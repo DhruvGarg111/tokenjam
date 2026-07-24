@@ -1601,17 +1601,62 @@ const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
 const writeTokenMeta = document.querySelector('meta[name="tj-write-token"]');
 const WRITE_TOKEN = writeTokenMeta ? writeTokenMeta.getAttribute('content') : null;
 
-async function api(path, params = {}) {
+// --- GET response cache ---
+// The App hard-unmounts each view on navigation, so returning to a page
+// refetches every section from scratch (the expensive /analytics "Spend by
+// model" pivot, the Recoverable panel, etc. all flash-reload). A small
+// module-level cache serves navigation-return reads instantly.
+//
+// Scope: safe idempotent READS only, and only the heavy / slow-changing
+// endpoints below — never the fast live pollers (/status, /traces, /alerts,
+// /drift, /budget, /sessions/*, /runs/*, /expectations), nor the Review inbox's
+// 8s /relearn proposal polls, which keep hitting the network on every poll
+// exactly as before (a short-TTL cache would defeat their fast refresh). Any
+// mutation (apiPost / *OrDetail) clears the whole cache, so a read never lingers
+// stale after a write. Force-bypass with api(path, params, { noCache: true })
+// for polls that must be fresh even on a cacheable endpoint (the Cost view's
+// 30s poll uses this).
+const API_CACHE_TTL_MS = 45000;
+const CACHEABLE_READ_PREFIXES = [
+  '/analytics', '/cost', '/optimize', '/recommendations',
+  '/relearn/applied',
+  '/summarize/backups', '/summarize/candidates',
+  '/summarize/staged', '/summarize/capabilities',
+];
+const apiCache = new Map(); // key -> { at: epochMs, promise: Promise<data> }
+const isCacheableRead = (path) => CACHEABLE_READ_PREFIXES.some(p => path.startsWith(p));
+function clearApiCache() { apiCache.clear(); }
+
+async function api(path, params = {}, opts = {}) {
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v != null && v !== '') qs.set(k, v);
   }
   const url = '/api/v1' + path + (qs.toString() ? '?' + qs : '');
+  const cacheable = isCacheableRead(path);
+  const key = 'GET ' + url;
+  if (cacheable && !opts.noCache) {
+    const hit = apiCache.get(key);
+    // Fresh (< TTL) -> return immediately; stale/miss -> fall through and fetch
+    // (await-on-stale). In-flight requests are shared via the stored promise.
+    if (hit && (Date.now() - hit.at) < API_CACHE_TTL_MS) return hit.promise;
+  }
   const headers = {};
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
-  const resp = await fetch(url, { headers });
-  if (!resp.ok) throw new Error(`API ${resp.status}`);
-  return resp.json();
+  const promise = fetch(url, { headers }).then(resp => {
+    if (!resp.ok) throw new Error(`API ${resp.status}`);
+    return resp.json();
+  });
+  if (cacheable) {
+    // Store even on a noCache fetch so the cache stays warm for the next
+    // navigation-return; evict on failure so errors are never cached.
+    apiCache.set(key, { at: Date.now(), promise });
+    promise.catch(() => {
+      const cur = apiCache.get(key);
+      if (cur && cur.promise === promise) apiCache.delete(key);
+    });
+  }
+  return promise;
 }
 
 async function apiPost(path, body) {
@@ -1621,6 +1666,8 @@ async function apiPost(path, body) {
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
+  // Any mutation invalidates cached reads so stale data never lingers.
+  clearApiCache();
   if (!resp.ok) throw new Error(`API ${resp.status}`);
   return resp.json();
 }
@@ -1635,6 +1682,8 @@ async function apiPostOrDetail(path, body) {
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
+  // Any mutation invalidates cached reads so stale data never lingers.
+  clearApiCache();
   let data = null;
   try { data = await resp.json(); } catch (e) { /* no/empty body */ }
   if (!resp.ok) {
@@ -5608,22 +5657,22 @@ function CostView({ params }) {
   const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
     totalTokens: 0, framing: null, costResp: null, compare: null, cacheResp: null });
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts = {}) => {
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
     try {
       const tableGroup = groupBy === 'total' ? 'day' : groupBy;
       // One /cost call returns the grouped table `rows` + the daily `series`
       // (per date+agent+model) the chart needs + framing + totals (#113).
-      const d = await api('/cost', { since, group_by: tableGroup, agent_id: agentId || undefined });
+      const d = await api('/cost', { since, group_by: tableGroup, agent_id: agentId || undefined }, opts);
       let compare = null;
       try {
-        compare = await api('/cost/compare', { since, compare: 'previous', agent_id: agentId || undefined });
+        compare = await api('/cost/compare', { since, compare: 'previous', agent_id: agentId || undefined }, opts);
       } catch (_) { compare = null; }
       // Cache-savings series (#212). Best-effort: a failure here must not blank
       // the cost screen, so it falls back to null (card renders nothing).
       let cacheResp = null;
       try {
-        cacheResp = await api('/cost/cache', { since, agent_id: agentId || undefined });
+        cacheResp = await api('/cost/cache', { since, agent_id: agentId || undefined }, opts);
       } catch (_) { cacheResp = null; }
       const totalTokens = d.total_tokens != null
         ? d.total_tokens
@@ -5635,7 +5684,8 @@ function CostView({ params }) {
     }
   }, [since, groupBy, agentId]);
 
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+  // Poll bypasses the GET cache so the 30s refresh always hits the network.
+  useEffect(() => { load(); const t = setInterval(() => load({ noCache: true }), 30000); return () => clearInterval(t); }, [load]);
 
   const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
@@ -8787,6 +8837,9 @@ function DashboardView({ params }) {
 
   useEffect(() => {
     load();
+    // The live tiles (/status, /traces, /alerts, /drift) are excluded from the
+    // GET cache, so each poll refetches them fresh; the slow /cost, /optimize and
+    // /relearn reads honor the short cache TTL (refresh within ~45s).
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
     const onVis = () => { if (document.visibilityState === 'visible') load(); };
     document.addEventListener('visibilitychange', onVis);
