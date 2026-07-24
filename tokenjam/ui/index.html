@@ -8963,8 +8963,57 @@ const VIEW_LENS = {
 };
 
 // ============================
-// App Router
+// App Router — keep-alive
 // ============================
+// Each PRIMARY sidebar view mounts once and then STAYS mounted; navigation
+// toggles visibility (display:none) instead of unmounting, so a view's
+// component state + already-fetched data survive navigation and returning to a
+// page is instant with no re-fetch spinner. The registry is the single source
+// of truth for view → component wiring (it replaced the switch-and-unmount
+// router). Detail/param views (session/trace/run detail) are NOT kept alive —
+// they mount fresh per id via detailNodeFor (a brief load on drill-in is
+// expected and fine).
+const PRIMARY_VIEWS = [
+  ['dashboard', DashboardView],
+  ['review',    ReviewInboxView],
+  ['sessions',  StatusView],
+  ['traces',    TracesListView],
+  ['cost',      CostView],
+  ['analytics', AnalyticsView],
+  ['alerts',    AlertsView],
+  ['drift',     DriftView],
+  ['optimize',  OptimizeView],
+  ['summarize', SummarizeView],
+  ['budget',    BudgetView],
+];
+const PRIMARY_KEYS = new Set(PRIMARY_VIEWS.map(([k]) => k));
+const EMPTY_PARAMS = new URLSearchParams();
+const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
+
+// Map a raw route to the keep-alive primary key that frames it. #/overview is a
+// retired alias for the Dashboard; #/status and #/runs are silent aliases for
+// Sessions (they render the same StatusView); #/optimize/summarize is the
+// Summarize sub-view. Anything else is its own view key.
+function primaryKeyFor(route) {
+  const v = route.view;
+  if (v === 'overview') return 'dashboard';
+  if (v === 'status' || v === 'runs') return 'sessions';
+  if (v === 'optimize' && route.param === 'summarize') return 'summarize';
+  return v;
+}
+
+// Detail overlay for an id-keyed drill-in (mounts fresh per id), else null.
+// Only session/trace/run detail are id-keyed; summarize is a kept-alive
+// sub-view (in PRIMARY_VIEWS), not a per-id detail.
+function detailNodeFor(route) {
+  const id = route.param;
+  if (!id) return null;
+  if (route.view === 'sessions' || route.view === 'status') return html`<${SessionDetailView} sessionId=${id} />`;
+  if (route.view === 'traces') return html`<${TraceDetailView} traceId=${id} />`;
+  if (route.view === 'runs') return html`<${RunDetailView} runId=${id} />`;
+  return null;
+}
+
 function App() {
   const [route, setRoute] = useState(getRoute());
 
@@ -9010,37 +9059,65 @@ function App() {
     });
   }, [route.view, route.param]);
 
-  const p = route.params;
-  switch (route.view) {
-    // Improve lens home — the self-improve loop's Approve stage (SPEC.md §12).
-    case 'review': return html`<${ReviewInboxView} params=${p} />`;
-    // Overview retired — the Dashboard's triage band subsumes it. Lingering
-    // #/overview bookmarks/links fall through to the Dashboard.
-    case 'overview':
-    case 'dashboard': return html`<${DashboardView} params=${p} />`;
-    // #/status is a legacy alias kept for old bookmarks — its sidebar entry was
-    // removed (it duplicated Sessions, which renders the same StatusView). New
-    // navigation uses #/sessions; do not re-add a Status nav link.
-    case 'status':
-    case 'sessions':
-      if (route.param) return html`<${SessionDetailView} sessionId=${route.param} />`;
-      return html`<${StatusView} params=${p} />`;
-    case 'traces':
-      if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
-      return html`<${TracesListView} params=${p} />`;
-    case 'runs':
-      if (route.param) return html`<${RunDetailView} runId=${route.param} />`;
-      return html`<${StatusView} params=${p} />`;
-    case 'cost': return html`<${CostView} params=${p} />`;
-    case 'analytics': return html`<${AnalyticsView} params=${p} />`;
-    case 'alerts': return html`<${AlertsView} params=${p} />`;
-    case 'drift': return html`<${DriftView} params=${p} />`;
-    case 'optimize':
-      if (route.param === 'summarize') return html`<${SummarizeView} params=${p} />`;
-      return html`<${OptimizeView} params=${p} />`;
-    case 'budget': return html`<${BudgetView} params=${p} />`;
-    default: return html`<div class="empty">Page not found.</div>`;
+  const primaryKey = primaryKeyFor(route);
+  const detail = detailNodeFor(route);
+
+  // Per-view params: only the ACTIVE primary view receives the live route
+  // params; hidden views keep their last params so a param meant for one view
+  // never perturbs another. The active view thus reacts to its OWN route param
+  // change (a filter/preset in the hash → its load() deps change → refetch),
+  // while a hidden view stays put until it's re-activated (then it revalidates
+  // in the background, still showing its last data — never a spinner). Written
+  // during render as a plain memo of "last params seen while active".
+  const paramsByView = useRef({});
+  if (!detail && PRIMARY_KEYS.has(primaryKey)) {
+    paramsByView.current[primaryKey] = route.params;
   }
+
+  // Warm-all-on-boot: start with ONLY the active view mounted so the first
+  // paint isn't slowed by the others, then progressively mount the rest
+  // (hidden) after first paint — staggered via requestIdleCallback so boot
+  // doesn't fire every endpoint at once (a thundering herd). Once mounted, a
+  // view stays mounted (keep-alive), so its on-mount fetch + poll keep its data
+  // warm for an instant first visit.
+  const [mounted, setMounted] = useState(() => new Set([primaryKey]));
+  const mountedRef = useRef(mounted);
+  mountedRef.current = mounted;
+
+  // If the user navigates to a view before warming has reached it, mount it now.
+  useEffect(() => {
+    if (PRIMARY_KEYS.has(primaryKey) && !mountedRef.current.has(primaryKey)) {
+      setMounted(prev => { const n = new Set(prev); n.add(primaryKey); return n; });
+    }
+  }, [primaryKey]);
+
+  useEffect(() => {
+    const idle = window.requestIdleCallback || (cb => setTimeout(cb, 1));
+    let cancelled = false;
+    let i = 0;
+    const pump = () => {
+      if (cancelled || i >= PRIMARY_VIEWS.length) return;
+      const k = PRIMARY_VIEWS[i++][0];
+      setMounted(prev => (prev.has(k) ? prev : new Set(prev).add(k)));
+      setTimeout(() => idle(pump), WARM_STAGGER_MS);
+    };
+    idle(pump);
+    return () => { cancelled = true; };
+  }, []);
+
+  // Keep-alive stack: every mounted primary view renders, but only the active
+  // one is visible; the rest are display:none (kept mounted, state intact). A
+  // detail drill-in (mounted fresh, keyed by id) overlays the hidden stack.
+  return html`
+    ${PRIMARY_VIEWS.map(([key, Comp]) => {
+      if (!mounted.has(key)) return null;
+      const isActive = !detail && key === primaryKey;
+      const vp = paramsByView.current[key] || EMPTY_PARAMS;
+      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} /></div>`;
+    })}
+    ${detail ? html`<div key=${'detail:' + route.view + ':' + route.param} class="view-pane">${detail}</div>` : null}
+    ${!detail && !PRIMARY_KEYS.has(primaryKey) ? html`<div class="empty">Page not found.</div>` : null}
+  `;
 }
 
 render(html`<${App} />`, document.getElementById('app'));

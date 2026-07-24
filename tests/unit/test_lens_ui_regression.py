@@ -566,7 +566,9 @@ def test_trim_card_no_longer_a_flat_three_column_table(html):
 # --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
 def test_analytics_screen_registered(html):
     assert "function AnalyticsView" in html
-    assert "case 'analytics': return html`<${AnalyticsView}" in html
+    # Keep-alive router: the view is wired via the PRIMARY_VIEWS registry (which
+    # replaced the switch-and-unmount router) rather than a `case` arm.
+    assert "['analytics', AnalyticsView]" in html
     assert 'href="#/analytics"' in html  # sidebar nav link
 
 
@@ -849,10 +851,12 @@ def test_review_inbox_is_default_landing(html):
     assert "location.hash = '#/dashboard'" not in html  # no hash-assign redirect
     assert "history.replaceState(null, '', '#/review')" in html
     assert "function ReviewInboxView" in html
-    assert "case 'review': return html`<${ReviewInboxView}" in html
+    # Keep-alive router: Review + Dashboard are wired through the PRIMARY_VIEWS
+    # registry (which replaced the switch), both mounted-and-kept-alive.
+    assert "['review',    ReviewInboxView]" in html
     assert 'href="#/review"' in html
     assert "function DashboardView" in html
-    assert "case 'dashboard': return html`<${DashboardView}" in html
+    assert "['dashboard', DashboardView]" in html
     assert 'href="#/dashboard"' in html
 
 
@@ -861,7 +865,9 @@ def test_overview_retired(html):
     # through to the Dashboard.
     assert "function OverviewView" not in html
     assert 'href="#/overview"' not in html
-    assert "case 'overview':\n    case 'dashboard'" in html
+    # Keep-alive router: #/overview folds into the Dashboard key via primaryKeyFor
+    # (replaced the switch's `case 'overview': case 'dashboard'` fallthrough).
+    assert "if (v === 'overview') return 'dashboard';" in html
 
 
 def test_dashboard_embeds_analytics_explorer(html):
@@ -2025,7 +2031,10 @@ def test_summarize_nav_child_and_route(html):
     # section is active, routing to #/optimize/summarize (the router already
     # splits view/param). The nav reveal logic shows children per active section.
     assert 'href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize"' in html
-    assert "if (route.param === 'summarize') return html`<${SummarizeView} params=${p} />`;" in html
+    # Keep-alive router: #/optimize/summarize resolves to the 'summarize' primary
+    # key (a kept-alive sub-view in PRIMARY_VIEWS), not a switch `case` arm.
+    assert "if (v === 'optimize' && route.param === 'summarize') return 'summarize';" in html
+    assert "['summarize', SummarizeView]" in html
     # nav-child reveal: a child shows only while its section is active.
     assert "el.classList.contains('nav-child')" in html
     assert "el.style.display = (v === view) ? 'flex' : 'none';" in html
@@ -2283,7 +2292,10 @@ def test_sessions_nav_entry_present(html):
         '<a href="#/sessions" class="nav-link" data-view="sessions" '
         'data-lens="improve">' in html
     )
-    assert "case 'sessions':" in html
+    # Keep-alive router: the bare #/sessions route lands on StatusView (the
+    # session list) via the PRIMARY_VIEWS registry — the same StatusView the
+    # Status alias used to render — kept alive so returning is instant.
+    assert "['sessions',  StatusView]" in html
     assert "sessions: 'improve'" in html
 
 
@@ -2319,7 +2331,10 @@ def test_no_duplicate_status_nav_entry(html):
     # link is gone. #/status stays a route-level alias for old bookmarks, so
     # the `case 'status'` label must remain even though no link points at it.
     assert 'data-view="status"' not in html, "the duplicate Status nav link must be gone"
-    assert "case 'status':" in html, "keep #/status as a silent route alias"
+    # Keep-alive router: #/status (and #/runs) remain silent aliases for Sessions,
+    # resolved to the 'sessions' key in primaryKeyFor (replaced `case 'status'`).
+    assert "if (v === 'status' || v === 'runs') return 'sessions';" in html, \
+        "keep #/status as a silent alias for Sessions"
     # The two labels must not both render the split-zone page title.
     assert '<div class="page-title">Sessions</div>' in html
     assert '<div class="page-title">Status</div>' not in html
