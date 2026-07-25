@@ -102,13 +102,27 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     # netted against its own standing cost by the write budget, which can only
     # ever subtract. Pre-fix the gross sum was 4_850 (downsize, whole session)
     # + 4_300 (subagent) = 9_150 — nearly 2x the tokens the session spent.
-    gross = sum(
-        (p.gross_recoverable_tokens
-         if p.gross_recoverable_tokens is not None
-         else (p.estimated_recoverable_tokens or 0))
-        for p in proposals
-    )
-    assert gross == SESSION_TOKENS
+    def _gross(p):
+        return (p.gross_recoverable_tokens
+                if p.gross_recoverable_tokens is not None
+                else (p.estimated_recoverable_tokens or 0))
+
+    def _gross_for(analyzer: str) -> int:
+        return sum(_gross(p) for p in proposals if p.analyzer == analyzer)
+
+    # Each side is pinned on its OWN terms, so a failure names the culprit.
+    # The dedup fix is exactly this: downsize claims the main thread and
+    # nothing else.
+    assert _gross_for("downsize") == MAIN_INPUT + MAIN_OUTPUT
+
+    # The subagent side is deliberately an upper bound, NOT an equality:
+    # `subagent_rightsizing`'s reporting formula is its own concern and may
+    # legitimately claim less than the dispatch's full spend. What this test
+    # owns is that it never reaches back into the main thread's tokens.
+    assert 0 < _gross_for("subagent") <= SUB_INPUT + SUB_OUTPUT
+
+    # Together: the two populations partition the session rather than overlap.
+    assert sum(_gross(p) for p in proposals) <= SESSION_TOKENS
 
     rollup = estimated_recoverable_rollup(proposals)
     # The netted rollup never claims more than the session actually spent.

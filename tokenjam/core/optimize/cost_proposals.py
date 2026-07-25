@@ -2282,8 +2282,10 @@ def backfill_legacy_monthly_fields(proposal: dict[str, Any]) -> dict[str, Any]:
     """Read-time backward compat for a cached cost-proposal dict written
     before the monthly-basis fields existed on ``CostProposal``.
 
-    ``recompute_cost_proposals`` always runs every fresh proposal through
-    ``_with_monthly_extrapolation`` before it's written to disk, so a cache
+    ``recompute_cost_proposals`` always runs every fresh proposal through the
+    central projection pass (``cost_proposals_from_report`` applies the one
+    ``compute_projection_ratio`` via ``_with_rollup_projection``) before it's
+    written to disk, so a cache
     produced by the CURRENT build already carries both
     ``estimated_monthly_usd``/``estimated_monthly_tokens`` whenever a window
     figure exists — this never touches those. It only fires for an entry that

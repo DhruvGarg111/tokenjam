@@ -252,7 +252,8 @@ def _deadweight_finding(dead_servers=None, tax_table=None):
         sessions_scanned=10, configured_servers=1,
         servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
         estimated_recoverable_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
-        estimate_basis="dead-server 90d tax sum",
+        estimate_basis="sum of each dead server's schema-injection tax "
+                       "observed over this window",
     )
 
 
@@ -320,7 +321,7 @@ def test_deadweight_wired_into_cost_analyzers_and_report_adapter():
 def test_deadweight_tax_table_never_becomes_a_second_proposal():
     """Dedup guarantee: a live (non-dead) server sits in the tax table for
     visibility but must never itself spawn a proposal, and a dead server's
-    proposal total must equal exactly its OWN 90d tax -- never the tax
+    proposal total must equal exactly its OWN window tax -- never the tax
     table's (possibly multi-row) sum."""
     from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow
     from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
@@ -1118,6 +1119,14 @@ def test_resend_mixed_persona_offers_write_and_keeps_snippet():
     assert prop.apply_capable is True
     assert prop.proposed_fix == SUBAGENT_OFFLOAD_FIX
     assert "cache_control" in prop.suggestion
+    # Pin the one-paste slot too, so neither side of the mixed branch can drift
+    # silently: the SDK snippet is what a "mixed" window pastes (it is the only
+    # copyable artifact here -- the subagent-offload rule is a WRITE, carried on
+    # `proposed_fix` above and applied, not pasted), while a claude-code-only
+    # window has no snippet and falls back to the offload text.
+    assert prop.one_paste_fix == prop.suggestion
+    assert "cache_control" in prop.one_paste_fix
+    assert prop.one_paste_fix != SUBAGENT_OFFLOAD_FIX
 
 
 def test_resend_keeps_cache_control_snippet_for_sdk():

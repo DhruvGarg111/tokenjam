@@ -36,9 +36,23 @@ from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session
 
-# The four the product decision names explicitly: no lever at all inside an
-# interactive coding-agent session.
-NO_LEVER = {"cache", "cache-recommend", "placement", "trim"}
+# Derived from the production map, never hand-copied: a name added to the gate
+# is automatically covered by every test below, and a name silently DROPPED
+# from the gate fails the pin immediately underneath. Hand-maintaining this set
+# is how `verbosity` and `script` ended up gated in production but exercised by
+# none of these tests.
+NO_LEVER = set(PERSONA_DISABLED_ANALYZERS["claude-code"])
+
+# The pin: what the product decision names explicitly. Any change to the gate
+# is a product decision and must be made here deliberately.
+assert NO_LEVER == {
+    "cache", "cache-recommend", "placement", "trim", "verbosity", "script",
+}
+
+# `placement` is the odd one out: it is not an ANALYZER_REGISTRY name at all
+# (the `downsize` analyzer attaches it as a sub-check), so it is never
+# "invoked" and never appears in `report.findings` under its own name.
+NO_LEVER_REGISTRY_NAMES = NO_LEVER - {"placement"}
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 
 
@@ -112,10 +126,10 @@ def test_sdk_window_is_unaffected(db, cfg, monkeypatch):
     invoked, report = _run_recording_invocations(db, cfg, monkeypatch)
 
     assert report.persona == "sdk"
-    assert NO_LEVER <= set(invoked) | {"placement"}   # placement is a sub-check
+    assert NO_LEVER_REGISTRY_NAMES <= set(invoked)
     assert "placement" in report.findings
-    for name in NO_LEVER - {"placement"}:
-        assert name in invoked
+    for name in NO_LEVER_REGISTRY_NAMES:
+        assert name in invoked, name
 
 
 class _CountingConn:
@@ -159,7 +173,8 @@ def test_mixed_and_unknown_personas_disable_nothing():
     assert disabled_analyzers_for_persona("sdk") == frozenset()
     assert disabled_analyzers_for_persona("mixed") == frozenset()
     assert disabled_analyzers_for_persona("unknown") == frozenset()
-    assert NO_LEVER <= PERSONA_DISABLED_ANALYZERS["claude-code"]
+    # Exact, not a subset: the mirror must cover the whole gate.
+    assert NO_LEVER == set(PERSONA_DISABLED_ANALYZERS["claude-code"])
 
 
 def test_explicitly_requested_disabled_analyzer_is_still_skipped(db, cfg):
