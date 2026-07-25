@@ -1608,17 +1608,28 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
 def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One window-wide card for the ``resend`` (context re-send) finding.
 
-    Advise-only, and persona-gated like every other lever-bearing adapter (it
-    was the one that wasn't). Two levers exist and they are NOT interchangeable:
+    Persona-gated like every other lever-bearing adapter. Three levers exist
+    and they are NOT interchangeable:
 
-    * ``/compact`` / a fresh session cuts the re-sent volume and is available
-      to EVERYONE — it is always the lead fix.
+    * a rung-1 CLAUDE.md rule instructing offload of context-heavy sub-tasks
+      to subagents (``fix_subagent_offload``) is the DURABLE claude-code
+      lever: it persists across sessions and stops the repeated volume from
+      accumulating on the main thread in the first place. Apply-capable via
+      the same ``_persona_gated_write_fields`` machinery ``script`` /
+      ``reuse`` / ``verbosity`` already use, for a ``claude-code``/``mixed``
+      persona — see that helper.
+    * ``/compact`` / a fresh session is a MANUAL, per-session, transient
+      action available to everyone, but it fixes nothing going forward (a
+      real CC user who feels a session getting too full typically abandons
+      it and starts fresh anyway rather than compacting). It is carried only
+      as a secondary, immediate-relief note for an already-full session —
+      never the headline fix.
     * an SDK-side ``cache_control`` breakpoint is the SDK/API developer's
       ADDITIONAL lever. A Claude Code (or other agent-harness) window never
       constructs the request itself, so that snippet is not theirs to paste —
       showing it to them is the same wrong-audience defect the cache family
-      already avoids via ``_persona_gated_cache_fields``. Suppress it for a
-      ``claude-code`` persona and lead with ``/compact`` alone.
+      already avoids via ``_persona_gated_cache_fields``. Suppressed for a
+      ``claude-code`` persona, unchanged from before.
 
     ``ResendFinding.estimate_basis`` documents the discounted derivation; this
     adapter carries it verbatim. The caveat is carried ONCE via ``caveat=`` and
@@ -1640,9 +1651,31 @@ def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
     )
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
+    fix_subagent_offload = str(getattr(finding, "fix_subagent_offload", "") or "")
     # The cache_control snippet is the SDK lever only; a claude-code window
-    # can't paste it, so suppress it there and let /compact stand alone.
+    # can't paste it, so suppress it there — unchanged from before.
     cache_snippet = "" if persona == "claude-code" else fix_cache_control
+
+    if persona in {"claude-code", "mixed"} and fix_subagent_offload:
+        advise = fix_subagent_offload
+        if fix_compaction:
+            advise = advise + " Immediate relief in an already-full session: " + fix_compaction
+        write_fields = _persona_gated_write_fields(
+            persona, fix_subagent_offload, rung=1, scope="project",
+        )
+        # resend's `suggestion` slot is reserved for the SDK cache_control
+        # snippet above, not the write-fallback text the helper would add
+        # for a "mixed" persona — drop it so the two don't collide.
+        write_fields.pop("suggestion", None)
+        one_paste_fix = cache_snippet or fix_subagent_offload
+    else:
+        advise = fix_compaction
+        write_fields = {
+            "advise_only": True, "apply_capable": False,
+            "rung": 0, "scope": "", "proposed_fix": "",
+        }
+        one_paste_fix = cache_snippet or fix_compaction
+
     return [CostProposal(
         kind="cost",
         analyzer="resend",
@@ -1657,13 +1690,14 @@ def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
             "repeat_share_median": getattr(finding, "repeat_share_median", None),
             "repeat_share_p90": getattr(finding, "repeat_share_p90", None),
         },
-        advise_text=fix_compaction,
+        advise_text=advise,
         suggestion=cache_snippet,
-        one_paste_fix=cache_snippet or fix_compaction,
+        one_paste_fix=one_paste_fix,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
+        **write_fields,
     )]
 
 
