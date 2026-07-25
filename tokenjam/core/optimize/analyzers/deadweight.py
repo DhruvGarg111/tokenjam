@@ -80,21 +80,27 @@ MIN_SESSIONS_DEADWEIGHT = 5
 #: (mirrors relearn.py's MAX_EXAMPLE_SESSIONS convention).
 MAX_EXAMPLE_SESSIONS = 3
 
-#: Full MCP-connector schema-injection tax, per server, when its tool schemas
+#: Full MCP-connector schema-injection tax, PER CALL, when its tool schemas
 #: are loaded (not deferred) — a documented community/founder-research figure
 #: (~25K tokens/call for an attached MCP connector's injected tool
 #: definitions; see .claude/context/research/evidence/
 #: subscription-vs-cost-framing.md and feature-context-diagnostic.md), NOT a
 #: live per-call measurement — the on-disk transcript carries no per-schema
 #: token count (see core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE).
-#: `estimated`, conservative, cited in the card footnote.
+#: `estimated`, conservative, cited in the card footnote. The server's tool
+#: definitions ride in the `tools` array of EVERY call in the session, not
+#: just the first — this is the FIRST call's token count; subsequent calls in
+#: the same session re-send it too but are priced at the cache-read rate, not
+#: this rate again (see the per-session multiplier in the tax loop below).
 FULL_SCHEMA_TAX_TOKENS = 25_000
 
 #: When a session's transcript shows this server's tools in a DEFERRED
-#: listing (ToolSearch-style), its schemas are NOT loaded that turn — only a
+#: listing (ToolSearch-style), its schemas are NOT loaded that call — only a
 #: short name+description line per tool appears in the listing.
 #: Conservative estimate: ~10 tools x ~40 tokens/line for a typically-sized
-#: server. Never used to claim the full tax for a deferred session.
+#: server. Never used to claim the full tax for a deferred call. Like
+#: FULL_SCHEMA_TAX_TOKENS, this is the first call's count; the same
+#: per-session multiplier applies to later calls.
 DEFERRED_SCHEMA_TAX_TOKENS = 400
 
 #: Chars-per-token conversion for text measured directly off transcripts
@@ -489,6 +495,12 @@ class _SessionSignal:
     #: assistant-turn model -> turn count, for pricing the token tax at a
     #: representative model's input rate (see ``_dominant_model``).
     models: dict[str, int] = field(default_factory=dict)
+    #: Total assistant turns in the session — each is one API request, so this
+    #: is the session's ACTUAL call count (mirrors context_diagnostic.py's
+    #: one-``TurnComposition``-per-turn convention). A configured MCP server's
+    #: tool schemas ride in the ``tools`` array of every one of these calls,
+    #: not just the first — see the per-call multiplier in the tax loop below.
+    assistant_turns: int = 0
 
 
 def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
@@ -526,6 +538,7 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
                     reminder_measured = True
 
         if role == "assistant":
+            signal.assistant_turns += 1
             model = message.get("model")
             if isinstance(model, str) and model:
                 signal.models[model] = signal.models.get(model, 0) + 1
@@ -551,27 +564,47 @@ def _tax_construction_note(
     non_deferred: int, deferred_sessions: int, sessions_present: int,
     *, model: str = "", input_per_mtok: float | None = None,
     usd_per_session: float | None = None,
+    avg_calls_per_session: float = 1.0,
+    cache_read_ratio: float = 0.0,
 ) -> str:
     if sessions_present == 0:
         return ""
     if deferred_sessions == 0:
         note = (
-            f"{FULL_SCHEMA_TAX_TOKENS:,} tok/session (full schema injection), "
-            f"cited estimate, not a live per-call measurement."
+            f"{FULL_SCHEMA_TAX_TOKENS:,} tok on the first call (full schema "
+            f"injection), cited estimate, not a live per-call measurement."
         )
     elif non_deferred == 0:
         note = (
-            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session; ToolSearch deferred "
-            f"this server's schemas in every observed session (name and "
-            f"description line only, never the full schema tax)."
+            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok on the first call; ToolSearch "
+            f"deferred this server's schemas in every observed session (name "
+            f"and description line only, never the full schema tax)."
         )
     else:
         note = (
-            f"{FULL_SCHEMA_TAX_TOKENS:,} tok/session when fully loaded "
-            f"({non_deferred} of {sessions_present} sessions) blended with "
-            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when ToolSearch defers "
+            f"{FULL_SCHEMA_TAX_TOKENS:,} tok on the first call when fully "
+            f"loaded ({non_deferred} of {sessions_present} sessions) blended "
+            f"with {DEFERRED_SCHEMA_TAX_TOKENS:,} tok when ToolSearch defers "
             f"this server's schemas ({deferred_sessions} of {sessions_present} "
-            f"sessions); never claims the full tax for a deferred session."
+            f"sessions); never claims the full tax for a deferred call."
+        )
+    if cache_read_ratio > 0:
+        note += (
+            f" The schema rides in the `tools` array of every call in the "
+            f"session, not just the first: priced at the input rate once, "
+            f"then at the cache-read rate (~{cache_read_ratio * 100:.0f}% of "
+            f"input) on every later call (avg {avg_calls_per_session:.1f} "
+            f"call(s)/session across these sessions, from each session's own "
+            f"actual call count, never a global mean/median). Simplification: "
+            f"assumes every call in a session lands inside Anthropic's "
+            f"5-minute cache TTL; a call after a longer gap would instead "
+            f"re-write the schema at the higher cache-write rate for that "
+            f"call, so this understates sessions with long gaps between calls."
+        )
+    else:
+        note += (
+            " Charged once per session (no cache-read rate available for "
+            "the priced model to compound later calls against)."
         )
     return note + " " + _pricing_note(model, input_per_mtok, usd_per_session)
 
@@ -605,9 +638,13 @@ class ServerDeadweight:
     deferred_sessions:                int
     dead:                             bool
     estimated_tax_tokens_per_session: int
-    #: Window-scoped total (this server's per-session tax x sessions_present
-    #: it was present in over the ANALYZED window) — NO projection folded in.
-    #: A caller wanting a forward-looking figure applies the shared, centrally-
+    #: Window-scoped total: the SUM of each present session's own tax (first
+    #: call at input rate + that session's own later calls at the cache-read
+    #: rate — see the per-session multiplier in `compute_deadweight_finding`),
+    #: never `estimated_tax_tokens_per_session x sessions_present` (that would
+    #: silently substitute the average call count for every session's actual
+    #: one). NO projection folded in. A caller wanting a forward-looking
+    #: figure applies the shared, centrally-
     #: computed 30-day-pace ratio (`cost_proposals.compute_projection_ratio`)
     #: on top of this, exactly like every other cost analyzer's window field
     #: (the "Recoverable-savings contract", CLAUDE.md). See #273: this field
@@ -734,6 +771,12 @@ def compute_deadweight_finding(
         deferred_sessions = 0
         example_sessions: list[str] = []
         model_counts: dict[str, int] = {}
+        # (deferred_here, actual_call_count) per present session — each
+        # session's OWN call count feeds its own cache-read multiplier below;
+        # never a global mean/median (call-count distribution is severely
+        # right-skewed, and the affected population is only sessions where
+        # this server was present).
+        session_presence: list[tuple[bool, int]] = []
         for session_id, signal in per_session.items():
             deferred_here = server.name in signal.deferred_servers
             present = deferred_here or server.scope == "user" or (
@@ -749,37 +792,49 @@ def compute_deadweight_finding(
                 example_sessions.append(session_id)
             for model, count in signal.models.items():
                 model_counts[model] = model_counts.get(model, 0) + count
+            session_presence.append((deferred_here, max(signal.assistant_turns, 1)))
 
         dead = sessions_present >= min_sessions and invocations == 0
         non_deferred = max(sessions_present - deferred_sessions, 0)
-        tax_per_session = (
-            round(
-                (non_deferred * FULL_SCHEMA_TAX_TOKENS + deferred_sessions * DEFERRED_SCHEMA_TAX_TOKENS)
-                / sessions_present
-            )
-            if sessions_present else 0
-        )
-        # Window-scoped total -- this server's per-session tax times the
-        # sessions it was present in over since..until. No projection: #273
-        # deleted the fixed 90-day multiplier that used to live here.
-        tax_window = tax_per_session * sessions_present
 
         # Price the token tax through core/pricing.py at the dominant model
         # observed across this server's present sessions -- never a
-        # hardcoded rate. usd stays None when no priced model was seen.
+        # hardcoded rate. usd/cache_read_ratio stay at their no-op defaults
+        # when no priced model was seen.
         priced_model = _dominant_model(model_counts)
         input_per_mtok: float | None = None
-        usd_per_session: float | None = None
-        usd_window: float | None = None
+        cache_read_ratio = 0.0
         if priced_model:
             provider = provider_for_model(priced_model) or "unknown"
             rates = get_rates(provider, priced_model)
             if rates is not None and rates.input_per_mtok > 0:
                 input_per_mtok = rates.input_per_mtok
-                usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
-                usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
+                cache_read_ratio = rates.cache_read_per_mtok / rates.input_per_mtok
             else:
                 priced_model = ""  # no rate available -- don't claim a model we can't price
+
+        # The schema rides in the `tools` array of EVERY call in a session,
+        # not just once — after the first call it's re-billed as a cache read
+        # (~10% of input rate for every Anthropic model in pricing/
+        # models.toml), not re-charged at full input rate again. Computed per
+        # session from that session's own call count and summed for the
+        # window total; tax_per_session below is the resulting average, for
+        # display only — never the basis for tax_window itself.
+        tax_window = 0
+        total_calls = 0
+        for deferred_here, calls in session_presence:
+            base = DEFERRED_SCHEMA_TAX_TOKENS if deferred_here else FULL_SCHEMA_TAX_TOKENS
+            multiplier = 1.0 + (calls - 1) * cache_read_ratio
+            tax_window += round(base * multiplier)
+            total_calls += calls
+        tax_per_session = round(tax_window / sessions_present) if sessions_present else 0
+        avg_calls_per_session = (total_calls / sessions_present) if sessions_present else 1.0
+
+        usd_per_session: float | None = None
+        usd_window: float | None = None
+        if input_per_mtok is not None:
+            usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
+            usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
 
         row = ServerDeadweight(
             name=server.name,
@@ -795,6 +850,8 @@ def compute_deadweight_finding(
                 non_deferred, deferred_sessions, sessions_present,
                 model=priced_model, input_per_mtok=input_per_mtok,
                 usd_per_session=usd_per_session,
+                avg_calls_per_session=avg_calls_per_session,
+                cache_read_ratio=cache_read_ratio,
             ),
             fix=(
                 f"Remove or project-scope the `{server.name}` MCP server "

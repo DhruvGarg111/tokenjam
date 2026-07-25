@@ -81,6 +81,18 @@ def _invoking_session(root: Path, project: str, session_id: str, cwd: str, tool_
     ])
 
 
+def _multi_call_session(root: Path, project: str, session_id: str, cwd: str, calls: int) -> None:
+    """A session with ``calls`` sequential user/assistant turns -- each
+    assistant turn is one API request, so a configured server's tool schemas
+    ride in the `tools` array of every one of them (see the per-session
+    cache-read multiplier in ``compute_deadweight_finding``)."""
+    records: list[dict] = []
+    for i in range(calls):
+        records.append(_user_prompt(f"turn {i}", cwd=cwd))
+        records.append(_assistant(f"ok {i}", cwd=cwd))
+    _write_transcript(root, project, session_id, records)
+
+
 def _deferred_session(root: Path, project: str, session_id: str, cwd: str, tool_name: str) -> None:
     """A session whose transcript shows the deferred-tools listing naming
     ``tool_name`` — the server's schema was NOT fully loaded this session."""
@@ -479,6 +491,41 @@ def test_partial_deferral_blends_the_two_constants(tmp_path):
     expected = round((5 * FULL_SCHEMA_TAX_TOKENS + 5 * DEFERRED_SCHEMA_TAX_TOKENS) / 10)
     assert dead.estimated_tax_tokens_per_session == expected
     assert dead.estimated_tax_tokens_per_session < FULL_SCHEMA_TAX_TOKENS
+
+
+def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
+    """The schema tax must price EVERY call in a session, not just charge the
+    full/deferred constant once -- later calls in the same session re-send
+    the schema and are billed at the cache-read rate, not re-charged at input
+    rate. A mixed population (light single-call sessions + one heavy
+    multi-call session) proves this uses each session's OWN actual call
+    count, never a global mean/median applied uniformly."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s-light-{i}", str(project_dir))
+    _multi_call_session(root, "-repo-a", "s-heavy", str(project_dir), calls=10)
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
+
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+    light_tax = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
+    heavy_tax = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (10 - 1) * ratio))
+    expected_window = light_tax * (MIN_SESSIONS_DEADWEIGHT - 1) + heavy_tax
+
+    assert heavy_tax > FULL_SCHEMA_TAX_TOKENS
+    assert dead.estimated_tax_tokens_window == expected_window
+    # The heavy session's real cost is folded in, not diluted by an averaged
+    # call count applied uniformly to every session.
+    assert dead.estimated_tax_tokens_window > light_tax * MIN_SESSIONS_DEADWEIGHT
+    assert "cache-read rate" in dead.tax_construction
+    assert "5-minute cache TTL" in dead.tax_construction
 
 
 # --- C2: context tax table --------------------------------------------------
