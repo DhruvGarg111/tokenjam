@@ -721,7 +721,16 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep = _report()
     rep.findings["script"] = _workflow_finding()
-    rep.findings["reuse"] = _reuse_finding()
+    # A saving big enough to clear the write budget's net-of-standing-cost
+    # gate, so this test measures ONLY the persona decision. The shared
+    # `_reuse_cluster` default (900 tokens over a 10-session window) is
+    # deliberately smaller than the CLAUDE.md rule it would write costs to
+    # keep, which is a net-negative write the budget is right to suppress —
+    # see `test_write_budget_suppresses_net_negative_cost_write`.
+    rep.findings["reuse"] = _reuse_finding(
+        clusters=[_reuse_cluster(cache_reuse_recoverable_tokens=900_000,
+                                 cache_reuse_recoverable_usd=30.0)],
+    )
     rep.findings["verbosity"] = _verbosity_finding()
 
     rep.persona = "sdk"
