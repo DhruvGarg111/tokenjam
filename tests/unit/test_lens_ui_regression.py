@@ -2855,29 +2855,32 @@ def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
 
 
 # --- Recoverable-waste band drops no-lever analyzers for claude-code -------- #
-def test_recoverable_band_excludes_no_lever_analyzers_for_claude_code(html):
-    # cache / cache-recommend / placement / trim / verbosity / script have no
-    # actionable lever from the Claude Code CLI action surface (CLAUDE.md
-    # rules, hooks, MCP config, subagent definitions) — they must vanish from
-    # the Overview band entirely for a claude-code window, not render as a
-    # placeholder. Live-verified via a seeded `tj serve` + screenshot; this
-    # pins the JS source so a future edit can't silently regress it.
-    assert "const PERSONA_DISABLED_ANALYZERS" in html
-    start = html.index("const PERSONA_DISABLED_ANALYZERS")
-    end = html.index("};", start)
-    block = html[start:end]
-    assert "'claude-code'" in block
-    for name in ("cache", "cache-recommend", "placement", "trim", "verbosity", "script"):
-        assert f"'{name}'" in block
+# core/optimize/runner.py's PERSONA_DISABLED_ANALYZERS is the single source of
+# truth for which analyzers a persona has no lever for (#308). The dashboard
+# must derive its gate solely from the `/optimize` payload's
+# `persona_disabled_analyzers` field — never duplicate the map as a JS literal,
+# which would silently desync the first time the Python map changes.
+def test_dashboard_has_no_hardcoded_persona_disabled_analyzer_list(html):
+    assert "PERSONA_DISABLED_ANALYZERS" not in html
+    assert "'claude-code': new Set(" not in html
 
 
 def test_recoverable_tiles_filters_by_persona_before_ranking(html):
     fn_start = html.index("function recoverableTiles(opt)")
     fn_end = html.index("\nfunction ", fn_start + 1)
     fn = html[fn_start:fn_end]
-    assert "PERSONA_DISABLED_ANALYZERS[opt.persona]" in fn
+    assert "new Set(opt.persona_disabled_analyzers || [])" in fn
     assert "disabled.has(k)" in fn
     # Downsize + wave-2 findings + the not-ready fallback must all respect the
     # gate (three separate call sites build `out`) so a persona-disabled
     # analyzer never sneaks in through any of them.
     assert fn.count("disabled.has(") >= 3
+
+
+def test_optimize_view_and_recoverable_tiles_read_same_payload_field(html):
+    # Both call sites (the Optimize screen's order filter and the Overview
+    # band's recoverableTiles) must key off the same server-published field —
+    # not one payload read and one hardcoded literal — so they can never
+    # disagree about which analyzers a persona can act on.
+    assert html.count("persona_disabled_analyzers") >= 2
+    assert "const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);" in html
