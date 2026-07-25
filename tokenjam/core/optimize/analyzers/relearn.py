@@ -1019,7 +1019,9 @@ def build_proposals(
 
     ``persona`` gates the rung-1/rung-2 CLAUDE.md/skill write exactly like
     ``cost_proposals._persona_gated_write_fields`` gates the script/reuse/
-    verbosity cards it shares that same write surface with: only a
+    resend cards it shares that same write surface with (``verbosity`` is NOT
+    a peer here — it no longer routes through that helper and is
+    unconditionally advise-only for every persona): only a
     ``"claude-code"``/``"mixed"`` window is offered the write. An
     ``"sdk"``/``"unknown"`` window (the conservative default) never gets one
     — nothing in an SDK-only service's request path reads a CLAUDE.md or a
@@ -1207,7 +1209,11 @@ def _apply_write_budget(
     for p in proposals:
         decision = decisions.get(p.signature)
         if decision is None:
-            out.append(p)
+            # Never entered the budget at all — advise-only, or no target to
+            # write into. Nothing is on offer, so say so rather than letting
+            # the dataclass default (`write_offered=True`) stand and claim a
+            # write that does not exist.
+            out.append(replace(p, write_offered=False))
             continue
         # The monthly field lives on the 30-day basis, so it is netted against
         # the PROJECTED session count while the window field is netted against

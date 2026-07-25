@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Sequence
 
 from tokenjam.core.optimize.projection import ProjectionBasis
@@ -111,6 +111,15 @@ MIN_FIX_CHARS = 40
 #: the placeholder rather than when a real fix happens to mention reviewing
 #: something (every honesty caveat in the tree says "review ... before
 #: applying"; none of those may be mistaken for a placeholder).
+#: The first two are anchored on purpose: "review examples" / "TODO" are common
+#: enough words that matching them mid-text would false-positive on a genuine
+#: rule that merely mentions them. The third is deliberately UNANCHORED, and
+#: must stay that way — the text handed to :func:`is_placeholder_fix` on the
+#: live relearn path is not the raw fix but the fully RENDERED artifact (a
+#: marker comment, a heading, the fix, an evidence line; see
+#: ``relearn_apply.artifact_for_rung``), so the placeholder sentence sits in the
+#: middle of the block and an anchored pattern never sees it. Anchoring this one
+#: for symmetry silently switches the whole quality floor off for that path.
 _PLACEHOLDER_PATTERNS = (
     re.compile(r"^\s*review\s+examples?\b", re.IGNORECASE),
     re.compile(r"^\s*(tbd|todo|n/?a)\b", re.IGNORECASE),
@@ -435,8 +444,18 @@ def _decide_family(
     ordered = sorted(members, key=lambda c: (-c.gross_tokens, c.key))
     rep = ordered[0]
     if rep.gross_tokens <= 0:
+        # The representative's saving is unpriceable, so nothing can be netted.
+        # Its siblings still lose the write for the ordinary reason — the block
+        # is written ONCE for the family — and must NOT each be handed an
+        # `offered=True` unpriceable verdict of their own, which would put the
+        # same artifact text on offer N times and break the one-block-per-family
+        # invariant. Same shape as the priceable branch's sibling handling.
         return rep, _unpriceable_decision(rep), [
-            _unpriceable_decision(c) for c in ordered[1:]
+            replace(
+                _unpriceable_decision(c),
+                offered=False, reason=REASON_FAMILY_MERGED,
+            )
+            for c in ordered[1:]
         ]
     per_session = standing_tokens_per_session(rep.rung, rep.artifact_text)
     exposure = max(

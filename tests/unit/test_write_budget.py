@@ -109,6 +109,29 @@ def test_generic_placeholder_fixes_are_rejected():
     assert wb.is_placeholder_fix("Fix it.")            # under the length floor
 
 
+def test_placeholder_is_caught_inside_a_rendered_artifact_block():
+    """What the budget pass actually inspects on the live relearn path is the
+    RENDERED artifact, not the raw fix: the marker comment and heading come
+    first, so the placeholder sentence lands mid-string. The unanchored
+    "no known fix template matched" pattern is the only thing that catches it
+    — anchoring it for symmetry with the other two switches the quality floor
+    off for every cluster that has no fix template."""
+    from tokenjam.core.optimize.relearn_apply import artifact_for_rung
+
+    rendered = artifact_for_rung(
+        {
+            "title": "Some recurring failure",
+            "proposed_fix": "Review examples — no known fix template matched.",
+            "repos": ["r"], "occurrences": 5, "sessions": 3, "examples": [],
+        },
+        "relearn:x", 1, "some-recurring-failure",
+    )
+    assert not rendered.lstrip().lower().startswith("review examples"), (
+        "precondition: the placeholder must sit mid-block, not at the start"
+    )
+    assert wb.is_placeholder_fix(rendered)
+
+
 def test_an_honesty_caveat_is_not_mistaken_for_a_placeholder():
     """Every real fix in the tree says "review ... before applying". None of
     those may trip the anchored placeholder patterns."""
@@ -195,6 +218,32 @@ def test_same_family_clusters_collapse_onto_one_block():
     assert sum(d.standing_tokens_per_session for d in decisions.values()) == (
         wb.standing_tokens_per_session(1, _REAL_FIX)
     )
+
+
+def test_unpriceable_family_still_offers_only_one_block():
+    """The one-block-per-family invariant must hold on the UNPRICEABLE branch
+    too. When the representative carries no token figure there is nothing to
+    net, so every member takes the pass-through verdict — but only the
+    representative's block is ever written, so a sibling handed `offered=True`
+    would put the identical artifact text on offer once per cluster and
+    bypass the budget counter entirely."""
+    basis = _basis(sessions=100)
+    decisions = wb.allocate_writes(
+        [
+            _candidate("rep", tokens=0),
+            _candidate("sib1", tokens=0),
+            _candidate("sib2", tokens=0),
+        ],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5), basis,
+    )
+    assert [d.offered for d in decisions.values()].count(True) == 1
+    assert decisions["rep"].offered is True
+    assert decisions["rep"].basis == wb.BASIS_NOT_PRICEABLE
+    for key in ("sib1", "sib2"):
+        assert decisions[key].offered is False, key
+        assert decisions[key].reason == wb.REASON_FAMILY_MERGED, key
+        # Unchanged from the pass-through verdict: no netting was invented.
+        assert decisions[key].basis == wb.BASIS_NOT_PRICEABLE, key
 
 
 def test_writes_are_ranked_by_net_value_and_bounded():
