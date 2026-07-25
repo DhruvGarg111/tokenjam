@@ -6198,25 +6198,32 @@ function capitalize(name) {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 }
 
-// Mirror core/framing.render_savings: api/unknown → dollars; subscription →
-// token-share of the cycle; local → token count. The mode is server-decided.
+// Mirror core/framing's dollars-by-default rule: dollars unless the server
+// explicitly suppressed them (local inference, or an all-unknown plan mix —
+// see dollarsSuppressed below). Subscription no longer suppresses: dollars
+// price all traffic at API list rates and render with framing.qualifier_text
+// carrying the list-price-equivalent caveat. The `window_total_tokens`
+// token-share fallback stays for the rare case a payload only carries
+// `display_rule`-less legacy framing (pricing_mode-only fallback below).
 function fmtFramedSavings(usd, tokens, framing) {
-  const mode = framing ? framing.pricing_mode : 'api';
-  if (mode === 'subscription') {
+  if (dollarsSuppressed(framing)) {
     if (tokens == null) return '—';
-    if (framing.window_total_tokens > 0) return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    const mode = framing ? framing.pricing_mode : 'api';
+    if (mode === 'subscription' && framing.window_total_tokens > 0) {
+      return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    }
     return fmtTokens(tokens) + ' tokens';
   }
-  if (mode === 'local') return tokens == null ? '—' : fmtTokens(tokens) + ' tokens';
   return usd == null ? '—' : fmtCost(usd);
 }
 
 // Is the server telling us NOT to lead with dollars? Reads the explicit
 // server-side decision (`display_rule`, core/framing.py) rather than
-// re-deriving it, with a pricing_mode fallback for older payloads. True for a
-// subscription-dominant corpus (a dollar figure there covers only the
-// API-billed slice, so it understates), for local inference, and for an
-// unknown plan. Callers make TOKENS the headline in that case.
+// re-deriving it, with a pricing_mode fallback for older payloads. True for
+// local inference (no marginal cost to price) and an all-unknown plan mix.
+// Subscription is deliberately NOT in this set — dollars price all traffic at
+// API list rates and are shown with a list-price-equivalent qualifier.
+// Callers make TOKENS the headline only in the suppressed case.
 const DOLLARS_SUPPRESSED_RULES = new Set([
   'suppress_dollars_for_subscription_share', 'tokens_only', 'suppress_dollars_unknown',
 ]);

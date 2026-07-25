@@ -1080,13 +1080,23 @@ def test_resend_suppresses_cache_control_snippet_for_claude_code():
     # The durable subagent-offload rule leads, not /compact.
     assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
     assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
-    assert prop.one_paste_fix == SUBAGENT_OFFLOAD_FIX
+    # The one-paste artifact is the SECOND half of the compound fix: the agent
+    # file's model + reasoning-effort pin. The offload rule is a WRITE, carried
+    # on `proposed_fix` and applied rather than pasted.
+    assert "model:" in prop.one_paste_fix
+    assert "reasoning_effort:" in prop.one_paste_fix
 
 
-def test_resend_claude_code_offers_apply_capable_subagent_offload_write():
+def test_resend_claude_code_offers_apply_capable_compound_write():
     # Durable claude-code lever: a rung-1 CLAUDE.md rule, apply-capable via the
     # same `_persona_gated_write_fields` machinery script/reuse/verbosity use.
-    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
+    # ONE card carries BOTH halves of the lever — offload the context-heavy
+    # work, and right-size what you offload it to — so this consolidates the
+    # resend and subagent recommendations instead of adding a card.
+    from tokenjam.core.optimize.analyzers.context_resend import (
+        RIGHTSIZE_FIX_TEMPLATE,
+        SUBAGENT_OFFLOAD_FIX,
+    )
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
@@ -1094,7 +1104,29 @@ def test_resend_claude_code_offers_apply_capable_subagent_offload_write():
     assert prop.apply_capable is True
     assert prop.rung == 1
     assert prop.scope == "project"
-    assert prop.proposed_fix == SUBAGENT_OFFLOAD_FIX
+    assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
+    assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
+
+
+def test_resend_cost_of_waste_is_carried_but_never_the_recoverable_figure():
+    # The gross observation rides its own fields and must never be confused
+    # with — or summed into — what the fix returns.
+    from tokenjam.core.optimize.cost_proposals import (
+        _resend_to_proposals,
+        estimated_recoverable_rollup,
+    )
+
+    finding = _resend_finding()
+    finding.cost_of_waste_usd = 4_200.0
+    finding.cost_of_waste_tokens = 9_800_000_000
+    prop = _resend_to_proposals(finding, persona="claude-code")[0]
+
+    assert prop.cost_of_waste_usd == 4_200.0
+    assert prop.estimated_recoverable_usd == 0.5
+    # The Review inbox headline reads only the recoverable fields.
+    rollup = estimated_recoverable_rollup([prop])
+    assert rollup["estimated_recoverable_usd"] == 0.5
+    assert rollup["estimated_recoverable_tokens"] == 6_830
 
 
 def test_resend_sdk_persona_gets_no_write_and_leads_with_compact():
@@ -1117,16 +1149,14 @@ def test_resend_mixed_persona_offers_write_and_keeps_snippet():
 
     prop = _resend_to_proposals(_resend_finding(), persona="mixed")[0]
     assert prop.apply_capable is True
-    assert prop.proposed_fix == SUBAGENT_OFFLOAD_FIX
+    assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
     assert "cache_control" in prop.suggestion
-    # Pin the one-paste slot too, so neither side of the mixed branch can drift
-    # silently: the SDK snippet is what a "mixed" window pastes (it is the only
-    # copyable artifact here -- the subagent-offload rule is a WRITE, carried on
-    # `proposed_fix` above and applied, not pasted), while a claude-code-only
-    # window has no snippet and falls back to the offload text.
-    assert prop.one_paste_fix == prop.suggestion
-    assert "cache_control" in prop.one_paste_fix
-    assert prop.one_paste_fix != SUBAGENT_OFFLOAD_FIX
+    # Both sides of the mixed branch are pinned so neither can drift silently:
+    # the SDK share keeps its cache_control snippet on `suggestion`, while the
+    # one-paste slot carries the claude-code share's right-sizing frontmatter
+    # (the offload rule itself is a WRITE on `proposed_fix`, applied not pasted).
+    assert "reasoning_effort:" in prop.one_paste_fix
+    assert "cache_control" not in prop.one_paste_fix
 
 
 def test_resend_keeps_cache_control_snippet_for_sdk():
@@ -1144,14 +1174,13 @@ def test_resend_caveat_is_not_duplicated():
     # The caveat is carried once via `caveat=`, and must NOT also be folded into
     # advise_text — doing both printed the same sentence twice on the card
     # (description paragraph + caveat line render the joined fields).
-    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.caveat == "conservative lower bound"
     assert "conservative lower bound" not in prop.advise_text
     assert prop.advise_text == (
-        SUBAGENT_OFFLOAD_FIX + " Immediate relief in an already-full session: Run /compact."
+        prop.proposed_fix + " Immediate relief in an already-full session: Run /compact."
     )
 
 
