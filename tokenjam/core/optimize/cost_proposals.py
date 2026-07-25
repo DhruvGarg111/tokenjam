@@ -177,6 +177,26 @@ class CostProposal:
     # to reimplement the arithmetic.
     estimated_monthly_usd:        float | None = None
     estimated_monthly_tokens:     int | None   = None
+    # Whether this proposal's waste RECURS at the user's own session pace
+    # (`"per_session"` — the shared, centrally-computed 30-day-pace ratio
+    # rescales it) or is a `"one_time"` fixed-occurrence / delete-this-
+    # artifact saving (never rescaled; its monthly figure always equals its
+    # window figure). See `compute_projection_ratio` and #273's approved
+    # design ("each analyzer declares scaling ... state the choice
+    # explicitly"). Defaulted here rather than repeated at every adapter's
+    # `CostProposal(...)` call site because EVERY current analyzer is
+    # `"per_session"`: downsize/cache/cache-recommend/resend/trim/subagent/
+    # script/reuse/verbosity/placement/deadweight's waste all recur every
+    # session (or call) the underlying condition persists — including the
+    # deadweight MCP tax, which keeps accruing every session the server stays
+    # configured even though ITS fix is a one-time config edit; the SAVING is
+    # what recurs, not the fix. `"one_time"` is reserved for a future
+    # analyzer whose estimate is a genuinely single fixed occurrence, which
+    # must set it explicitly at its own call site when it's added.
+    # (relearn's `RelearnCluster` estimates are a SEPARATE, unbounded-history
+    # system with no fixed window — not adapted into a `CostProposal` at all,
+    # so it carries no `scaling` field and is out of scope here.)
+    scaling:               str = "per_session"
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
     correlational:        bool = True
@@ -280,11 +300,17 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        # `downsize` already computes its own 30-day projection (model_downgrade.
-        # py's `monthly_savings_usd`/`monthly_tokens_in_candidates`) — surface it
-        # directly rather than re-deriving from the window figure.
-        estimated_monthly_usd=getattr(finding, "monthly_savings_usd", None),
-        estimated_monthly_tokens=getattr(finding, "monthly_tokens_in_candidates", None),
+        # `estimated_monthly_usd`/`estimated_monthly_tokens` are intentionally
+        # left unset here (#273): `model_downgrade.py`'s own
+        # `monthly_savings_usd`/`monthly_tokens_in_candidates` is a
+        # `30/window_days` projection computed inside the analyzer, which is
+        # exactly the per-analyzer self-projection the approved design
+        # forbids for the SHARED monthly basis — every analyzer's Review-inbox
+        # monthly figure must come from the ONE central ratio
+        # (`compute_projection_ratio`), applied uniformly in
+        # `cost_proposals_from_report`, or two analyzers' "monthly" figures
+        # are silently on different bases again. `monthly_savings_usd` itself
+        # is untouched and still backs the CLI's own `tj optimize` line.
     )]
 
 
@@ -460,17 +486,11 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
             estimated_recoverable_usd=row.delta_usd,
             estimated_recoverable_tokens=row.total_tokens,
             estimate_basis=row.estimate_basis,
-            # `projected_30d_delta_usd` is this row's own 30-day projection
-            # (mirrors the window-wide card's `monthly_savings_usd`). No
-            # per-row monthly-token figure exists, so tokens are extrapolated
-            # by the SAME window->30d ratio the dollar figure already carries
-            # (`projected_30d_delta_usd / delta_usd`) rather than duplicating
-            # a window_days parameter down through this helper.
-            estimated_monthly_usd=row.projected_30d_delta_usd,
-            estimated_monthly_tokens=(
-                round(row.total_tokens * (row.projected_30d_delta_usd / row.delta_usd))
-                if row.delta_usd > 0 else None
-            ),
+            # `estimated_monthly_usd`/`estimated_monthly_tokens` are left
+            # unset here for the same reason as the window-wide downsize card
+            # above (#273): `row.projected_30d_delta_usd` is this row's own
+            # `window_days`-based self-projection, not the shared central
+            # ratio. The central function fills these in uniformly.
             agent_id=row.agent_id if row.agent_id != "unknown" else "",
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
@@ -1236,7 +1256,10 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
 
     ``estimated_recoverable_usd`` is carried straight off the analyzer's own
-    ``ServerDeadweight.estimated_tax_usd_90d`` — the analyzer already prices
+    ``ServerDeadweight.estimated_tax_usd_window`` — a WINDOW-scoped figure
+    with no projection folded in (#273: this used to be a fixed 90-day
+    projection, which made it incomparable to every other analyzer's window
+    figure and corrupted any sum across them). The analyzer already prices
     the token tax through ``core/pricing.py`` at the dominant model observed
     in that server's sessions (never a hardcoded rate; see
     ``deadweight._pricing_note``). Stays ``None`` when no priced model was
@@ -1300,12 +1323,9 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             },
             advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
-            estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
-            estimated_recoverable_usd=server.estimated_tax_usd_90d,
-            estimate_basis=(
-                server.tax_construction
-                + " Projected over a 90-day window from the sessions observed."
-            ),
+            estimated_recoverable_tokens=server.estimated_tax_tokens_window or None,
+            estimated_recoverable_usd=server.estimated_tax_usd_window,
+            estimate_basis=server.tax_construction,
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
             apply_kind=str(plumbing.get("apply_kind", "")),
@@ -1747,7 +1767,12 @@ def recompute_cost_proposals(
             return []
 
         try:
-            relearn_store.write_cost_proposals(proposals, config=config)
+            relearn_store.write_cost_proposals(
+                proposals, config=config,
+                window_days=effective_window_days,
+                active_days=int(getattr(report.window, "active_days", 0) or 0),
+                n_sessions=int(getattr(report.window, "sessions", 0) or 0),
+            )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
             pass
@@ -1797,6 +1822,88 @@ def trigger_background_cost_recompute(
     return True
 
 
+# --------------------------------------------------------------------------- #
+# The ONE central 30-day-pace projection (#273's approved design). Deleted
+# every per-analyzer self-projection (deadweight's old fixed 90-day factor,
+# downsize's own `monthly_savings_usd` feeding the shared field) in favor of
+# this single function, applied once here and again in
+# `estimated_recoverable_rollup` — never inside an analyzer — so every cost
+# analyzer's "monthly" figure is on the SAME basis and a sum across them
+# never silently mixes bases again.
+# --------------------------------------------------------------------------- #
+
+#: Guardrails: below any of these, the window's data is too thin to trust a
+#: forward projection from — show the observed figure, unscaled, instead.
+#: (Below this many days the window itself is barely wider than the ratio's
+#: own 30-day target, so a projection would mostly be noise.)
+MIN_WINDOW_DAYS_FOR_PROJECTION = 14
+#: Below this many distinct active days, the "sessions per active day" pace
+#: is estimated from too few data points to extrapolate honestly.
+MIN_ACTIVE_DAYS_FOR_PROJECTION = 8
+#: Below this many total sessions, there isn't enough volume for a pace
+#: figure to mean anything.
+MIN_SESSIONS_FOR_PROJECTION = 20
+#: Upper bound on the ratio — never claim more than 3x the observed window
+#: figure, however sparse the user's active days were.
+MAX_PROJECTION_RATIO = 3.0
+
+OBSERVED_LABEL = "observed"
+PROJECTED_LABEL = "per 30 days"
+
+
+def compute_projection_ratio(
+    window_days: float, active_days: int, n_sessions: int,
+) -> tuple[float | None, str]:
+    """The single ratio every cost analyzer's window figure is multiplied by
+    to get its 30-day-pace projection, and the label to render beside it.
+
+    ``r = clamp(30 / active_days, floor, MAX_PROJECTION_RATIO)`` where
+    ``active_days`` is the count of distinct calendar days in the window with
+    >=1 session (``WindowSummary.active_days``) — projecting on the user's
+    OWN observed pace, not a fixed multiplier on the window length (the bug
+    this replaces: a shrinking window inflated a fixed-days-over-window_days
+    ratio unboundedly). ``floor`` is ``1.0`` only when ``window_days <= 30``
+    (a real month's worth of pace can't be claimed to be LESS than what was
+    already observed over a sub-month window); a window LONGER than 30 days
+    may legitimately normalize DOWN below 1.0 — that's not a bug, it's
+    averaging a longer observation back down to a 30-day figure.
+
+    Returns ``(None, "observed")`` — no projection at all — when the window
+    is too thin to trust one: fewer than ``MIN_WINDOW_DAYS_FOR_PROJECTION``
+    days, fewer than ``MIN_ACTIVE_DAYS_FOR_PROJECTION`` active days, or fewer
+    than ``MIN_SESSIONS_FOR_PROJECTION`` sessions. A caller sees ``None`` and
+    renders the observed (window) figure labeled "observed in the last W
+    days" instead of "per 30 days" — never silently substitutes 1.0 for the
+    ratio and pretends that's a projection.
+
+    Deliberately NOT provided as an alternative basis: peak-single-day or a
+    p90-daily rate. Either cherry-picks the user's single worst day/week,
+    which is the first thing a skeptic attacks (#273's explicit prohibition)
+    — the mean pace over ALL active days is the only basis used here.
+    """
+    if (
+        window_days < MIN_WINDOW_DAYS_FOR_PROJECTION
+        or active_days < MIN_ACTIVE_DAYS_FOR_PROJECTION
+        or n_sessions < MIN_SESSIONS_FOR_PROJECTION
+    ):
+        return None, OBSERVED_LABEL
+    raw = 30.0 / active_days
+    ratio = min(raw, MAX_PROJECTION_RATIO)
+    if window_days <= 30:
+        ratio = max(ratio, 1.0)
+    return ratio, PROJECTED_LABEL
+
+
+def _effective_ratio(scaling: str, ratio: float | None) -> float:
+    """The ratio actually applied to ONE proposal: a `"one_time"` finding is
+    never rescaled regardless of the window's pace (its monthly figure always
+    equals its window figure), and a `None` ratio (guardrails blocked the
+    projection) means nothing is scaled either."""
+    if scaling == "one_time" or ratio is None:
+        return 1.0
+    return ratio
+
+
 def cost_proposals_from_report(
     report: Any, config: Any = None, *, pricing_mode: str = "api",
     window_days: float = 30.0,
@@ -1836,17 +1943,26 @@ def cost_proposals_from_report(
     see its own docstring) — neither ever assumes ``"claude-code"``.
 
     ``window_days`` (default 30 — ``DEFAULT_COST_WINDOW_DAYS``, matching the
-    daemon's own default look-back) is the monthly-basis extrapolation factor
-    (behavioral requirement #1): every proposal's ``estimated_monthly_usd``/
-    ``estimated_monthly_tokens`` that an adapter didn't already populate
-    (only ``downsize`` does, from its own 30-day projection) is stamped here
-    as ``window_figure * (30 / window_days)`` — one generic pass so no
-    adapter has to reimplement the arithmetic. A caller building a report
-    over a non-30-day window (e.g. ``tj optimize --since 7d``) still gets an
-    honest monthly figure rather than a raw window total mislabeled "/ mo".
+    daemon's own default look-back) feeds ``compute_projection_ratio`` along
+    with ``report.window.active_days``/``report.window.sessions`` (#273):
+    every proposal's ``estimated_monthly_usd``/``estimated_monthly_tokens``
+    is stamped here as ``window_figure * ratio`` — the SAME ratio for every
+    proposal, computed ONCE, respecting each proposal's own ``scaling``
+    (``"one_time"`` is never rescaled). No adapter sets these fields itself
+    any more (``downsize`` used to; #273 removed that self-projection so a
+    later scan over a non-default window can't leave it on a different basis
+    than everyone else). A caller building a report over a non-30-day window
+    (e.g. ``tj optimize --since 7d``) still gets an honest monthly figure
+    rather than a raw window total mislabeled "/ mo" — or, when the window is
+    too thin to trust a projection from (see ``compute_projection_ratio``'s
+    guardrails), the unscaled observed figure instead of an invented one.
     """
     findings = getattr(report, "findings", {}) or {}
     persona = str(getattr(report, "persona", "") or "unknown")
+    window = getattr(report, "window", None)
+    active_days = int(getattr(window, "active_days", 0) or 0)
+    n_sessions = int(getattr(window, "sessions", 0) or 0)
+    ratio, _label = compute_projection_ratio(window_days, active_days, n_sessions)
     proposals: list[CostProposal] = []
 
     # Second half of the persona skip gate. `build_report` already refuses to
@@ -1885,17 +2001,21 @@ def cost_proposals_from_report(
             proposals.extend(adapter(finding))
         except Exception:
             continue
-    return [_with_monthly_extrapolation(p, window_days) for p in proposals]
+    return [_with_rollup_projection(p, ratio) for p in proposals]
 
 
-def _with_monthly_extrapolation(proposal: CostProposal, window_days: float) -> CostProposal:
+def _with_rollup_projection(proposal: CostProposal, ratio: float | None) -> CostProposal:
     """Fill in ``estimated_monthly_usd``/``estimated_monthly_tokens`` from the
-    window figure when an adapter didn't already set one (see
-    ``cost_proposals_from_report``'s ``window_days`` docstring). Returns a NEW
-    ``CostProposal`` (``dataclasses.replace``) rather than mutating the one
-    the adapter built — every proposal here is otherwise treated as an
-    immutable, already-complete record."""
-    scale = (30.0 / window_days) if window_days and window_days > 0 else 1.0
+    window figure using the one shared ``ratio`` (``None`` when
+    ``compute_projection_ratio``'s guardrails blocked projection, in which
+    case the monthly figure equals the observed window figure unscaled).
+    Respects the proposal's own ``scaling`` — a ``"one_time"`` finding is
+    never rescaled regardless of ``ratio``. Returns a NEW ``CostProposal``
+    (``dataclasses.replace``) rather than mutating the one the adapter built
+    — every proposal here is otherwise treated as an immutable,
+    already-complete record. Only fills a field an adapter left ``None``; no
+    current adapter sets these itself (#273), but a future one may."""
+    scale = _effective_ratio(proposal.scaling, ratio)
     updates: dict[str, Any] = {}
     if proposal.estimated_monthly_usd is None and proposal.estimated_recoverable_usd is not None:
         updates["estimated_monthly_usd"] = round(proposal.estimated_recoverable_usd * scale, 6)
@@ -1947,6 +2067,8 @@ def estimated_recoverable_rollup(
     proposals: list[Any],
     *,
     window_days: int = DEFAULT_COST_WINDOW_DAYS,
+    active_days: int = 0,
+    n_sessions: int = 0,
 ) -> dict[str, Any]:
     """Sum ``estimated_recoverable_usd`` across ``proposals``, deduplicated by
     ``signature`` (a proposal's stable identity — see the ``CostProposal``
@@ -1972,6 +2094,20 @@ def estimated_recoverable_rollup(
     ``proposal_count``, and say so against ``deduplicated_proposal_count`` when
     coverage is partial: the token sum is a floor, not a total.
 
+    Both ``estimated_recoverable_usd``/``estimated_recoverable_tokens`` stay
+    the raw OBSERVED (window-scoped) sums — unchanged contract, so an
+    existing caller reading these two keys keeps seeing exactly what it saw
+    before. #273 adds a SEPARATE, single-basis 30-day projection alongside
+    them (never folded into the same field the window figure lives in, per
+    the Recoverable-savings contract): ``projected_usd_30d``/
+    ``projected_tokens_30d`` are each proposal's window figure multiplied by
+    the ONE ratio ``compute_projection_ratio(window_days, active_days,
+    n_sessions)`` computes (respecting each proposal's own ``scaling`` —
+    ``"one_time"`` is never rescaled), summed the same way. ``active_days``/
+    ``n_sessions`` default to 0 (guardrails always block the projection),
+    so a caller that doesn't yet know them gets the honest "observed" state
+    rather than a fabricated ratio.
+
     Tagged ``estimated`` — this is a heuristic figure, never a measured one.
     """
     seen: dict[str, dict[str, Any]] = {}
@@ -1982,12 +2118,18 @@ def estimated_recoverable_rollup(
             continue  # empty/duplicate signature never counts twice
         seen[sig] = row
 
+    ratio, label = compute_projection_ratio(window_days, active_days, n_sessions)
+
     contributing: list[dict[str, Any]] = []
     by_analyzer: dict[str, dict[str, Any]] = {}
     total_usd = 0.0
     total_tokens = 0
     token_proposal_count = 0
+    projected_usd = 0.0
+    projected_tokens = 0
     for row in seen.values():
+        scale = _effective_ratio(str(row.get("scaling") or "per_session"), ratio)
+
         # The token sum is counted INDEPENDENTLY of the dollar sum: the two
         # estimates are populated by different analyzers and a proposal can
         # carry either one alone. Folding tokens in only where a dollar
@@ -1996,6 +2138,7 @@ def estimated_recoverable_rollup(
         tokens = row.get("estimated_recoverable_tokens")
         if tokens is not None:
             total_tokens += int(tokens)
+            projected_tokens += round(int(tokens) * scale)
             token_proposal_count += 1
 
         usd = row.get("estimated_recoverable_usd")
@@ -2003,6 +2146,7 @@ def estimated_recoverable_rollup(
             continue
         usd = float(usd)
         total_usd += usd
+        projected_usd += usd * scale
         analyzer = str(row.get("analyzer") or "unknown")
         entry = by_analyzer.setdefault(analyzer, {"analyzer": analyzer, "count": 0, "usd": 0.0})
         entry["count"] += 1
@@ -2043,6 +2187,21 @@ def estimated_recoverable_rollup(
             f"proposal(s); the rest carry no token estimate, so it is a "
             f"floor, not a total."
         )
+    if ratio is not None:
+        disclosure = (
+            f"Projected to a 30-day month at your own pace: "
+            f"{n_sessions / active_days:.1f} sessions per active coding day, "
+            f"measured from {n_sessions} sessions across {active_days} active "
+            f"days in the last {window_days} days."
+        )
+    else:
+        disclosure = (
+            f"Observed in the last {window_days} days ({n_sessions} sessions "
+            f"across {active_days} active days) — not enough data to project "
+            f"a 30-day pace yet (needs >= {MIN_WINDOW_DAYS_FOR_PROJECTION} "
+            f"days, >= {MIN_ACTIVE_DAYS_FOR_PROJECTION} active days, and "
+            f">= {MIN_SESSIONS_FOR_PROJECTION} sessions)."
+        )
 
     return {
         "estimated_recoverable_usd": round(total_usd, 6),
@@ -2051,6 +2210,13 @@ def estimated_recoverable_rollup(
         "token_proposal_count": token_proposal_count,
         "deduplicated_proposal_count": deduplicated_proposal_count,
         "window_days": window_days,
+        "active_days": active_days,
+        "n_sessions": n_sessions,
+        "projection_ratio": ratio,
+        "projection_label": label,
+        "projected_usd_30d": round(projected_usd, 6),
+        "projected_tokens_30d": projected_tokens,
+        "disclosure": disclosure,
         "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
         "contributing": contributing,
         "estimate_confidence": COST_ESTIMATE_CONFIDENCE,

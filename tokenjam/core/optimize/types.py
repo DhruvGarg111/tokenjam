@@ -66,6 +66,14 @@ class WindowSummary:
     total_tokens: int
     total_cost_usd: float
     thin_data:   bool
+    #: Distinct calendar days within the window with >=1 session — the
+    #: user's own "active day" pace, the basis for the shared 30-day
+    #: projection ratio every cost analyzer's rollup uses (see
+    #: `cost_proposals.compute_projection_ratio`, #273). Defaults to 0 for a
+    #: hand-built `WindowSummary` (tests, older callers) — a 0 fails that
+    #: ratio's guardrail, so the projection is simply skipped rather than
+    #: dividing by zero or inventing a value.
+    active_days: int = 0
 
 
 @dataclass

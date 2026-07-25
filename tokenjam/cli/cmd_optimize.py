@@ -2205,16 +2205,16 @@ def _render_deadweight(
             # Dollars only when a priced model was actually observed for this
             # server. None means no rate was available, and printing $0.00
             # there would read as "this costs nothing".
-            if pricing_mode == "api" and s.estimated_tax_usd_90d is not None:
+            if pricing_mode == "api" and s.estimated_tax_usd_window is not None:
                 tax = (
-                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens / "
-                    f"{format_cost(s.estimated_tax_usd_90d)} over 90 days "
+                    f"~{format_tokens(s.estimated_tax_tokens_window)} tokens / "
+                    f"{format_cost(s.estimated_tax_usd_window)} in this window "
                     f"[dim](estimated, priced at {s.priced_model})[/dim]"
                 )
             else:
                 tax = (
-                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens over "
-                    f"90 days [dim](estimated; no priced model observed for "
+                    f"~{format_tokens(s.estimated_tax_tokens_window)} tokens in "
+                    f"this window [dim](estimated; no priced model observed for "
                     f"this server, so no dollar figure)[/dim]"
                 )
             console.print(f"          [dim]tax[/dim] {tax}")

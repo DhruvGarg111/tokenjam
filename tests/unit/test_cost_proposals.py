@@ -231,7 +231,7 @@ def _dead_server(**overrides):
     fields = dict(
         name="apollo", scope="project", source="/repo/.mcp.json",
         sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
-        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_90d=225_000,
+        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
         tax_construction="25,000 tok/session (full schema injection), cited estimate.",
         fix="Remove or project-scope the `apollo` MCP server (/repo/.mcp.json); "
             "zero tool calls across 10 session(s) in this window.",
@@ -251,7 +251,7 @@ def _deadweight_finding(dead_servers=None, tax_table=None):
     return DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
         servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
-        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_90d for s in dead_servers) or None,
+        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
         estimate_basis="dead-server 90d tax sum",
     )
 
@@ -286,7 +286,7 @@ def test_deadweight_proposal_carries_priced_usd_from_server():
     server = _dead_server(
         priced_model="claude-opus-4-8",
         estimated_tax_usd_per_session=0.125,
-        estimated_tax_usd_90d=1.40625,
+        estimated_tax_usd_window=1.40625,
     )
     p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
     assert p.estimated_recoverable_usd == 1.40625
@@ -325,7 +325,7 @@ def test_deadweight_tax_table_never_becomes_a_second_proposal():
     from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow
     from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
 
-    dead = _dead_server(name="apollo", estimated_tax_tokens_90d=225_000)
+    dead = _dead_server(name="apollo", estimated_tax_tokens_window=225_000)
     finding = _deadweight_finding(
         dead_servers=[dead],
         tax_table=[
@@ -913,42 +913,66 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     assert "floor, not a total" not in rollup["estimate_basis"]
 
 
-# --- Review inbox monthly-basis fields (behavioral requirement #1) ----------- #
+# --- Review inbox monthly-basis fields (#273: single central projection) ---- #
 
-def test_downsize_proposal_surfaces_its_own_monthly_projection():
-    # `downsize` already computes a 30-day projection (model_downgrade.py's
-    # `monthly_savings_usd`/`monthly_tokens_in_candidates`) — surfaced onto the
-    # proposal directly, never re-derived by the generic extrapolation below.
+def test_downsize_monthly_uses_the_same_central_projection_as_everyone_else():
+    # #273: downsize no longer self-projects into the shared monthly field
+    # (model_downgrade.py's own `monthly_savings_usd` used to be copied
+    # straight onto the proposal) — its estimated_monthly_usd now comes from
+    # the SAME central ratio every other analyzer's does, applied uniformly
+    # in `cost_proposals_from_report`.
     props = {p.analyzer: p for p in cost_proposals_from_report(_report())}
-    assert props["downsize"].estimated_monthly_usd == 3.0
-    assert props["downsize"].estimated_monthly_tokens == 0   # fixture's default
+    dsz = props["downsize"]
+    # `_report()`'s window (5 days, 10 sessions) is far below the projection
+    # guardrails (>=14 window days, >=8 active days, >=20 sessions), so no
+    # projection applies: the monthly figure equals the observed one.
+    assert dsz.estimated_monthly_usd == pytest.approx(dsz.estimated_recoverable_usd)
+    # The window-wide downsize card never sets a token estimate, so there is
+    # nothing to project a monthly token figure from either — no more
+    # silently claiming "0 monthly tokens" for an unmeasured quantity.
+    assert dsz.estimated_recoverable_tokens is None
+    assert dsz.estimated_monthly_tokens is None
 
 
-def test_non_downsize_proposals_get_generic_monthly_extrapolation():
-    # cache/trim carry no monthly figure of their own, so a report built over
-    # a NON-30-day window gets a generic `30/window_days` extrapolation of
-    # the window figure, applied once in `cost_proposals_from_report`. Assert
-    # the SCALING RELATIONSHIP to the adapter's own window figure (its exact
-    # dollar value is computed from `estimate_cache_recoverable`/pricing.py
-    # internals, not the fixture's finding-level field, which `_cache_to_
-    # proposals` doesn't read) — the `cache` finding also fans out into
-    # several signature-distinct cards, so select by signature.
-    at_default = {p.signature: p for p in cost_proposals_from_report(_report())}
+def test_thin_window_reports_observed_not_a_fabricated_projection():
+    # Below the guardrails (here: 10 window days < the 14-day floor), every
+    # analyzer's monthly figure is left AT its window figure — never scaled
+    # by a ratio computed from too little data.
     at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
-    cache_default = at_default["cost:cache:anthropic:claude-sonnet-5"]
     cache_10d = at_10d["cost:cache:anthropic:claude-sonnet-5"]
-    assert cache_default.estimated_monthly_usd == pytest.approx(cache_default.estimated_recoverable_usd)
-    assert cache_10d.estimated_monthly_usd == pytest.approx(cache_default.estimated_recoverable_usd * 3.0)
-    trim_default = at_default["cost:trim:svc-a"]
-    trim_10d = at_10d["cost:trim:svc-a"]
-    assert trim_10d.estimated_monthly_usd == pytest.approx(trim_default.estimated_recoverable_usd * 3.0)
-    assert trim_10d.estimated_monthly_tokens == round(trim_default.estimated_recoverable_tokens * 3.0)
+    assert cache_10d.estimated_monthly_usd == pytest.approx(cache_10d.estimated_recoverable_usd)
+
+
+def test_projection_ratio_scales_every_cost_analyzer_the_same_way():
+    # A window that clears every guardrail (>=14 window days, >=8 active
+    # days, >=20 sessions): 10 active days over a 30-day window ->
+    # ratio = min(30/10, 3.0) = 3.0, floored no further since window_days<=30
+    # already yields 3.0. Every analyzer — including downsize — gets scaled
+    # by this SAME ratio; #273's whole point is that there is no longer a
+    # per-analyzer special case here.
+    rep = _report()
+    rep.window = WindowSummary(
+        since=MARKER, until=NOW, days=30, sessions=25, spans=100,
+        total_tokens=1, total_cost_usd=5.0, thin_data=False, active_days=10,
+    )
+    scaled = {p.signature: p for p in cost_proposals_from_report(rep, window_days=30.0)}
+
+    cache = scaled["cost:cache:anthropic:claude-sonnet-5"]
+    assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd * 3.0)
+
+    trim = scaled["cost:trim:svc-a"]
+    assert trim.estimated_monthly_usd == pytest.approx(trim.estimated_recoverable_usd * 3.0)
+    assert trim.estimated_monthly_tokens == round(trim.estimated_recoverable_tokens * 3.0)
+
+    downsize = scaled["cost:downsize"]
+    assert downsize.estimated_monthly_usd == pytest.approx(downsize.estimated_recoverable_usd * 3.0)
 
 
 def test_default_window_is_already_the_monthly_basis_no_scaling():
-    # `cost_proposals_from_report`'s default `window_days` (30.0) matches the
-    # daemon's own default look-back, so an un-scoped call needs no scaling:
-    # the monthly figure equals the window figure exactly.
+    # `cost_proposals_from_report`'s default `window_days` (30.0) still falls
+    # below `_report()`'s thin fixture window's guardrails, so an un-scoped
+    # call needs no scaling: the monthly figure equals the window figure
+    # exactly (the observed-only state, not a coincidental ratio of 1.0).
     by_sig = {p.signature: p for p in cost_proposals_from_report(_report())}
     cache = by_sig["cost:cache:anthropic:claude-sonnet-5"]
     assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd)
@@ -1147,14 +1171,19 @@ def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
 
 # --- Real-data validation follow-ups: dollar-first headline, sort, formatting -
 
-def test_downsize_agent_row_monthly_usd_matches_its_own_evidence_text():
+def test_downsize_agent_row_leaves_monthly_to_the_central_projection():
     # Reproduces the founder's real "Model over-sizing in claude-code
     # (claude-opus-4-7 to claude-haiku-4-5)" card: a per-agent price row is
     # the path that produced it (_downsize_agent_proposals, not the window-
-    # wide aggregate _report() fixture above exercises). estimated_monthly_usd
-    # and the evidence string's own "$X per 30 days" figure both come from
-    # the SAME row.projected_30d_delta_usd — assert they never diverge, so a
-    # dollar-computable downsize card can never render a tokens-only headline.
+    # wide aggregate _report() fixture above exercises). #273: the adapter no
+    # longer self-projects `row.projected_30d_delta_usd` onto
+    # estimated_monthly_usd (that figure is `window_days`-based, computed
+    # inside model_downgrade.py — exactly the per-analyzer self-projection
+    # the approved design forbids for the shared field) — calling the
+    # adapter directly (bypassing `cost_proposals_from_report`'s central
+    # pass) leaves it unset. The evidence paragraph's own "$X per 30 days"
+    # arithmetic disclosure is untouched; it's a plain string built from the
+    # row, independent of this field.
     from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
     from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
 
@@ -1174,11 +1203,12 @@ def test_downsize_agent_row_monthly_usd_matches_its_own_evidence_text():
     props = _downsize_agent_proposals(_Finding(), config=None)
     assert len(props) == 1
     prop = props[0]
-    assert prop.estimated_monthly_usd is not None
-    assert prop.estimated_monthly_usd > 0
-    assert prop.estimated_monthly_usd == rows[0].projected_30d_delta_usd
-    # The evidence paragraph's own "$X per 30 days" is the identical number.
-    assert f"{prop.estimated_monthly_usd:,.2f}" in prop.evidence or f"{prop.estimated_monthly_usd:.4f}" in prop.evidence
+    assert prop.estimated_monthly_usd is None
+    assert prop.estimated_recoverable_usd == rows[0].delta_usd
+    # The evidence paragraph's own "$X per 30 days" arithmetic line still
+    # cites the row's own projection, unaffected by the CostProposal field.
+    monthly = rows[0].projected_30d_delta_usd
+    assert f"{monthly:,.2f}" in prop.evidence or f"{monthly:.4f}" in prop.evidence
 
 
 def test_backfill_legacy_monthly_fields_fills_only_absent_keys():
