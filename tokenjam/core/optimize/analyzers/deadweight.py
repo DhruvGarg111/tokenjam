@@ -491,6 +491,17 @@ def _split_reminder_sources(blob: str) -> dict[str, int]:
 class _SessionSignal:
     mcp_invocations: dict[str, int] = field(default_factory=dict)
     deferred_servers: set[str] = field(default_factory=set)
+    #: server name -> assistant-turn ordinal (1-indexed, matches
+    #: ``assistant_turns`` at the moment) of that server's FIRST tool_use in
+    #: this session — the earliest point with POSITIVE evidence the schema was
+    #: fully loaded. A deferred tool's own listing states calling it directly
+    #: "will fail ... use ToolSearch to load their schema before calling
+    #: them", so a successful invocation implies the schema was already loaded
+    #: by that turn. A server never invoked in this session (every dead-weight
+    #: candidate, by definition) has no entry here and is conservatively
+    #: treated as deferred for its whole presence — matching the "never claim
+    #: the full tax for a deferred call without evidence" discipline.
+    first_invocation_turn: dict[str, int] = field(default_factory=dict)
     reminder_chars_by_source: dict[str, int] = field(default_factory=dict)
     #: assistant-turn model -> turn count, for pricing the token tax at a
     #: representative model's input rate (see ``_dominant_model``).
@@ -548,6 +559,10 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
                 server = _mcp_server_from_tool_name(str(block.get("name") or ""))
                 if server:
                     signal.mcp_invocations[server] = signal.mcp_invocations.get(server, 0) + 1
+                    # `assistant_turns` was already incremented above for THIS
+                    # record, so this is the 1-indexed ordinal of the call
+                    # that's doing the invoking.
+                    signal.first_invocation_turn.setdefault(server, signal.assistant_turns)
 
     return signal
 
@@ -732,6 +747,16 @@ def compute_deadweight_finding(
 
     session_paths: list[tuple[str, Path]] = []
     for path in sorted(root.rglob("*.jsonl")):
+        # Subagent/sidechain transcripts live at
+        # `<parent-session-dir>/subagents/agent-<id>.jsonl` (core/transcript.py)
+        # -- nested under `root`, so a plain rglob picks them up too. Counting
+        # one as its own top-level "session" would double the call count fed
+        # into the per-session schema-tax multiplier below (and, for a
+        # user-scoped server, spuriously inflate `sessions_present` toward the
+        # dead-weight threshold) purely because the parent session happened to
+        # spawn a subagent -- never the parent session's own ACTUAL call count.
+        if path.parent.name == "subagents":
+            continue
         try:
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
         except OSError:
@@ -771,12 +796,17 @@ def compute_deadweight_finding(
         deferred_sessions = 0
         example_sessions: list[str] = []
         model_counts: dict[str, int] = {}
-        # (deferred_here, actual_call_count) per present session — each
-        # session's OWN call count feeds its own cache-read multiplier below;
-        # never a global mean/median (call-count distribution is severely
+        # (deferred_calls, full_calls) per present session — each session's
+        # OWN call count feeds its own cache-read multiplier below; never a
+        # global mean/median (call-count distribution is severely
         # right-skewed, and the affected population is only sessions where
-        # this server was present).
-        session_presence: list[tuple[bool, int]] = []
+        # this server was present). Split per CALL, not once per session: a
+        # server deferred early in a session and then actually invoked later
+        # (schema fully loaded from that call on, per the deferred listing's
+        # own "use ToolSearch to load their schema before calling them")
+        # must not have every call in that session priced at the low
+        # deferred base — only the calls before the load point.
+        session_presence: list[tuple[int, int]] = []
         for session_id, signal in per_session.items():
             deferred_here = server.name in signal.deferred_servers
             present = deferred_here or server.scope == "user" or (
@@ -792,7 +822,18 @@ def compute_deadweight_finding(
                 example_sessions.append(session_id)
             for model, count in signal.models.items():
                 model_counts[model] = model_counts.get(model, 0) + count
-            session_presence.append((deferred_here, max(signal.assistant_turns, 1)))
+
+            total_calls = max(signal.assistant_turns, 1)
+            if deferred_here:
+                load_turn = signal.first_invocation_turn.get(server.name)
+                # No invocation ever seen for this server in this session
+                # (true for every dead-weight candidate, by definition): no
+                # positive evidence the schema was ever fully loaded here, so
+                # stay conservative and treat the whole session as deferred.
+                deferred_calls = min(load_turn - 1, total_calls) if load_turn else total_calls
+            else:
+                deferred_calls = 0
+            session_presence.append((max(deferred_calls, 0), total_calls - max(deferred_calls, 0)))
 
         dead = sessions_present >= min_sessions and invocations == 0
         non_deferred = max(sessions_present - deferred_sessions, 0)
@@ -819,14 +860,23 @@ def compute_deadweight_finding(
         # models.toml), not re-charged at full input rate again. Computed per
         # session from that session's own call count and summed for the
         # window total; tax_per_session below is the resulting average, for
-        # display only — never the basis for tax_window itself.
+        # display only — never the basis for tax_window itself. A session
+        # whose deferred/full split changes partway through prices each
+        # segment separately: the segment's own first call at the full
+        # per-call base (the content just changed, so nothing is cached yet
+        # for it), later calls in that SAME segment at the cache-read rate.
         tax_window = 0
         total_calls = 0
-        for deferred_here, calls in session_presence:
-            base = DEFERRED_SCHEMA_TAX_TOKENS if deferred_here else FULL_SCHEMA_TAX_TOKENS
-            multiplier = 1.0 + (calls - 1) * cache_read_ratio
-            tax_window += round(base * multiplier)
-            total_calls += calls
+        for deferred_calls, full_calls in session_presence:
+            if deferred_calls > 0:
+                tax_window += round(
+                    DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (deferred_calls - 1) * cache_read_ratio)
+                )
+            if full_calls > 0:
+                tax_window += round(
+                    FULL_SCHEMA_TAX_TOKENS * (1.0 + (full_calls - 1) * cache_read_ratio)
+                )
+            total_calls += deferred_calls + full_calls
         tax_per_session = round(tax_window / sessions_present) if sessions_present else 0
         avg_calls_per_session = (total_calls / sessions_present) if sessions_present else 1.0
 
