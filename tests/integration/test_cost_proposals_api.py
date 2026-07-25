@@ -384,3 +384,35 @@ async def test_cost_proposals_payload_carries_plan_tier_framing(client):
     assert "estimated_recoverable_tokens" in rollup
     assert "token_proposal_count" in rollup
     assert "deduplicated_proposal_count" in rollup
+
+
+# --- the past-overspend headline ships on the payload ---------------------- #
+# The gap this closes: the backend priced the observed figure correctly, wrote
+# an honesty basis for it, and handed it to a dashboard that never rendered it.
+# Both leading surfaces (the Dashboard hero and the Review inbox headline) read
+# THIS block, so it has to be on the payload of the endpoint they already call.
+
+async def test_cost_proposals_payload_carries_the_past_overspend_block(app, client):
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    refresh = await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    assert refresh.status_code == 200
+
+    payload = (await client.get("/api/v1/relearn/cost-proposals")).json()
+    block = payload["past_overspend"]
+    assert block["past_overspend_usd"] >= 0
+    assert "window_days" in block
+    assert block["basis"]
+    assert block["disclosure"]
+
+    # Structurally separate from the recoverable rollup: no key of one appears
+    # in the other, so no renderer can accidentally add them together.
+    assert "past_overspend_usd" not in payload["rollup"]
+    assert "estimated_recoverable_usd" not in block
+    # And no pace to project the observation at.
+    assert "projection_ratio" not in block
+
+    # Every proposal carries its own past-tense figure, so a card never has to
+    # re-derive its own headline.
+    for proposal in payload["proposals"]:
+        assert "past_overspend_usd" in proposal
+        assert "past_overspend_basis" in proposal

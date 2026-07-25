@@ -52,11 +52,15 @@ REUSE_HONESTY_CAVEAT = (
 # contract). Must contain the word "review".
 REUSE_ESTIMATE_BASIS = (
     "structurally repeated planning calls — the headline prices the "
-    "script-replacement premise (a template/skill removes the planning call "
-    "entirely: avg cost x reps); the more conservative cache-reuse premise "
-    "(a template only removes the re-plan delta: avg cost x (reps - 1)) "
-    "stays available on every cluster as cache_reuse_recoverable_usd/"
-    "_tokens; review templates before reusing"
+    "cache-reuse premise (a template only removes the RE-plan delta: avg cost "
+    "x (reps - 1)), because the first planning call in a cluster had to "
+    "happen: nothing existed to reuse yet. The script-replacement premise "
+    "(a template/skill removes every planning call: avg cost x reps) stays "
+    "available on every cluster as script_replacement_recoverable_usd/"
+    "_tokens, but it is never the headline: charging the user for the one "
+    "instance that was necessary work states a figure they can disprove "
+    "(a 2-repetition cluster would be a 2x overclaim); review templates "
+    "before reusing"
 )
 
 
@@ -260,9 +264,10 @@ class ReuseFinding:
         "tool_sequence_only"
     )
     # Recoverable-savings contract (#111). The aggregate uses the conservative
-    # cache-reuse number — the front-page tile shows what's recoverable going
-    # forward, not the script-replacement upper bound. None when no cluster
-    # cleared the thresholds.
+    # cache-reuse number (avg cost x (reps - 1)), never the script-replacement
+    # upper bound (avg cost x reps): the first planning call in a cluster was
+    # necessary work, so a figure that includes it is one a user can disprove.
+    # None when no cluster cleared the thresholds.
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:    str = REUSE_ESTIMATE_BASIS

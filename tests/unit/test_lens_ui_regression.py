@@ -2365,9 +2365,11 @@ def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
     assert "suppressed" in tile
-    assert "'~' + fmtTokens(totalToks) + ' tok'" in tile
+    # The open-items half of this component is now the past-overspend band
+    # (server-computed, always dollars-with-tokens, no suppression choice to
+    # make). What survives here is the applied tile, which still honors a
+    # truthy `suppressed` by leading with tokens.
     assert "'~' + fmtTokens(appliedTokSum) + ' tok'" in tile
-    assert "fmtUsd(totalUsd)" in tile
     assert "fmtUsd(appliedUsdSum)" in tile
 
 
@@ -2483,30 +2485,47 @@ def test_dollars_suppressed_reads_the_server_display_rule(html):
         assert rule in html, f"missing suppressing display_rule {rule}"
 
 
-# --- the estimated-recoverable tile: dollars-vs-tokens by the ≥half rule --- #
-def test_estimated_recoverable_tile_leads_with_dollars_only_at_half_priceable(html):
-    # Behavioral requirement #2: the headline "ESTIMATED RECOVERABLE" tile
-    # shows dollars (with tokens in the sub-line) only when at least half the
-    # OPEN items across both tabs are priceable; otherwise it leads with
-    # tokens, same as the mockup's own tokens variant.
+# --- the headline is the server's past-overspend band, not a JS sum -------- #
+# SUPERSEDES the old "ESTIMATED RECOVERABLE / mo" tile tests. The founder
+# decision this replaces them under: the product leads with what the flagged
+# behaviours ALREADY cost (past tense, window-observed), not with what a fix
+# might return. A past figure is checkable against a bill the user already
+# paid; a forward one asks them to trust a projection of a month that has not
+# happened, and trust is the scarce resource.
+def test_inbox_headline_is_the_past_overspend_band(html):
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "priceable.length * 2 >= openItems.length" in tile
-    # The `est.` pill was dropped for the denser mockup styling, so the
-    # estimate framing has to survive in the tile's own label + hover title —
-    # the figure must never read as a measured number.
-    assert ">Estimated recoverable " in tile
-    assert "sum of each open item's est./mo figure" in tile
+    assert "<${PastOverspendBand} block=${pastOverspend}" in tile
+    # The old forward-looking headline and its vocabulary are gone from here.
+    assert ">Estimated recoverable " not in tile
+    assert "est./mo" not in tile
 
 
-def test_estimated_tile_hides_when_there_are_no_open_items(html):
-    # Nothing open on either tab means nothing honest to lead a "recoverable"
-    # headline with, so that half of the tile hides rather than showing a zero.
+def test_inbox_headline_number_comes_from_the_payload_not_a_client_side_sum(html):
+    # Single-compute-path: the headline figure is the server's own rollup over
+    # the open set (GET /relearn/cost-proposals -> past_overspend), so it is
+    # the same number the Dashboard hero renders. It must not be reduced over
+    # whatever cards happen to be on screen — a local dismiss changes one
+    # person's view, not what was spent.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "openItems.length > 0 ? html`" in tile
+    assert "reduce" not in tile.split("const appliedPriceable")[0]
+    assert "priceable.length * 2 >= openItems.length" not in tile
+
+
+def test_past_overspend_band_hides_when_nothing_is_open(html):
+    # Nothing open means no observed figure to state, so the band hides rather
+    # than rendering a fabricated zero — but the excluded-waste line still has
+    # to render, so it gets a bare band of its own.
+    start = html.index("function InboxStatTiles")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "hasOpenOverspend ? html`" in tile
+    band_start = html.index("function PastOverspendBand")
+    band = html[band_start:html.index("\n}", band_start)]
+    assert "if (!causes && !toks) return null;" in band
 
 
 # --- #326: excluded waste (summarize) is stated + linked, never summed ----- #

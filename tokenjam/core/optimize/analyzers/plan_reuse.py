@@ -300,18 +300,22 @@ def run(ctx: AnalyzerContext) -> None:
 
     finding.clusters = surfaced
     if surfaced:
-        # Headline uses the script-replacement premise (a template/skill
-        # removes the planning call entirely: avg cost x reps) rather than
-        # the more conservative cache-reuse premise (avg cost x (reps - 1)) —
-        # both are legitimate readings of the same measured cluster, and the
-        # conservative figure stays available per-cluster as
-        # cache_reuse_recoverable_usd/_tokens. See REUSE_ESTIMATE_BASIS for
-        # which premise this total rests on.
+        # Headline uses the CONSERVATIVE cache-reuse premise (a template only
+        # removes the re-plan delta: avg cost x (reps - 1)), not the
+        # script-replacement upper bound (avg cost x reps). The first planning
+        # call in a cluster had to happen — there was nothing to reuse yet —
+        # so the headline may not charge for it. This matters more now that
+        # every surface states these figures in the PAST tense ("this is what
+        # you already overspent"): "you wasted $X" where X includes necessary
+        # work is a claim a user can disprove on inspection, and on a
+        # 2-repetition cluster it is a 2x overclaim. The upper bound stays
+        # available per-cluster as script_replacement_recoverable_usd/_tokens
+        # for the template-authoring case. See REUSE_ESTIMATE_BASIS.
         finding.estimated_recoverable_usd = round(
-            sum(c.script_replacement_recoverable_usd for c in surfaced), 6
+            sum(c.cache_reuse_recoverable_usd for c in surfaced), 6
         )
         finding.estimated_recoverable_tokens = sum(
-            c.script_replacement_recoverable_tokens for c in surfaced
+            c.cache_reuse_recoverable_tokens for c in surfaced
         )
 
     ctx.report.findings["reuse"] = finding

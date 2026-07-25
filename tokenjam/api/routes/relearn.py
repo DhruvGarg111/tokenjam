@@ -467,7 +467,20 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     found something) — waste this headline deliberately does NOT sum in
     because it has its own review surface, stated instead of silently
     dropped. See ``cost_proposals.estimated_recoverable_rollup``'s docstring
-    for the full contract."""
+    for the full contract.
+
+    ``past_overspend`` is a SEPARATE, past-tense block over the same open set
+    (``cost_proposals.past_overspend_rollup``): what the flagged behaviours
+    already cost over the analyzed window, observed rather than projected. It
+    is the figure both the Overview hero and the Review inbox headline render,
+    which is why it is computed here once rather than on each surface. Nothing
+    in it is ever added to anything in ``rollup``: the two are different
+    questions ("what did this cost me" vs "what does a fix return"), and for
+    ``resend`` they are different quantities over the same window, so summing
+    them would double-count. Each proposal also carries the same figures
+    per-card (``past_overspend_usd``/``_tokens``/``_basis``, plus
+    ``past_avoidable_*`` where the avoidable share is genuinely a different
+    quantity) so a card never re-derives its own headline."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
@@ -511,6 +524,16 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         excluded=(block.get("cost_excluded") if block else None),
         **rollup_kwargs,
     )
+    # The past-overspend headline, computed over the SAME open set, in its own
+    # block — the Overview hero and the Review inbox headline both read this
+    # one key, so the two surfaces cannot disagree. Deliberately given only
+    # `window_days`: it is a window observation, so there is no pace to project
+    # it at (see `past_overspend_rollup`), and no value in it is ever summed
+    # into `rollup` above.
+    past_overspend = cost_proposals_mod.past_overspend_rollup(
+        open_proposals,
+        **({"window_days": rollup_kwargs["window_days"]} if "window_days" in rollup_kwargs else {}),
+    )
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)
@@ -530,6 +553,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         "computed_at": block.get("cost_computed_at") if block else None,
         "proposals": proposals,
         "rollup": rollup,
+        "past_overspend": past_overspend,
         "framing": framing,
         "degraded": bool(last_error),
         "last_error": last_error,

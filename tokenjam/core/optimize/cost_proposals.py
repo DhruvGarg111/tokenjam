@@ -220,6 +220,43 @@ class CostProposal:
     cost_of_waste_usd:            float | None = None
     cost_of_waste_tokens:         int | None   = None
     cost_of_waste_basis:          str          = ""
+    # PAST OVERSPEND — the one PAST-TENSE, window-OBSERVED figure every card
+    # renders as its headline ("re-sending context cost you $X over the last
+    # 30 days"), stamped centrally by `_with_past_overspend` so no adapter
+    # decides its own basis. Derivation, in full:
+    #   * a finding that carries `cost_of_waste_usd` (today only `resend`)
+    #     puts THAT here — the observed cost of the flagged behaviour — and
+    #     puts its (smaller, also window-observed) avoidable share on the
+    #     `past_avoidable_*` fields below;
+    #   * every other analyzer's window `estimated_recoverable_usd` IS its
+    #     observed window overspend — the two differ at most by the central
+    #     30-day pace, never by a fractional/adoption discount — so that value
+    #     is carried here unchanged and `past_avoidable_*` stays None. Verified
+    #     per analyzer against source: downsize (`actual_cost - alt_cost` over
+    #     the window), deadweight (window tax, "NO projection folded in"),
+    #     subagent (deltas priced off already-incurred tokens), summarize
+    #     (per-call reduction over observed calls), relearn (a standing-cost
+    #     offset, not a discount), reuse (avg cost x (reps - 1)).
+    # NEVER paced: `compute_projection_ratio`'s `r` is a forward projection and
+    # is applied only to the `estimated_monthly_*` fields. Multiplying an
+    # observation by a forecast ratio would make it a forecast.
+    # NEVER summed with `estimated_recoverable_*` on any surface: for `resend`
+    # the two are different quantities over the same window and adding them
+    # double-counts; `estimated_recoverable_rollup` reads only the
+    # `estimated_*` fields, `past_overspend_rollup` only these.
+    past_overspend_usd:           float | None = None
+    past_overspend_tokens:        int | None   = None
+    past_overspend_basis:         str          = ""
+    # The SECOND past-tense number, populated ONLY where the observed waste and
+    # the share of it that was avoidable are genuinely different quantities
+    # (today: `resend` alone, whose offload term is gated by a MEASURED
+    # `offloadable_share`). Also a window observation, never a forecast, so it
+    # is stated in the past tense too ("about $703 of that was avoidable") —
+    # never as "recoverable" or "you could save". `None` everywhere else, which
+    # is what makes a card render one number instead of two.
+    past_avoidable_usd:           float | None = None
+    past_avoidable_tokens:        int | None   = None
+    past_avoidable_basis:         str          = ""
     # Monthly-basis fields (Review inbox stat tiles) — a SEPARATE, explicitly-
     # named basis from the two window fields above; see the "Recoverable-
     # savings contract" note in model_downgrade.py / CLAUDE.md. `downsize`
@@ -1838,8 +1875,9 @@ def _resend_to_proposals(
     if cost_of_waste_usd is not None:
         evidence += (
             f" That re-sent volume cost {_money(float(cost_of_waste_usd))} over "
-            f"the window — an observation, not a recoverable amount; the fix "
-            f"below returns a much smaller figure."
+            f"the window: an observation of what already billed, not a claim "
+            f"about what a fix returns. Only a smaller share of it was "
+            f"avoidable; the rest is what multi-turn work inherently re-sends."
         )
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
@@ -2328,7 +2366,10 @@ def cost_proposals_from_report(
         except Exception:
             continue
     proposals = _apply_write_budget(proposals, report, window_days)
-    return [_with_rollup_projection(p, ratio) for p in proposals]
+    # Order matters: the write budget can NET a proposal's window figure down
+    # against what its rule costs to keep, and both the 30-day projection and
+    # the past-overspend stamp must read the netted figure, never the gross.
+    return [_with_past_overspend(_with_rollup_projection(p, ratio)) for p in proposals]
 
 
 def _write_budget_basis(report: Any, window_days: float) -> Any:
@@ -2454,6 +2495,115 @@ def _with_rollup_projection(proposal: CostProposal, ratio: float | None) -> Cost
     ):
         updates["estimated_monthly_tokens"] = round(proposal.estimated_recoverable_tokens * scale)
     return replace(proposal, **updates) if updates else proposal
+
+
+#: Suffix appended to every stamped ``past_overspend_basis`` so the figure can
+#: never be read off a payload without the tense being stated with it.
+PAST_OVERSPEND_OBSERVED_NOTE = (
+    "Observed over the analyzed window: what this behaviour already cost, "
+    "priced at the rates it actually billed at. Not a projection and not a "
+    "claim about what a fix returns."
+)
+
+#: Same, for the second (avoidable-share) number. Still past tense: it is a
+#: window observation gated by a MEASURED share, never a forecast.
+PAST_AVOIDABLE_OBSERVED_NOTE = (
+    "Also observed over the same window: the share of the figure above that "
+    "was avoidable, measured from this window's own telemetry. The rest was "
+    "structurally necessary."
+)
+
+
+def _with_past_overspend(proposal: CostProposal) -> CostProposal:
+    """Stamp the past-tense, window-observed ``past_overspend_*`` (and, where
+    the two are genuinely different quantities, ``past_avoidable_*``) fields.
+
+    ONE place decides the basis for every analyzer, for the same reason
+    ``_with_rollup_projection`` is the one place the 30-day pace is applied:
+    two surfaces reading two differently-derived "what did this cost me"
+    figures is how the Overview hero and the Review inbox headline silently
+    come to disagree.
+
+    A finding that computes an explicit observed cost of the flagged behaviour
+    (``cost_of_waste_usd`` — today only ``resend``, whose avoidable share is
+    gated by a measured ``offloadable_share`` and so is ~10x smaller) leads
+    with THAT, and carries its avoidable share as the second number. For every
+    other analyzer the window ``estimated_recoverable_usd`` already IS the
+    observed window overspend, so it is carried across unchanged and there is
+    no second number to show — rendering both would be showing one quantity
+    twice. See the ``past_overspend_usd`` field comment for the per-analyzer
+    verification.
+
+    Never applies a projection ratio. Never mutates: returns a new proposal.
+    """
+    waste_usd = proposal.cost_of_waste_usd
+    waste_tokens = proposal.cost_of_waste_tokens
+    if waste_usd is None and not waste_tokens:
+        # The single-number case: the observed overspend and the avoidable
+        # figure are the same quantity, so only the first is populated.
+        if proposal.estimated_recoverable_usd is None and proposal.estimated_recoverable_tokens is None:
+            return proposal
+        return replace(
+            proposal,
+            past_overspend_usd=proposal.estimated_recoverable_usd,
+            past_overspend_tokens=proposal.estimated_recoverable_tokens,
+            past_overspend_basis=" ".join(
+                x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
+            ),
+        )
+    return replace(
+        proposal,
+        past_overspend_usd=waste_usd,
+        past_overspend_tokens=waste_tokens or None,
+        past_overspend_basis=" ".join(
+            x for x in (proposal.cost_of_waste_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
+        ),
+        past_avoidable_usd=proposal.estimated_recoverable_usd,
+        past_avoidable_tokens=proposal.estimated_recoverable_tokens,
+        past_avoidable_basis=" ".join(
+            x for x in (proposal.estimate_basis, PAST_AVOIDABLE_OBSERVED_NOTE) if x
+        ),
+    )
+
+
+def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Read-time backward compat for a cost-proposal dict cached before the
+    ``past_overspend_*`` fields existed, mirroring
+    ``backfill_legacy_monthly_fields``.
+
+    A cache written by the CURRENT build always carries them (they are stamped
+    in ``cost_proposals_from_report``), so this only fires for an entry that
+    predates them — which would otherwise render an em dash where the page's
+    headline number belongs until the next scheduled recompute, up to 6h away.
+    Applies the SAME derivation ``_with_past_overspend`` does, on the dict, and
+    never invents a figure: a legacy entry with no estimate at all stays empty.
+    """
+    if "past_overspend_usd" in proposal:
+        return proposal
+    waste_usd = proposal.get("cost_of_waste_usd")
+    waste_tokens = proposal.get("cost_of_waste_tokens")
+    if waste_usd is None and not waste_tokens:
+        return {
+            **proposal,
+            "past_overspend_usd": proposal.get("estimated_recoverable_usd"),
+            "past_overspend_tokens": proposal.get("estimated_recoverable_tokens"),
+            "past_overspend_basis": " ".join(
+                x for x in (proposal.get("estimate_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
+            ),
+        }
+    return {
+        **proposal,
+        "past_overspend_usd": waste_usd,
+        "past_overspend_tokens": waste_tokens or None,
+        "past_overspend_basis": " ".join(
+            x for x in (proposal.get("cost_of_waste_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
+        ),
+        "past_avoidable_usd": proposal.get("estimated_recoverable_usd"),
+        "past_avoidable_tokens": proposal.get("estimated_recoverable_tokens"),
+        "past_avoidable_basis": " ".join(
+            x for x in (proposal.get("estimate_basis") or "", PAST_AVOIDABLE_OBSERVED_NOTE) if x
+        ),
+    }
 
 
 def backfill_legacy_monthly_fields(proposal: dict[str, Any]) -> dict[str, Any]:
@@ -2722,4 +2872,121 @@ def estimated_recoverable_rollup(
         "contributing": contributing,
         "estimate_confidence": COST_ESTIMATE_CONFIDENCE,
         "estimate_basis": basis,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The past-overspend rollup — the number the product LEADS with, on both the
+# Overview hero and the Review inbox headline.
+#
+# Deliberately a SEPARATE function returning a SEPARATE block rather than more
+# keys on `estimated_recoverable_rollup`'s dict: the one failure mode that
+# would make this feature net-negative is a reader concluding the big past
+# figure is claimable. Structural separation is the guard — there is no code
+# path on which a past-overspend value can reach a recoverable total, because
+# the function that computes recoverable totals never reads these fields and
+# this one never reads theirs.
+# --------------------------------------------------------------------------- #
+
+def past_overspend_rollup(
+    proposals: list[Any],
+    *,
+    window_days: int = DEFAULT_COST_WINDOW_DAYS,
+) -> dict[str, Any]:
+    """Sum ``past_overspend_usd``/``past_overspend_tokens`` across
+    ``proposals``, deduplicated by ``signature`` exactly as
+    ``estimated_recoverable_rollup`` does.
+
+    This is what the flagged behaviours ALREADY cost over the analyzed window,
+    every token priced at the rate it genuinely billed at. Nothing here is
+    projected, discounted, or claimed:
+
+    * **No pacing.** ``compute_projection_ratio``'s ``r`` is never applied —
+      not here, not by any caller. The whole point of the figure is that it is
+      an observation of a window that already happened; multiplying it by a
+      forward ratio would turn it into the forecast it exists to replace. This
+      function does not even accept ``active_days``/``n_sessions``, so there is
+      nothing to project FROM.
+    * **Never summed with a recoverable total.** See the module block comment
+      above.
+
+    ``past_avoidable_usd`` (the second, smaller number ``resend`` alone
+    carries) is deliberately NOT summed into a total of its own: it exists to
+    qualify one card's headline, and a cross-analyzer "avoidable" total would
+    read as exactly the claimable figure this design refuses to state. It is
+    reported per analyzer in ``by_analyzer`` so a renderer can pair the two on
+    the card that owns them, and nowhere else.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for p in proposals:
+        row = asdict(p) if is_dataclass(p) and not isinstance(p, type) else dict(p)
+        sig = str(row.get("signature") or "")
+        if not sig or sig in seen:
+            continue
+        seen[sig] = row
+
+    total_usd = 0.0
+    total_tokens = 0
+    usd_count = 0
+    token_count = 0
+    by_analyzer: dict[str, dict[str, Any]] = {}
+    for row in seen.values():
+        analyzer = str(row.get("analyzer") or "unknown")
+        entry = by_analyzer.setdefault(
+            analyzer,
+            {"analyzer": analyzer, "count": 0, "usd": 0.0, "tokens": 0, "avoidable_usd": None},
+        )
+        entry["count"] += 1
+
+        tokens = row.get("past_overspend_tokens")
+        if tokens is not None:
+            total_tokens += int(tokens)
+            token_count += 1
+            entry["tokens"] = int(entry["tokens"]) + int(tokens)
+
+        avoidable = row.get("past_avoidable_usd")
+        if avoidable is not None:
+            entry["avoidable_usd"] = round((entry["avoidable_usd"] or 0.0) + float(avoidable), 6)
+
+        usd = row.get("past_overspend_usd")
+        if usd is None:
+            continue
+        usd = float(usd)
+        total_usd += usd
+        usd_count += 1
+        entry["usd"] = round(float(entry["usd"]) + usd, 6)
+
+    deduplicated_proposal_count = len(seen)
+    if usd_count == 0:
+        basis = (
+            f"no open (not yet applied) cost proposal currently carries an "
+            f"observed dollar figure for the last {window_days} days."
+        )
+    else:
+        breakdown = "; ".join(
+            f"{a['analyzer']} ({a['count']})"
+            for a in sorted(by_analyzer.values(), key=lambda x: x["analyzer"])
+        )
+        basis = (
+            f"sum of past_overspend_usd across {usd_count} of "
+            f"{deduplicated_proposal_count} open (not yet applied), "
+            f"deduplicated-by-signature cost proposal(s), observed over the "
+            f"last {window_days} days; contributing analyzers: {breakdown}."
+        )
+    if token_count:
+        basis += (
+            f" Token figure: sum of past_overspend_tokens across "
+            f"{token_count} of {deduplicated_proposal_count} proposal(s); the "
+            f"rest carry no token figure, so it is a floor, not a total."
+        )
+    return {
+        "past_overspend_usd": round(total_usd, 6),
+        "past_overspend_tokens": total_tokens,
+        "proposal_count": usd_count,
+        "token_proposal_count": token_count,
+        "deduplicated_proposal_count": deduplicated_proposal_count,
+        "window_days": window_days,
+        "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
+        "basis": basis,
+        "disclosure": PAST_OVERSPEND_OBSERVED_NOTE,
     }

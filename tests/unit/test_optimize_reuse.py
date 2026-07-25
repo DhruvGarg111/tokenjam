@@ -151,11 +151,13 @@ def test_cluster_surfaced_and_savings_math(db):
     assert c.tool_signature == ("read", "edit", "run")
     assert c.cache_reuse_recoverable_usd == pytest.approx(0.80)
     assert c.script_replacement_recoverable_usd == pytest.approx(1.00)
-    # Aggregate uses the script-replacement premise (a template removes the
-    # planning call entirely) — the more conservative cache-reuse premise
-    # (avg cost x (reps - 1)) stays available per-cluster, never deleted.
-    assert finding.estimated_recoverable_usd == pytest.approx(1.00)
-    assert finding.estimated_recoverable_tokens == c.script_replacement_recoverable_tokens
+    # Aggregate uses the CONSERVATIVE cache-reuse premise (avg cost x
+    # (reps - 1)): the first planning call had to happen, so the headline may
+    # never charge for it. The script-replacement upper bound (avg cost x
+    # reps) stays available per-cluster, never deleted, never the headline.
+    assert finding.estimated_recoverable_usd == pytest.approx(0.80)
+    assert finding.estimated_recoverable_tokens == c.cache_reuse_recoverable_tokens
+    assert finding.estimated_recoverable_usd < c.script_replacement_recoverable_usd
 
 
 def test_below_repetition_threshold_dropped(db):
