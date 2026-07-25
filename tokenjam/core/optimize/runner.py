@@ -67,6 +67,7 @@ def summarize_window(
     row = conn.execute(
         f"SELECT COUNT(*) AS spans, "
         f"COUNT(DISTINCT session_id) AS sessions, "
+        f"COUNT(DISTINCT CAST(start_time AS DATE)) AS active_days, "
         f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + COALESCE(cache_tokens,0) + COALESCE(cache_write_tokens,0)), 0) AS tokens, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost "
         f"FROM spans WHERE {where}",
@@ -74,14 +75,16 @@ def summarize_window(
     ).fetchone()
     spans = int(row[0] or 0)
     sessions = int(row[1] or 0)
-    tokens = int(row[2] or 0)
-    cost = float(row[3] or 0.0)
+    active_days = int(row[2] or 0)
+    tokens = int(row[3] or 0)
+    cost = float(row[4] or 0.0)
     days = max((until - since).total_seconds() / 86400.0, 0.0)
     return WindowSummary(
         since=since,
         until=until,
         days=days,
         sessions=sessions,
+        active_days=active_days,
         spans=spans,
         total_tokens=tokens,
         total_cost_usd=cost,

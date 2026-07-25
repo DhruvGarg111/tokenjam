@@ -66,6 +66,12 @@ class WindowSummary:
     total_tokens: int
     total_cost_usd: float
     thin_data:   bool
+    # Distinct calendar days in the window with at least one session — the
+    # `D_active` term of the shared 30-day projection basis (see
+    # `core/optimize/projection.py`). Defaulted so a hand-constructed summary
+    # (tests, a cached report predating the field) simply suppresses the
+    # projection rather than inventing a pace from a missing count.
+    active_days: int = 0
 
 
 @dataclass

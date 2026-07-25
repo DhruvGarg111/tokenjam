@@ -191,6 +191,28 @@ class CostProposal:
     # The exact fix, with this agent's own measured values already substituted
     # in. Every advise-only card carries one.
     one_paste_fix:        str  = ""
+    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`), filled
+    # for every card whose fix is a PERMANENT artifact the user keeps: a rung-1
+    # CLAUDE.md rule or a rung-2 skill note. Those are re-sent on every future
+    # session, so the four `estimated_*` fields above are reported NET of that
+    # standing cost and the pre-net figures are parked here, inspectable. A
+    # card with no write to offer (every advise-only cost card) writes nothing,
+    # therefore stands nothing, and passes through untouched.
+    gross_recoverable_usd:    float | None = None
+    gross_recoverable_tokens: int | None   = None
+    standing_cost_tokens_per_session: int = 0
+    standing_cost_tokens:     int          = 0
+    standing_cost_usd:        float | None = None
+    standing_cost_basis:      str          = ""
+    #: gross / standing. Below 1.0 the rule costs more to keep than it saves.
+    payback_ratio:            float | None = None
+    net_negative:             bool         = False
+    # Whether the permanent write is actually on offer after the budget pass,
+    # and why not when it isn't. A suppressed write degrades exactly the way
+    # the persona gate already degrades one: advise-only, with the identical
+    # text still carried as a copyable `suggestion`.
+    write_offered:            bool         = False
+    write_blocked_reason:     str          = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -1684,7 +1706,15 @@ def recompute_cost_proposals(
             since = until - timedelta(days=effective_window_days)
             report = build_report(
                 db, config, since, until, agent_id=agent_id,
-                findings=list(COST_ANALYZERS),
+                # `summarize` is deliberately NOT a COST_ANALYZER (it owns its
+                # own curate/diff surface and has no adapter here, so it
+                # contributes no card), but it IS built: it is the only
+                # analyzer that measures how much standing context the agent
+                # files already carry, and the write budget spends against
+                # that measurement. Without it the two halves of the loop stay
+                # blind to each other and the inbox can offer new permanent
+                # rules for a file the same report says to compress.
+                findings=[*COST_ANALYZERS, "summarize"],
             )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
@@ -1830,7 +1860,110 @@ def cost_proposals_from_report(
             proposals.extend(adapter(finding))
         except Exception:
             continue
+    proposals = _apply_write_budget(proposals, report, window_days)
     return [_with_monthly_extrapolation(p, window_days) for p in proposals]
+
+
+def _write_budget_basis(report: Any, window_days: float) -> Any:
+    """The shared 30-day projection basis for this report's window.
+
+    Reads ``active_days``/``sessions`` off the window summary the runner already
+    computed. A hand-constructed report (a test, an older cached one) carries
+    neither, which resolves to an unprojected basis with a zero session count:
+    the netting then charges a rule nothing and only the quality floor and the
+    write cap apply. Degrading toward "claim no standing cost" is the only safe
+    direction, since the alternative would invent one.
+    """
+    from tokenjam.core.optimize.projection import build_projection_basis
+
+    window = getattr(report, "window", None)
+    return build_projection_basis(
+        float(getattr(window, "days", 0.0) or window_days or 0.0),
+        int(getattr(window, "active_days", 0) or 0),
+        int(getattr(window, "sessions", 0) or 0),
+    )
+
+
+def _apply_write_budget(
+    proposals: list[CostProposal], report: Any, window_days: float,
+) -> list[CostProposal]:
+    """Net every write-bearing card against what its rule costs to KEEP, and
+    bound how many permanent rules the window may offer.
+
+    Only cards that actually write something enter the budget: ``apply_capable``
+    with a rung-1/rung-2 ``proposed_fix``. Everything else (the advise-only
+    majority, the model-id swaps, the MCP-server removals) writes no standing
+    prompt text and passes through with its figures untouched.
+
+    Candidates are grouped by ``(analyzer, rung)`` because that is genuinely one
+    block: every ``reuse`` cluster writes the same skeleton note, every
+    ``script`` cluster the same script note. Nine clusters used to mean nine
+    identical appended blocks; now the family's largest carries the write and
+    its siblings say they are covered by it. A suppressed write degrades the
+    same way the persona gate already degrades one: advise-only, with the
+    identical text still carried as a copyable ``suggestion``.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+
+    basis = _write_budget_basis(report, window_days)
+    findings = getattr(report, "findings", {}) or {}
+    budget = wb.build_write_budget(
+        lane_budget_tokens=wb.COST_WRITE_BUDGET_TOKENS,
+        lane_max_writes=wb.COST_MAX_OFFERED_WRITES,
+        # The summarize analyzer's own measurement of the files these rules
+        # append to. Absent (it is deliberately not a COST_ANALYZER, so a
+        # caller must ask for it) leaves the lane cap standing alone.
+        existing_agent_file_tokens=wb.measured_agent_file_tokens(
+            findings.get("summarize"),
+        ),
+    )
+
+    candidates = [
+        wb.WriteCandidate(
+            key=p.signature,
+            family=f"{p.analyzer}:rung{p.rung}",
+            rung=p.rung,
+            artifact_text=p.proposed_fix,
+            gross_tokens=int(p.estimated_recoverable_tokens or 0),
+            gross_usd=p.estimated_recoverable_usd,
+        )
+        for p in proposals
+        if p.apply_capable and p.rung >= 1 and p.proposed_fix
+    ]
+    if not candidates:
+        return proposals
+    decisions = wb.allocate_writes(candidates, budget, basis)
+
+    out: list[CostProposal] = []
+    for p in proposals:
+        decision = decisions.get(p.signature)
+        if decision is None or not (p.apply_capable and p.rung >= 1 and p.proposed_fix):
+            out.append(p)
+            continue
+        updates: dict[str, Any] = {
+            "gross_recoverable_usd": p.estimated_recoverable_usd,
+            "gross_recoverable_tokens": p.estimated_recoverable_tokens,
+            "estimated_recoverable_tokens": (
+                decision.claimed_tokens if p.estimated_recoverable_tokens is not None else None
+            ),
+            "estimated_recoverable_usd": decision.claimed_usd,
+            "standing_cost_tokens_per_session": decision.standing_tokens_per_session,
+            "standing_cost_tokens": decision.standing_tokens,
+            "standing_cost_usd": decision.standing_usd,
+            "standing_cost_basis": decision.basis,
+            "payback_ratio": decision.payback_ratio,
+            "net_negative": decision.net_negative,
+            "write_offered": decision.offered,
+            "write_blocked_reason": decision.reason,
+        }
+        if not decision.offered:
+            updates.update(
+                apply_capable=False, advise_only=True, rung=0, scope="",
+                proposed_fix="", suggestion=p.suggestion or p.proposed_fix,
+                apply_blocked_reason=decision.reason,
+            )
+        out.append(replace(p, **updates))
+    return out
 
 
 def _with_monthly_extrapolation(proposal: CostProposal, window_days: float) -> CostProposal:
