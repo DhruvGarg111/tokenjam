@@ -953,6 +953,88 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     assert "floor, not a total" not in rollup["estimate_basis"]
 
 
+# --- #326: relearn clusters fold into the SAME headline, and the excluded
+# (summarize) total is carried through rather than silently dropped -------- #
+
+def test_rollup_folds_relearn_monthly_usd_into_projected_only():
+    proposals = [
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    relearn_clusters = [
+        {"signature": "relearn:a", "estimated_monthly_usd": 5.0,
+         "estimated_monthly_tokens": 1000},
+        {"signature": "relearn:b", "estimated_monthly_usd": 2.5,
+         "estimated_monthly_tokens": 500},
+    ]
+    rollup = estimated_recoverable_rollup(proposals, relearn_clusters=relearn_clusters)
+    # The window-observed field is UNCHANGED by relearn — different time
+    # basis, never mixed in.
+    assert rollup["estimated_recoverable_usd"] == 3.0
+    # Relearn's own contribution is broken out...
+    assert rollup["relearn_monthly_usd"] == 7.5
+    assert rollup["relearn_monthly_tokens"] == 1500
+    assert rollup["relearn_cluster_count"] == 2
+    assert rollup["relearn_priced_cluster_count"] == 2
+    # ...and folded into the 30-day projected total alongside the cost
+    # proposals' own (unscaled here — the guardrails block projection with
+    # no active_days/n_sessions given, so cost proposals' window figure
+    # passes through as-is at scale 1.0).
+    assert rollup["projected_usd_30d"] == pytest.approx(3.0 + 7.5)
+    assert rollup["projected_tokens_30d"] == 1500
+
+
+def test_rollup_dedupes_relearn_clusters_by_signature():
+    relearn_clusters = [
+        {"signature": "relearn:a", "estimated_monthly_usd": 5.0},
+        {"signature": "relearn:a", "estimated_monthly_usd": 5.0},
+    ]
+    rollup = estimated_recoverable_rollup([], relearn_clusters=relearn_clusters)
+    assert rollup["relearn_monthly_usd"] == 5.0
+    assert rollup["relearn_cluster_count"] == 1
+
+
+def test_rollup_skips_relearn_clusters_with_no_dollar_estimate():
+    relearn_clusters = [
+        {"signature": "relearn:a", "estimated_monthly_usd": None,
+         "estimated_monthly_tokens": 400},
+    ]
+    rollup = estimated_recoverable_rollup([], relearn_clusters=relearn_clusters)
+    assert rollup["relearn_monthly_usd"] == 0.0
+    assert rollup["relearn_priced_cluster_count"] == 0
+    assert rollup["relearn_cluster_count"] == 1
+    # Tokens are still counted independently of the dollar estimate, same
+    # rule as the cost-proposal loop above.
+    assert rollup["relearn_monthly_tokens"] == 400
+    assert rollup["projected_tokens_30d"] == 400
+
+
+def test_rollup_excluded_is_carried_through_never_summed():
+    excluded = {"summarize": {"estimated_monthly_usd": 4135.35, "href": "#/optimize"}}
+    rollup = estimated_recoverable_rollup([], excluded=excluded)
+    assert rollup["excluded"] == excluded
+    assert rollup["estimated_recoverable_usd"] == 0.0
+    assert rollup["projected_usd_30d"] == 0.0
+
+
+def test_rollup_excluded_defaults_to_empty_dict_not_none():
+    rollup = estimated_recoverable_rollup([])
+    assert rollup["excluded"] == {}
+
+
+def test_rollup_empty_relearn_clusters_untouched_baseline():
+    # No relearn_clusters passed at all — the new fields exist but are inert,
+    # so an existing caller unaware of #326 keeps seeing the same totals.
+    proposals = [
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["relearn_monthly_usd"] == 0.0
+    assert rollup["relearn_cluster_count"] == 0
+    assert rollup["projected_usd_30d"] == 3.0
+
+
 # --- Review inbox monthly-basis fields (#273: single central projection) ---- #
 
 def test_downsize_monthly_uses_the_same_central_projection_as_everyone_else():
