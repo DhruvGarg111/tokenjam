@@ -948,6 +948,7 @@ def build_proposals(
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
     window_days: float | None = None,
+    persona: str = "unknown",
 ) -> tuple[list[RelearnCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
@@ -960,10 +961,21 @@ def build_proposals(
     OTel lane — see ``core/optimize/relearn_otel.py``). A cluster whose repos are
     all in that set is marked ``advise_only`` and gets NO suggested target: there
     is nothing to apply into, so the card must not imply an apply path exists.
+
+    ``persona`` gates the rung-1/rung-2 CLAUDE.md/skill write exactly like
+    ``cost_proposals._persona_gated_write_fields`` gates the script/reuse/
+    verbosity cards it shares that same write surface with: only a
+    ``"claude-code"``/``"mixed"`` window is offered the write. An
+    ``"sdk"``/``"unknown"`` window (the conservative default) never gets one
+    — nothing in an SDK-only service's request path reads a CLAUDE.md or a
+    ``.claude/skills/`` note, so offering it there is a write that visibly
+    succeeds and changes nothing. ``proposed_fix`` (the recommendation text)
+    is unaffected either way — only the apply path is.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
 
     repo_cwd_map = repo_cwd_map or {}
+    write_offered = persona in {"claude-code", "mixed"}
     proposals: list[RelearnCluster] = []
     dropped = 0
     for cluster in clusters:
@@ -993,9 +1005,12 @@ def build_proposals(
         # `bool(advise_only_repos) and ...` defeats mypy's None-narrowing since
         # it's wrapped in a call; guarding on the name itself narrows it to
         # `set[str]` inside the genexpr while keeping identical truthiness.
+        # `not write_offered` folds in the persona gate above: even a
+        # workspace-having cluster gets no apply path for an sdk/unknown
+        # window.
         advise_only = bool(
             advise_only_repos and all(r in advise_only_repos for r in repos)
-        )
+        ) or not write_offered
         repo_cwd = "" if advise_only else (
             repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
         )
@@ -1055,6 +1070,7 @@ def analyze_relearns(
     extra_failures: list[FailureEpisode] | None = None,
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
+    persona: str = "unknown",
 ) -> RelearnFinding:
     """Full pipeline over an explicit session list — the pure core the
     registry entry point and the on-disk cache job both call. Never raises.
@@ -1070,6 +1086,8 @@ def analyze_relearns(
     ``conn`` (optional DuckDB connection) is forwarded to ``build_proposals``
     for the per-cluster blended-dollar-rate lookup (Review inbox monthly-$
     basis) — ``None`` keeps every cluster tokens-only, same as today.
+    ``persona`` is forwarded to ``build_proposals`` to gate the rung-1/rung-2
+    write — see its docstring.
     """
     all_failures: list[FailureEpisode] = []
     scanned = 0
@@ -1104,7 +1122,7 @@ def analyze_relearns(
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
-        conn=conn, window_days=window_days,
+        conn=conn, window_days=window_days, persona=persona,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
     total_monthly_tokens = sum(p.estimated_monthly_tokens for p in proposals) if proposals else None
@@ -1178,6 +1196,7 @@ def compute_relearn_finding(
     distill_enabled: bool = True,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
+    persona: str = "unknown",
 ) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
     used by the serve-time background cache job (``api/routes/relearn.py``)
@@ -1185,6 +1204,12 @@ def compute_relearn_finding(
     repo-name enrichment (``sessions.agent_id``); pass ``None`` and every
     session falls back to a ``"unknown"`` repo label — clustering itself needs
     no DB at all, it's a pure filesystem scan.
+
+    ``persona`` (default ``"unknown"``, the conservative no-write default —
+    see ``build_proposals``) is forwarded to gate the rung-1/rung-2 write.
+    ``run(ctx)`` below passes the report's own ``ctx.persona`` rather than
+    re-deriving it here, so a report never carries two different persona
+    classifications for the same window.
 
     Full-corpus by design: enumerates every on-disk Claude Code transcript
     (not window-scoped like the other analyzers — a relearn recurring across
@@ -1255,7 +1280,7 @@ def compute_relearn_finding(
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures, advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
-        conn=conn,
+        conn=conn, persona=persona,
     )
 
 
@@ -1278,4 +1303,5 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, ctx.since, min_sessions=min_sessions,
         transcript_cache_dir=default_cache_dir(ctx.config),
+        persona=ctx.persona,
     )

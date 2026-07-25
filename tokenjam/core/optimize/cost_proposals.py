@@ -20,13 +20,16 @@ NOT optional here:
     tokenjam cannot write into — those cards have NO apply path, exactly like
     an ``advise_only`` ``RelearnCluster`` (empty ``suggested_target``). A
     minority (``subagent``, the per-agent slice of ``downsize``, ``script``,
-    ``reuse``, ``verbosity``) DO have a workspace surface an orchestrating
-    agent reads before acting (a CLAUDE.md rubric, a model-id key, a new
-    skill note) and route through the same rung-gated
-    ``relearn_apply.apply_relearn_fix`` machinery the relearn lane uses
-    (``apply_capable=True``, ``rung``, ``scope``, ``proposed_fix``). Every
-    other card carries a recommendation and, where sensible, a copyable
-    config/code suggestion; the user applies it themselves.
+    ``reuse``) DO have a workspace surface an orchestrating agent reads
+    before acting (a CLAUDE.md rubric, a model-id key, a new skill note) and
+    route through the same rung-gated ``relearn_apply.apply_relearn_fix``
+    machinery the relearn lane uses (``apply_capable=True``, ``rung``,
+    ``scope``, ``proposed_fix``). ``verbosity`` shares that same class of
+    surface in principle but is deliberately kept advise-only for every
+    persona (see ``_verbosity_to_proposals``) — the finding is cohort-scoped
+    but the artifact would be global, which fails the no-quality-tax gate.
+    Every other card carries a recommendation and, where sensible, a
+    copyable config/code suggestion; the user applies it themselves.
   * **Estimated, never causal.** Every saving figure a cost finding carries is
     a heuristic ESTIMATE (house style, CLAUDE.md Rule 14). The adapter
     preserves the finding's own ``estimate_basis`` and labels the figure
@@ -138,6 +141,31 @@ SUBAGENT_RUBRIC_INTRO = (
     "the premium tier."
 )
 
+# The downsize card's claude-code CTA. Mirrors `cmd_optimize._render_downgrade_
+# cta`'s claude-code branch: an interactive CC session can't pass `--original`/
+# `--candidate` to swap its own model mid-turn, so "route to a cheaper model"
+# is not a fix this persona can act on. Used wherever the card would otherwise
+# hand a CC window the same generic model-swap text an SDK caller gets (see
+# ticket-level "no CC user gets a raw-model-swap CTA" requirement).
+_DOWNSIZE_CC_LEVER = (
+    "You can't switch your own interactive model mid-session, so this is not a "
+    "fix to paste into your own request the way an SDK caller would. The "
+    "actionable levers instead: `tj route export --target ccr` (or --target "
+    "litellm) to route future calls through a cheaper model, `tj optimize "
+    "subagent` to right-size subagent models and context, `/compact` to trim "
+    "context mid-session, or a CLAUDE.md/subagent directive telling this agent "
+    "to dispatch cheaper subagents for this shape of work."
+)
+
+# Appended (not substituted) for a "mixed" window: the swap text above already
+# applies to the sdk share, this just adds the claude-code share's own lever —
+# same "both, labeled" precedent as `_render_downgrade_cta`'s mixed branch.
+_DOWNSIZE_MIXED_CC_NOTE = (
+    " For the Claude Code sessions in this window: you can't switch your own "
+    "interactive model mid-session — use `tj route export`, `tj optimize "
+    "subagent`, or `/compact` instead."
+)
+
 
 @dataclass
 class CostProposal:
@@ -242,7 +270,9 @@ class CostProposal:
 # proposals. All tolerate a None/empty finding (returns []).
 # --------------------------------------------------------------------------- #
 
-def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal]:
+def _downsize_to_proposal(
+    finding: Any, config: Any = None, persona: str = "unknown",
+) -> list[CostProposal]:
     """The model-over-sizing card(s).
 
     When the finding carries per-agent price rows, each agent gets its own card
@@ -256,10 +286,15 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
     maps each oversized model to its cheaper same-family alternative, and the
     delta-verify pass measures the model-mix cost delta across ALL flagged
     models, so one proposal listing them keeps that aggregate estimate coherent.
+
+    ``persona`` gates the CTA exactly like ``cmd_optimize._render_downgrade_
+    cta`` gates the CLI's: a ``"claude-code"`` window can't switch its own
+    interactive model, so it never gets the raw "route to a cheaper model"
+    instruction — see ``_DOWNSIZE_CC_LEVER``.
     """
     if finding is None or getattr(finding, "candidate_sessions", 0) <= 0:
         return []
-    per_agent = _downsize_agent_proposals(finding, config)
+    per_agent = _downsize_agent_proposals(finding, config, persona)
     if per_agent:
         return per_agent
     suggestions: dict[str, str] = dict(getattr(finding, "suggestions", {}) or {})
@@ -273,13 +308,20 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
         f"({model_list}); candidate sessions are {finding.percent_of_tokens:.0f}% "
         f"of the window's tokens."
     )
-    advise = (
-        "Route the flagged structural-shaped work to the cheaper same-family "
-        "model before it runs. Suggested swaps: "
-        + "; ".join(f"{m} → {alt}" for m, alt in sorted(suggestions.items()))
-        + ". " + str(getattr(finding, "caveat", "") or "")
-    ).strip()
+    caveat = str(getattr(finding, "caveat", "") or "")
     suggestion = "\n".join(f"{m} -> {alt}" for m, alt in sorted(suggestions.items()))
+    if persona == "claude-code":
+        advise = (_DOWNSIZE_CC_LEVER + " " + caveat).strip()
+        suggestion = ""
+    else:
+        advise = (
+            "Route the flagged structural-shaped work to the cheaper same-family "
+            "model before it runs. Suggested swaps: "
+            + "; ".join(f"{m} → {alt}" for m, alt in sorted(suggestions.items()))
+            + ". " + caveat
+        ).strip()
+        if persona == "mixed":
+            advise += _DOWNSIZE_MIXED_CC_NOTE
     return [CostProposal(
         kind="cost",
         analyzer="downsize",
@@ -410,12 +452,20 @@ def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
     }
 
 
-def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
+def _downsize_agent_proposals(
+    finding: Any, config: Any, persona: str = "unknown",
+) -> list[CostProposal]:
     """One card per agent, carrying that agent's own price arithmetic.
 
     Replaces the window-wide card when per-agent rows exist, so one source of
     over-sized spend produces exactly one card rather than an aggregate plus its
     own parts.
+
+    When the direct model-id swap is ``apply_capable`` (a registered, git-clean
+    source path — see ``_model_swap_plumbing``), the fix is a real write to
+    that agent's own config, not "switch your interactive model": it stays
+    persona-agnostic. Only the NON-apply-capable fallback text needs the
+    claude-code CTA, same reasoning as the window-wide card above.
     """
     proposals: list[CostProposal] = []
     for row in getattr(finding, "per_agent", []) or []:
@@ -452,6 +502,10 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
             )
         elif plumbing.get("apply_blocked_reason"):
             advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
+            if persona == "claude-code":
+                advise += " " + _DOWNSIZE_CC_LEVER
+            elif persona == "mixed":
+                advise += _DOWNSIZE_MIXED_CC_NOTE
         proposals.append(CostProposal(
             kind="cost",
             analyzer="downsize",
@@ -505,7 +559,7 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
 
 
 def _placement_to_proposals(
-    finding: Any, *, pricing_mode: str = "api",
+    finding: Any, *, pricing_mode: str = "api", persona: str = "unknown",
 ) -> list[CostProposal]:
     """One card for the batch-placement candidates (advise-only).
 
@@ -519,8 +573,17 @@ def _placement_to_proposals(
     (CLAUDE.md anti-pattern #22: never show a figure the reader can't act
     on). Without this the web Review inbox showed a batch-placement dollar
     figure the CLI deliberately suppresses for the same finding.
+
+    ``persona`` gates the WHOLE card, not just the dollar figure: the Batch
+    API is a synchronous-endpoint replacement in the user's own APPLICATION
+    code, and an interactive Claude Code session has no application code of
+    its own to move to a batch lane — the lever is structurally unreachable
+    for that persona regardless of ``pricing_mode``. A ``"claude-code"``
+    window gets nothing here (not even the advise-only/no-dollar branch);
+    ``"mixed"``/``"sdk"``/``"unknown"`` are unaffected — the sdk share of a
+    mixed window can still act on it.
     """
-    if finding is None:
+    if finding is None or persona == "claude-code":
         return []
     candidates = list(getattr(finding, "candidates", []) or [])
     if not candidates:
@@ -1348,9 +1411,13 @@ def _cluster_hash(value: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Persona-gated fix modality — `script` / `reuse` / `verbosity` only.
+# Persona-gated fix modality — `script` / `reuse` only. (`verbosity` shares
+# the same write SURFACE — see its own module comment above `_verbosity_to_
+# proposals` — but never offers the write at all, for any persona: its
+# cohort-scoped flag would become a global CLAUDE.md rule if written, which
+# fails the no-quality-tax gate outright regardless of who reads it.)
 #
-# All three write the SAME class of artifact when apply-capable: a rung-1
+# Both write the SAME class of artifact when apply-capable: a rung-1
 # CLAUDE.md note or rung-2 `.claude/skills/<slug>/SKILL.md` file (see
 # `relearn_apply.default_target_path`). Nothing in an SDK-only service's
 # request path ever reads a CLAUDE.md or a `.claude/skills/` note — those are
@@ -1545,22 +1612,18 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     """One proposal for the whole verbosity finding (unlike ``script``/
     ``reuse``, this is a single window-wide signal, not per-cluster).
 
-    Apply-capable at rung 1: a CLAUDE.md note carrying the finding's own
-    ``remedy_snippet`` plus its suggested ``max_tokens`` cap. This is the
-    least-grounded of the three analyzers by design (output length is not
-    waste), so the note leans on the finding's own honesty caveat rather than
-    asserting a saving. Left un-degraded to advise-only would strand the one
-    lever this analyzer already computes (the remedy snippet) with nowhere to
-    go; a workspace note is the same class of soft, orchestrator-read surface
-    the ``subagent`` rubric already uses, so this reuses that precedent
-    rather than inventing a new one.
-
-    The write is only actually offered for a ``"claude-code"``/``"mixed"``
-    ``persona`` — see ``_persona_gated_write_fields``. This is the sharpest
-    case of the three: the lever itself (``max_tokens``) is genuinely
-    SDK-actionable — an SDK caller can cap it in their own request — it is
-    only the CLAUDE.md *artifact* that is the wrong surface for them. Gating
-    still carries the cap as a ``suggestion`` so that lever isn't lost.
+    ALWAYS advise-only, regardless of ``persona`` — no rung-1 CLAUDE.md write
+    is ever offered here, unlike ``script``/``reuse`` which share the same
+    write machinery. A cohort-scoped flag (this task shape ran long vs its
+    OWN like-shaped peers) written as a global CLAUDE.md note would apply
+    blanket terseness pressure to every future task, including legitimately
+    verbose ones — the analyzer's own honesty caveat says output length is
+    not waste, so an enforced-looking file note fails that gate outright.
+    The recommendation is still carried as a copy-pasteable ``suggestion``
+    for every persona (never silently dropped), it just never becomes a
+    write. ``persona`` is accepted (and kept in the dispatcher's uniform
+    ``(f, persona=persona)`` call shape) but intentionally unused — see
+    above.
     """
     if finding is None:
         return []
@@ -1577,10 +1640,13 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     )
     advise = remedy
     if max_tokens:
+        # A DATA POINT, not an enforceable cap — "keep responses under N
+        # tokens" reads as a rule once pasted anywhere; this states what
+        # similar sessions happened to do instead.
         advise += (
-            f" Suggested cap for this shape of task: keep responses under "
-            f"about {max_tokens:,} output tokens (the cohort baseline most "
-            f"sessions already sit under)."
+            f" For reference, similar sessions in this cohort typically "
+            f"finished under about {max_tokens:,} output tokens — a data "
+            f"point to weigh, not a limit to enforce."
         )
     advise = (advise + " " + caveat).strip()
     return [CostProposal(
@@ -1598,10 +1664,10 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
             "apply_sessions": total_candidates,
         },
         advise_text=advise,
+        suggestion=advise,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
     )]
 
 
@@ -1962,19 +2028,29 @@ def cost_proposals_from_report(
     so existing callers that don't know their caller's plan keep today's
     behaviour.
 
-    ``script`` / ``reuse`` / ``verbosity`` read ``report.persona`` (set once
-    by ``runner.build_report`` — see ``AnalyzerContext.persona``) to decide
-    whether their rung-1/rung-2 workspace write is offered at all — see
-    ``_persona_gated_write_fields``. The whole ``cache`` family (``cache`` /
-    ``cache_thrash`` / ``cache-recommend``) reads the same ``persona`` to
-    decide whether their cache_control instruction is shown at all — see
-    ``_persona_gated_cache_fields``; unlike script/reuse/verbosity there is no
-    write to gate, only the instruction text. A report built without a
+    ``script`` / ``reuse`` read ``report.persona`` (set once by ``runner.
+    build_report`` — see ``AnalyzerContext.persona``) to decide whether their
+    rung-1/rung-2 workspace write is offered at all — see
+    ``_persona_gated_write_fields``. ``verbosity`` reads the same finding
+    shape but never offers a write for ANY persona (see ``_verbosity_to_
+    proposals``) — a cohort-scoped flag written as a global CLAUDE.md rule
+    fails the no-quality-tax gate regardless of who would read it. The whole
+    ``cache`` family (``cache`` / ``cache_thrash`` / ``cache-recommend``)
+    reads the same ``persona`` to decide whether their cache_control
+    instruction is shown at all — see ``_persona_gated_cache_fields``; unlike
+    script/reuse there is no write to gate, only the instruction text.
+    ``downsize`` reads the same ``persona`` to swap its CTA for the
+    claude-code-actionable levers (``tj route export`` / ``tj optimize
+    subagent`` / ``/compact``) instead of a raw model-swap instruction that
+    persona can't act on — see ``_DOWNSIZE_CC_LEVER``. ``placement`` reads it
+    to suppress the card outright for a ``"claude-code"`` window: the Batch
+    API is a lever in the user's own application code, which an interactive
+    session doesn't have. A report built without a
     ``persona`` field (e.g. hand-constructed in a test) defaults to
-    ``"unknown"``, which keeps the script/reuse/verbosity write off (that
-    helper's conservative default) while leaving the cache family's
-    instruction on (that helper's conservative default runs the other way —
-    see its own docstring) — neither ever assumes ``"claude-code"``.
+    ``"unknown"``, which keeps the script/reuse write off (that helper's
+    conservative default) while leaving the cache family's instruction on
+    (that helper's conservative default runs the other way — see its own
+    docstring) — neither ever assumes ``"claude-code"``.
 
     ``window_days`` (default 30 — ``DEFAULT_COST_WINDOW_DAYS``, matching the
     daemon's own default look-back) feeds ``compute_projection_ratio`` along
@@ -2012,7 +2088,10 @@ def cost_proposals_from_report(
         return None if name in disabled else findings.get(name)
 
     adapters = (
-        (lambda f: _downsize_to_proposal(f, config), getattr(report, "downgrade", None)),
+        (
+            lambda f: _downsize_to_proposal(f, config, persona=persona),
+            getattr(report, "downgrade", None),
+        ),
         (lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
         (lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
         (lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
@@ -2023,7 +2102,10 @@ def cost_proposals_from_report(
         ),
         (_trim_to_proposals, _pick("trim")),
         (lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
-        (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), _pick("placement")),
+        (
+            lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode, persona=persona),
+            _pick("placement"),
+        ),
         (_deadweight_to_proposals, _pick("deadweight")),
         (lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
         (lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
