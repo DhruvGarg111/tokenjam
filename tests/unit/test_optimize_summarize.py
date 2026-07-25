@@ -217,6 +217,60 @@ def test_global_scope_file_is_priced_across_every_session_in_the_window(
     assert f.estimated_recoverable_usd > 1_000 * rates.input_per_mtok / 1_000_000
 
 
+def test_project_scope_file_is_priced_against_its_own_repos_calls_per_session(
+    db, monkeypatch,
+):
+    """A project-scope candidate must price against its OWN repo's average
+    calls-per-session -- never the window-wide blend across every other
+    repo/agent in the window, which can differ sharply from this repo's own
+    session behavior.
+
+    Repo A: one session, 5 calls (a heavy call-count repo). Repo B: four
+    sessions, one call each (a light one). The window-wide average
+    (9 calls / 5 sessions = 1.8, rounds to 2) is nowhere near repo A's own
+    average (5.0) -- pricing repo A's file against the blend would understate
+    its recoverable figure.
+    """
+    from tokenjam.core.pricing import get_rates
+
+    db.upsert_session(make_session(session_id="a1", agent_id="claude-code-repo-a"))
+    for i in range(5):
+        db.insert_span(make_llm_span(
+            session_id="a1", agent_id="claude-code-repo-a",
+            provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1, minutes=i),
+        ))
+    for i in range(4):
+        sid = f"b{i}"
+        db.upsert_session(make_session(session_id=sid, agent_id="claude-code-repo-b"))
+        db.insert_span(make_llm_span(
+            session_id=sid, agent_id="claude-code-repo-b",
+            provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1),
+        ))
+
+    _patch_scan(monkeypatch, [_cand("repo-a/CLAUDE.md", 1_000, scope="repo")])
+    since, until = _window()
+    report = build_report(db=db, config=TjConfig(version="1"),
+                          since=since, until=until, findings=["summarize"])
+
+    f = report.findings["summarize"]
+    candidate = f.candidates[0]
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+
+    assert candidate.sessions_loading == 1  # only repo-a's own session matches
+    # Repo A's own average is 5 calls/session -> 4 rereads, never the
+    # window-wide blend's rounded 2 calls/session -> 1 reread.
+    expected = 1_000 * (rates.input_per_mtok / 1_000_000) * (1 + ratio * 4)
+    wrong_window_blend = 1_000 * (rates.input_per_mtok / 1_000_000) * (1 + ratio * 1)
+    assert candidate.est_usd_saved == pytest.approx(round(expected, 6))
+    assert candidate.est_usd_saved != pytest.approx(round(wrong_window_blend, 6))
+    assert candidate.est_usd_saved > wrong_window_blend
+
+
 def test_render_summarize_shows_the_window_dollar_figure_when_priced(
     db, monkeypatch, capsys,
 ):

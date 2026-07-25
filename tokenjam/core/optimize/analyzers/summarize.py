@@ -151,14 +151,19 @@ class _LoadProfile:
     """How often the window's sessions would re-send an always-on prompt file.
 
     ``sessions_total`` is every session in the window (what a global-scope file
-    is loaded by); ``sessions_by_repo`` narrows that for a project-scope file.
-    ``calls_per_session`` is the average number of LLM calls a session makes —
-    the first sends the file at the input rate, each later one re-reads it at
-    the cache-read rate.
+    is loaded by); ``sessions_by_repo``/``calls_by_repo`` narrow that for a
+    project-scope file. ``calls_per_session`` is the window-WIDE average number
+    of LLM calls a session makes — the first sends the file at the input rate,
+    each later one re-reads it at the cache-read rate. A project-scope file
+    must price against its OWN repo's average, not this blend across every
+    other repo/agent in the window (see ``_repo_calls_per_session``); this
+    field stays window-wide because it's also what a global-scope file
+    legitimately prices against.
     """
 
     sessions_total: int
     sessions_by_repo: dict[str, int]
+    calls_by_repo: dict[str, int]
     calls_per_session: float
     rates: RateProfile
 
@@ -191,22 +196,26 @@ def _load_profile(ctx: AnalyzerContext) -> _LoadProfile | None:
         return None
 
     sessions_by_repo: dict[str, int] = {}
+    calls_by_repo: dict[str, int] = {}
     sessions_total = 0
     calls_total = 0
     for agent_id, sessions, calls in rows:
         sessions = int(sessions or 0)
+        calls = int(calls or 0)
         sessions_total += sessions
-        calls_total += int(calls or 0)
+        calls_total += calls
         label = str(agent_id or "")
         if label.startswith(_CC_AGENT_PREFIX):
             label = label[len(_CC_AGENT_PREFIX):]
         if label:
             sessions_by_repo[label] = sessions_by_repo.get(label, 0) + sessions
+            calls_by_repo[label] = calls_by_repo.get(label, 0) + calls
     if sessions_total <= 0:
         return None
     return _LoadProfile(
         sessions_total=sessions_total,
         sessions_by_repo=sessions_by_repo,
+        calls_by_repo=calls_by_repo,
         calls_per_session=calls_total / sessions_total,
         rates=rates,
     )
@@ -229,10 +238,44 @@ def _sessions_loading(path: str, scope: str, profile: _LoadProfile) -> int:
     )
 
 
-def _price_reduction(tokens_saved: int, sessions: int, profile: _LoadProfile) -> float | None:
+def _repo_calls_per_session(path: str, scope: str, profile: _LoadProfile) -> float:
+    """This candidate's own repo's average calls-per-session, on the SAME
+    ancestor-matching basis ``_sessions_loading`` uses.
+
+    A global-scope file legitimately spans every session in the window, so it
+    keeps the window-wide average. A project-scope file uses only its own
+    repo's observed call rate — blending in every other repo/agent in the
+    window would over- or under-state the recoverable figure whenever that
+    repo's actual session behavior differs from the window average. Falls
+    back to the window-wide average only when the repo match carries no
+    session evidence (in practice unreachable from ``_price_reduction``, which
+    already returns ``None`` for a zero-session candidate before this is
+    consulted).
+    """
+    if scope == "global":
+        return profile.calls_per_session
+    ancestors = {parent.name for parent in Path(path).parents if parent.name}
+    matched_sessions = sum(
+        count for repo, count in profile.sessions_by_repo.items() if repo in ancestors
+    )
+    if matched_sessions <= 0:
+        return profile.calls_per_session
+    matched_calls = sum(
+        count for repo, count in profile.calls_by_repo.items() if repo in ancestors
+    )
+    return matched_calls / matched_sessions
+
+
+def _price_reduction(
+    tokens_saved: int, sessions: int, calls_per_session: float, rates: RateProfile,
+) -> float | None:
     """What removing ``tokens_saved`` from an always-on file is worth over the
     window: the reduction, on each loading session, sent once at the input rate
     and re-read on that session's every later call at the cache-read rate.
+
+    ``calls_per_session`` is the candidate's OWN repo's average (see
+    ``_repo_calls_per_session``) for a project-scope file, or the window-wide
+    average for a global-scope one — never a blend of the two.
 
     ``None`` when no session loads the file — the saving is real but this
     window carries no evidence of its size, and a zero would misreport that as
@@ -240,8 +283,8 @@ def _price_reduction(tokens_saved: int, sessions: int, profile: _LoadProfile) ->
     """
     if sessions <= 0 or tokens_saved <= 0:
         return None
-    rereads = max(round(profile.calls_per_session) - 1, 0)
-    return profile.rates.cost_of(float(tokens_saved), rereads) * sessions
+    rereads = max(round(calls_per_session) - 1, 0)
+    return rates.cost_of(float(tokens_saved), rereads) * sessions
 
 
 @register("summarize")
@@ -295,7 +338,10 @@ def run(ctx: AnalyzerContext) -> None:
             reduction_pct=_reduction_pct(c.est_tokens_saved, c.total_chars),
             sessions_loading=sessions,
             est_usd_saved=(
-                _price_reduction(c.est_tokens_saved, sessions, profile)
+                _price_reduction(
+                    c.est_tokens_saved, sessions,
+                    _repo_calls_per_session(c.path, c.scope, profile), profile.rates,
+                )
                 if profile else None
             ),
         ))
