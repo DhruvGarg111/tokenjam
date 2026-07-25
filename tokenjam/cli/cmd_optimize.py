@@ -26,6 +26,7 @@ from tokenjam.core.optimize import (
     DowngradeFinding,
     OptimizeReport,
     build_report,
+    disabled_analyzers_for_persona as _disabled_analyzers,
     report_from_dict,
     report_to_dict,
 )
@@ -789,6 +790,23 @@ def _render_report(
         console.print(f"  [yellow]![/yellow] {_rich_escape(note)}")
     if report.notes:
         console.print()
+
+    # An analyzer the user typed by name that this persona's skip gate dropped
+    # would otherwise render as silence, which reads as a broken command. The
+    # gate is deliberately invisible when it fires on the default (unnamed)
+    # selection — those analyzers simply do not exist for this user — but a
+    # name someone typed deserves an answer.
+    if requested:
+        gated = sorted(
+            set(requested) & _disabled_analyzers(report.persona or "unknown")
+        )
+        if gated:
+            console.print(
+                f"  [dim]Not run: {', '.join(gated)}. No fix for these exists "
+                f"inside an interactive coding-agent session, so they are "
+                f"skipped rather than reported as findings you cannot act "
+                f"on.[/dim]\n"
+            )
 
     # ----- Findings, ranked by reclaimable share of the window's tokens -----
     # Findings used to render in ANALYZER_ORDER (registry order), so a

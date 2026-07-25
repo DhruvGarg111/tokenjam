@@ -75,6 +75,30 @@ COST_ANALYZERS = (
     "script", "reuse", "verbosity", "resend",
 )
 
+
+def _disabled_analyzers(persona: str) -> frozenset[str]:
+    """The persona skip-gate set, imported lazily.
+
+    Deferred import: ``runner`` reaches this module through the analyzer
+    registry, so a module-level import would cycle.
+    """
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+
+    return disabled_analyzers_for_persona(persona)
+
+
+def cost_analyzers_for_persona(persona: str) -> tuple[str, ...]:
+    """``COST_ANALYZERS`` minus the ones with no fix this persona can apply.
+
+    ``COST_ANALYZERS`` is an INDEPENDENT second analyzer-selection surface
+    (the Review inbox's recompute selects from it, not from
+    ``ANALYZER_ORDER``), so the persona skip gate has to be mirrored here or a
+    disabled analyzer's findings still reach the inbox as apply-able cards.
+    Same map, same reasons — see ``runner.PERSONA_DISABLED_ANALYZERS``.
+    """
+    disabled = _disabled_analyzers(persona)
+    return tuple(name for name in COST_ANALYZERS if name not in disabled)
+
 # The rung-1/rung-2 apply notes below all route through the SAME workspace-note
 # machinery `subagent` already uses (`relearn_apply.apply_relearn_fix`, rung 1
 # = CLAUDE.md note, rung 2 = a new .claude/skills/<slug>/SKILL.md). None of
@@ -1669,7 +1693,14 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
-    from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
+    from tokenjam.core.framing import (
+        agent_persona_mix,
+        config_declared_plan,
+        dominant_persona,
+        dominant_plan,
+        plan_tier_mix,
+        pricing_mode_for,
+    )
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
@@ -1682,15 +1713,26 @@ def recompute_cost_proposals(
             effective_window_days = max(1, window_days)
             until = utcnow()
             since = until - timedelta(days=effective_window_days)
+            conn = getattr(db, "conn", None)
+            # Persona decides which cost analyzers are worth running at all —
+            # one with no fix this persona can apply is dropped BEFORE the
+            # report is built, so it never queries and never reaches the
+            # inbox. `build_report` applies the same gate internally (it is
+            # the choke point); selecting the persona-scoped list here keeps
+            # this surface honest on its own terms rather than relying on the
+            # callee to undo an over-broad request.
+            persona = dominant_persona(
+                agent_persona_mix(conn, since, until, agent_id=agent_id) if conn is not None else {},
+                declared_plan=config_declared_plan(config),
+            )
             report = build_report(
                 db, config, since, until, agent_id=agent_id,
-                findings=list(COST_ANALYZERS),
+                findings=list(cost_analyzers_for_persona(persona)),
             )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
             # does (placement's batch-lever dollars, currently the only card
             # this gates — see `_placement_to_proposals`).
-            conn = getattr(db, "conn", None)
             plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
             pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
             proposals = cost_proposals_from_report(
@@ -1806,24 +1848,37 @@ def cost_proposals_from_report(
     findings = getattr(report, "findings", {}) or {}
     persona = str(getattr(report, "persona", "") or "unknown")
     proposals: list[CostProposal] = []
+
+    # Second half of the persona skip gate. `build_report` already refuses to
+    # RUN an analyzer with no fix for this persona, so on the live path these
+    # findings are absent anyway; `_pick` makes the inbox correct by its own
+    # construction rather than by trusting how the report was built — a report
+    # assembled elsewhere (a cached payload, a wider selection, a test) can
+    # still carry the finding, and a card the user cannot apply must not
+    # appear in Review either way. A `None` finding contributes nothing.
+    disabled = _disabled_analyzers(persona)
+
+    def _pick(name: str) -> Any:
+        return None if name in disabled else findings.get(name)
+
     adapters = (
         (lambda f: _downsize_to_proposal(f, config), getattr(report, "downgrade", None)),
-        (lambda f: _cache_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_uncached_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_thrash_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_lookback_to_proposals(f, persona=persona), findings.get("cache")),
+        (lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
+        (lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
+        (lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
+        (lambda f: _cache_lookback_to_proposals(f, persona=persona), _pick("cache")),
         (
-            lambda f: _cache_recommend_to_proposals(f, findings.get("cache"), persona=persona),
-            findings.get("cache-recommend"),
+            lambda f: _cache_recommend_to_proposals(f, _pick("cache"), persona=persona),
+            _pick("cache-recommend"),
         ),
-        (_trim_to_proposals, findings.get("trim")),
-        (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
-        (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), findings.get("placement")),
-        (_deadweight_to_proposals, findings.get("deadweight")),
-        (lambda f: _script_to_proposals(f, persona=persona), findings.get("script")),
-        (lambda f: _reuse_to_proposals(f, persona=persona), findings.get("reuse")),
-        (lambda f: _verbosity_to_proposals(f, persona=persona), findings.get("verbosity")),
-        (lambda f: _resend_to_proposals(f, persona=persona), findings.get("resend")),
+        (_trim_to_proposals, _pick("trim")),
+        (lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
+        (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), _pick("placement")),
+        (_deadweight_to_proposals, _pick("deadweight")),
+        (lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
+        (lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
+        (lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
+        (lambda f: _resend_to_proposals(f, persona=persona), _pick("resend")),
     )
     for adapter, finding in adapters:
         try:

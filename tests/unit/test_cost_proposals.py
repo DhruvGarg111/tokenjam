@@ -705,8 +705,13 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep.persona = "claude-code"
     by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
-    for name in ("script", "reuse", "verbosity"):
-        assert by_analyzer[name].apply_capable is True
+    # `reuse` keeps its workspace write for this persona. `script` and
+    # `verbosity` are skipped for it entirely (script's cluster signature can't
+    # match heterogeneous coding work; verbosity's only remedy is a global
+    # be-terser rule), so no card is built for them at all.
+    assert by_analyzer["reuse"].apply_capable is True
+    assert "script" not in by_analyzer
+    assert "verbosity" not in by_analyzer
 
     # A report with no persona set at all (e.g. hand-built, pre-gating test
     # code) defaults to "unknown" -> the fail-safe, not "claude-code".

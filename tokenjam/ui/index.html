@@ -6618,7 +6618,16 @@ function OptimizeView({ params }) {
   // own full surface in the Review inbox, summarize its own bespoke box
   // below and its own screen (SummarizeView); giving them a second,
   // thinner card here would just duplicate that richer treatment.
-  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
+  // Analyzers the server's persona gate never ran, because they have no fix
+  // this user can apply (`persona_disabled_analyzers` on the /optimize
+  // payload; see core/optimize/runner.py). They must VANISH, not render an
+  // empty state: `placement` (and `downsize`) deliberately show a "ran, found
+  // nothing" card when their finding is absent, which for a gated analyzer
+  // would be a row pointing at a lever the reader does not have. Filtering the
+  // order list here covers every such branch at once, including future ones.
+  const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);
+  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']
+    .filter(n => !personaGated.has(n));
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const compIsApi = !!compFraming && compFraming.pricing_mode === 'api';

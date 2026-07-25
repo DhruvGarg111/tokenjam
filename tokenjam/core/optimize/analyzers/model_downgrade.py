@@ -402,10 +402,24 @@ def run(ctx: AnalyzerContext) -> None:
     That keeps ``findings['placement']`` reachable by ``_rank_findings`` /
     ``_render_placement`` in every case, so the CLI's empty-state message
     (with live threshold values) actually renders instead of being dead code.
+
+    The one exception is the persona skip gate: because ``placement`` is a
+    sub-check rather than a registry name, ``build_report``'s gate cannot drop
+    it, so this function consults the same
+    ``disabled_analyzers_for_persona`` map. When it's disabled the check is
+    never run at all (no query, no empty finding attached), which is what
+    keeps it out of the ranking, the payload and the Review inbox instead of
+    surfacing an unactionable empty state.
     """
+    # Deferred import: `runner` imports the analyzers package to trigger the
+    # `@register` side effects, so a module-level import here would cycle.
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
     )
+    if "placement" in disabled_analyzers_for_persona(ctx.persona):
+        return
     optimize_cfg = getattr(ctx.config, "optimize", None)
     ctx.report.findings["placement"] = analyze_batch_placement(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,

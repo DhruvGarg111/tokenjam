@@ -44,6 +44,83 @@ ANALYZER_ORDER: list[str] = [
     "deadweight",
 ]
 
+# Analyzers that have NO fix a user of that persona can actually apply.
+#
+# Keyed by the window's dominant persona (`core.framing.dominant_persona`:
+# "claude-code" | "sdk" | "mixed" | "unknown"). A name listed for the dominant
+# persona is dropped from `selected` in `build_report` BEFORE the dispatch
+# loop, so the analyzer is never invoked: it runs no query, produces no
+# finding, and is therefore absent from every downstream surface (the CLI
+# report, the /optimize payload, the Review inbox). That is deliberately a
+# TRUE skip and not an `enabled: False` finding — a disabled analyzer that
+# still queries costs the same time and then renders a row whose only honest
+# caption is "there is nothing you can do about this."
+#
+# The bar for keeping an analyzer is not "a fix could be described" — it is:
+#   1. the output ends in a concrete edit to a file or setting this persona
+#      actually controls;
+#   2. the user is better off NET of the fix's own standing cost (an
+#      always-loaded instruction file is re-sent on every future session);
+#   3. the saving does not come from making the agent terser or dumber.
+# An analyzer that misses any one of those has no business spending query
+# time for that persona. Each entry below records which one it misses.
+#
+# `mixed` / `sdk` / `unknown` disable nothing: the conservative default is to
+# run everything, so an unclassified window never silently loses a finding.
+PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
+    # An interactive coding agent's harness constructs the API request, picks
+    # the model for its own main thread, and owns the prompt template. The
+    # user only controls their workspace config files. Everything below is a
+    # lever that lives on the other side of that line.
+    "claude-code": frozenset({
+        # Cache efficacy is measured off `cache_control` breakpoint placement,
+        # which the harness sets and the user cannot reach — no request field
+        # of theirs to change, so the finding is a diagnostic with no fix.
+        "cache",
+        # Same missing lever, and it cannot fire anyway: the analyzer needs
+        # repeated exact prompt-prefix matches, while an interactive session's
+        # captured prompt is the human's latest turn, which is never a stable
+        # cacheable prefix. Candidates are structurally always zero.
+        "cache-recommend",
+        # Batch placement recommends re-laning work onto a delayed batch
+        # endpoint. Unreachable from an interactive session by definition —
+        # the whole point is that a human is waiting on the answer. Not a
+        # registry name (the `downsize` analyzer attaches it as a sub-check),
+        # so `downsize` reads this same map to skip it — see model_downgrade.
+        "placement",
+        # Trim predicts low-significance regions of a prompt template so the
+        # author can shorten it. That presumes editable prompt-template source
+        # code, which an interactive coding-agent user does not have.
+        "trim",
+        # Verbosity's detection is sound, but its only remedy is a global
+        # "be concise, answer in the fewest words" instruction written into an
+        # always-loaded file — buying tokens by making the agent terser
+        # everywhere, off a finding that was scoped to one cohort of sessions.
+        # That is a quality tax, which is not a trade this product makes.
+        "verbosity",
+        # Script clusters a session by its ENTIRE ordered (tool, arg-shape)
+        # tuple, so one extra file read or a reordered call breaks the match.
+        # It found zero clusters across ~1.2k real coding sessions, and the
+        # cluster threshold is not the bottleneck — the signature is.
+        # DECISION: disabled for this persona now rather than silently
+        # retired; re-enable if the signature is redesigned to a subsequence
+        # or prefix match that tolerates heterogeneous coding work.
+        "script",
+    }),
+}
+
+
+def disabled_analyzers_for_persona(persona: str) -> frozenset[str]:
+    """Analyzer names with no applicable fix for `persona`.
+
+    Single source of truth for the persona skip gate — `build_report` uses it
+    to drop analyzers before dispatch, the `downsize` analyzer uses it for its
+    `placement` sub-check, and `cost_proposals` uses it so the Review inbox
+    makes the same selection. Unknown/unlisted personas disable nothing.
+    """
+    return PERSONA_DISABLED_ANALYZERS.get(persona, frozenset())
+
+
 THIN_DATA_DAYS = 7
 
 
@@ -158,6 +235,15 @@ def build_report(
             f"Unknown finding(s): {sorted(unknown)}. "
             f"Available: {sorted(ANALYZER_REGISTRY.keys())}"
         )
+
+    # Persona skip gate. Applied AFTER validation (so a typo still raises) and
+    # BEFORE dispatch, which is what makes it a true skip: an analyzer removed
+    # here is never invoked and runs no query. Unconditional — every caller
+    # that selects analyzers (the CLI, /api/v1/optimize, the Review inbox's
+    # COST_ANALYZERS recompute, the status teaser) funnels through this one
+    # choke point, so none of them can reintroduce a finding this persona
+    # cannot act on. See PERSONA_DISABLED_ANALYZERS for the per-name reasons.
+    selected -= disabled_analyzers_for_persona(persona)
 
     for name in ANALYZER_ORDER:
         if name in selected and name in ANALYZER_REGISTRY:
