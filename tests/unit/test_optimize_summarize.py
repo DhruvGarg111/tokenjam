@@ -74,7 +74,11 @@ def test_sums_per_call_tokens_drops_zero_saving(db, monkeypatch):
     f = _run(db)
     assert f.files == 2
     assert f.estimated_recoverable_tokens == 710
-    assert f.estimated_recoverable_usd is None       # tokens-only by design
+    # No session in this window is observed loading a repo-scoped "./CLAUDE.md"
+    # (its ancestor names match no agent_id-derived repo), so no dollar figure
+    # is attached — never a zero, never a rate borrowed from a file that did
+    # resolve.
+    assert f.estimated_recoverable_usd is None
     assert f.estimate_confidence == "heuristic"
     assert f.estimate_basis                          # explicit basis required by contract
     assert {c.path for c in f.candidates} == {"./CLAUDE.md", "./AGENTS.md"}
@@ -145,12 +149,18 @@ def test_summarize_in_click_choices_and_renderer():
 
 def test_render_summarize_lists_candidates_and_points_to_summarize_list(db, monkeypatch, capsys):
     """The finding renders through the CLI dispatch path, names the files, the
-    per-call token saving, and points at `tj summarize` -- never fabricates a
-    dollar figure (estimated_recoverable_usd stays None by design)."""
+    per-call token saving, and points at `tj summarize`.
+
+    These candidates resolve to no loading session, so there is no dollar
+    figure to show and none is fabricated. The inverse — that a resolvable file
+    DOES surface its dollars — is pinned by
+    `test_render_summarize_shows_the_window_dollar_figure_when_priced`.
+    """
     from tokenjam.cli.cmd_optimize import _render_summarize
 
     _patch_scan(monkeypatch, [_cand("./CLAUDE.md", 410), _cand("./AGENTS.md", 300)])
     finding = _run(db)
+    assert finding.estimated_recoverable_usd is None
 
     for mode in ("api", "subscription", "local", "unknown"):
         _render_summarize(finding, pricing_mode=mode, marker="①")
@@ -162,6 +172,73 @@ def test_render_summarize_lists_candidates_and_points_to_summarize_list(db, monk
     assert "tj summarize list" in out
     assert "tj summarize prep" in out
     assert "$" not in out  # no fabricated dollar figure
+
+
+# --- Always-on files save REPEATEDLY, so the figure is priced per window ------
+
+def test_global_scope_file_is_priced_across_every_session_in_the_window(
+    db, monkeypatch,
+):
+    """A `~/.claude` file is loaded by every session and re-read on every call
+    within one, so its reduction is worth reduction x sessions x (input rate +
+    later calls at the cache-read rate) — not a one-time figure."""
+    from tokenjam.core.pricing import get_rates
+
+    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(session_id="s2"))
+    for sid in ("s1", "s2"):
+        for _ in range(3):
+            db.insert_span(make_llm_span(
+                session_id=sid, provider="anthropic", model="claude-haiku-4-5",
+                input_tokens=100, output_tokens=10,
+                start_time=utcnow() - timedelta(days=1),
+            ))
+    _patch_scan(monkeypatch, [_cand("~/.claude/CLAUDE.md", 1_000, scope="global")])
+
+    since, until = _window()
+    report = build_report(db=db, config=TjConfig(version="1"),
+                          since=since, until=until, findings=["summarize"])
+    f = report.findings["summarize"]
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    # 2 sessions x 3 calls each: one send at the input rate, two re-reads.
+    expected = (
+        1_000
+        * (rates.input_per_mtok / 1_000_000)
+        * (1 + (rates.cache_read_per_mtok / rates.input_per_mtok) * 2)
+        * 2
+    )
+    assert f.sessions_examined == 2
+    assert f.calls_per_session == 3.0
+    assert f.candidates[0].sessions_loading == 2
+    assert f.estimated_recoverable_usd == pytest.approx(round(expected, 6))
+    assert f.rate_basis
+    # Strictly more than a single send: the saving recurs, it is not one-time.
+    assert f.estimated_recoverable_usd > 1_000 * rates.input_per_mtok / 1_000_000
+
+
+def test_render_summarize_shows_the_window_dollar_figure_when_priced(
+    db, monkeypatch, capsys,
+):
+    from tokenjam.cli.cmd_optimize import _render_summarize
+
+    db.upsert_session(make_session(session_id="s1"))
+    db.insert_span(make_llm_span(
+        session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=100, output_tokens=10, start_time=utcnow() - timedelta(days=1),
+    ))
+    _patch_scan(monkeypatch, [_cand("~/.claude/CLAUDE.md", 5_000_000, scope="global")])
+    since, until = _window()
+    report = build_report(db=db, config=TjConfig(version="1"),
+                          since=since, until=until, findings=["summarize"])
+    finding = report.findings["summarize"]
+    assert finding.estimated_recoverable_usd
+
+    _render_summarize(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+    assert "$" in out
+    # Rich soft-wraps, so match on a fragment that survives a line break.
+    assert "session(s) in this" in out
 
 
 def test_render_summarize_empty_state_names_the_reason(db, monkeypatch, capsys):
