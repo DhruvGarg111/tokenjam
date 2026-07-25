@@ -69,6 +69,13 @@ from tokenjam.core.context_diagnostic import (
     load_turn_compositions,
 )
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
+from tokenjam.core.optimize.analyzers.resend_tail import (
+    MIN_SESSION_CONTEXT_TOKENS,
+    introduced_tokens,
+    premium_driver_role,
+    resend_tail_tokens,
+    resend_tail_tokens_per_turn,
+)
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.pricing import get_rates
@@ -115,25 +122,26 @@ AVOIDABLE_FRACTION_OF_REPEAT = 0.683
 #
 # Scope, and why it is disjoint from every other analyzer's claim (Critical
 # Rule 27 — two analyzers claiming `estimated_recoverable_*` must draw from
-# disjoint spans). This claim is computed over MAIN-THREAD turns only
-# (`sub_agent_id IS NULL`), so it cannot overlap `subagent`, which filters to
-# `sub_agent_id IS NOT NULL`. And it only counts sessions whose accumulated
-# main-thread context exceeds MIN_SESSION_CONTEXT_TOKENS, which no `downsize`
-# candidate can be: that analyzer's structural gate is input < 5K tokens for
-# the whole session.
-
-#: A session only has an offload lever once its main-thread context is big
-#: enough for re-reading it to cost real money. Same threshold
-#: `subagent_rightsizing.CONTEXT_HEAVY_TOKENS` uses for the same idea, and
-#: an order of magnitude above `downsize`'s 5K structural ceiling, which is
-#: what keeps the two claims disjoint by construction.
-MIN_SESSION_CONTEXT_TOKENS = 50_000
-
-#: A prompt whose size falls to at most this share of the previous turn's has
-#: had its context reset (a `/compact`, a resume, a fresh window). Material
-#: introduced before that point is not re-read after it, so the tail stops
-#: there rather than running to end-of-session.
-COMPACTION_PROMPT_DROP_RATIO = 0.5
+# disjoint spans). Two guards, one per neighbour:
+#
+#   * vs `subagent` — this claim is computed over MAIN-THREAD turns only
+#     (`sub_agent_id IS NULL`), so it cannot overlap `subagent`, which filters
+#     to `sub_agent_id IS NOT NULL`.
+#   * vs `downsize` — `downsize` now claims the same offload mechanism for the
+#     sessions where a PREMIUM model drove the work inline (its driver-role
+#     case). Those sessions are skipped here. The partition test is the shared
+#     `resend_tail.premium_driver_role`, called by both analyzers, so the two
+#     populations cannot drift apart the way two independently-tuned thresholds
+#     would. `downsize`'s SECONDARY tiny-session case stays disjoint the way it
+#     always was: MIN_SESSION_CONTEXT_TOKENS is an order of magnitude above its
+#     5K structural ceiling.
+#
+# The tail arithmetic itself moved to `analyzers/resend_tail.py` so both sides
+# compute it from one implementation; the private aliases below keep every
+# existing call site and test working unchanged.
+_resend_tail_tokens_per_turn = resend_tail_tokens_per_turn
+_resend_tail_tokens = resend_tail_tokens
+_introduced_tokens = introduced_tokens
 
 RESEND_HONESTY_CAVEAT = (
     "Structural token-share, not a savings claim: a conservative lower bound "
@@ -293,6 +301,10 @@ class ResendFinding:
     #: `None` when no session in the window delegates, in which case no
     #: offload dollar figure is claimed.
     offloadable_share:         float | None = None
+    #: Context-heavy sessions handed to `downsize`'s driver-role case instead
+    #: of being claimed here (Critical Rule 27). Surfaced so the partition is
+    #: visible on the payload rather than being an invisible subtraction.
+    driver_role_sessions:      int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -333,14 +345,6 @@ def _cache_control_snippet(model: str, tokens: int) -> str:
     )
 
 
-def _introduced_tokens(turn: TurnComposition) -> int:
-    """Material this turn ADDS to the conversation, and that every later turn
-    in the same context window therefore re-reads: uncached input (a tool
-    result, a pasted file, a user message) plus the assistant's own output.
-    Cache reads are excluded — those are the re-reading, not the material."""
-    return turn.new_input_tokens + turn.output_tokens
-
-
 def _measure_offloadable_share(by_session: dict[str, list[TurnComposition]]) -> float | None:
     """Share of context-introducing volume this user already routes through
     subagents, measured across the sessions where they delegate at all.
@@ -371,49 +375,6 @@ def _measure_offloadable_share(by_session: dict[str, list[TurnComposition]]) -> 
     return min(delegated / total, 1.0)
 
 
-def _resend_tail_tokens_per_turn(main_turns: list[TurnComposition]) -> list[int]:
-    """Per-turn tail-token contribution — same computation as
-    ``_resend_tail_tokens``, kept ungrouped so each turn's own contribution can
-    be priced at that turn's own model's rate rather than one rate applied to
-    the session-wide sum.
-
-    For each turn, the material it introduces is re-read by every later
-    main-thread turn until the next compaction — a turn whose prompt collapses
-    to at most ``COMPACTION_PROMPT_DROP_RATIO`` of the previous one's, which is
-    what a ``/compact`` or a context reset looks like in the data. Counting
-    past that boundary would claim a cost the user never paid.
-
-    Returns, per turn, ``introduced x tail_length``, i.e. tokens billed as
-    cache reads purely because the work stayed on the parent thread.
-    """
-    n = len(main_turns)
-    prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in main_turns]
-    # boundary_after[i] = index of the first compaction boundary strictly after
-    # turn i, or n when the context survives to the end of the session.
-    boundary_after = [n] * n
-    next_boundary = n
-    for i in range(n - 1, -1, -1):
-        boundary_after[i] = next_boundary
-        collapsed = (
-            i >= 1
-            and prompt_sizes[i - 1] > 0
-            and prompt_sizes[i] <= prompt_sizes[i - 1] * COMPACTION_PROMPT_DROP_RATIO
-        )
-        if collapsed:
-            next_boundary = i
-
-    return [
-        _introduced_tokens(turn) * max(boundary_after[i] - i - 1, 0)
-        for i, turn in enumerate(main_turns)
-    ]
-
-
-def _resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
-    """Window-scoped total of ``_resend_tail_tokens_per_turn`` — kept for
-    callers (and tests) that only need the session's aggregate tail."""
-    return sum(_resend_tail_tokens_per_turn(main_turns))
-
-
 def _capture_flags(config) -> tuple[bool, bool, bool]:
     capture = getattr(config, "capture", None)
     return (
@@ -428,7 +389,15 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a ResendFinding to ctx.report.findings."""
     finding = ResendFinding()
 
-    turns = load_turn_compositions(ctx.conn, ctx.since, ctx.until, ctx.agent_id, ordered=True)
+    # `with_tool_activity=True` is required by the disjointness partition, not
+    # by anything this analyzer measures itself: `premium_driver_role` reads
+    # `tool_fanout` and `delegates`, which default to inert values without the
+    # tool-span join. Loading them here is what makes this analyzer's view of
+    # the partition identical to `downsize`'s rather than accidentally wider.
+    turns = load_turn_compositions(
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        ordered=True, with_tool_activity=True,
+    )
     if not turns:
         finding.notes.append("No LLM turns in the window.")
         ctx.report.findings["resend"] = finding
@@ -472,6 +441,7 @@ def run(ctx: AnalyzerContext) -> None:
     offload_usd_total = 0.0
     rightsize_usd_total = 0.0
     offload_tokens_total = 0
+    driver_role_sessions = 0
 
     for sid, session_turns in by_session.items():
         prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in session_turns]
@@ -529,6 +499,16 @@ def run(ctx: AnalyzerContext) -> None:
         # keeps this disjoint from `downsize`. Priced per turn at that turn's
         # own model's rate, same reasoning as cost-of-waste above.
         if offloadable_share is None:
+            continue
+        if premium_driver_role(session_turns) is not None:
+            # Claimed in full by `downsize`'s driver-role case (Critical Rule
+            # 27). A premium model that drove this session inline is a bigger,
+            # differently-framed version of the same offload lever, and the two
+            # cards must not price the same tokens. The cost-of-waste figure
+            # above is deliberately NOT skipped: it is an observation of what
+            # re-sending context cost, never a saving, and is never summed with
+            # any recoverable figure on any surface.
+            driver_role_sessions += 1
             continue
         main_turns = [t for t in session_turns if not t.sub_agent_id]
         if len(main_turns) < 2:
@@ -600,6 +580,15 @@ def run(ctx: AnalyzerContext) -> None:
             "your offloadable share from) and carries enough main-thread "
             "context for offloading to pay. The token figure above still "
             "stands."
+        )
+    finding.driver_role_sessions = driver_role_sessions
+    if driver_role_sessions:
+        finding.notes.append(
+            f"{driver_role_sessions} context-heavy session(s) in this window "
+            "were driven inline by a premium-tier model that never dispatched "
+            "a subagent. Their offload saving is claimed by the model-role "
+            "card instead of here, so the two never price the same tokens; "
+            "the cost-of-waste figure above still covers them."
         )
     finding.estimate_basis = RESEND_ESTIMATE_BASIS
 

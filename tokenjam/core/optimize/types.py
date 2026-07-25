@@ -92,6 +92,27 @@ class DowngradeExample:
 
 
 @dataclass
+class DriverRoleExample:
+    """One session where a premium model drove undelegated, tool-heavy work.
+
+    A spot-check row, not the aggregate: `offload_usd` + `tier_usd` are this
+    session's own two halves of the inline-vs-routed counterfactual, so a user
+    can open the session and check the claim against what actually happened.
+    """
+    session_id:      str
+    agent_id:        str
+    model:           str
+    alt_model:       str
+    turns:           int   # main-thread turns in the session
+    stretch_turns:   int   # of those, turns inside a tool-driven stretch
+    tool_calls:      int   # main-thread tool calls
+    tail_tokens:     int   # tokens re-read purely because work stayed inline
+    offload_usd:     float
+    tier_usd:        float
+    recoverable_usd: float
+
+
+@dataclass
 class DowngradeFinding:
     candidate_sessions: int
     total_sessions:     int
@@ -138,6 +159,31 @@ class DowngradeFinding:
     # Typed loosely to keep `types` free of an analyzer import; empty when no
     # candidate group had pricing data for both sides.
     per_agent:                    list[Any]    = field(default_factory=list)
+    # --- The PRIMARY case: a premium model in the driver role ---------------
+    # Sessions where a premium-tier model drove long, undelegated, tool-heavy
+    # work inline instead of routing it to cheap workers. Every field here
+    # describes ONLY that case; the fields above describe ONLY the secondary
+    # tiny-session case. The two populations are disjoint (a driver-flagged
+    # session is excluded from the tiny-session walk), which is what makes it
+    # safe for `estimated_recoverable_usd` to be their sum.
+    driver_sessions:          int   = 0
+    driver_recoverable_usd:   float = 0.0
+    # The two halves of the driver-role claim, kept visible so the headline is
+    # never a black box. `driver_offload_usd` is the re-read tail that stops
+    # happening once the work runs in a worker's own context;
+    # `driver_tier_usd` is the same turns' own work repriced at the worker
+    # tier. They compound (where the work runs vs what it runs on) and sum to
+    # `driver_recoverable_usd`.
+    driver_offload_usd:       float = 0.0
+    driver_tier_usd:          float = 0.0
+    driver_tokens:            int   = 0
+    driver_tail_tokens:       int   = 0
+    # Premium driver model -> the worker tier its work would have routed to.
+    # Named on the card: a counterfactual whose substitute is unstated cannot
+    # be inspected.
+    driver_substitutes:       dict[str, str] = field(default_factory=dict)
+    driver_examples:          list[DriverRoleExample] = field(default_factory=list)
+    driver_estimate_basis:    str   = ""
 
 
 @dataclass

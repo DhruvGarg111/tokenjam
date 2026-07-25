@@ -995,7 +995,21 @@ def _render_downgrade(
 
     `persona` picks the call-to-action at the bottom (#97) — see
     `_render_downgrade_cta`.
+
+    The driver-role case leads when it fired: it is the primary case, and on a
+    coding-agent corpus it carries essentially all of the analyzer's dollars.
+    The tiny-session block below it is skipped entirely when no session matched
+    it, so the header never reports "0% of sessions" over a real finding.
     """
+    if d.driver_sessions:
+        _render_driver_role(d, pricing_mode, marker)
+        marker = " "
+    if d.candidate_sessions <= 0:
+        # No tiny-session candidates, so there is no `bench_command` and no
+        # model swap for the CTA to talk about: the driver-role block above
+        # carries its own fix, which is a CLAUDE.md rule rather than a swap.
+        return
+
     console.print(
         f"  [bold]{marker} Downsize:[/bold] "
         f"{d.percent_of_sessions:.0f}% of sessions match a smaller-model "
@@ -1076,6 +1090,41 @@ def _render_downgrade(
     )
     if d.bench_command:
         _render_downgrade_cta(d.bench_command, persona)
+
+
+def _render_driver_role(
+    d: DowngradeFinding, pricing_mode: str, marker: str,
+) -> None:
+    """The primary case: a premium model drove undelegated work inline.
+
+    Dollars are suppressed outside `api` pricing exactly as the tiny-session
+    block suppresses them — the token figure carries the finding instead, since
+    a flat-rate plan's re-read tail is real quota even when it is not a bill.
+    """
+    swaps = ", ".join(f"{m} → {alt}" for m, alt in sorted(d.driver_substitutes.items()))
+    console.print(
+        f"  [bold]{marker} Model role:[/bold] a premium model drove "
+        f"{d.driver_sessions} of {d.total_sessions} sessions inline, without "
+        f"dispatching a single worker"
+    )
+    console.print(
+        f"     • [bold]{format_tokens(d.driver_tail_tokens)}[/bold] tokens were "
+        f"re-read purely because that work stayed in the main thread"
+    )
+    if pricing_mode == "api":
+        console.print(
+            f"     • Routing it to a worker would have saved "
+            f"[bold]{format_cost(d.driver_recoverable_usd)}[/bold] in the window "
+            f"({format_cost(d.driver_offload_usd)} of re-reads + "
+            f"{format_cost(d.driver_tier_usd)} of tier difference)"
+        )
+    if swaps:
+        console.print(f"     • Suggested worker tier: [dim]{swaps}[/dim]")
+    console.print(
+        "     • [dim]Your own thread stays on the premium model — what moves is "
+        "the context-heavy work, not the driver.[/dim]"
+    )
+    console.print()
 
 
 def _render_downgrade_cta(bench_command: str, persona: str) -> None:

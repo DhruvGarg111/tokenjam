@@ -339,14 +339,23 @@ def _downsize_to_proposal(
     interactive model, so it never gets the raw "route to a cheaper model"
     instruction — see ``_DOWNSIZE_CC_LEVER``.
     """
-    if finding is None or getattr(finding, "candidate_sessions", 0) <= 0:
+    if finding is None:
         return []
+    # The driver-role card is a SEPARATE card from the tiny-session one: it
+    # describes a different session population (disjoint by construction — see
+    # `analyzers/resend_tail.premium_driver_role`) and a different lever, so
+    # merging the two would put one number on top of two unrelated derivations.
+    # Exactly one window-wide card, never one per agent, so this adds at most a
+    # single row to the inbox.
+    proposals = _driver_role_proposals(finding, persona)
+    if getattr(finding, "candidate_sessions", 0) <= 0:
+        return proposals
     per_agent = _downsize_agent_proposals(finding, config, persona)
     if per_agent:
-        return per_agent
+        return proposals + per_agent
     suggestions: dict[str, str] = dict(getattr(finding, "suggestions", {}) or {})
     if not suggestions:
-        return []
+        return proposals
     models = sorted(suggestions.keys())
     model_list = ", ".join(models)
     evidence = (
@@ -386,9 +395,15 @@ def _downsize_to_proposal(
         advise_text=advise,
         suggestion=suggestion,
         one_paste_fix=suggestion,
-        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
-        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        # The TINY-SESSION share only: the finding's figures are the sum of
+        # both cases, and the driver-role half already has its own card above,
+        # so carrying the sum here would claim it twice under two signatures —
+        # exactly the failure Critical Rule 27 describes. Subtractive rather
+        # than recomputed, so a window with no driver case passes the finding's
+        # own numbers through byte for byte (including a `None`).
+        estimated_recoverable_usd=_minus_driver_usd(finding),
+        estimated_recoverable_tokens=_minus_driver_tokens(finding),
+        estimate_basis=_tiny_session_basis(finding),
         # `estimated_monthly_usd`/`estimated_monthly_tokens` are intentionally
         # left unset here (#273): `model_downgrade.py`'s own
         # `monthly_savings_usd`/`monthly_tokens_in_candidates` is a
@@ -400,6 +415,123 @@ def _downsize_to_proposal(
         # `cost_proposals_from_report`, or two analyzers' "monthly" figures
         # are silently on different bases again. `monthly_savings_usd` itself
         # is untouched and still backs the CLI's own `tj optimize` line.
+    )]
+
+
+def _minus_driver_usd(finding: Any) -> float | None:
+    """The finding's recoverable dollars with the driver-role card's share
+    removed, so the two downsize cards partition one figure instead of each
+    carrying the total. ``None`` passes straight through."""
+    total = getattr(finding, "estimated_recoverable_usd", None)
+    if total is None:
+        return None
+    driver = float(getattr(finding, "driver_recoverable_usd", 0.0) or 0.0)
+    return round(max(float(total) - driver, 0.0), 6)
+
+
+def _minus_driver_tokens(finding: Any) -> int | None:
+    """Token counterpart of :func:`_minus_driver_usd`."""
+    total = getattr(finding, "estimated_recoverable_tokens", None)
+    if total is None:
+        return None
+    driver = int(getattr(finding, "driver_tokens", 0) or 0)
+    return max(int(total) - driver, 0)
+
+
+def _tiny_session_basis(finding: Any) -> str:
+    """The basis for the tiny-session card.
+
+    The finding's own `estimate_basis` describes BOTH cases, which would be
+    misleading on a card that only claims one of them — but only once the
+    driver-role case actually fired. With no driver session in the window the
+    finding's basis already describes exactly this card, so it passes through.
+    """
+    if int(getattr(finding, "driver_sessions", 0) or 0) <= 0:
+        return str(getattr(finding, "estimate_basis", "") or "")
+    return (
+        "candidate sessions routed to a cheaper model over the window — "
+        "structural fit only, no quality validation. The premium-driver-role "
+        "share of this window is claimed on its own card, not here."
+    )
+
+
+_DRIVER_ROLE_ADVICE = (
+    "Route this shape of work to workers instead of doing it inline. Add a "
+    "standing rule to CLAUDE.md telling the agent to dispatch a subagent for "
+    "context-heavy sub-tasks (broad file reads, multi-file search, long "
+    "tool-output loops, exploratory investigation) rather than running them in "
+    "the main thread, and pin the worker's model in its own "
+    "`.claude/agents/<name>.md` frontmatter so every dispatch inherits the "
+    "cheaper tier. This is not a request to downgrade your own interactive "
+    "session: the driver stays on the premium model and keeps making the "
+    "decisions. What changes is that the worker's tool output lives in the "
+    "worker's context, so it never gets re-read by every later turn of yours."
+)
+
+
+def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+    """The model-ROLE card: a premium model drove undelegated work inline.
+
+    One window-wide card, deliberately never one per agent — the standing
+    don't-fill-the-inbox constraint means this case adds exactly one row no
+    matter how many sessions or agents it covers.
+
+    Persona-agnostic advice, unlike the tiny-session card's: the fix here is a
+    CLAUDE.md rule plus an agent-file `model:` pin, both of which are on the
+    Claude Code action surface, so there is no "you can't switch your own
+    interactive model" caveat to apply.
+    """
+    sessions = int(getattr(finding, "driver_sessions", 0) or 0)
+    usd = float(getattr(finding, "driver_recoverable_usd", 0.0) or 0.0)
+    if sessions <= 0 or usd <= 0:
+        return []
+    substitutes: dict[str, str] = dict(getattr(finding, "driver_substitutes", {}) or {})
+    models = sorted(substitutes.keys())
+    total_sessions = int(getattr(finding, "total_sessions", 0) or 0)
+    offload = float(getattr(finding, "driver_offload_usd", 0.0) or 0.0)
+    tier = float(getattr(finding, "driver_tier_usd", 0.0) or 0.0)
+    tail = int(getattr(finding, "driver_tail_tokens", 0) or 0)
+    swap_text = ", ".join(f"{m} → {substitutes[m]}" for m in models)
+    evidence = (
+        f"{sessions} of {total_sessions} sessions ran "
+        f"{', '.join(models) or 'a premium model'} as the driver and never "
+        f"dispatched a subagent: {tail:,} tokens were re-read purely because "
+        f"that work stayed in the main thread. Routing it to a worker "
+        f"({swap_text or 'a cheaper same-family model'}) would have saved "
+        f"${offload:,.2f} of re-reads plus ${tier:,.2f} of tier difference."
+    )
+    one_paste = (
+        "# CLAUDE.md\n"
+        "Offload context-heavy sub-tasks (broad file reads, multi-file search, "
+        "long tool-output loops, exploratory investigation) to a subagent "
+        "instead of running them inline in the main thread.\n"
+        + "\n".join(
+            f"\n# .claude/agents/<name>.md\n---\nmodel: {substitutes[m]}\n---"
+            for m in models[:1]
+        )
+    )
+    return [CostProposal(
+        kind="cost",
+        analyzer="downsize",
+        signature="cost:downsize:driver-role",
+        title="Premium model in the driver role (route the work, not the thread)",
+        target_key={"models": models, "suggestions": substitutes},
+        evidence=evidence,
+        baseline={
+            "driver_sessions": sessions,
+            "total_sessions": total_sessions,
+            "driver_offload_usd": offload,
+            "driver_tier_usd": tier,
+            "driver_tail_tokens": tail,
+            "driver_tokens": int(getattr(finding, "driver_tokens", 0) or 0),
+            "substitutes": substitutes,
+        },
+        advise_text=_DRIVER_ROLE_ADVICE,
+        suggestion=one_paste,
+        one_paste_fix=one_paste,
+        estimated_recoverable_usd=round(usd, 6),
+        estimated_recoverable_tokens=int(getattr(finding, "driver_tokens", 0) or 0),
+        estimate_basis=str(getattr(finding, "driver_estimate_basis", "") or ""),
     )]
 
 
