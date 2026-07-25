@@ -2852,3 +2852,32 @@ def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
     assert headline_unit(priced_deadweight, founder_framing) == "dollars"
     assert headline_unit(resend_structural, founder_framing) == "tokens"
     assert headline_unit(unpriced_placement, founder_framing) == "tokens"
+
+
+# --- Recoverable-waste band drops no-lever analyzers for claude-code -------- #
+def test_recoverable_band_excludes_no_lever_analyzers_for_claude_code(html):
+    # cache / cache-recommend / placement / trim / verbosity / script have no
+    # actionable lever from the Claude Code CLI action surface (CLAUDE.md
+    # rules, hooks, MCP config, subagent definitions) — they must vanish from
+    # the Overview band entirely for a claude-code window, not render as a
+    # placeholder. Live-verified via a seeded `tj serve` + screenshot; this
+    # pins the JS source so a future edit can't silently regress it.
+    assert "const PERSONA_DISABLED_ANALYZERS" in html
+    start = html.index("const PERSONA_DISABLED_ANALYZERS")
+    end = html.index("};", start)
+    block = html[start:end]
+    assert "'claude-code'" in block
+    for name in ("cache", "cache-recommend", "placement", "trim", "verbosity", "script"):
+        assert f"'{name}'" in block
+
+
+def test_recoverable_tiles_filters_by_persona_before_ranking(html):
+    fn_start = html.index("function recoverableTiles(opt)")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+    assert "PERSONA_DISABLED_ANALYZERS[opt.persona]" in fn
+    assert "disabled.has(k)" in fn
+    # Downsize + wave-2 findings + the not-ready fallback must all respect the
+    # gate (three separate call sites build `out`) so a persona-disabled
+    # analyzer never sneaks in through any of them.
+    assert fn.count("disabled.has(") >= 3
