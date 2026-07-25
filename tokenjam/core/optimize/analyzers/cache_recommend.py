@@ -19,6 +19,16 @@ span carries it, falling back to `GenAIAttributes.PROMPT_CONTENT` otherwise
 read straight off disk by the backfill parser) because the latter is the
 human's per-turn message on those spans — a different string every turn,
 so it never repeats verbatim and the prefix-hash below always came up empty.
+
+This analyzer is disabled outright for the `claude-code` persona
+(`runner.PERSONA_DISABLED_ANALYZERS`) — not because this prefix detection
+can't fire, but because a Claude Code user has no `cache_control` lever to
+pull even when it does. That disable removes `cache-recommend` from dispatch
+before a `claude-code`-dominant window is ever analyzed, so the
+CLAUDE.md-prefix path above never runs for that persona. It DOES run — and
+can surface real candidates — for `sdk`/`mixed` windows that carry
+Claude-Code-sourced spans alongside SDK-sourced ones (persona is computed
+per-window; see `core.framing.dominant_persona`).
 """
 from __future__ import annotations
 
