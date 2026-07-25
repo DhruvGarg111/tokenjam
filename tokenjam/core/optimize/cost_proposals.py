@@ -68,11 +68,25 @@ COST_CORRELATIONAL_CAVEAT = (
 #: savings and previously had no adapter here, silently excluding it from the
 #: Review inbox's Cost-advisories tab.
 #:
-#: ``summarize`` (prompt summarization) is deliberately NOT here — it is the
-#: one cost analyzer with its own dedicated review surface (the curate/diff
-#: screen driven by ``core/summarize/``'s prepare/check/apply lifecycle,
-#: which needs a multi-step rewrite-and-verify flow this single-card adapter
-#: shape can't represent), not an oversight to fix later.
+#: ``summarize`` (prompt summarization) is deliberately NOT here, and stays out
+#: now that it carries a dollar figure of its own. Three reasons, decided
+#: rather than inherited:
+#:
+#:   1. It has its own dedicated review surface — the curate/diff screen driven
+#:      by ``core/summarize/``'s prepare/check/apply lifecycle, a multi-step
+#:      rewrite-and-verify flow this single-card adapter shape cannot represent.
+#:      An inbox card would either duplicate that surface or link away from the
+#:      inbox to it, and neither is a card.
+#:   2. It is the BUDGET, not a peer. ``write_budget.measured_agent_file_tokens``
+#:      reads the summarize finding to size how much permanent rule-writing every
+#:      OTHER analyzer in this table is allowed to propose. Listing it here would
+#:      make the analyzer that sets the budget also compete for it, and a user who
+#:      dismissed the card would silently be dismissing the counterweight that
+#:      stops the rule-writers from growing the files it wants compressed.
+#:   3. The standing product constraint is to consolidate cards, not add them.
+#:      Its saving is already visible in the Overview waste band (registry-driven
+#:      off the presence of ``estimated_recoverable_usd``), so it is not hidden —
+#:      only absent from this one surface.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
     "script", "reuse", "verbosity", "resend",
@@ -195,6 +209,17 @@ class CostProposal:
     # labeled. ``None`` when the finding produced no estimate for this item.
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
+    # COST OF WASTE — what the flagged behaviour actually COST over the window,
+    # fully observed. Structurally separate from every `estimated_*` field
+    # above and MUST NEVER be summed with them, on any surface: those answer
+    # "what does the fix return", this answers "what did this cost me", and the
+    # second is legitimately much larger than the first (a floor of zero is not
+    # achievable — see `analyzers/context_resend.py`'s module docstring).
+    # `estimated_recoverable_rollup` reads only the `estimated_*` fields, so
+    # this never leaks into the Review inbox headline.
+    cost_of_waste_usd:            float | None = None
+    cost_of_waste_tokens:         int | None   = None
+    cost_of_waste_basis:          str          = ""
     # Monthly-basis fields (Review inbox stat tiles) — a SEPARATE, explicitly-
     # named basis from the two window fields above; see the "Recoverable-
     # savings contract" note in model_downgrade.py / CLAUDE.md. `downsize`
@@ -1693,8 +1718,80 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     )]
 
 
-def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _rightsize_target(subagent_finding: Any, config: Any) -> dict[str, Any]:
+    """The concrete agent file the compound offload card should name, if one
+    exists: the most expensive over-powered subagent that has its own
+    definition file, plus the cheaper model to pin in it.
+
+    Reuses ``_agent_model_plumbing`` — the same resolver the ``subagent`` card
+    already uses — rather than re-deriving a path, so the two cards can never
+    name different files for the same agent. Empty dict when the subagent
+    analyzer didn't run, nothing was flagged, or no flagged subagent has a
+    definition file; the card then states the right-sizing lever generically
+    instead of inventing an agent name.
+    """
+    if subagent_finding is None:
+        return {}
+    flagged = list(getattr(subagent_finding, "flagged", []) or [])
+    over_powered = [r for r in flagged if "over_powered" in (getattr(r, "flags", []) or [])]
+    if not over_powered:
+        return {}
+    try:
+        return _agent_model_plumbing(over_powered, config)
+    except Exception:
+        return {}
+
+
+def _compound_offload_fix(rightsize: dict[str, Any], fix_offload: str, fix_rightsize: str) -> str:
+    """The single rung-1 rule that carries BOTH halves of the compound lever.
+
+    One artifact, not two: the offload directive decides where context-heavy
+    work runs, the right-sizing directive decides what it runs on, and they
+    compound. Writing them as one block is what keeps this a consolidation of
+    the resend / subagent / downsize recommendations rather than a third card
+    on top of them.
+    """
+    parts = [fix_offload, fix_rightsize]
+    if rightsize:
+        parts.append(
+            f"Concretely: {rightsize['agent_name']} already runs oversized for "
+            f"the work it does — pin `model: {rightsize['proposed_model']}` in "
+            f"{rightsize['target_path']} and set its reasoning effort to match "
+            f"the task rather than inheriting the parent's."
+        )
+    return "\n\n".join(p for p in parts if p)
+
+
+def _rightsize_frontmatter_snippet(rightsize: dict[str, Any]) -> str:
+    """The copyable agent-file frontmatter for the right-sizing half.
+
+    Both keys live in the same ``.claude/agents/<name>.md`` frontmatter block,
+    so the second half of the compound fix is one paste, not two.
+    """
+    name = rightsize.get("agent_name") or "<subagent-name>"
+    model = rightsize.get("proposed_model") or "<cheaper-same-family-model>"
+    path = rightsize.get("target_path") or f".claude/agents/{name}.md"
+    return (
+        f"# {path} — frontmatter\n"
+        f"---\n"
+        f"name: {name}\n"
+        f"model: {model}\n"
+        f"reasoning_effort: low\n"
+        f"---"
+    )
+
+
+def _resend_to_proposals(
+    finding: Any, persona: str = "unknown",
+    subagent_finding: Any = None, config: Any = None,
+) -> list[CostProposal]:
     """One window-wide card for the ``resend`` (context re-send) finding.
+
+    This card is COMPOUND by design: it consolidates what resend and subagent
+    right-sizing would otherwise say on separate cards, because the two are one
+    behavioural change (offload context-heavy work to a subagent, and size that
+    subagent to the work) applied through one rung-1 rule. Consolidating rather
+    than adding is deliberate — the Review inbox does not grow.
 
     Persona-gated like every other lever-bearing adapter. Three levers exist
     and they are NOT interchangeable:
@@ -1737,25 +1834,39 @@ def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
         f"earlier turn (conservative lower bound; independent of whether "
         f"caching is enabled)."
     )
+    cost_of_waste_usd = getattr(finding, "cost_of_waste_usd", None)
+    if cost_of_waste_usd is not None:
+        evidence += (
+            f" That re-sent volume cost {_money(float(cost_of_waste_usd))} over "
+            f"the window — an observation, not a recoverable amount; the fix "
+            f"below returns a much smaller figure."
+        )
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
     fix_subagent_offload = str(getattr(finding, "fix_subagent_offload", "") or "")
+    fix_rightsize = str(getattr(finding, "fix_rightsize", "") or "")
     # The cache_control snippet is the SDK lever only; a claude-code window
     # can't paste it, so suppress it there — unchanged from before.
     cache_snippet = "" if persona == "claude-code" else fix_cache_control
+    rightsize = _rightsize_target(subagent_finding, config)
 
     if persona in {"claude-code", "mixed"} and fix_subagent_offload:
-        advise = fix_subagent_offload
+        compound_fix = _compound_offload_fix(rightsize, fix_subagent_offload, fix_rightsize)
+        advise = compound_fix
         if fix_compaction:
             advise = advise + " Immediate relief in an already-full session: " + fix_compaction
         write_fields = _persona_gated_write_fields(
-            persona, fix_subagent_offload, rung=1, scope="project",
+            persona, compound_fix, rung=1, scope=rightsize.get("scope") or "project",
         )
         # resend's `suggestion` slot is reserved for the SDK cache_control
         # snippet above, not the write-fallback text the helper would add
         # for a "mixed" persona — drop it so the two don't collide.
         write_fields.pop("suggestion", None)
-        one_paste_fix = cache_snippet or fix_subagent_offload
+        # The second half of the compound fix: the agent-file frontmatter that
+        # pins model AND reasoning effort. Carried as the one-paste artifact
+        # because the rung-1 write lands in CLAUDE.md, and the apply machinery
+        # writes exactly one target per apply.
+        one_paste_fix = _rightsize_frontmatter_snippet(rightsize)
     else:
         advise = fix_compaction
         write_fields = {
@@ -1777,12 +1888,20 @@ def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
             "repeat_share": float(repeat_share),
             "repeat_share_median": getattr(finding, "repeat_share_median", None),
             "repeat_share_p90": getattr(finding, "repeat_share_p90", None),
+            "offloadable_share": getattr(finding, "offloadable_share", None),
+            "offload_recoverable_usd": getattr(finding, "offload_recoverable_usd", None),
+            "rightsize_recoverable_usd": getattr(finding, "rightsize_recoverable_usd", None),
+            "rightsize_agent_name": rightsize.get("agent_name", ""),
+            "rightsize_target_path": rightsize.get("target_path", ""),
         },
         advise_text=advise,
         suggestion=cache_snippet,
         one_paste_fix=one_paste_fix,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        cost_of_waste_usd=cost_of_waste_usd,
+        cost_of_waste_tokens=getattr(finding, "cost_of_waste_tokens", None) or None,
+        cost_of_waste_basis=str(getattr(finding, "cost_of_waste_basis", "") or ""),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
         **write_fields,
@@ -2142,7 +2261,17 @@ def cost_proposals_from_report(
         (lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
         (lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
         (lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
-        (lambda f: _resend_to_proposals(f, persona=persona), _pick("resend")),
+        (
+            # The resend card is compound: it names the concrete over-powered
+            # subagent (from the `subagent` finding) that the offload rule
+            # should also right-size, so the two levers land as one card rather
+            # than two. Reading the sibling finding here, not in the analyzer,
+            # keeps `context_resend.py` free of a cross-analyzer dependency.
+            lambda f: _resend_to_proposals(
+                f, persona=persona, subagent_finding=_pick("subagent"), config=config,
+            ),
+            _pick("resend"),
+        ),
     )
     for adapter, finding in adapters:
         try:

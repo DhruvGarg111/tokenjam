@@ -2124,10 +2124,13 @@ def _render_summarize(
     silently dropped from plain-text `tj optimize` output and only reachable
     via `--json`.
 
-    Tokens-only by design (see core/optimize/analyzers/summarize.py):
-    `estimated_recoverable_usd` is intentionally None — there's no per-file
-    call telemetry to amortize a dollar figure over — so this renderer never
-    fabricates one, only the per-call token reduction.
+    The token figure is per CALL; the dollar figure is per WINDOW, because
+    these files are always-on context and the reduction is realized on every
+    session that loads them (see core/optimize/analyzers/summarize.py). The
+    dollar line only appears when the analyzer could observe how many sessions
+    actually load the files — it is never fabricated from a default rate — and
+    it goes through `render_savings` so a subscription/local plan sees the same
+    framing every other analyzer gives it.
     """
     console.print(_finding_header(marker, "Summarize:"))
     if not finding.candidates:
@@ -2143,6 +2146,17 @@ def _render_summarize(
         f"summarizable, ~[bold]{format_tokens(tokens)}[/bold] per call "
         f"[dim](aggregate {finding.reduction_pct}% prose reduction)[/dim]"
     )
+    recoverable_usd = getattr(finding, "estimated_recoverable_usd", None)
+    if recoverable_usd:
+        savings = render_savings(
+            recoverable_usd, tokens, Framing(pricing_mode=pricing_mode),
+        )
+        if savings != "—":
+            console.print(
+                f"       [green]~{savings}[/green] across the "
+                f"[bold]{finding.sessions_examined}[/bold] session(s) in this "
+                f"window that re-send these files on every call"
+            )
     for c in finding.candidates[:5]:
         console.print(
             f"       [dim]{c.path}[/dim]  [dim]({c.scope})[/dim]  "
