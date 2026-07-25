@@ -265,6 +265,58 @@ def test_recoverable_usd_none_when_no_priced_model(db):
     assert finding.estimated_recoverable_tokens is not None
 
 
+def _seed_mixed_model_session(db, session_id, sizes, models, *, cache_ratio=0.0, start=None):
+    """Like `_seed_session` but each turn can carry its OWN (provider, model)
+    instead of one model for the whole session."""
+    start = start or datetime(2026, 5, 10, tzinfo=UTC)
+    db.upsert_session(make_session(session_id=session_id, plan_tier="api"))
+    for i, (size, (provider, model)) in enumerate(zip(sizes, models)):
+        cache_tok = int(size * cache_ratio)
+        input_tok = size - cache_tok
+        db.insert_span(make_llm_span(
+            session_id=session_id, provider=provider, model=model,
+            input_tokens=input_tok, cache_tokens=cache_tok, output_tokens=50,
+            cost_usd=0.01, start_time=start + timedelta(minutes=i),
+        ))
+
+
+def test_cost_of_waste_prices_each_turn_at_its_own_model_not_the_dominant_one(db):
+    """A session that mixes models must price EACH turn's re-sent volume at
+    THAT turn's own model's rate, not at whichever model dominated the turn
+    count. Two opus turns ($5/MTok) and two haiku turns ($1/MTok), tied on
+    turn count, all uncached and equally sized -- the correct figure prices
+    each turn's own uncached-repeat share at its own rate."""
+    _seed_mixed_model_session(db, "mixed", [1000, 1000, 1000, 1000], [
+        ("anthropic", "claude-opus-4-8"), ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-haiku-4-5"), ("anthropic", "claude-haiku-4-5"),
+    ])
+    _seed_session(db, "pad1", [500])
+    _seed_session(db, "pad2", [500])
+    finding = _run(db, _config())
+
+    opus = get_rates("anthropic", "claude-opus-4-8")
+    haiku = get_rates("anthropic", "claude-haiku-4-5")
+    # sum=4000, max=1000 (tie) -> repeat_tokens=3000, split evenly across the
+    # 4 equally-sized turns: 750 uncached-repeat tokens per turn.
+    per_turn_uncached_repeat = 750
+    expected = (
+        2 * (per_turn_uncached_repeat / 1_000_000 * opus.input_per_mtok)
+        + 2 * (per_turn_uncached_repeat / 1_000_000 * haiku.input_per_mtok)
+    )
+    # What pricing the WHOLE session at a single dominant model (a tie here,
+    # but the old code's Counter.most_common(1) picks one) would have given --
+    # strictly higher than the correct mixed figure since it prices some
+    # cheap-model volume at the expensive rate (or vice versa; either way it
+    # cannot equal the correctly split figure for these two distinct rates).
+    all_opus_estimate = 3000 / 1_000_000 * opus.input_per_mtok
+    all_haiku_estimate = 3000 / 1_000_000 * haiku.input_per_mtok
+
+    assert finding.cost_of_waste_usd == pytest.approx(round(expected, 6))
+    assert finding.cost_of_waste_usd != pytest.approx(round(all_opus_estimate, 6))
+    assert finding.cost_of_waste_usd != pytest.approx(round(all_haiku_estimate, 6))
+    assert all_haiku_estimate < finding.cost_of_waste_usd < all_opus_estimate
+
+
 # --------------------------------------------------------------------------
 # The offload lever: measured from this corpus's own sub_agent_id telemetry
 # --------------------------------------------------------------------------
@@ -320,6 +372,57 @@ def test_recoverable_usd_is_offload_plus_rightsize_and_excludes_gross(db):
     # The whole point of the split: the recoverable claim is a small fraction
     # of what re-sending actually cost, and the gross never leaks into it.
     assert finding.cost_of_waste_usd > finding.estimated_recoverable_usd
+
+
+def _seed_recoverable_corpus(db, first_turn_model):
+    """Same shape as `_seed_offload_corpus`, except the FIRST main-thread turn
+    of the in-thread session -- the one with the largest re-read tail, since
+    it's the one read back by every later turn -- uses `first_turn_model`
+    while every later turn stays on the expensive model."""
+    start = datetime(2026, 5, 10, tzinfo=UTC)
+    db.upsert_session(make_session(session_id="delegator", plan_tier="api"))
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            session_id="delegator", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=1000, cache_tokens=1000, output_tokens=100,
+            cost_usd=0.01, start_time=start + timedelta(minutes=i),
+        ))
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            session_id="delegator", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=1000, cache_tokens=0, output_tokens=100,
+            cost_usd=0.01, sub_agent_id="researcher",
+            start_time=start + timedelta(minutes=10 + i),
+        ))
+    db.upsert_session(make_session(session_id="inthread", plan_tier="api"))
+    models = [first_turn_model] + ["claude-opus-4-8"] * 4
+    for i, model in enumerate(models):
+        db.insert_span(make_llm_span(
+            session_id="inthread", provider="anthropic", model=model,
+            input_tokens=20_000, cache_tokens=20_000 * i, output_tokens=500,
+            cost_usd=0.5, start_time=start + timedelta(hours=1, minutes=i),
+        ))
+    _seed_session(db, "pad1", [500])
+
+
+def test_offload_recoverable_prices_each_turn_at_its_own_model(db):
+    """Changing ONLY the first main-thread turn's model (the one with the
+    largest re-read tail) must move the offload-recoverable figure --
+    otherwise it is still being priced off whichever model dominates the turn
+    count (4 opus turns vs. 1 other), not per turn. Under the old
+    dominant-model-only code this comparison would be a no-op: the dominant
+    model stays opus in both runs, so the figure would not move at all."""
+    _seed_recoverable_corpus(db, "claude-opus-4-8")
+    all_opus = _run(db, _config())
+
+    cheap_db = InMemoryBackend()
+    _seed_recoverable_corpus(cheap_db, "claude-haiku-4-5")
+    mixed = _run(cheap_db, _config())
+
+    assert all_opus.offload_recoverable_usd is not None
+    assert mixed.offload_recoverable_usd is not None
+    # A cheaper first-turn model must pull the recoverable figure DOWN.
+    assert mixed.offload_recoverable_usd < all_opus.offload_recoverable_usd
 
 
 def test_no_delegating_session_means_no_offload_claim(db):

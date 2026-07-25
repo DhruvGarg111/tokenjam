@@ -371,8 +371,11 @@ def _measure_offloadable_share(by_session: dict[str, list[TurnComposition]]) -> 
     return min(delegated / total, 1.0)
 
 
-def _resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
-    """Token-turns of re-reading the main thread pays for its own material.
+def _resend_tail_tokens_per_turn(main_turns: list[TurnComposition]) -> list[int]:
+    """Per-turn tail-token contribution — same computation as
+    ``_resend_tail_tokens``, kept ungrouped so each turn's own contribution can
+    be priced at that turn's own model's rate rather than one rate applied to
+    the session-wide sum.
 
     For each turn, the material it introduces is re-read by every later
     main-thread turn until the next compaction — a turn whose prompt collapses
@@ -380,7 +383,7 @@ def _resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
     what a ``/compact`` or a context reset looks like in the data. Counting
     past that boundary would claim a cost the user never paid.
 
-    Returns the sum of ``introduced x tail_length``, i.e. tokens billed as
+    Returns, per turn, ``introduced x tail_length``, i.e. tokens billed as
     cache reads purely because the work stayed on the parent thread.
     """
     n = len(main_turns)
@@ -399,10 +402,16 @@ def _resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
         if collapsed:
             next_boundary = i
 
-    return sum(
+    return [
         _introduced_tokens(turn) * max(boundary_after[i] - i - 1, 0)
         for i, turn in enumerate(main_turns)
-    )
+    ]
+
+
+def _resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
+    """Window-scoped total of ``_resend_tail_tokens_per_turn`` — kept for
+    callers (and tests) that only need the session's aggregate tail."""
+    return sum(_resend_tail_tokens_per_turn(main_turns))
 
 
 def _capture_flags(config) -> tuple[bool, bool, bool]:
@@ -488,31 +497,38 @@ def run(ctx: AnalyzerContext) -> None:
 
         if repeat_tokens <= 0:
             continue
-        rates = get_rates(provider, model)
-        if rates is None or rates.input_per_mtok <= 0:
-            continue  # unpriced model: contributes to no dollar figure at all
 
-        # COST OF WASTE (observed). Every cache read IS re-sent context by
-        # definition, billed at the cache-read rate; the still-uncached share
-        # of the repeat volume billed at the full input rate. Nothing
-        # discounted, nothing projected — this is what it cost, not what a fix
-        # returns. NEVER summed with the recoverable figures below.
-        total_new_input = sum(t.new_input_tokens for t in session_turns)
-        reread_tokens = sum(t.reread_tokens for t in session_turns)
-        uncached_fraction = (total_new_input / s_sum) if s_sum else 0.0
-        uncached_repeat_tokens = repeat_tokens * uncached_fraction
-        waste_usd_total += (
-            reread_tokens / 1_000_000 * rates.cache_read_per_mtok
-            + uncached_repeat_tokens / 1_000_000 * rates.input_per_mtok
-        )
-        waste_tokens_total += reread_tokens + round(uncached_repeat_tokens)
-        any_waste_priced = True
+        # COST OF WASTE (observed), priced per TURN at that turn's OWN model's
+        # rate — a session that mixes models (e.g. opus for some turns, haiku
+        # for others) must not have every turn priced at whichever model
+        # happened to dominate the turn count. `repeat_tokens` is inherently a
+        # session-level quantity (it comes from the sum-vs-max prompt-size
+        # comparison, not a per-turn one), so its uncached share is allocated
+        # across turns in proportion to each turn's own `new_input_tokens` —
+        # the same proportion the old single blended fraction expressed in
+        # aggregate, just applied per turn instead of once. Every cache read
+        # IS re-sent context by definition, billed at that turn's cache-read
+        # rate; the still-uncached share billed at that turn's input rate.
+        # Nothing discounted, nothing projected — this is what it cost, not
+        # what a fix returns. NEVER summed with the recoverable figures below.
+        for t in session_turns:
+            turn_rates = get_rates(t.provider or "unknown", t.model)
+            if turn_rates is None or turn_rates.input_per_mtok <= 0:
+                continue  # this turn's model unpriced: contributes no dollar figure
+            uncached_repeat = repeat_tokens * (t.new_input_tokens / s_sum) if s_sum else 0.0
+            waste_usd_total += (
+                t.reread_tokens / 1_000_000 * turn_rates.cache_read_per_mtok
+                + uncached_repeat / 1_000_000 * turn_rates.input_per_mtok
+            )
+            waste_tokens_total += t.reread_tokens + round(uncached_repeat)
+            any_waste_priced = True
 
         # RECOVERABLE (the compound offload + right-size lever). Main-thread
         # turns only, and only in sessions whose context is heavy enough for
         # the lever to exist — see MIN_SESSION_CONTEXT_TOKENS for why that also
-        # keeps this disjoint from `downsize`.
-        if offloadable_share is None or rates.cache_read_per_mtok <= 0:
+        # keeps this disjoint from `downsize`. Priced per turn at that turn's
+        # own model's rate, same reasoning as cost-of-waste above.
+        if offloadable_share is None:
             continue
         main_turns = [t for t in session_turns if not t.sub_agent_id]
         if len(main_turns) < 2:
@@ -522,20 +538,25 @@ def run(ctx: AnalyzerContext) -> None:
 
         # The tail that offloading removes: material re-read by later
         # main-thread turns purely because the work stayed in the thread.
-        offloadable_tail = _resend_tail_tokens(main_turns) * offloadable_share
-        offload_usd_total += offloadable_tail / 1_000_000 * rates.cache_read_per_mtok
+        for t, tail_tokens in zip(main_turns, _resend_tail_tokens_per_turn(main_turns)):
+            turn_rates = get_rates(t.provider or "unknown", t.model)
+            if turn_rates is None or turn_rates.cache_read_per_mtok <= 0:
+                continue
+            offloadable_tail = tail_tokens * offloadable_share
+            offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
 
-        # Right-sizing stacks independently: the same offloaded material still
-        # has to be read once by whatever runs it, so pricing it at the cheaper
-        # same-family model's input rate instead of this one's is a second,
-        # non-overlapping cut. Skipped when no cheaper alternative is priced.
-        offloaded_material = sum(_introduced_tokens(t) for t in main_turns) * offloadable_share
-        offload_tokens_total += round(offloadable_tail + offloaded_material)
-        alt = lookup_downgrade(provider, model)
-        alt_rates = get_rates(provider, alt) if alt else None
-        if alt_rates is not None:
-            rate_gap = max(0.0, rates.input_per_mtok - alt_rates.input_per_mtok)
-            rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
+            # Right-sizing stacks independently: the same offloaded material
+            # still has to be read once by whatever runs it, so pricing it at
+            # the cheaper same-family model's input rate instead of this
+            # turn's is a second, non-overlapping cut. Skipped when no
+            # cheaper alternative is priced for this turn's own model.
+            offloaded_material = _introduced_tokens(t) * offloadable_share
+            offload_tokens_total += round(offloadable_tail + offloaded_material)
+            alt = lookup_downgrade(t.provider or "unknown", t.model)
+            alt_rates = get_rates(t.provider or "unknown", alt) if alt else None
+            if alt_rates is not None:
+                rate_gap = max(0.0, turn_rates.input_per_mtok - alt_rates.input_per_mtok)
+                rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
 
     if total_sum <= 0:
         finding.notes.append(
