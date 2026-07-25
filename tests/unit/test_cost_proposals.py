@@ -1000,16 +1000,56 @@ def _resend_finding():
 
 def test_resend_suppresses_cache_control_snippet_for_claude_code():
     # The cache_control snippet is the SDK lever. A Claude Code window never
-    # constructs the request, so it is not theirs to paste — the card must lead
-    # with /compact and show NO snippet, matching how the cache family gates.
+    # constructs the request, so it is not theirs to paste — show NO snippet,
+    # matching how the cache family gates.
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.suggestion == "", "cache_control snippet must be suppressed for claude-code"
     assert "cache_control" not in prop.suggestion
-    assert prop.advise_text.startswith("Run /compact.")
-    # The paste fallback is the compaction guidance, never the snippet.
-    assert prop.one_paste_fix == "Run /compact."
+    # The durable subagent-offload rule leads, not /compact.
+    assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
+    assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
+    assert prop.one_paste_fix == SUBAGENT_OFFLOAD_FIX
+
+
+def test_resend_claude_code_offers_apply_capable_subagent_offload_write():
+    # Durable claude-code lever: a rung-1 CLAUDE.md rule, apply-capable via the
+    # same `_persona_gated_write_fields` machinery script/reuse/verbosity use.
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
+    assert prop.advise_only is False
+    assert prop.apply_capable is True
+    assert prop.rung == 1
+    assert prop.scope == "project"
+    assert prop.proposed_fix == SUBAGENT_OFFLOAD_FIX
+
+
+def test_resend_sdk_persona_gets_no_write_and_leads_with_compact():
+    # The SDK branch is unchanged: no coding-agent harness reads a CLAUDE.md
+    # note there, so no write is offered and /compact remains the lead fix.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    for persona in ("sdk", "unknown"):
+        prop = _resend_to_proposals(_resend_finding(), persona=persona)[0]
+        assert prop.advise_only is True
+        assert prop.apply_capable is False
+        assert prop.advise_text == "Run /compact."
+
+
+def test_resend_mixed_persona_offers_write_and_keeps_snippet():
+    # "mixed" carries both audiences: the claude-code share gets the write,
+    # the sdk share still gets its cache_control snippet (unchanged).
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="mixed")[0]
+    assert prop.apply_capable is True
+    assert prop.proposed_fix == SUBAGENT_OFFLOAD_FIX
+    assert "cache_control" in prop.suggestion
 
 
 def test_resend_keeps_cache_control_snippet_for_sdk():
@@ -1027,12 +1067,15 @@ def test_resend_caveat_is_not_duplicated():
     # The caveat is carried once via `caveat=`, and must NOT also be folded into
     # advise_text — doing both printed the same sentence twice on the card
     # (description paragraph + caveat line render the joined fields).
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.caveat == "conservative lower bound"
     assert "conservative lower bound" not in prop.advise_text
-    assert prop.advise_text == "Run /compact."
+    assert prop.advise_text == (
+        SUBAGENT_OFFLOAD_FIX + " Immediate relief in an already-full session: Run /compact."
+    )
 
 
 def test_resend_persona_flows_through_the_report_dispatch():
