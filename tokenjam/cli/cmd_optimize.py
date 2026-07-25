@@ -384,6 +384,14 @@ def cmd_optimize(
         payload["agent_persona_mix"] = agent_mix
         payload["persona"] = persona
         payload["cost_proposals_available"] = cost_proposal_count
+        # The names the persona gate dropped, so a --json consumer can tell
+        # "ran, found nothing" from "not run for this persona" — same
+        # distinction the /optimize route exposes. The two JSON surfaces must
+        # not drift: a scripted consumer reading the CLI would otherwise see an
+        # absent finding with no way to know why.
+        payload["persona_disabled_analyzers"] = sorted(
+            _disabled_analyzers(report.persona or "unknown")
+        )
         if cost_diff is not None:
             from tokenjam.cli.cmd_cost import _diff_to_dict
             payload["compare"] = _diff_to_dict(cost_diff)
