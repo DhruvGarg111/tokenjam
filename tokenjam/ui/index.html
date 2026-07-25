@@ -6150,6 +6150,28 @@ const ANALYZER_META = {
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
 
+// Analyzers with no actionable lever for a given persona, keyed by
+// `opt.persona` (server-computed dominant persona for the window — see
+// core/framing.dominant_persona: "claude-code" | "sdk" | "mixed" | "unknown").
+// A Claude Code subscriber can only act through their CLI action surface
+// (CLAUDE.md rules, hooks, MCP server config, subagent definitions) — they
+// can't swap the interactive model per request or route to the Batch API.
+// Findings with no lever on that surface are excluded entirely from the
+// recoverable-waste band rather than shown as noise: cache/cache-recommend
+// (cache_control is set at the API-call site, not editable from the CLI),
+// placement (Batch API is unreachable from an interactive session), trim
+// (its remedy is a prompt-template edit outside the CLI surface), verbosity
+// (its only remedy is a blanket "produce less output" rule, which risks
+// degrading quality on tasks that legitimately need long output), and script
+// (its cluster-matching signature is too brittle to fire reliably on
+// heterogeneous coding sessions today). Only "claude-code" is gated — a
+// mixed/sdk/unknown window keeps the full set. This list intentionally
+// mirrors the equivalent server-side gate; keep the two in sync if either
+// changes.
+const PERSONA_DISABLED_ANALYZERS = {
+  'claude-code': new Set(['cache', 'cache-recommend', 'placement', 'trim', 'verbosity', 'script']),
+};
+
 // Fallback threshold values for the `placement` empty state, mirroring
 // analyzers/batch_placement.py's MIN_SESSIONS_FOR_CADENCE / MIN_GROUP_COST_USD
 // module defaults. Used only when the finding itself is absent from the
@@ -6296,18 +6318,27 @@ function classifyFinding(name, fd, skipped) {
 // wave-2 finding carrying the `estimated_recoverable_usd` contract field becomes
 // a tile (so a future `reuse` analyzer appears with no UI change).
 // cache-recommend / budget-projection lack the field → excluded by contract.
+// Persona-disabled analyzers (PERSONA_DISABLED_ANALYZERS) are dropped before
+// ranking, not shown as a placeholder — they vanish entirely from the band
+// so a claude-code window isn't crowded out by findings it can't act on, and
+// the tile that survives at rank 0 is guaranteed to carry a real lever.
 function recoverableTiles(opt) {
   if (!opt) return [];
+  const disabled = PERSONA_DISABLED_ANALYZERS[opt.persona] || new Set();
   const out = [];
   const skipped = new Set(opt.skipped_analyzers || []);
   const f = opt.findings || {};
   // Downsize always gets a tile — it runs unconditionally; a null typed slot
   // means "ran, no candidates", not "missing" (issue #126).
-  out.push({ name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
+  if (!disabled.has('downsize')) {
+    out.push({ name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
+  }
   Object.keys(f).forEach(k => {
+    if (disabled.has(k)) return;
     if (f[k] && 'estimated_recoverable_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
   });
   skipped.forEach(k => {
+    if (disabled.has(k)) return;
     if (!(k in f) && k !== 'downsize') {
       out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' });
     }
@@ -6511,8 +6542,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         : !(fd.dead_servers || []).length ? html`<div class="opt-line dim">${(fd.notes && fd.notes.length) ? fd.notes.join(' ') : `All ${fd.configured_servers} configured MCP server${fd.configured_servers !== 1 ? 's' : ''} were invoked at least once in this window.`}</div>`
         : html`
           <div class="opt-line">${fd.dead_servers.length} dead MCP server${fd.dead_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, never called)</span>.</div>
-          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax / 90d</th></tr></thead>
-            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_90d != null ? fmtCost(s.estimated_tax_usd_90d) : ('~' + fmtTokens(s.estimated_tax_tokens_90d) + ' tokens')}</td></tr>`)}</tbody></table>
+          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax (window)</th></tr></thead>
+            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table>
           ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     }
   }
@@ -6618,7 +6649,16 @@ function OptimizeView({ params }) {
   // own full surface in the Review inbox, summarize its own bespoke box
   // below and its own screen (SummarizeView); giving them a second,
   // thinner card here would just duplicate that richer treatment.
-  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
+  // Analyzers the server's persona gate never ran, because they have no fix
+  // this user can apply (`persona_disabled_analyzers` on the /optimize
+  // payload; see core/optimize/runner.py). They must VANISH, not render an
+  // empty state: `placement` (and `downsize`) deliberately show a "ran, found
+  // nothing" card when their finding is absent, which for a gated analyzer
+  // would be a row pointing at a lever the reader does not have. Filtering the
+  // order list here covers every such branch at once, including future ones.
+  const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);
+  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']
+    .filter(n => !personaGated.has(n));
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const compIsApi = !!compFraming && compFraming.pricing_mode === 'api';

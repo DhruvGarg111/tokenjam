@@ -605,7 +605,17 @@ class ServerDeadweight:
     deferred_sessions:                int
     dead:                             bool
     estimated_tax_tokens_per_session: int
-    estimated_tax_tokens_90d:         int
+    #: Window-scoped total (this server's per-session tax x sessions_present
+    #: it was present in over the ANALYZED window) — NO projection folded in.
+    #: A caller wanting a forward-looking figure applies the shared, centrally-
+    #: computed 30-day-pace ratio (`cost_proposals.compute_projection_ratio`)
+    #: on top of this, exactly like every other cost analyzer's window field
+    #: (the "Recoverable-savings contract", CLAUDE.md). See #273: this field
+    #: used to fold a fixed 90-day projection in directly, which made it
+    #: incomparable to every other analyzer's window-scoped figure and
+    #: silently corrupted the Review-inbox rollup's basis when summed
+    #: alongside them.
+    estimated_tax_tokens_window:      int
     tax_construction:                 str
     fix:                              str
     example_sessions:                 list[str] = field(default_factory=list)
@@ -614,7 +624,8 @@ class ServerDeadweight:
     #: ``None`` when no priced model was observed (never a fabricated rate).
     priced_model:                     str = ""
     estimated_tax_usd_per_session:    float | None = None
-    estimated_tax_usd_90d:            float | None = None
+    #: Window-scoped dollar total — see `estimated_tax_tokens_window` above.
+    estimated_tax_usd_window:         float | None = None
 
 
 @dataclass
@@ -650,13 +661,19 @@ def compute_deadweight_finding(
     until: datetime,
     *,
     projects_root: Path | str | None = None,
-    window_days: float | None = None,
     min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
     cache_dir: Path | None = None,
 ) -> DeadweightFinding:
     """Full pipeline over a window of Claude Code transcripts. Never raises —
     a missing projects root, an unreadable transcript, or a malformed config
     file is skipped, not fatal.
+
+    Emits ``estimated_tax_tokens_window``/``estimated_tax_usd_window`` — the
+    tax OBSERVED over ``since``..``until``, with no internal projection
+    (#273). A forward-looking figure, when wanted, is the caller's job: the
+    Review-inbox rollup applies one shared, centrally-computed 30-day-pace
+    ratio on top of every cost analyzer's window figure alike, so a window
+    parameter has nothing left to do here.
 
     ``min_sessions`` overrides ``MIN_SESSIONS_DEADWEIGHT`` (config-overridable
     via ``core.config.OptimizeConfig.min_sessions_deadweight``); the module
@@ -706,11 +723,6 @@ def compute_deadweight_finding(
     if not configured:
         return finding
 
-    days = window_days if window_days and window_days > 0 else max(
-        (until - since).total_seconds() / 86400.0, 1.0,
-    )
-    projection_factor = 90.0 / days
-
     from tokenjam.core.pricing import get_rates, provider_for_model
 
     tax_rows: list[ContextTaxRow] = []
@@ -747,7 +759,10 @@ def compute_deadweight_finding(
             )
             if sessions_present else 0
         )
-        tax_90d = round(tax_per_session * sessions_present * projection_factor)
+        # Window-scoped total -- this server's per-session tax times the
+        # sessions it was present in over since..until. No projection: #273
+        # deleted the fixed 90-day multiplier that used to live here.
+        tax_window = tax_per_session * sessions_present
 
         # Price the token tax through core/pricing.py at the dominant model
         # observed across this server's present sessions -- never a
@@ -755,14 +770,14 @@ def compute_deadweight_finding(
         priced_model = _dominant_model(model_counts)
         input_per_mtok: float | None = None
         usd_per_session: float | None = None
-        usd_90d: float | None = None
+        usd_window: float | None = None
         if priced_model:
             provider = provider_for_model(priced_model) or "unknown"
             rates = get_rates(provider, priced_model)
             if rates is not None and rates.input_per_mtok > 0:
                 input_per_mtok = rates.input_per_mtok
                 usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
-                usd_90d = round(tax_90d / 1_000_000 * input_per_mtok, 6)
+                usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
             else:
                 priced_model = ""  # no rate available -- don't claim a model we can't price
 
@@ -775,7 +790,7 @@ def compute_deadweight_finding(
             deferred_sessions=deferred_sessions,
             dead=dead,
             estimated_tax_tokens_per_session=tax_per_session,
-            estimated_tax_tokens_90d=tax_90d,
+            estimated_tax_tokens_window=tax_window,
             tax_construction=_tax_construction_note(
                 non_deferred, deferred_sessions, sessions_present,
                 model=priced_model, input_per_mtok=input_per_mtok,
@@ -789,7 +804,7 @@ def compute_deadweight_finding(
             example_sessions=example_sessions,
             priced_model=priced_model,
             estimated_tax_usd_per_session=usd_per_session,
-            estimated_tax_usd_90d=usd_90d,
+            estimated_tax_usd_window=usd_window,
         )
         finding.servers.append(row)
         if sessions_present > 0:
@@ -841,15 +856,15 @@ def compute_deadweight_finding(
     # twice between the tax table and a dead-weight proposal.
     if finding.dead_servers:
         finding.estimated_recoverable_tokens = sum(
-            s.estimated_tax_tokens_90d for s in finding.dead_servers
+            s.estimated_tax_tokens_window for s in finding.dead_servers
         )
         priced = [
-            s.estimated_tax_usd_90d for s in finding.dead_servers
-            if s.estimated_tax_usd_90d is not None
+            s.estimated_tax_usd_window for s in finding.dead_servers
+            if s.estimated_tax_usd_window is not None
         ]
         basis = (
-            f"sum of each dead server's projected 90-day schema-injection tax "
-            f"({FULL_SCHEMA_TAX_TOKENS:,} tok/session full, "
+            f"sum of each dead server's schema-injection tax observed over "
+            f"this window ({FULL_SCHEMA_TAX_TOKENS:,} tok/session full, "
             f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when deferred); the "
             f"tax table's own MCP-schema rows are informational only and "
             f"never double-count into this total."
@@ -900,7 +915,7 @@ def run(ctx: AnalyzerContext) -> None:
         optimize_cfg, "min_sessions_deadweight", MIN_SESSIONS_DEADWEIGHT,
     )
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
-        ctx.since, ctx.until, window_days=ctx.window_days,
+        ctx.since, ctx.until,
         min_sessions=min_sessions,
         cache_dir=default_cache_dir(ctx.config),
     )

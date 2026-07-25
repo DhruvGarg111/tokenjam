@@ -111,7 +111,30 @@ COMPACTION_FIX = (
     "Run /compact (or start a fresh session) once accumulated context crosses "
     "your working set. The repeated volume this finding measures is the same "
     "content being re-sent turn over turn: trimming it directly cuts future "
-    "prompt size, regardless of whether caching is on."
+    "prompt size, regardless of whether caching is on. This is a manual, "
+    "per-session action, so it never fixes the pattern going forward — treat "
+    "it as immediate relief for an already-full session, not the durable fix."
+)
+
+# The durable claude-code lever: a rung-1 CLAUDE.md rule (same write machinery
+# `script`/`reuse`/`verbosity` use via `cost_proposals._persona_gated_write_fields`)
+# so the context that would otherwise get re-sent every turn never accumulates
+# on the main thread in the first place. Unlike `/compact`, this persists
+# across sessions and is on the CC action surface (a workspace file an
+# orchestrating agent reads), which is why it leads for a claude-code window
+# instead of `/compact` (founder critique, 2026-07-25: a real CC user abandons
+# an over-full session and starts fresh rather than compacting it, so telling
+# them to compact isn't a useful recommendation).
+SUBAGENT_OFFLOAD_FIX = (
+    "Offload context-heavy sub-tasks (broad file reads, multi-file search, "
+    "long tool-output loops, exploratory investigation) to a subagent instead "
+    "of running them inline in the main thread. A subagent's own tool logs "
+    "and intermediate output stay in its own context; only its short "
+    "conclusion returns to the caller, so the material that keeps getting "
+    "re-sent turn over turn never accumulates on the main thread to begin "
+    "with. Where available, pair this with a hook that warns once context "
+    "crosses a size threshold, as a second, automated nudge toward the same "
+    "behavior."
 )
 
 # Cap on evidence rows carried in the finding payload; aggregates are over ALL
@@ -153,12 +176,14 @@ class ResendFinding:
     # re-pasted prompts/outputs) reused from context_diagnostic rather than
     # reimplemented (capture-gated; empty + a note when no capture toggle is on).
     recurring_examples: list[RecurringInclusion] = field(default_factory=list)
-    # Both fixes are always carried: the lever differs by persona (agent
-    # harness user: compaction; SDK user: cache_control), and the renderer
+    # All three fixes are always carried: the lever differs by persona
+    # (agent harness user: subagent-offload, with compaction as a secondary
+    # immediate-relief note; SDK user: cache_control), and the renderer
     # picks which to lead with. `fix_cache_control` is "" when no example
     # session had a model to name in the snippet.
-    fix_compaction:    str = COMPACTION_FIX
-    fix_cache_control: str = ""
+    fix_compaction:        str = COMPACTION_FIX
+    fix_subagent_offload:  str = SUBAGENT_OFFLOAD_FIX
+    fix_cache_control:     str = ""
     caveat:            str = RESEND_HONESTY_CAVEAT
     estimate_basis:    str = ""
     estimate_confidence: str = "heuristic"

@@ -717,6 +717,36 @@ async def test_optimize_fast_skips_trim(client):
     assert "trim" not in (data.get("findings") or {})
 
 
+async def test_optimize_payload_reports_persona_disabled_analyzers(db, client):
+    """A claude-code window reports which analyzers the persona gate dropped,
+    and never lists one as merely `skipped` — the UI renders a placeholder for
+    a skipped name, and a gated analyzer must vanish instead."""
+    from datetime import timedelta
+
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(6):
+        started = utcnow() - timedelta(days=i + 1)
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"cc-{i}", plan_tier="api",
+            started_at=started,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider="anthropic", model="claude-opus-4-7",
+            input_tokens=4000, output_tokens=800, cost_usd=0.12,
+            session_id=f"cc-{i}", start_time=started,
+        ))
+
+    data = (await client.get("/api/v1/optimize?since=30d&fast=true")).json()
+    assert data["persona"] == "claude-code"
+    gated = set(data["persona_disabled_analyzers"])
+    assert {"cache", "cache-recommend", "placement", "trim"} <= gated
+    assert gated.isdisjoint(data.get("findings") or {})
+    # `trim` is BOTH expensive and persona-gated here: it must not be reported
+    # as skipped-for-speed, which would draw a "open the Optimize tab" tile.
+    assert "trim" not in data.get("skipped_analyzers", [])
+
+
 async def test_budget_framing_reflects_configured_subscription_plan(db):
     """The budget surface has no window, so framing falls back to the
     declared plan in config (#110)."""

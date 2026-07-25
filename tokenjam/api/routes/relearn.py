@@ -470,7 +470,16 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         if rec.get("state") != "reverted"
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
-    rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals)
+    # The window this batch of proposals was actually computed over (#273) —
+    # stored alongside them at recompute time, never re-derived here, so the
+    # rollup's projection ratio matches the data that produced these figures.
+    rollup_kwargs: dict[str, Any] = {}
+    if block:
+        if block.get("cost_window_days"):
+            rollup_kwargs["window_days"] = block["cost_window_days"]
+        rollup_kwargs["active_days"] = block.get("cost_active_days") or 0
+        rollup_kwargs["n_sessions"] = block.get("cost_n_sessions") or 0
+    rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals, **rollup_kwargs)
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)

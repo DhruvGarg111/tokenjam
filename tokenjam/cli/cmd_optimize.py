@@ -26,6 +26,7 @@ from tokenjam.core.optimize import (
     DowngradeFinding,
     OptimizeReport,
     build_report,
+    disabled_analyzers_for_persona as _disabled_analyzers,
     report_from_dict,
     report_to_dict,
 )
@@ -383,6 +384,14 @@ def cmd_optimize(
         payload["agent_persona_mix"] = agent_mix
         payload["persona"] = persona
         payload["cost_proposals_available"] = cost_proposal_count
+        # The names the persona gate dropped, so a --json consumer can tell
+        # "ran, found nothing" from "not run for this persona" — same
+        # distinction the /optimize route exposes. The two JSON surfaces must
+        # not drift: a scripted consumer reading the CLI would otherwise see an
+        # absent finding with no way to know why.
+        payload["persona_disabled_analyzers"] = sorted(
+            _disabled_analyzers(report.persona or "unknown")
+        )
         if cost_diff is not None:
             from tokenjam.cli.cmd_cost import _diff_to_dict
             payload["compare"] = _diff_to_dict(cost_diff)
@@ -789,6 +798,23 @@ def _render_report(
         console.print(f"  [yellow]![/yellow] {_rich_escape(note)}")
     if report.notes:
         console.print()
+
+    # An analyzer the user typed by name that this persona's skip gate dropped
+    # would otherwise render as silence, which reads as a broken command. The
+    # gate is deliberately invisible when it fires on the default (unnamed)
+    # selection — those analyzers simply do not exist for this user — but a
+    # name someone typed deserves an answer.
+    if requested:
+        gated = sorted(
+            set(requested) & _disabled_analyzers(report.persona or "unknown")
+        )
+        if gated:
+            console.print(
+                f"  [dim]Not run: {', '.join(gated)}. No fix for these exists "
+                f"inside an interactive coding-agent session, so they are "
+                f"skipped rather than reported as findings you cannot act "
+                f"on.[/dim]\n"
+            )
 
     # ----- Findings, ranked by reclaimable share of the window's tokens -----
     # Findings used to render in ANALYZER_ORDER (registry order), so a
@@ -2187,16 +2213,16 @@ def _render_deadweight(
             # Dollars only when a priced model was actually observed for this
             # server. None means no rate was available, and printing $0.00
             # there would read as "this costs nothing".
-            if pricing_mode == "api" and s.estimated_tax_usd_90d is not None:
+            if pricing_mode == "api" and s.estimated_tax_usd_window is not None:
                 tax = (
-                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens / "
-                    f"{format_cost(s.estimated_tax_usd_90d)} over 90 days "
+                    f"~{format_tokens(s.estimated_tax_tokens_window)} tokens / "
+                    f"{format_cost(s.estimated_tax_usd_window)} in this window "
                     f"[dim](estimated, priced at {s.priced_model})[/dim]"
                 )
             else:
                 tax = (
-                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens over "
-                    f"90 days [dim](estimated; no priced model observed for "
+                    f"~{format_tokens(s.estimated_tax_tokens_window)} tokens in "
+                    f"this window [dim](estimated; no priced model observed for "
                     f"this server, so no dollar figure)[/dim]"
                 )
             console.print(f"          [dim]tax[/dim] {tax}")
