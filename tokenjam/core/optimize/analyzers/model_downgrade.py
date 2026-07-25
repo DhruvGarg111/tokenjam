@@ -186,6 +186,21 @@ def analyze_model_downgrade(
       - aggregate input/output/cache tokens, tool count, cost, dominant model
       - if model is in DOWNGRADE_CANDIDATES and shape matches the heuristic,
         treat as a candidate and compute alternative cost
+
+    The candidate aggregation is scoped to the MAIN THREAD (``sub_agent_id IS
+    NULL``). Task-dispatched subagent turns live under the parent session id,
+    and ``subagent_rightsizing`` already prices the identical model swap over
+    them (``sub_agent_id IS NOT NULL``, per (session, subagent)). Without this
+    filter the two analyzers claim the same tokens under two structurally
+    different signatures (``cost:downsize:<agent>`` and
+    ``cost:subagent[:<name>]``), which ``estimated_recoverable_rollup``'s
+    dedup-by-signature cannot catch — so the Review-inbox headline came out
+    inflated by the overlap. Same class of guard as
+    ``cost_proposals._per_agent_cache_recoverable_by_model`` provides for the
+    cache family; made disjoint at the source here because the subagent spans
+    also skewed this query's ``MODE(model)``, which could name a subagent's
+    model as the session's dominant one. The window-wide DENOMINATORS below
+    stay unfiltered: only what we CLAIM narrows, never what we compare it to.
     """
     clauses = ["start_time >= $1", "start_time < $2", "session_id IS NOT NULL"]
     params: list[Any] = [since, until]
@@ -194,7 +209,7 @@ def analyze_model_downgrade(
         params.append(agent_id)
     where = " AND ".join(clauses)
 
-    # First pass: LLM spans grouped by session.
+    # First pass: main-thread LLM spans grouped by session.
     llm_rows = conn.execute(
         f"SELECT session_id, "
         f"FIRST(trace_id) AS trace_id, "
@@ -208,6 +223,7 @@ def analyze_model_downgrade(
         f"COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, "
         f"COALESCE(SUM(cost_usd),0.0)    AS cost_usd "
         f"FROM spans WHERE {where} AND model IS NOT NULL "
+        f"AND sub_agent_id IS NULL "
         f"GROUP BY session_id",
         params,
     ).fetchall()
@@ -216,20 +232,34 @@ def analyze_model_downgrade(
         return None
 
     # Tool span counts per session (separate query — tool spans have model=NULL).
+    # Main thread only, matching the aggregation above: a subagent's own tool
+    # fan-out is not the parent thread's shape.
     tool_rows = conn.execute(
         f"SELECT session_id, COUNT(*) FROM spans "
-        f"WHERE {where} AND tool_name IS NOT NULL "
+        f"WHERE {where} AND tool_name IS NOT NULL AND sub_agent_id IS NULL "
         f"GROUP BY session_id",
         params,
     ).fetchall()
     tool_counts: dict[str, int] = {r[0]: int(r[1] or 0) for r in tool_rows if r[0]}
 
-    total_sessions = len(llm_rows)
+    # Window-wide denominators, over EVERY LLM span in the window — subagent
+    # turns included. `percent_of_sessions` and `percent_of_tokens` are shares
+    # of what the user actually spent; computing them over the main-thread
+    # subset would shrink the denominator and overstate both.
+    total_sessions, window_total_tokens = conn.execute(
+        f"SELECT COUNT(DISTINCT session_id), "
+        f"COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0) "
+        f"+ COALESCE(SUM(cache_tokens),0) + COALESCE(SUM(cache_write_tokens),0) "
+        f"FROM spans WHERE {where} AND model IS NOT NULL",
+        params,
+    ).fetchone()
+    total_sessions = int(total_sessions or 0)
+    window_total_tokens = int(window_total_tokens or 0)
+
     candidate_sessions = 0
     actual_cost = 0.0
     alt_cost = 0.0
     candidate_tokens = 0
-    window_total_tokens = 0
     examples: list[DowngradeExample] = []
     suggestions: dict[str, str] = {}
     # Per-candidate-session rows for the per-agent price arithmetic on the card
@@ -245,12 +275,6 @@ def analyze_model_downgrade(
     for row in llm_rows:
         session_id, trace_id, agent, start_time, end_time, provider, model, \
             in_tok, out_tok, cache_tok, cache_write_tok, cost = row
-        # Accumulate window-wide token totals (used for subscription-mode
-        # token-share rendering even when the row isn't a candidate).
-        window_total_tokens += (
-            int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
-            + int(cache_write_tok or 0)
-        )
         if not provider or not model:
             continue
         alt = _lookup_downgrade(provider, model)
@@ -336,10 +360,13 @@ def analyze_model_downgrade(
     # Per-agent price arithmetic (one row per agent/model group). The thinking
     # lookup is a separate, best-effort query: most runtimes never report a
     # thinking token count, and a row without one omits the share rather than
-    # printing a zero.
+    # printing a zero. Scoped to the main thread like the candidate aggregation
+    # above, so the share's numerator and denominator describe the same turns.
     per_agent = build_agent_price_rows(
         price_candidates, window_days,
-        thinking_tokens_by_session(conn, since, until, agent_id),
+        thinking_tokens_by_session(
+            conn, since, until, agent_id, main_thread_only=True,
+        ),
     )
 
     commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
