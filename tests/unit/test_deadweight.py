@@ -175,7 +175,7 @@ def test_detects_dead_server_at_threshold(tmp_path):
     assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
     assert dead.invocations == 0
     assert dead.estimated_tax_tokens_per_session == FULL_SCHEMA_TAX_TOKENS
-    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_90d
+    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_window
     assert finding.estimated_recoverable_tokens > 0
 
 
@@ -199,8 +199,8 @@ def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
     assert dead.estimated_tax_usd_per_session == round(
         dead.estimated_tax_tokens_per_session / 1_000_000 * rates.input_per_mtok, 6,
     )
-    assert dead.estimated_tax_usd_90d > 0
-    assert finding.estimated_recoverable_usd == dead.estimated_tax_usd_90d
+    assert dead.estimated_tax_usd_window > 0
+    assert finding.estimated_recoverable_usd == dead.estimated_tax_usd_window
     assert "Priced at claude-opus-4-8's input rate" in dead.tax_construction
 
 
@@ -221,7 +221,7 @@ def test_no_priced_model_leaves_usd_none(tmp_path):
 
     assert dead.priced_model == ""
     assert dead.estimated_tax_usd_per_session is None
-    assert dead.estimated_tax_usd_90d is None
+    assert dead.estimated_tax_usd_window is None
     assert finding.estimated_recoverable_usd is None
     assert "No dollar estimate" in dead.tax_construction
 
@@ -534,7 +534,7 @@ def test_dead_server_tax_not_double_counted_between_table_and_total(tmp_path):
     # The tax table's own MCP row and the recoverable total both derive from
     # the SAME per-server figure, but the total must equal exactly the dead
     # servers' sum -- never (tax table total) + (recoverable total).
-    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_90d
+    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_window
     assert mcp_row.total_tokens_window == dead.estimated_tax_tokens_per_session * dead.sessions_present
 
 
@@ -637,7 +637,7 @@ def test_render_deadweight_omits_dollars_when_no_model_was_priced(tmp_path, caps
         ])
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
-    assert finding.dead_servers[0].estimated_tax_usd_90d is None
+    assert finding.dead_servers[0].estimated_tax_usd_window is None
 
     _render_deadweight(finding, pricing_mode="api", marker="①")
     out = capsys.readouterr().out

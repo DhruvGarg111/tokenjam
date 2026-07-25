@@ -6511,8 +6511,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         : !(fd.dead_servers || []).length ? html`<div class="opt-line dim">${(fd.notes && fd.notes.length) ? fd.notes.join(' ') : `All ${fd.configured_servers} configured MCP server${fd.configured_servers !== 1 ? 's' : ''} were invoked at least once in this window.`}</div>`
         : html`
           <div class="opt-line">${fd.dead_servers.length} dead MCP server${fd.dead_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, never called)</span>.</div>
-          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax / 90d</th></tr></thead>
-            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_90d != null ? fmtCost(s.estimated_tax_usd_90d) : ('~' + fmtTokens(s.estimated_tax_tokens_90d) + ' tokens')}</td></tr>`)}</tbody></table>
+          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax (window)</th></tr></thead>
+            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table>
           ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     }
   }
