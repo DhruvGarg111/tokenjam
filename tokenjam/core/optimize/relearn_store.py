@@ -233,8 +233,28 @@ def recompute_now(
                 transcript_cache_dir = default_cache_dir(config)
             except Exception:
                 transcript_cache_dir = None
+        # Full-corpus persona classification (relearn scans unbounded history
+        # like the finding itself, not a window) — same functions
+        # `runner.build_report` uses for `AnalyzerContext.persona`/
+        # `OptimizeReport.persona`, so the daemon's relearn cache gates its
+        # rung-1/rung-2 write by the same rule the rest of the product does.
+        persona = "unknown"
+        if conn is not None:
+            try:
+                from tokenjam.core.framing import (
+                    agent_persona_mix,
+                    config_declared_plan,
+                    dominant_persona,
+                )
+
+                persona = dominant_persona(
+                    agent_persona_mix(conn), declared_plan=config_declared_plan(config),
+                )
+            except Exception:
+                persona = "unknown"
         finding = compute_relearn_finding(
             conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
+            persona=persona,
         )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to

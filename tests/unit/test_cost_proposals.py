@@ -526,6 +526,10 @@ def _verbosity_finding(**overrides):
 
 
 def test_verbosity_proposal_shape_and_apply_fields():
+    """Unlike script/reuse, verbosity NEVER offers a write — for any persona,
+    including claude-code (see `_verbosity_to_proposals`'s docstring): a
+    cohort-scoped flag written as a global CLAUDE.md rule fails the
+    no-quality-tax gate outright, regardless of who would read it."""
     from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
     props = _verbosity_to_proposals(_verbosity_finding(), persona="claude-code")
     assert len(props) == 1
@@ -536,16 +540,20 @@ def test_verbosity_proposal_shape_and_apply_fields():
     assert "6 session" in p.evidence
     assert p.estimated_recoverable_usd == 0.9
     assert p.estimated_recoverable_tokens == 9_000
-    assert p.advise_only is False
-    assert p.apply_capable is True
-    assert p.rung == 1
-    assert p.scope == "project"
-    # The remedy snippet + the concrete suggested cap both land in the note.
-    assert "concise" in p.proposed_fix.lower()
-    assert "800" in p.proposed_fix
+    assert p.advise_only is True
+    assert p.apply_capable is False
+    assert p.rung == 0
+    assert p.scope == ""
+    assert p.proposed_fix == ""
+    # The remedy snippet + the concrete suggested cap both land in the
+    # copy-pasteable suggestion, worded as a data point, never an
+    # enforceable cap.
+    assert "800" in p.suggestion
+    assert "not a limit to enforce" in p.suggestion
     # The honesty caveat (output length is not waste) rides along, never a
     # bare "you are wasting tokens" claim.
-    assert "not waste" in p.proposed_fix
+    assert "not waste" in p.suggestion
+    assert p.suggestion == p.advise_text
     assert p.baseline["apply_sessions"] == 6
 
 
@@ -570,14 +578,18 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
     assert {"script", "reuse", "verbosity"} <= analyzers
 
 
-# --- Persona-gated fix modality (script / reuse / verbosity only) -----------
+# --- Persona-gated fix modality (script / reuse / verbosity) ----------------
 #
-# These three analyzers' only apply path is a rung-1 CLAUDE.md note or rung-2
+# script/reuse's apply path is a rung-1 CLAUDE.md note or rung-2
 # .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
 # request path ever reads. An "sdk"/"unknown" persona must never see
 # apply_capable=True for them; the identical recommendation must still reach
 # them as a copy-pasteable `suggestion`. A "claude-code" window must be
 # byte-identical to before this gating existed.
+#
+# verbosity shares the sdk/unknown no-write behavior (parametrized in below)
+# but NEVER offers the write, for ANY persona including claude-code/mixed —
+# see the dedicated tests after the parametrized block.
 
 def _script_finding_for_persona_tests():
     return _workflow_finding()
@@ -644,7 +656,6 @@ def test_unknown_persona_is_gated_same_as_sdk(adapter_name, finder):
 @pytest.mark.parametrize("adapter_name,finder", [
     ("_script_to_proposals", _script_finding_for_persona_tests),
     ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
-    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
 ])
 def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name, finder):
     """The exact fields these analyzers produced before persona gating
@@ -666,7 +677,6 @@ def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name,
 @pytest.mark.parametrize("adapter_name,finder", [
     ("_script_to_proposals", _script_finding_for_persona_tests),
     ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
-    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
 ])
 def test_mixed_persona_offers_the_write_and_the_snippet(adapter_name, finder):
     """"mixed": both audiences are meaningfully represented and a single
@@ -684,6 +694,23 @@ def test_mixed_persona_offers_the_write_and_the_snippet(adapter_name, finder):
     assert p.advise_only is False
     assert p.proposed_fix
     assert p.suggestion == p.advise_text
+
+
+@pytest.mark.parametrize("persona", ["claude-code", "mixed", "sdk", "unknown"])
+def test_verbosity_never_offers_the_write_for_any_persona(persona):
+    """verbosity's write path is disabled outright, not persona-gated: the
+    finding's cohort-scoped flag would become a global CLAUDE.md rule if
+    written, for EVERY persona — see `_verbosity_to_proposals`."""
+    from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
+    props = _verbosity_to_proposals(_verbosity_finding_for_persona_tests(), persona=persona)
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is False
+    assert p.advise_only is True
+    assert p.rung == 0
+    assert p.scope == ""
+    assert p.proposed_fix == ""
+    assert p.suggestion == p.advise_text  # the recommendation still reaches everyone
 
 
 def test_cost_proposals_from_report_reads_persona_off_the_report():
@@ -705,8 +732,11 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep.persona = "claude-code"
     by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
-    for name in ("script", "reuse", "verbosity"):
+    for name in ("script", "reuse"):
         assert by_analyzer[name].apply_capable is True
+    # verbosity never offers the write, even for claude-code — see
+    # test_verbosity_never_offers_the_write_for_any_persona.
+    assert by_analyzer["verbosity"].apply_capable is False
 
     # A report with no persona set at all (e.g. hand-built, pre-gating test
     # code) defaults to "unknown" -> the fail-safe, not "claude-code".
@@ -1174,6 +1204,140 @@ def test_downsize_agent_row_monthly_usd_matches_its_own_evidence_text():
     assert prop.estimated_monthly_usd == rows[0].projected_30d_delta_usd
     # The evidence paragraph's own "$X per 30 days" is the identical number.
     assert f"{prop.estimated_monthly_usd:,.2f}" in prop.evidence or f"{prop.estimated_monthly_usd:.4f}" in prop.evidence
+
+
+# --- Persona gating: downsize (window-wide + per-agent) ---------------------
+
+def _downsize_finding():
+    return DowngradeFinding(
+        candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
+        alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
+        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        estimate_basis="downsize basis",
+    )
+
+
+def test_downsize_window_wide_card_gives_claude_code_the_cc_lever_not_a_raw_swap():
+    """A claude-code window can't switch its own interactive model mid-
+    session, so the window-wide fallback card must not hand it the raw
+    "route to a cheaper model" instruction an SDK caller gets."""
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    props = _downsize_to_proposal(_downsize_finding(), persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert "switch your own interactive model" in p.advise_text
+    assert "route to a cheaper" not in p.advise_text.lower()
+    assert "tj route export" in p.advise_text
+    assert p.suggestion == ""  # the unusable model-swap snippet is dropped
+
+
+def test_downsize_window_wide_card_unchanged_for_sdk_and_unknown():
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    for persona in ("sdk", "unknown"):
+        props = _downsize_to_proposal(_downsize_finding(), persona=persona)
+        p = props[0]
+        assert "Route the flagged structural-shaped work" in p.advise_text
+        assert p.suggestion  # the swap snippet is still there for a caller who can act on it
+
+
+def test_downsize_window_wide_card_mixed_gets_both():
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    props = _downsize_to_proposal(_downsize_finding(), persona="mixed")
+    p = props[0]
+    assert "Route the flagged structural-shaped work" in p.advise_text  # sdk share
+    assert "switch your own interactive model" in p.advise_text          # cc share
+
+
+def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
+    """A per-agent card with no registered source path (apply blocked) is
+    just as unreachable for a claude-code window as the window-wide card —
+    it must get the same CC-actionable lever appended."""
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+
+    candidates = [{
+        "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
+        "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+    } for i in range(32)]
+    rows = build_agent_price_rows(candidates, window_days=30.0)
+
+    class _Finding:
+        per_agent = rows
+        candidate_sessions = 32
+        suggestions: dict = {}
+
+    props = _downsize_agent_proposals(_Finding(), config=None, persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert "Applying it here is not on offer" in p.advise_text
+    assert "switch your own interactive model" in p.advise_text
+
+    # sdk/unknown never get the CC lever appended.
+    for persona in ("sdk", "unknown"):
+        p2 = _downsize_agent_proposals(_Finding(), config=None, persona=persona)[0]
+        assert "switch your own interactive model" not in p2.advise_text
+
+
+# --- Persona gating: placement (batch) ---------------------------------------
+
+def _placement_finding():
+    from tokenjam.core.optimize.analyzers.batch_placement import (
+        BatchCandidate,
+        BatchPlacementFinding,
+    )
+
+    candidate = BatchCandidate(
+        agent_id="worker-svc", sessions=8, first_start="2026-07-01T00:00:00Z",
+        last_start="2026-07-15T00:00:00Z", median_gap_seconds=3600.0, gap_cv=0.1,
+        cost_usd=4.0, tokens=200_000, estimated_batch_saving_usd=2.0,
+    )
+    return BatchPlacementFinding(
+        candidates=[candidate], window_cost_usd=10.0, candidate_cost_usd=4.0,
+        percent_of_window_cost=40.0, estimated_recoverable_usd=2.0,
+        estimated_recoverable_tokens=200_000, estimate_basis="placement basis",
+    )
+
+
+def test_placement_suppressed_outright_for_claude_code_persona():
+    """Batch API is structurally unreachable from an interactive coding-agent
+    session (there's no application code of its own to move to a batch
+    lane) — the whole card must be gone, not just the dollar figure,
+    regardless of pricing_mode."""
+    from tokenjam.core.optimize.cost_proposals import _placement_to_proposals
+
+    for pricing_mode in ("api", "subscription"):
+        assert _placement_to_proposals(
+            _placement_finding(), pricing_mode=pricing_mode, persona="claude-code",
+        ) == []
+
+
+@pytest.mark.parametrize("persona", ["sdk", "mixed", "unknown"])
+def test_placement_unaffected_for_non_claude_code_personas(persona):
+    from tokenjam.core.optimize.cost_proposals import _placement_to_proposals
+
+    props = _placement_to_proposals(_placement_finding(), persona=persona)
+    assert len(props) == 1
+    assert props[0].analyzer == "placement"
+
+
+def test_placement_gated_by_report_persona_through_the_dispatcher():
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    rep = _report()
+    rep.findings["placement"] = _placement_finding()
+
+    rep.persona = "claude-code"
+    analyzers = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert "placement" not in analyzers
+
+    rep.persona = "sdk"
+    analyzers = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert "placement" in analyzers
 
 
 def test_backfill_legacy_monthly_fields_fills_only_absent_keys():

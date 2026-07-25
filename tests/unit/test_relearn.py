@@ -476,6 +476,57 @@ def test_single_repo_cluster_scopes_to_project(tmp_path):
     assert finding.clusters[0].repos == ["onerepo"]
 
 
+# --- Persona gating on the rung-1/rung-2 write --------------------------------
+# Mirrors cost_proposals._persona_gated_write_fields's gate on the SAME class
+# of surface (a CLAUDE.md/skill write): only claude-code/mixed get the write.
+# A workspace-having (non-OTel) cluster used to be apply-capable regardless of
+# persona — see test_relearn_otel.test_workspace_cluster_is_not_advise_only,
+# which now has to opt back into "claude-code" to isolate the workspace seam
+# from this gate.
+
+def _one_repo_sessions(tmp_path, label):
+    for i in range(MIN_RECURRING_SESSIONS):
+        _edit_before_read_session(tmp_path, f"-Users-test-{label}", f"{label}-{i}")
+    return [(f"{label}-{i}", label) for i in range(MIN_RECURRING_SESSIONS)]
+
+
+@pytest.mark.parametrize("persona", ["claude-code", "mixed"])
+def test_write_offered_cluster_advise_only_false_for_claude_code_and_mixed(tmp_path, persona):
+    sessions = _one_repo_sessions(tmp_path, f"wp-{persona}")
+    finding = analyze_relearns(
+        sessions, projects_root=tmp_path, distill_enabled=False, persona=persona,
+    )
+    assert len(finding.clusters) == 1
+    assert finding.clusters[0].advise_only is False
+
+
+@pytest.mark.parametrize("persona", ["sdk", "unknown"])
+def test_write_withheld_for_sdk_and_unknown_even_with_a_real_workspace(tmp_path, persona):
+    """A workspace-having cluster (a real repo, not an OTel service) still
+    gets no apply path for an sdk/unknown window — nothing in an SDK-only
+    service's request path reads a CLAUDE.md/skill note. The recommendation
+    (`proposed_fix`) is unaffected; only the apply path is withheld."""
+    sessions = _one_repo_sessions(tmp_path, f"nowrite-{persona}")
+    finding = analyze_relearns(
+        sessions, projects_root=tmp_path, distill_enabled=False, persona=persona,
+    )
+    assert len(finding.clusters) == 1
+    cluster = finding.clusters[0]
+    assert cluster.advise_only is True
+    assert cluster.suggested_target == ""
+    assert cluster.proposed_fix  # the recommendation itself is never dropped
+
+
+def test_default_persona_is_unknown_and_withholds_the_write(tmp_path):
+    """No explicit `persona` kwarg must never silently default to
+    claude-code — the conservative default matches every other
+    persona-gated adapter in cost_proposals.py."""
+    sessions = _one_repo_sessions(tmp_path, "default-persona")
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
+    assert len(finding.clusters) == 1
+    assert finding.clusters[0].advise_only is True
+
+
 def test_clean_sessions_produce_no_proposals(tmp_path):
     for i in range(5):
         _clean_session(tmp_path, "-Users-test-clean", f"clean-{i}")
