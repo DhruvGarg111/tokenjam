@@ -83,8 +83,7 @@ def blended_rate_profile(
     try:
         rows = conn.execute(
             "SELECT provider, model, "
-            "COALESCE(SUM(input_tokens + output_tokens + cache_tokens "
-            "+ cache_write_tokens), 0) "
+            "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cache_tokens), 0) "
             "FROM spans WHERE " + " AND ".join(clauses) + " GROUP BY provider, model",
             params,
         ).fetchall()
@@ -93,27 +92,55 @@ def blended_rate_profile(
 
     from tokenjam.core.pricing import get_rates
 
+    # Each rate is weighted by ITS OWN matching token class, not a shared
+    # combined total -- input tokens for the input rate, cache-read tokens for
+    # the cache-read ratio. Weighting either by output/cache-write volume (a
+    # token class the priced rate has nothing to do with) biases the blend
+    # whenever a corpus's model mix has different output/cache-write
+    # proportions than input/cache-read proportions.
     weighted_input = 0.0
+    input_tokens_total = 0
     weighted_cache_read = 0.0
-    total_tokens = 0
+    cache_read_tokens_total = 0
     models: list[str] = []
-    for provider, model, tokens in rows:
-        tokens = int(tokens or 0)
-        if tokens <= 0:
+    for provider, model, input_tokens, cache_read_tokens in rows:
+        input_tokens = int(input_tokens or 0)
+        cache_read_tokens = int(cache_read_tokens or 0)
+        if input_tokens <= 0 and cache_read_tokens <= 0:
             continue
         rates = get_rates(str(provider or "unknown"), str(model))
         if rates is None or rates.input_per_mtok <= 0:
             continue
-        weighted_input += rates.input_per_mtok * tokens
-        weighted_cache_read += rates.cache_read_per_mtok * tokens
-        total_tokens += tokens
+        if input_tokens > 0:
+            weighted_input += rates.input_per_mtok * input_tokens
+            input_tokens_total += input_tokens
+        if cache_read_tokens > 0:
+            weighted_cache_read += rates.cache_read_per_mtok * cache_read_tokens
+            cache_read_tokens_total += cache_read_tokens
         models.append(f"{provider}/{model}")
-    if total_tokens <= 0:
+    if input_tokens_total <= 0:
         return None
-    input_per_mtok = weighted_input / total_tokens
+    input_per_mtok = weighted_input / input_tokens_total
     if input_per_mtok <= 0:
         return None
-    cache_read_ratio = min(weighted_cache_read / total_tokens / input_per_mtok, 1.0)
+    # No cache reads observed at all: no cache-read volume to weight the ratio
+    # by, so fall back to the same models' rates weighted by INPUT volume
+    # instead -- still derived from pricing/models.toml for the models
+    # actually observed, never an invented number.
+    if cache_read_tokens_total > 0:
+        cache_read_per_mtok = weighted_cache_read / cache_read_tokens_total
+    else:
+        weighted_cache_read_by_input = 0.0
+        for provider, model, input_tokens, _cache_read_tokens in rows:
+            input_tokens = int(input_tokens or 0)
+            if input_tokens <= 0:
+                continue
+            rates = get_rates(str(provider or "unknown"), str(model))
+            if rates is None or rates.input_per_mtok <= 0:
+                continue
+            weighted_cache_read_by_input += rates.cache_read_per_mtok * input_tokens
+        cache_read_per_mtok = weighted_cache_read_by_input / input_tokens_total
+    cache_read_ratio = min(cache_read_per_mtok / input_per_mtok, 1.0)
     return RateProfile(
         input_rate_per_token=input_per_mtok / 1_000_000,
         cache_read_ratio=cache_read_ratio,

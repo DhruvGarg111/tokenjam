@@ -892,10 +892,10 @@ class _FakeSpanConn:
     """Minimal stand-in for a DuckDB connection.
 
     Relearn issues two different queries per cluster — the rate blend
-    (``provider, model, tokens``) and the per-session prompt timeline the
-    re-read tail is measured on (``session_id, start_time, prompt_size``) — so
-    this dispatches on the SQL text rather than returning one canned shape to
-    both.
+    (``provider, model, input_tokens, cache_tokens``) and the per-session
+    prompt timeline the re-read tail is measured on (``session_id,
+    start_time, prompt_size``) — so this dispatches on the SQL text rather
+    than returning one canned shape to both.
     """
     def __init__(self, rate_rows, timeline_rows=()):
         self._rate_rows = rate_rows
@@ -913,7 +913,7 @@ class _FakeSpanConn:
 def test_blended_rate_profile_names_the_models_it_derived_from():
     from tokenjam.core.optimize.rate_profile import blended_rate_profile
 
-    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000)])
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)])
     profile = blended_rate_profile(conn, session_ids={"s1", "s2"})
 
     rates = get_rates("anthropic", "claude-sonnet-5")
@@ -948,7 +948,7 @@ def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-usd{i}", f"usd-{i}")
     sessions = [(f"usd-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
-    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000)])
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)])
 
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
 
@@ -976,7 +976,7 @@ def test_occurrence_is_worth_its_re_read_tail_not_just_one_turn(tmp_path):
         for i in range(MIN_RECURRING_SESSIONS)
         for n in range(20)
     ]
-    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000)], timeline)
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)], timeline)
 
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
     cluster = finding.clusters[0]
@@ -1004,7 +1004,7 @@ def test_compaction_truncates_the_re_read_tail(tmp_path):
         for i in range(MIN_RECURRING_SESSIONS)
         for n, size in enumerate(sizes)
     ]
-    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000)], timeline)
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)], timeline)
 
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
     assert finding.clusters[0].tail_calls_median == 5
