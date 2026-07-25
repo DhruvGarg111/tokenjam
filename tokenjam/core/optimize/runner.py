@@ -77,10 +77,17 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # which the harness sets and the user cannot reach — no request field
         # of theirs to change, so the finding is a diagnostic with no fix.
         "cache",
-        # Same missing lever, and it cannot fire anyway: the analyzer needs
-        # repeated exact prompt-prefix matches, while an interactive session's
-        # captured prompt is the human's latest turn, which is never a stable
-        # cacheable prefix. Candidates are structurally always zero.
+        # Same missing lever as `cache` above: even when the analyzer finds a
+        # stable, repeated prefix — it can, for Claude-Code-sourced spans, via
+        # the project's CLAUDE.md content backfilled onto them (#272, see
+        # cache_recommend.py's module docstring) — a Claude Code user still
+        # has no way to set `cache_control` on the request the harness
+        # builds, so a candidate would be a diagnostic with no fix. This
+        # entry is what keeps the CLAUDE.md-prefix path from ever reaching
+        # that dead end: it drops `cache-recommend` from dispatch before this
+        # persona's window is analyzed, so the path only actually runs for
+        # `sdk`/`mixed` windows (persona is computed per-window, see
+        # `dominant_persona`), where it can serve a real fix.
         "cache-recommend",
         # Batch placement recommends re-laning work onto a delayed batch
         # endpoint. Unreachable from an interactive session by definition —
