@@ -97,9 +97,21 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     assert "downsize" in analyzers, "expected the session to trip downsize"
     assert "subagent" in analyzers, "expected the dispatch to trip subagent"
 
+    # Disjointness is a property of what the analyzers CLAIM, so it is checked
+    # on the pre-net (gross) figures: a write-bearing card is additionally
+    # netted against its own standing cost by the write budget, which can only
+    # ever subtract. Pre-fix the gross sum was 4_850 (downsize, whole session)
+    # + 4_300 (subagent) = 9_150 — nearly 2x the tokens the session spent.
+    gross = sum(
+        (p.gross_recoverable_tokens
+         if p.gross_recoverable_tokens is not None
+         else (p.estimated_recoverable_tokens or 0))
+        for p in proposals
+    )
+    assert gross == SESSION_TOKENS
+
     rollup = estimated_recoverable_rollup(proposals)
-    # Pre-fix this summed 4_850 (downsize, whole session) + 4_300 (subagent) =
-    # 9_150 — nearly 2x the tokens the session actually spent.
-    assert rollup["estimated_recoverable_tokens"] == SESSION_TOKENS
+    # The netted rollup never claims more than the session actually spent.
+    assert rollup["estimated_recoverable_tokens"] <= SESSION_TOKENS
     # The dollar side can only ever claim the session's real spend back.
     assert rollup["estimated_recoverable_usd"] <= MAIN_COST + SUB_COST

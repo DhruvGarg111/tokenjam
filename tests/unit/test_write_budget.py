@@ -330,12 +330,18 @@ def _raw(signature, family_key, title, failures):
 
 def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
     """A family-unmatched cluster falls back to "Review examples", which used
-    to become a permanent CLAUDE.md block like any other."""
+    to become a permanent CLAUDE.md block like any other.
+
+    `persona="claude-code"` is the precondition for a write to be offered AT
+    ALL (the persona gate in `build_proposals`); these tests are about what the
+    write BUDGET does once that gate has passed, so they opt in explicitly
+    rather than relying on the conservative "unknown" default."""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
         [_raw("Bash:weird thing", None, "Bash: weird thing", _episodes("w", 6))],
         repo_cwd_map={"repo": "/tmp/repo"}, projection=_basis(sessions=6, active_days=6),
+        persona="claude-code",
     )
     assert len(proposals) == 1
     p = proposals[0]
@@ -359,7 +365,7 @@ def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
             _raw("edit_before_read", "edit_before_read", "edit before read",
                  _episodes("e", 40)),
         ],
-        repo_cwd_map={"repo": "/tmp/repo"},
+        repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=80, active_days=10, window_days=30.0),
     )
     by_family = {p.family_key: p for p in proposals}
@@ -385,7 +391,7 @@ def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
         for i in range(12)
     ]
     proposals, _ = build_proposals(
-        clusters, repo_cwd_map={"repo": "/tmp/repo"},
+        clusters, repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=40, active_days=10),
     )
     offered = [p for p in proposals if p.write_offered]
@@ -407,7 +413,7 @@ def test_relearn_totals_are_the_netted_ones():
     proposals, _ = build_proposals(
         [_raw("edit_before_read", "edit_before_read", "edit before read",
               _episodes("e", 40))],
-        repo_cwd_map={"repo": "/tmp/repo"},
+        repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=80, active_days=10),
     )
     p = proposals[0]
