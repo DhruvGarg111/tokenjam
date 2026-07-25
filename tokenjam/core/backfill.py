@@ -397,7 +397,10 @@ def parse_claude_code_session(
         if capture.prompts and pending_prompt.strip():
             llm_attrs[GenAIAttributes.PROMPT_CONTENT] = pending_prompt
         if capture.prompts:
-            if claude_md_text is None:
+            # Only commit the sentinel once a real lookup happened. A record
+            # without `cwd` can't resolve anything, so leaving the sentinel at
+            # None lets a later record that DOES carry cwd try again.
+            if claude_md_text is None and cwd is not None:
                 claude_md_text = _read_project_claude_md(cwd)
             if claude_md_text:
                 llm_attrs[TjAttributes.SYSTEM_PREFIX_CONTENT] = claude_md_text
