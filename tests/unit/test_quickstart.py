@@ -171,12 +171,18 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
     assert result.exit_code == 0, result.output
-    # Leads with the reads-your-local-logs framing.
-    assert "where your quota actually goes" in result.output
-    assert "~/.claude/projects" in result.output
+    # Leads with the reads-your-local-logs framing. Compared against the
+    # flattened output: Rich wraps the lead to console width, so the phrase
+    # can straddle a line break.
+    flat = _flat(result.output)
+    assert "where your quota actually goes" in flat
+    assert "~/.claude/projects" in flat
     # Both halves of the first-run value are present.
     assert "quota" in result.output.lower()
-    assert "Session timeline" in result.output
+    # The per-session timeline table was replaced by the persona line + the
+    # past-overspend callout; the window totals line survives it.
+    assert "Session timeline" not in result.output
+    assert "Totals:" in result.output
     # The opt-in "go deeper" pointer prints a CTA — see the two footer tests
     # below for the ephemeral (`npx tokenjam onboard`) vs installed (`tj
     # onboard`) forms (#507). Here we just assert an onboard CTA is present.
@@ -660,14 +666,285 @@ def test_quickstart_preview_omitted_when_no_sessions(tmp_path):
     assert "With the statusline installed" not in result.output
 
 
-# ── Session Story teaser (reuses `tj session-story`'s own renderer) ─────────
+# ── Both-personas line + past-overspend callout ────────────────────────────
+#
+# What replaced the Session Story teaser and the per-session timeline table.
+# Two jobs: say out loud that tokenjam serves Claude Code users AND Anthropic
+# SDK / API traffic (they arrive by different ingest paths), and close on the
+# single largest thing this history already overspent on, with the fix.
+#
+# Honesty rules under test, all from the repo CLAUDE.md field contract:
+#   * `past_overspend_usd` is the canonical figure, observed over the window,
+#     never paced and never summed with `observed_cost_usd`;
+#   * the SINGLE LARGEST finding is shown, never a sum across analyzers;
+#   * `None` means "not measured", never `$0` — a corpus with nothing to
+#     report renders no callout at all rather than a fabricated figure.
 
-def test_quickstart_session_story_teaser_appears_for_qualifying_session(
+
+def _cheapest_model_assistant(uuid: str, session_id: str, cwd: str,
+                              ts: str) -> dict:
+    """An assistant turn on the cheapest model tokenjam prices, so no analyzer
+    has a cheaper alternative to propose."""
+    record = _assistant(uuid, session_id, cwd, ts,
+                        input_tokens=200, output_tokens=80, cache_read=400)
+    record["message"]["model"] = "claude-haiku-4-5"
+    return record
+
+
+def _proposal(*, analyzer="deadweight", title="Unused MCP server: posthog",
+              evidence="0 tool calls across 12 sessions.",
+              advise_text="Remove the `posthog` MCP server.",
+              usd=None, tokens=None, caveat="Estimated, correlational figure."):
+    from tokenjam.core.optimize.cost_proposals import CostProposal
+
+    return CostProposal(
+        kind="cost",
+        analyzer=analyzer,
+        signature=f"cost:{analyzer}",
+        title=title,
+        target_key={},
+        evidence=evidence,
+        baseline={},
+        advise_text=advise_text,
+        past_overspend_usd=usd,
+        past_overspend_tokens=tokens,
+        caveat=caveat,
+    )
+
+
+class _StubWindow:
+    def __init__(self, total_cost_usd: float) -> None:
+        self.total_cost_usd = total_cost_usd
+
+
+class _StubReport:
+    def __init__(self, total_cost_usd: float) -> None:
+        self.window = _StubWindow(total_cost_usd)
+
+
+def _patch_optimize(monkeypatch, proposals, window_cost=1000.0):
+    """Stub the two optimize entry points `_compute_past_overspend` imports.
+
+    Both imports happen inside the function body, so patching the modules they
+    resolve from is enough — no import-order games. Everything under test here
+    is the SELECTION (largest, defensible, priced-or-token) and the render, not
+    the analyzers themselves; those have their own suites.
+    """
+    import tokenjam.core.optimize as opt
+    import tokenjam.core.optimize.cost_proposals as cp
+
+    monkeypatch.setattr(opt, "build_report",
+                        lambda **kwargs: _StubReport(window_cost))
+    monkeypatch.setattr(cp, "cost_proposals_from_report",
+                        lambda *args, **kwargs: list(proposals))
+
+
+def _compute(monkeypatch, proposals, window_cost=1000.0):
+    from datetime import timedelta
+
+    from tokenjam.cli.cmd_quickstart import _compute_past_overspend
+
+    _patch_optimize(monkeypatch, proposals, window_cost=window_cost)
+    return _compute_past_overspend(object(), _NOW - timedelta(days=30), _NOW)
+
+
+def test_past_overspend_picks_the_single_largest_priced_finding(monkeypatch):
+    callout = _compute(monkeypatch, [
+        _proposal(analyzer="subagent", title="Right-size a subagent", usd=4.0,
+                  tokens=100),
+        _proposal(analyzer="deadweight", title="Unused MCP server: posthog",
+                  usd=42.5, tokens=900,
+                  advise_text="Remove the `posthog` MCP server."),
+        _proposal(analyzer="summarize", title="Review 3 oversized files",
+                  usd=9.0, tokens=300),
+    ])
+
+    assert callout is not None
+    # The largest, NOT the 55.5 sum of the three (analyzers price overlapping
+    # angles on the same spans, so summing double-counts).
+    assert callout.usd == 42.5
+    assert callout.title == "Unused MCP server: posthog"
+    assert callout.advise_text == "Remove the `posthog` MCP server."
+
+
+def test_past_overspend_drops_a_figure_larger_than_the_window_cost(monkeypatch):
+    """A figure bigger than what the whole window cost is self-refuting: this
+    render prints the window's implied API value a few lines below it. The
+    over-ceiling finding is DROPPED, never rescaled into a paced number."""
+    callout = _compute(monkeypatch, [
+        _proposal(analyzer="deadweight", title="Unused MCP server", usd=357.0),
+        _proposal(analyzer="summarize", title="Review 3 oversized files", usd=88.0),
+    ], window_cost=245.0)
+
+    assert callout is not None
+    assert callout.usd == 88.0
+
+
+def test_past_overspend_falls_back_to_tokens_below_the_dollar_floor(monkeypatch):
+    callout = _compute(monkeypatch, [
+        _proposal(usd=0.12, tokens=250_000),
+    ])
+
+    assert callout is not None
+    assert callout.usd is None            # never a fabricated / near-zero figure
+    assert callout.tokens == 250_000
+    assert "under $1" in callout.tokens_only_reason
+
+
+def test_past_overspend_falls_back_to_tokens_when_never_priced(monkeypatch):
+    """`None` means "not measured", never `$0` — so an unpriced finding shows
+    its token figure and says why there is no dollar figure."""
+    callout = _compute(monkeypatch, [
+        _proposal(usd=None, tokens=800_000),
+    ])
+
+    assert callout is not None
+    assert callout.usd is None
+    assert callout.tokens == 800_000
+    assert "no priced figure" in callout.tokens_only_reason
+
+
+def test_past_overspend_is_none_when_nothing_qualifies(monkeypatch):
+    assert _compute(monkeypatch, []) is None
+    assert _compute(monkeypatch, [_proposal(usd=None, tokens=None)]) is None
+    assert _compute(monkeypatch, [_proposal(usd=None, tokens=0)]) is None
+
+
+def test_past_overspend_never_dies_on_the_analyzers(monkeypatch):
+    """A first run must degrade, not crash, if the analyzers raise."""
+    import tokenjam.core.optimize as opt
+
+    def _boom(**kwargs):
+        raise RuntimeError("analyzer exploded")
+
+    monkeypatch.setattr(opt, "build_report", _boom)
+
+    from datetime import timedelta
+
+    from tokenjam.cli.cmd_quickstart import _compute_past_overspend
+
+    assert _compute_past_overspend(object(), _NOW - timedelta(days=30), _NOW) is None
+
+
+def test_past_overspend_strips_a_duplicate_money_clause_from_the_title(monkeypatch):
+    """Several proposal titles carry their own money suffix (the Review inbox
+    renders them beside no figure). This callout LEADS with the figure, so the
+    suffix would print two differently-rounded amounts in one sentence."""
+    callout = _compute(monkeypatch, [
+        _proposal(title="Review 17 oversized files, $187.55", usd=187.55),
+    ])
+
+    assert callout is not None
+    assert callout.title == "Review 17 oversized files"
+
+
+def test_past_overspend_falls_back_to_optimize_when_advice_is_unusable(monkeypatch):
+    """The persona gate substitutes a "no fix is shown for it" string for
+    findings this persona can't act on. Surfacing that as "the fix" would be
+    worse than pointing at the full report."""
+    from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
+
+    blank = _compute(monkeypatch, [_proposal(advise_text="   ", usd=5.0)])
+    gated = _compute(monkeypatch, [_proposal(advise_text=CACHE_NO_LEVER_TEXT, usd=5.0)])
+
+    assert blank is not None and gated is not None
+    assert blank.advise_text == "Run `tj optimize` for this finding and its fix."
+    assert gated.advise_text == blank.advise_text
+
+
+# ── The rendered block ─────────────────────────────────────────────────────
+
+
+def test_quickstart_names_both_ingest_paths_in_one_line(tmp_path):
+    """tokenjam is not a Claude-Code-only tool: the report says so once, in
+    terms of the ingest path each persona actually arrives by. MCP is the
+    SDK/API path — Claude Code arrives out of band (these local logs)."""
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "TokenJam ingests both sides of your spend" in flat
+    assert "Claude Code from these local session logs" in flat
+    assert "Anthropic SDK / API traffic from OTel spans or the tokenjam MCP server" in flat
+
+
+def test_quickstart_renders_the_past_overspend_callout(tmp_path, monkeypatch):
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "_compute_past_overspend", lambda *a, **k: q.PastOverspendCallout(
+        title="Unused MCP server: posthog",
+        evidence="`posthog` made 0 tool calls across 12 session(s).",
+        advise_text="Remove or project-scope the `posthog` MCP server.",
+        caveat="Estimated, correlational figure.",
+        usd=42.50,
+    ))
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "What that already cost you" in flat
+    assert "$42.50 of that was avoidable: Unused MCP server: posthog" in flat
+    assert "0 tool calls across 12 session(s)" in flat
+    assert "Fix: Remove or project-scope the `posthog` MCP server." in flat
+    assert "Estimated, correlational figure." in flat
+
+
+def test_quickstart_past_overspend_token_form_states_why_no_dollars(
     tmp_path, monkeypatch,
 ):
-    """The teaser renders for the SAME session the statusline preview already
-    picked — no extra file globbing, just the shared renderer on that session's
-    already-confirmed-readable transcript."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "_compute_past_overspend", lambda *a, **k: q.PastOverspendCallout(
+        title="Right-size a subagent",
+        evidence="3 subagents ran on a premium model.",
+        advise_text="Set `model:` in the agent file.",
+        tokens=250_000,
+        tokens_only_reason="under $1 at API list rates over this window",
+    ))
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "250.0k tokens of that was avoidable" in flat
+    assert "No dollar figure: under $1 at API list rates over this window." in flat
+    # Never a fabricated / zero dollar figure alongside the token form.
+    assert "$0.00" not in result.output
+
+
+def test_quickstart_degrades_cleanly_when_nothing_is_recoverable(tmp_path):
+    """The REAL analyzer path on a corpus with nothing to report: no panel, no
+    `$0.00`, no fabricated number, and the rest of the report still renders.
+
+    The fixture already runs on the cheapest model in the pricing table, so
+    `downsize` has nothing to route it down to, and an isolated HOME (see
+    `tests/conftest.py`) leaves every config-reading analyzer with nothing to
+    find. No stubbing: this is the path a first-time user with a clean, small
+    history actually takes.
+    """
+    root = tmp_path / "projects"
+    _make_session_file(root, "sess-cheap", "/Users/me/projCheap", [
+        _cheapest_model_assistant("c1", "sess-cheap", "/Users/me/projCheap",
+                                  _ts(6, 20, "10:00:00.000")),
+    ])
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "What that already cost you" not in result.output
+    assert "of that was avoidable" not in result.output
+    # No fabricated / zero figure anywhere above the totals line (the totals
+    # line's own "implied API value" is a different, pre-existing figure).
+    assert "$0.00" not in result.output.split("Totals:")[0]
+    # The surrounding report is unaffected.
+    assert "where your quota actually goes" in _flat(result.output)
+    assert "Totals:" in result.output
+
+
+def test_quickstart_no_longer_teases_session_story(tmp_path, monkeypatch):
+    """The Session Story teaser is gone from the first run (`tj session-story`
+    itself is untouched and still a real command)."""
     from tokenjam.cli import cmd_quickstart as q
 
     monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
@@ -678,24 +955,125 @@ def test_quickstart_session_story_teaser_appears_for_qualifying_session(
     )
 
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
     assert result.exit_code == 0, result.output
-    assert "Session Story" in result.output
-    assert "tj session-story" in result.output
-    # The teaser follows the statusline preview in the output, not before it.
-    assert result.output.index("With the statusline installed") < result.output.index(
-        "Session Story"
+    # The statusline preview it used to hang off of still renders.
+    assert "With the statusline installed" in result.output
+    assert "Session Story" not in result.output
+    assert "tj session-story" not in result.output
+
+
+def test_quickstart_user_facing_copy_has_no_em_dashes(tmp_path):
+    """Standing copy rule for tokenjam: periods, semicolons or colons, never an
+    em dash.
+
+    Scope: quickstart's OWN copy, which is what this fixture exercises (no
+    analyzer finding qualifies on it). The past-overspend callout renders a
+    winning proposal's `advise_text` and `caveat` VERBATIM, and those strings
+    are authored in `core/optimize/cost_proposals.py` for every surface
+    (CLI, Review inbox, web UI); several still contain em dashes. They are
+    deliberately not rewritten at render time: the honesty caveats are
+    contractually surfaced verbatim, so the fix belongs at the source, in a
+    change that moves every surface at once.
+    """
+    root = _heavy_reread_fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "—" not in result.output
+
+
+def test_overspend_analyzer_set_drops_only_relearn():
+    """Runtime bound, not a second persona filter: `relearn` reports on
+    `cost_of_waste_*` and leaves `past_overspend_*` at None, so it can never
+    win this selection, while costing the large majority of the analyzer time
+    on a real corpus. Everything else in `COST_ANALYZERS` is passed straight
+    through, and the persona gate stays inside `build_report`."""
+    from tokenjam.cli.cmd_quickstart import _overspend_analyzers
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    selected = _overspend_analyzers(COST_ANALYZERS)
+
+    assert "relearn" not in selected
+    assert selected == [n for n in COST_ANALYZERS if n != "relearn"]
+
+
+def test_overspend_analyzer_set_keeps_deadweight_when_not_capped():
+    """`deadweight` scans every matching transcript on disk regardless of
+    `--max-sessions`, but when the ingest was NOT truncated its population
+    is identical to what got ingested — no reason to drop it."""
+    from tokenjam.cli.cmd_quickstart import _overspend_analyzers
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    selected = _overspend_analyzers(COST_ANALYZERS, population_capped=False)
+
+    assert "deadweight" in selected
+
+
+def test_overspend_analyzer_set_drops_deadweight_when_population_capped():
+    """When quickstart's session ingest actually truncated at the cap,
+    `deadweight`'s own disk scan reasons over strictly MORE sessions than the
+    ones ingested and rendered — a population mismatch the magnitude ceiling
+    alone can't catch (a smaller out-of-population figure still clears it).
+    Excluding the analyzer, not rescaling its figure, is the only honest
+    move here."""
+    from tokenjam.cli.cmd_quickstart import _overspend_analyzers
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    selected = _overspend_analyzers(COST_ANALYZERS, population_capped=True)
+
+    assert "deadweight" not in selected
+    assert "relearn" not in selected
+    assert selected == [n for n in COST_ANALYZERS if n not in ("relearn", "deadweight")]
+
+
+def test_past_overspend_excludes_deadweight_from_the_report_when_population_capped(monkeypatch):
+    """`_compute_past_overspend(population_capped=True)` must not even ASK
+    `build_report` to run `deadweight` — filtering its proposal out after
+    the fact would still let evidence/cost from out-of-window sessions leak
+    into the report object."""
+    import tokenjam.core.optimize as opt
+    from tokenjam.cli.cmd_quickstart import _compute_past_overspend
+
+    captured: dict = {}
+
+    def _fake_build_report(**kwargs):
+        captured["findings"] = kwargs.get("findings")
+        return _StubReport(1000.0)
+
+    monkeypatch.setattr(opt, "build_report", _fake_build_report)
+    import tokenjam.core.optimize.cost_proposals as cp
+    monkeypatch.setattr(cp, "cost_proposals_from_report", lambda *a, **k: [])
+
+    _compute_past_overspend(
+        object(), _NOW - timedelta(days=30), _NOW, population_capped=True,
     )
 
+    assert "deadweight" not in captured["findings"]
 
-def test_quickstart_session_story_teaser_omitted_when_no_preview_candidate(tmp_path):
-    """Silent degrade: no crossing session -> no statusline preview -> no
-    Session Story teaser either (nothing to reuse the selection from)."""
-    root = tmp_path / "projects"
-    _make_session_file(root, "sess-a", "/Users/me/projA", [
-        _assistant("a1", "sess-a", "/Users/me/projA", _ts(6, 20, "10:00:00.000"),
-                   input_tokens=1000, output_tokens=200, cache_read=10),
-    ])
+    _compute_past_overspend(
+        object(), _NOW - timedelta(days=30), _NOW, population_capped=False,
+    )
 
+    assert "deadweight" in captured["findings"]
+
+
+def test_quickstart_reads_no_config_and_opens_no_ondisk_db(tmp_path, monkeypatch):
+    """The zero-setup promise, now that the run also builds an optimize report:
+    the analyzers get an in-memory `TjConfig()` default, so no config file is
+    read or written and no on-disk DB is opened."""
+    import tokenjam.cli.main as main
+    import tokenjam.core.config as cfg
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("quickstart must not touch config / the on-disk DB")
+
+    monkeypatch.setattr(cfg, "load_config", _boom)
+    monkeypatch.setattr(cfg, "find_config_file", _boom)
+    monkeypatch.setattr(cfg, "write_config", _boom, raising=False)
+    monkeypatch.setattr(main, "open_db", _boom, raising=False)
+
+    root = _fixture_root(tmp_path)
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
     assert result.exit_code == 0, result.output
-    assert "Session Story" not in result.output

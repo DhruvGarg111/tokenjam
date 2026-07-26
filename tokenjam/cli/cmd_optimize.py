@@ -2632,6 +2632,15 @@ def _render_resend_fix(finding, persona: str) -> None:
         console.print(
             finding.fix_cache_control, markup=False, highlight=False, soft_wrap=True,
         )
+    elif persona == "sdk":
+        # No priced cache_control example: `finding.fix_compaction` is
+        # `/compact`, a Claude Code interactive command an SDK caller cannot
+        # run. Fall back to the persona-neutral call-site instruction instead
+        # of falling through to the claude-code branch below.
+        from tokenjam.core.optimize.analyzers.context_resend import (
+            RESEND_SDK_TRIM_FIX,
+        )
+        console.print(f"     [bold]Fix:[/bold] {RESEND_SDK_TRIM_FIX}")
     elif persona == "mixed":
         console.print(
             "     [bold]Fix — pick the lever that matches the traffic:[/bold]"
@@ -2643,7 +2652,7 @@ def _render_resend_fix(finding, persona: str) -> None:
             console.print(
                 finding.fix_cache_control, markup=False, highlight=False, soft_wrap=True,
             )
-    else:  # persona in {"claude-code", "unknown"}, or "sdk" with no snippet
+    else:  # persona in {"claude-code", "unknown"}
         console.print(f"     [bold]Fix:[/bold] {finding.fix_compaction}")
         if finding.fix_cache_control:
             console.print(

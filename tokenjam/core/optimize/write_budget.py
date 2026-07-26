@@ -121,6 +121,31 @@ RELEARN_MAX_OFFERED_WRITES = 5
 COST_WRITE_BUDGET_TOKENS = 500
 COST_MAX_OFFERED_WRITES = 3
 
+# --- Value floor ---------------------------------------------------------------
+
+#: A permanent write has to be WORTH ASKING FOR, not merely net-positive.
+#:
+#: Netting already stops a rule that costs more to keep than it recovers, but
+#: "net positive" is a very low bar: a rule clearing its own standing cost by
+#: $0.40 passes it, and the product then spends one of five scarce write slots
+#: — and one block of the user's permanently-re-sent agent file — on a figure
+#: no user would act on. The write budget's slots and the agent file's byte
+#: budget are the genuinely scarce resources here, so the floor is applied to
+#: what a rule RETURNS, in dollars, not to whether it merely breaks even.
+#:
+#: Deliberately a floor on the WRITE OFFER, never on the observation. A family
+#: below the floor keeps its `past_overspend_*` (that money was spent whether
+#: or not we choose to write a rule about it) and keeps its forward net claim
+#: and its copyable snippet — it is treated exactly like a deferred write, not
+#: like a suppressed one. Zeroing an observed cost because our remedy is too
+#: small to bother writing is the "no action for this" / "this was free"
+#: conflation the repo CLAUDE.md's rule 32 exists to stop.
+#:
+#: A candidate with no dollar figure at all is NOT held to this floor — the
+#: comparison cannot be made, and inventing a rate to make it would be worse
+#: than letting the tokens-only netting stand alone.
+MIN_NET_WRITE_USD = 5.0
+
 # --- Quality floor -------------------------------------------------------------
 
 #: A permanent rule needs to actually say something. Shorter than this is a
@@ -171,6 +196,16 @@ REASON_FAMILY_MERGED = (
     "Covered by the single rule offered for this family: one block is written "
     "for the whole family rather than one per cluster."
 )
+#: Not a suppression either — the same shape as REASON_BUDGET_FULL. The saving
+#: is real and the snippet stays copyable; we simply will not spend a permanent
+#: block of an always-re-sent file on a return this small.
+REASON_BELOW_VALUE_FLOOR = (
+    f"Below the ${MIN_NET_WRITE_USD:.0f} floor for a permanent rule: this one "
+    "clears its own standing cost but not by enough to be worth a block in a "
+    "file re-sent on every future session. The recommendation is still shown "
+    "as a copyable snippet, and what the recurrence already cost is reported "
+    "in full."
+)
 #: Not a suppression: the write IS offered, but the disclosure says the netting
 #: could not run. Reaching a suppression verdict from a MISSING measurement
 #: would kill real fixes for the sin of being unquantified, which is strictly
@@ -218,6 +253,9 @@ REASON_SHORT_BY_REASON.update({
     REASON_BUDGET_FULL: "deferred — this window's rule budget is spent",
     REASON_FAMILY_MERGED: "covered by another cluster's rule",
     REASON_CEILING_REACHED: "blocked — agent files already too large to grow",
+    REASON_BELOW_VALUE_FLOOR: (
+        f"returns under ${MIN_NET_WRITE_USD:.0f} — not worth a permanent rule"
+    ),
 })
 
 #: The net-negative sentence as it read BEFORE the modelled/observed hedging.
@@ -531,18 +569,32 @@ def _decide_family(
             )
             for c in ordered[1:]
         ]
+    # The family's gross is the SUM across every member, not just the
+    # representative's own — siblings carry no standing cost of their own
+    # (the block is written once for the whole family), but their savings
+    # still count toward whether that ONE shared write is worth keeping.
+    # Netting only `rep.gross_*` understates a multi-member family and can
+    # withhold the write even when the family's COMBINED return clears the
+    # value floor below.
+    family_gross_tokens = sum(c.gross_tokens for c in ordered)
     per_session = standing_tokens_per_session(rep.rung, rep.artifact_text)
     exposure = max(
         rep.exposure_sessions if rep.exposure_sessions is not None else basis.sessions, 0,
     )
     standing = per_session * exposure
+    # Priced at the REPRESENTATIVE's own implied rate (its `gross_usd` is the
+    # only figure guaranteed present, since the unpriceable branch above
+    # already returned early otherwise), then applied to the family total so
+    # every member's dollars are converted at one consistent rate rather than
+    # summing separately-derived per-candidate USD figures.
     rate = _rate_per_token(rep.gross_usd, rep.gross_tokens)
+    family_gross_usd = family_gross_tokens * rate if rate is not None else None
     standing_usd = standing * rate if rate is not None else None
-    net_tokens = rep.gross_tokens - standing
-    net_usd = (rep.gross_usd - standing_usd) if (
-        rep.gross_usd is not None and standing_usd is not None
-    ) else rep.gross_usd
-    payback = (rep.gross_tokens / standing) if standing > 0 else None
+    net_tokens = family_gross_tokens - standing
+    net_usd = (family_gross_usd - standing_usd) if (
+        family_gross_usd is not None and standing_usd is not None
+    ) else family_gross_usd
+    payback = (family_gross_tokens / standing) if standing > 0 else None
     net_negative = net_tokens <= 0
     clamped_net_usd = None if net_usd is None else max(net_usd, 0.0)
 
@@ -555,7 +607,7 @@ def _decide_family(
         payback_ratio=payback, net_negative=net_negative, exposure_sessions=exposure,
         claimed_tokens=0 if net_negative else max(net_tokens, 0),
         claimed_usd=(
-            None if rep.gross_usd is None
+            None if family_gross_usd is None
             else (0.0 if net_negative else (clamped_net_usd or 0.0))
         ),
         claim_suppressed=net_negative, basis=STANDING_COST_BASIS,
@@ -620,6 +672,21 @@ def allocate_writes(
             decisions[sibling.key] = sibling
         if rep_decision.net_negative:
             decisions[rep.key] = rep_decision
+            continue
+        # The VALUE floor, applied after netting and before the budget so a
+        # too-small family never consumes one of the scarce write slots a
+        # bigger one could use. Shaped exactly like the budget-full verdict
+        # below — not offered, but the claim and the snippet both survive —
+        # because a small return is still a real one; see MIN_NET_WRITE_USD.
+        # Skipped entirely when the family carries no dollar figure: there is
+        # no comparison to make and none is invented.
+        if (
+            rep_decision.net_usd is not None
+            and rep_decision.net_usd < MIN_NET_WRITE_USD
+        ):
+            decisions[rep.key] = replace(
+                rep_decision, offered=False, reason=REASON_BELOW_VALUE_FLOOR,
+            )
             continue
         ranked.append((rep, rep_decision))
 

@@ -1057,20 +1057,16 @@ def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
             # claim at all (CLAUDE.md rule 27; see the docstring).
             "past_reread_tokens": int(getattr(finding, "past_reread_tokens", 0) or 0),
             "past_reread_usd": getattr(finding, "past_reread_usd", None),
-            # relearn's OWN forward claim, kept under its own name on its own
-            # finding because it is a genuinely different quantity (fix-gated,
-            # over an unbounded corpus). Carried here for reference only: it
-            # must never reach `past_overspend_usd`, or it would enter
-            # `past_overspend_rollup` beside resend's claim on the same spans.
-            "relearn_claim_usd": getattr(finding, "estimated_recoverable_usd", None),
-            "relearn_claim_tokens": getattr(finding, "estimated_recoverable_tokens", None),
         },
         advise_text=advise,
         cost_of_waste_usd=past_usd,
         cost_of_waste_tokens=past_tokens or None,
         cost_of_waste_basis=str(getattr(finding, "past_overspend_basis", "") or ""),
         coverage_note=_relearn_coverage_note(clusters),
-        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        # No forward claim exists on this card (`past_overspend_usd` stays
+        # None by design — see `_relearn_coverage_note`), so there is no
+        # `estimate_basis` to caption; the observed figure's own basis lives
+        # on `cost_of_waste_basis` above.
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
     )]
 
@@ -2324,6 +2320,25 @@ def _resend_to_proposals(
         # because the rung-1 write lands in CLAUDE.md, and the apply machinery
         # writes exactly one target per apply.
         one_paste_fix = _rightsize_frontmatter_snippet(rightsize)
+    elif persona == "sdk":
+        # `/compact` is a Claude Code interactive command an SDK caller has
+        # no access to, so it must never be the advise text here — see
+        # RESEND_SDK_TRIM_FIX's docstring in context_resend.py. Lead with the
+        # cache_control snippet when a priced example produced one; fall
+        # back to a persona-neutral, call-site instruction otherwise.
+        from tokenjam.core.optimize.analyzers.context_resend import (
+            RESEND_SDK_TRIM_FIX,
+        )
+        advise = (
+            "Adopt a cache_control breakpoint at the call site (snippet "
+            "below) so this repeated context bills at the cache rate "
+            "instead of full price every turn."
+        ) if cache_snippet else RESEND_SDK_TRIM_FIX
+        write_fields = {
+            "advise_only": True, "apply_capable": False,
+            "rung": 0, "scope": "", "proposed_fix": "",
+        }
+        one_paste_fix = cache_snippet or RESEND_SDK_TRIM_FIX
     else:
         advise = fix_compaction
         write_fields = {

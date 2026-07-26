@@ -1,7 +1,7 @@
 """Unit tests for the segment-level premium quota audit (`tj quota-audit`, issue #5).
 
 The audit walks assistant turns per session in ``start_time`` order and reports
-ONE honest figure (founder D1): the share of premium (Opus/Fable) quota that
+ONE honest figure (D1): the share of premium (Opus/Fable) quota that
 went to Sonnet-shaped *work* — whole Sonnet-shaped sessions PLUS mechanical
 stretches inside otherwise-hard sessions — on exact per-turn model attribution
 (D2), as a labelled estimate with a wide bootstrap CI (D3).

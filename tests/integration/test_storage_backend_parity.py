@@ -114,6 +114,7 @@ SHIM_NOT_IMPLEMENTED = {
     "get_savings_entries",
     "get_session",
     "get_session_id_for_trace",
+    "get_trace_cost_stats",
     "get_session_active_seconds",
     "get_session_by_conversation",
     "get_window_cost_totals",

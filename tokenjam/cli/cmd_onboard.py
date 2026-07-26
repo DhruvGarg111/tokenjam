@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import click
 from rich.markup import escape
@@ -18,9 +18,6 @@ from tokenjam.core.config import find_config_file
 from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
-
-if TYPE_CHECKING:
-    from tokenjam.core.config import TjConfig
 
 # --- Claude Code backfill scope (#443) ---------------------------------------
 # `tj onboard --claude-code` used to backfill the ENTIRE on-disk history with
@@ -242,7 +239,7 @@ def _maybe_guard_ephemeral_runner(ctx: click.Context) -> None:
         return
 
     console.print(
-        "\n[yellow]Heads up:[/yellow] you're running via a temporary "
+        "\n[warn]Heads up:[/warn] you're running via a temporary "
         "uvx/pipx-run environment. [bold]tj onboard[/bold] wires a "
         "background daemon and a Claude Code statusline that both need a "
         "persistent [bold]tj[/bold] on PATH — those would go stale the "
@@ -273,13 +270,13 @@ def _maybe_guard_ephemeral_runner(ctx: click.Context) -> None:
     tj_path = _install_tokenjam_persistently()
     if tj_path is None:
         console.print(
-            "[red]Persistent install failed.[/red] Continuing this "
+            "[error]Persistent install failed.[/error] Continuing this "
             "session ephemerally — run [bold]pipx install tokenjam && "
             "tj onboard[/bold] yourself afterward.\n"
         )
         return
 
-    console.print(f"[green]✓[/green] Installed — re-running onboard via {tj_path}\n")
+    console.print(f"[ok]✓[/ok] Installed — re-running onboard via {tj_path}\n")
     result = subprocess.run([tj_path, *sys.argv[1:]])
     ctx.exit(result.returncode)
 
@@ -519,8 +516,8 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         # expecting their plan field to update (#68 §1).
         if reconfigure:
             console.print(
-                "[red]--reconfigure has no effect without --claude-code or "
-                "--codex.[/red]"
+                "[error]--reconfigure has no effect without --claude-code or "
+                "--codex.[/error]"
             )
             console.print(
                 "\nThe bare onboard path writes a generic config and doesn't "
@@ -641,7 +638,7 @@ retention_days = 90
     )
     apply_msg = _try_apply_declared_plans(plain_config, reconcile=reconcile_plan)
     if apply_msg:
-        console.print(f"[green]\u2713[/green] {apply_msg}")
+        console.print(f"[ok]\u2713[/ok] {apply_msg}")
 
     daemon_msg = None
     if want_daemon:
@@ -657,20 +654,20 @@ retention_days = 90
 
     # Output
     console.print()
-    console.print("[green]\u2713[/green] Config written to [bold].tj/config.toml[/bold]")
-    console.print(f"[green]\u2713[/green] Ingest secret generated: "
+    console.print("[ok]\u2713[/ok] Config written to [accent].tj/config.toml[/accent]")
+    console.print(f"[ok]\u2713[/ok] Ingest secret generated: "
                   f"[dim]{ingest_secret[:8]}...[/dim]")
     if budget and budget > 0:
-        console.print(f"[green]\u2713[/green] Default daily budget: "
+        console.print(f"[ok]\u2713[/ok] Default daily budget: "
                       f"[bold]${budget:.2f}[/bold] per agent")
     if plan_tier:
         # Escape the TOML section header \u2014 Rich treats `[budget.<provider>]` as a
         # markup tag and would strip it, leaving "(written to )". See issue #157.
         plan_section = escape(f"[budget.{plan_provider}]")
-        console.print(f"[green]\u2713[/green] Plan tier: "
+        console.print(f"[ok]\u2713[/ok] Plan tier: "
                       f"[bold]{plan_tier}[/bold] (written to {plan_section})")
     if daemon_msg:
-        console.print(f"[green]\u2713[/green] {daemon_msg}")
+        console.print(f"[ok]\u2713[/ok] {daemon_msg}")
     _print_capture_disclosure(plain_config.capture.prompts, plain_config.capture.tool_inputs)
 
     console.print()
@@ -773,7 +770,7 @@ def _run_onboard_verification(
 
     backend, _mode, error = open_read_backend(config)
     if backend is None:
-        console.print(f"\n[yellow]Can't verify yet[/yellow] \u2014 {error}.")
+        console.print(f"\n[warn]Can't verify yet[/warn] \u2014 {error}.")
         console.print(
             "Start [bold]tj serve[/bold], then run [bold]tj doctor[/bold] to check."
         )
@@ -805,14 +802,14 @@ def _run_onboard_verification(
 
     if result.confirmed:
         console.print(
-            f"[green]\u2713 Receiving telemetry![/green] First span arrived after "
-            f"{result.elapsed_s:.0f}s \u2014 you're wired up."
+            f"[ok]\u2713 Receiving telemetry![/ok] First span arrived after "
+            f"{result.elapsed_s:.0f}s; you're wired up."
         )
     elif result.error:
-        console.print(f"[yellow]Couldn't verify[/yellow] \u2014 {result.error}.")
+        console.print(f"[warn]Couldn't verify[/warn] \u2014 {result.error}.")
     else:
         console.print(
-            f"[yellow]\u26a0 No telemetry yet[/yellow] after {int(timeout_s)}s. "
+            f"[warn]\u26a0 No telemetry yet[/warn] after {int(timeout_s)}s. "
             + not_confirmed_cause(persona)
         )
 
@@ -839,7 +836,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
 
     if config_path is None:
         console.print(
-            "[red]No tj config found.[/red] Run [bold]tj onboard[/bold] "
+            "[error]No tj config found.[/error] Run [bold]tj onboard[/bold] "
             "(optionally with --claude-code / --codex) first, then "
             "[bold]tj onboard --verify-only[/bold]."
         )
@@ -849,7 +846,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
     try:
         config = load_config(str(config_path.resolve()))
     except Exception as exc:  # surface a clean message, no traceback
-        console.print(f"[red]Could not load config[/red] at {display_path(config_path)}: {exc}")
+        console.print(f"[error]Could not load config[/error] at {display_path(config_path)}: {exc}")
         ctx.exit(1)
         return
 
@@ -879,7 +876,12 @@ def _prompt_plan(provider_label: str, choices: list[tuple[str, str]],
     """
     console.print(f"\nHow do you pay for {provider_label}?")
     for i, (_key, desc) in enumerate(choices, start=1):
-        console.print(f"  {i}) {desc}")
+        # The digit is what the user types, so it takes the accent. Rich used
+        # to colour it anyway — along with every *other* number on the line,
+        # which is how "Max 20x plan" ended up rendering as `Max 2` + a cyan
+        # `0x`. Accenting only the choice key restores the affordance and
+        # leaves the plan names alone.
+        console.print(f"  [accent]{i}[/accent]) {desc}")
     keys = [k for k, _ in choices]
     default_idx = keys.index(current) + 1 if current in keys else 1
     raw = click.prompt(
@@ -986,178 +988,48 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     return msg, True, total
 
 
-def _lens_review_url(port: int, *, want_daemon: bool) -> str:
-    """One-click-revert pointer for the relearn activation tail below — the
-    Lens Review inbox (`#/review`, the Improve lens's home) already renders a
-    single-click Revert next to every applied fix, so onboarding never needs
-    its own revert UI. When the daemon isn't running yet (``--no-daemon``),
-    say so instead of printing a URL that won't answer."""
+def _review_inbox_url(port: int, *, want_daemon: bool) -> str:
+    """Pointer to the web dashboard's review inbox (``#/review``), where every
+    detected fix is reviewed, applied, and one-click reverted. When the daemon
+    isn't running yet (``--no-daemon``), say so instead of printing a URL that
+    won't answer."""
     if want_daemon:
         return f"http://127.0.0.1:{port}/#/review"
     return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
 
 
-def _run_relearn_first_fix(config: TjConfig, *, port: int, want_daemon: bool) -> None:
-    """Onboarding tail (#179): the backfill's payoff is a fix, not just a
-    chart. Scans the freshly-backfilled Claude Code history for recurring
-    relearns (``core.optimize.analyzers.relearn``) and, for a high-confidence
-    hook-quality finding, drives the user through approve+enable of their
-    first fix — human-gated at every step, never auto-armed.
+def _print_review_inbox_pointer(*, port: int, want_daemon: bool) -> None:
+    """Onboarding tail: point at the web dashboard's review inbox instead of
+    re-deriving and rendering findings in the terminal.
 
-    Thin history (the detector found no recurring cluster — it needs
-    ``MIN_RECURRING_SESSIONS`` repeats of the same failure before it will
-    ever propose anything) gets a "still watching" note instead of a fix CTA.
-    Non-interactive runs (CI, a piped ``tj onboard``) only ever print the
-    summary — the enable ask requires a human at a terminal to confirm.
-
-    Never raises: any failure here is best-effort and must not sink the rest
-    of onboarding, which has already written config/statusline/daemon state
-    by the time this runs.
+    Onboard used to run the full relearn scan inline (tens of seconds over a
+    real corpus), dump the recurring-mistake list plus a #1-fix evidence
+    block, and ask an interactive "enable this fix now?" question. That scan
+    was purely compute-for-display: it called ``compute_relearn_finding``
+    directly, bypassing ``core.optimize.relearn_store``, so nothing it
+    produced was persisted or read by any other surface. The daemon's own
+    background job computes and caches the findings the review inbox renders,
+    on its own schedule, so onboarding just sends the user there. Removing
+    the ask also means onboard has one fewer blocking question.
     """
-    from dataclasses import asdict
-
-    from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT
-    from tokenjam.core.optimize import relearn_apply
-    from tokenjam.core.optimize.analyzers.relearn import compute_relearn_finding
-
     console.print()
-    console.print("[dim]Scanning your history for recurring mistakes…[/dim]")
-    try:
-        # projects_root=CLAUDE_CODE_PROJECTS_ROOT: scan the exact directory
-        # the backfill above just read, not `compute_relearn_finding`'s own
-        # default (a module-level constant baked in at import time from
-        # ``Path.home()`` — it won't follow a test's ``Path.home`` patch the
-        # way this already-monkeypatchable module attribute does).
-        #
-        # distill_enabled=False: onboarding stays fast and dependency-free —
-        # the LLM-distill pass shells out to a real `claude` CLI per residual
-        # cluster (slow, and not guaranteed to be configured yet at this
-        # point in setup). Every distilled cluster is hardcoded to rung 1
-        # anyway (never enforcement-eligible), so it can never be the day-1
-        # candidate below — the daemon's periodic background recompute
-        # (`tj serve`'s relearn job) already runs the full distill-enabled
-        # scan and will surface those in the Lens Review inbox on its own
-        # schedule.
-        # persona="claude-code": `tj onboard` scanning the Claude Code
-        # transcript root is itself the claude-code persona's own onboarding
-        # flow (there is no window/conn here to classify from), so the write
-        # gate (see `build_proposals`) should stay open the way it always
-        # has for this call site.
-        finding = compute_relearn_finding(
-            projects_root=CLAUDE_CODE_PROJECTS_ROOT, distill_enabled=False,
-            persona="claude-code",
-        )
-    except Exception:
-        return
-
-    if not finding.clusters:
+    if want_daemon:
         console.print(
-            "[bold]Recurring mistakes:[/bold] still watching — check back "
-            "after a few more sessions."
+            "[heading]Recurring mistakes:[/heading] tj keeps watching your sessions "
+            "in the background."
         )
-        return
-
-    console.print()
+    else:
+        # The relearn job that produces this only runs under `tj serve` --
+        # under `--no-daemon` nothing is watching anything yet, and claiming
+        # otherwise would contradict the next line telling the user to start
+        # the server.
+        console.print(
+            "[heading]Recurring mistakes:[/heading] tj will watch your sessions "
+            "in the background once the server is running."
+        )
     console.print(
-        f"[bold]The mistakes your agent keeps making[/bold]  "
-        f"[dim]({finding.sessions_scanned} sessions scanned)[/dim]"
-    )
-    for cluster in finding.clusters[:5]:
-        distilled = (
-            " [dim](distilled — needs a closer look)[/dim]"
-            if (cluster.family_key or "").startswith("distilled:") else ""
-        )
-        console.print(
-            f"  [yellow]{cluster.occurrences:>4}x[/yellow]  {cluster.title}"
-            f"{distilled}  [dim]· {cluster.sessions} sessions · "
-            f"rung {cluster.rung}[/dim]"
-        )
-    total_tokens = finding.estimated_recoverable_tokens or 0
-    if total_tokens:
-        console.print(
-            f"  [dim]~{total_tokens:,} estimated recoverable tokens across "
-            f"{len(finding.clusters)} pattern"
-            f"{'s' if len(finding.clusters) != 1 else ''} — {finding.caveat}[/dim]"
-        )
-    lens_hint = _lens_review_url(port, want_daemon=want_daemon)
-
-    # High-confidence, hook-quality only (Hard constraint #2): rung 3-5 is the
-    # intervention ladder's enforcement tier (ENFORCEMENT_RUNGS), and every
-    # distilled (LLM-guessed) cluster is hardcoded to rung 1 by the detector
-    # itself — so filtering on rung already excludes distilled clusters. The
-    # explicit family_key check stays as defense-in-depth against a future
-    # detector change quietly handing a distilled cluster a higher rung. A
-    # cluster with no resolved write target can't be applied non-interactively
-    # (it would need a human to pick one), so it's excluded too.
-    candidate = next(
-        (
-            c for c in finding.clusters
-            if c.rung in relearn_apply.ENFORCEMENT_RUNGS
-            and not (c.family_key or "").startswith("distilled:")
-            and c.suggested_target
-        ),
-        None,
-    )
-    if candidate is None:
-        console.print()
-        console.print(
-            f"[dim]No day-1 hook-quality fix yet — review the rest anytime "
-            f"in the Lens Review inbox ({lens_hint}).[/dim]"
-        )
-        return
-
-    if not _is_interactive():
-        console.print()
-        console.print(
-            f"[dim]Re-run `tj onboard --claude-code` from a terminal, or "
-            f"open the Lens Review inbox ({lens_hint}), to approve + enable "
-            f"your first fix.[/dim]"
-        )
-        return
-
-    console.print()
-    console.print(f"[bold]Your #1 fix:[/bold] {candidate.title}")
-    console.print(
-        f"  [dim]Evidence — {candidate.occurrences} occurrences across "
-        f"{candidate.sessions} sessions:[/dim]"
-    )
-    for ex in candidate.examples[:3]:
-        console.print(f"    [dim]· session {ex.session_id} ({ex.repo}): {ex.snippet}[/dim]")
-    console.print(f"  Proposed fix: {candidate.proposed_fix}")
-    console.print(
-        "  [dim]What enabling does: Claude Code calls tj automatically right "
-        "after a matching tool failure. It never blocks or edits your code — "
-        "it only injects a short recovery note into context. The hook ships "
-        "disabled and stays that way unless you confirm below; you can "
-        "disable or revert it at any time.[/dim]"
-    )
-    if not click.confirm("  Enable this fix now?", default=False):
-        console.print(
-            f"[dim]  Skipped — enable anytime from the Lens Review inbox "
-            f"({lens_hint}) or by re-running tj onboard.[/dim]"
-        )
-        return
-
-    try:
-        result = relearn_apply.apply_relearn_fix(
-            config, asdict(candidate),
-            target_path=candidate.suggested_target, scope=candidate.scope,
-            go=True, force=False,
-        )
-        fix_id = result["record"]["id"]
-        relearn_apply.enable_enforcement(config, fix_id, confirm=True)
-    except relearn_apply.RelearnApplyRefused as exc:
-        console.print(f"[yellow]  Could not enable yet: {exc}[/yellow]")
-        console.print(f"[dim]  Retry from the Lens Review inbox ({lens_hint}).[/dim]")
-        return
-
-    console.print(
-        f"[green]✓[/green] Enabled: {candidate.title} "
-        f"[dim](wired at {candidate.suggested_target})[/dim]"
-    )
-    console.print(
-        f"  [dim]One-click revert any time: open {lens_hint} and click "
-        f"Revert next to this fix (fix id {fix_id}).[/dim]"
+        f"[muted]  Review and apply fixes in the web dashboard:[/muted] "
+        f"[url]{_review_inbox_url(port, want_daemon=want_daemon)}[/url]"
     )
 
 
@@ -1182,15 +1054,15 @@ def _print_setup_complete_home(
     if has_data and sessions_backfilled > 0:
         span = f" across the last {days} days" if days else ""
         console.print(
-            f"[bold green]You're set up.[/bold green] "
-            f"[green]{sessions_backfilled} session"
+            f"[ok]✓ You're set up.[/ok] "
+            f"{sessions_backfilled} session"
             f"{'s' if sessions_backfilled != 1 else ''} backfilled"
-            f"{span}.[/green]"
+            f"{span}."
         )
     else:
-        console.print("[bold green]You're set up.[/bold green]")
-    console.print("[dim]Full command list:[/dim]  tj --help  "
-                  "[dim]· home screen:[/dim]  tj")
+        console.print("[ok]✓ You're set up.[/ok]")
+    console.print("[muted]Full command list:[/muted]  [accent]tj --help[/accent]  "
+                  "[muted]· home screen:[/muted]  [accent]tj[/accent]")
 
 
 def _prompt_daily_budget(budget: float | None, plan_tier: str | None) -> float:
@@ -1312,45 +1184,57 @@ def _print_next_steps_nudge(
     """Curated post-onboard nudge (#240), persona-aware.
 
     Commands that work on the just-backfilled data *immediately* — no Claude
-    Code restart required. Claude Code users lead with the quota-diagnosis
-    commands (the reason tj is on their machine); ``tjb`` is an SDK-persona
-    workflow (re-run your own agent on a cheaper model) so it only appears on
-    the generic list. When onboarding just installed the daemon, Lens is
-    already serving — suggesting ``tj serve`` there invites a port conflict, so
-    the Lens line says "already running" instead. Curated to ~4 high-wow
-    commands rather than a `--help` wall; copy stays honest (no promised
-    savings — Critical Rule 14).
+    Code restart required. The Claude Code list is deliberately down to TWO
+    entries: the web dashboard (where the diagnosis actually lives, rendered
+    rather than re-derived per CLI invocation) and ``tj tokenmaxx`` (the
+    shareable card). ``tj context`` / ``tj quota-audit`` still exist as
+    commands; they are just not what a fresh user should be sent to first.
+    ``tjb`` is an SDK-persona workflow (re-run your own agent on a cheaper
+    model) so it only appears on the generic list. When onboarding just
+    installed the daemon, the dashboard is already serving — suggesting
+    ``tj serve`` there invites a port conflict, so that line says "already
+    running" instead. Copy stays honest (no promised savings — Critical
+    Rule 14).
     """
     console.print()
     if has_data:
         span = f"last {days} days" if days else "history"
         console.print(
-            f"[bold]▸ Next steps[/bold]  [dim]your {span} "
-            "already loaded — these work right now:[/dim]"
+            f"[heading]▸ Next steps[/heading]  [muted]your {span} "
+            "already loaded; these work right now:[/muted]"
         )
     else:
         console.print(
-            "[bold]▸ Next steps[/bold]  [dim]these work right now:[/dim]"
+            "[heading]▸ Next steps[/heading]  [muted]these work right now:[/muted]"
         )
     console.print()
     lens_url = f"http://127.0.0.1:{port}/"
     if daemon_running:
         lens_line = (
-            f"  [bold]Lens (web UI)[/bold]  [dim]already running → {lens_url}[/dim]"
+            f"  [label]web dashboard[/label]  [muted]already running →[/muted] [url]{lens_url}[/url]"
         )
     else:
         lens_line = (
-            f"  [bold]tj serve[/bold]       [dim]open Lens (web UI) at {lens_url}[/dim]"
+            f"  [accent]tj serve[/accent]       "
+            f"[muted]open the web dashboard at[/muted] [url]{lens_url}[/url]"
         )
+    tokenmaxx_line = (
+        "  [accent]tj tokenmaxx[/accent]   [muted]your shareable efficiency tier[/muted]"
+    )
     if persona == "claude_code":
-        console.print("  [bold]tj context[/bold]     [dim]where your quota goes — re-read vs real work[/dim]")
-        console.print("  [bold]tj quota-audit[/bold] [dim]how much Opus/Fable went to Sonnet-shaped sessions[/dim]")
         console.print(lens_line)
-        console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable efficiency tier[/dim]")
+        console.print(tokenmaxx_line)
     else:
-        console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable efficiency tier[/dim]")
-        console.print("  [bold]tj optimize[/bold]    [dim]cost-saving candidates from your usage[/dim]")
-        console.print("  [bold]tjb[/bold]            [dim]prove a cheaper model still holds (pip install tokenjam-bench)[/dim]")
+        console.print(tokenmaxx_line)
+        console.print(
+            "  [accent]tj optimize[/accent]    "
+            "[muted]cost-saving candidates from your usage[/muted]"
+        )
+        console.print(
+            "  [accent]tjb[/accent]            "
+            "[muted]prove a cheaper model still holds "
+            "(pip install tokenjam-bench)[/muted]"
+        )
         console.print(lens_line)
     console.print()
     _warn_if_tj_path_unresolved()
@@ -1486,28 +1370,34 @@ def _print_tj_path_warning(
     commands don't silently hit the wrong (or no) binary later."""
     if status == "unresolved":
         console.print(
-            "[yellow]Heads up:[/yellow] [bold]tj[/bold] isn't resolvable on "
+            "[warn]Heads up:[/warn] [accent]tj[/accent] isn't resolvable on "
             "PATH in a fresh shell yet, so the commands above will fail "
-            "until you open a [bold]new terminal[/bold] (or run "
-            "[bold]source ~/.zshrc[/bold])."
+            "until you open a [label]new terminal[/label] (or run "
+            "[accent]source ~/.zshrc[/accent])."
         )
         if fix_status in ("ran-uv-update-shell", "wrote-zshrc-block"):
-            console.print(f"[dim]  Fixed for next time — added {expected} to PATH.[/dim]")
+            console.print(
+                f"[muted]  Fixed for next time: added[/muted] "
+                f"[accent]{expected}[/accent] [muted]to PATH.[/muted]"
+            )
         if Path(expected).is_absolute():
-            console.print(f"[dim]  Full path meanwhile:  {expected}[/dim]")
+            console.print(
+                f"[muted]  Full path meanwhile:[/muted]  [accent]{expected}[/accent]"
+            )
     elif status == "shadowed":
         # A "shadowed" status always carries the shadowing binary's path.
         assert shadow_path is not None
         shadow_version = _tj_binary_version(shadow_path) or "an older tj"
         console.print(
-            f"[yellow]Heads up:[/yellow] [bold]{shadow_version}[/bold] at "
-            f"[bold]{shadow_path}[/bold] shadows the tj just installed at "
-            f"[bold]{expected}[/bold] — bare [bold]tj[/bold] in this shell "
-            "resolves to the older one."
+            f"[warn]Heads up:[/warn] [label]{shadow_version}[/label] at "
+            f"[accent]{shadow_path}[/accent] shadows the tj just installed at "
+            f"[accent]{expected}[/accent]. Bare [accent]tj[/accent] in this "
+            "shell resolves to the older one."
         )
         console.print(
-            f"[dim]  Use the full path, or move {Path(expected).parent} "
-            f"earlier on PATH:  {expected}[/dim]"
+            f"[muted]  Use the full path, or move[/muted] "
+            f"[accent]{Path(expected).parent}[/accent] "
+            f"[muted]earlier on PATH:[/muted]  [accent]{expected}[/accent]"
         )
 
 
@@ -1570,12 +1460,17 @@ def _print_statusline_status(status: str) -> None:
     if status in ("written", "updated", "kept"):
         verb = {"written": "wired", "updated": "updated", "kept": "already set"}[status]
         console.print(
-            f"  Statusline:          {verb} (tj statusline — zero token cost)"
+            f"  Statusline:          {verb} "
+            f"([accent]tj statusline[/accent][muted], zero token cost[/muted])"
         )
     elif status == "skipped":
+        # Not yellow: this is one row inside a field list where every other row
+        # is plain, and a single coloured row there reads as a failure rather
+        # than as the "kept your config, here's how to opt in" note it is.
         console.print(
-            "  [yellow]Statusline:          left your existing statusLine "
-            "untouched[/yellow] (set it to `tj statusline` to enable tj's line)."
+            "  Statusline:          left your existing statusLine untouched "
+            "[muted](set it to[/muted] [accent]tj statusline[/accent] "
+            "[muted]to enable tj's line).[/muted]"
         )
 
 
@@ -1787,7 +1682,11 @@ def _onboard_claude_code(
         config_path = global_config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
         write_config(config, config_path)
-        console.print(f"  tj config written to: {display_path(config_path)}", soft_wrap=True)
+        console.print(
+            f"[ok]\u2713[/ok] Config written to "
+            f"[accent]{display_path(config_path)}[/accent]",
+            soft_wrap=True,
+        )
         if _sync_secret_to_codex(ingest_secret):
             console.print("  Codex config updated to match new ingest secret.")
 
@@ -1841,10 +1740,10 @@ def _onboard_claude_code(
                     )
                 if result.limit_reached and max_sessions is not None:
                     console.print(
-                        f"[yellow]  Showing your most-recent {max_sessions} "
-                        f"sessions for a fast first run[/yellow] — run "
-                        f"[bold]tj backfill claude-code[/bold] for your full "
-                        f"history."
+                        f"[muted]  Showing your most-recent {max_sessions} "
+                        f"sessions for a fast first run; run[/muted] "
+                        f"[accent]tj backfill claude-code[/accent] "
+                        f"[muted]for your full history.[/muted]"
                     )
                 post_apply = _try_apply_declared_plans(
                     config, reconcile=reconfigure and plan_changed,
@@ -1949,7 +1848,7 @@ def _onboard_claude_code(
     global_settings_path.write_text(json_mod.dumps(global_settings, indent=2) + "\n")
     if cap_removed:
         console.print(
-            "[green]✓[/green] Removed the legacy output-trim hook "
+            "[ok]✓[/ok] Removed the legacy output-trim hook "
             "(tj hook cap-output) — this feature was removed."
         )
     _RESUME_BRIEF_STATUS_MSG = {
@@ -1960,7 +1859,7 @@ def _onboard_claude_code(
                    "(expected object with SessionStart list); fix and re-run",
     }
     console.print(
-        f"[green]✓[/green] Resume-brief hook (tj resume-brief --from-hook): "
+        f"[ok]✓[/ok] Resume-brief hook (tj resume-brief --from-hook): "
         f"{_RESUME_BRIEF_STATUS_MSG.get(resume_brief_status, resume_brief_status)}"
     )
 
@@ -2042,7 +1941,7 @@ def _onboard_claude_code(
     # "after restarting" pointer, and a "verify after restarting" line near
     # Connection details); consolidated back into one panel below.
     console.print()
-    console.print("[bold green]Claude Code observability configured.[/bold green]")
+    console.print("[ok]\u2713 Claude Code observability configured.[/ok]")
     _print_statusline_status(statusline_status)
     console.print(
         "  Telemetry:           Claude Code → tj, out-of-band "
@@ -2071,10 +1970,14 @@ def _onboard_claude_code(
         )
     else:
         console.print(
-            "[dim]tj is now in your Claude Code statusline "
-            "([bold]zero token cost[/bold]) — it shows this session's re-read "
-            "share and nudges [bold]/compact[/bold] when re-reading eats your "
-            "quota.[/dim]"
+            # `bold` nested inside `dim` renders as bold-dim, which is neither:
+            # it reads as a smudge rather than emphasis. Inside a dim sentence
+            # the only thing that earns a break from dim is the accent, and only
+            # for the thing the user actually types.
+            "[muted]tj is now in your Claude Code statusline (zero token "
+            "cost): it shows this session's re-read share and nudges[/muted] "
+            "[accent]/compact[/accent] [muted]when re-reading eats your "
+            "quota.[/muted]"
         )
     console.print()
     _print_claude_code_restart_panel()
@@ -2097,9 +2000,10 @@ def _onboard_claude_code(
     )
     if removed_resource_attr:
         console.print(
-            "  [yellow]Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
-            "settings[/yellow] [dim](the claude wrapper now sets it per "
-            "terminal).[/dim]"
+            # Informational, inside an all-dim details block: this is something
+            # tj did successfully, not something the user must act on.
+            "[muted]  Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
+            "settings (the claude wrapper now sets it per terminal).[/muted]"
         )
     console.print(f"[dim]  Agent ID:           {agent_id}[/dim]")
     if budget and budget > 0:
@@ -2134,7 +2038,7 @@ def _onboard_claude_code(
     # `_onboard_combination` so the banner prints exactly once (#432).
     if standalone:
         if backfill_has_data:
-            _run_relearn_first_fix(config, port=port, want_daemon=want_daemon)
+            _print_review_inbox_pointer(port=port, want_daemon=want_daemon)
         _print_setup_complete_home(
             sessions_backfilled=backfill_sessions_total,
             has_data=backfill_has_data,
@@ -2275,7 +2179,11 @@ def _onboard_codex(
         )
         config_path.parent.mkdir(parents=True, exist_ok=True)
         write_config(config, config_path)
-        console.print(f"  tj config written to: {display_path(config_path)}", soft_wrap=True)
+        console.print(
+            f"[ok]\u2713[/ok] Config written to "
+            f"[accent]{display_path(config_path)}[/accent]",
+            soft_wrap=True,
+        )
         if _sync_secret_to_claude_code(ingest_secret):
             console.print("  Claude Code config updated to match new ingest secret.")
 
@@ -2416,7 +2324,7 @@ def _onboard_codex(
     )
 
     console.print()
-    console.print("[bold green]Codex CLI observability configured.[/bold green]")
+    console.print("[ok]\u2713 Codex CLI observability configured.[/ok]")
     console.print(
         f"  Codex config:        {display_path(codex_config_path)}", soft_wrap=True
     )
@@ -2568,7 +2476,7 @@ def _onboard_combination(
 
     if not (uses_cc or uses_codex or uses_sdk):
         console.print(
-            "[yellow]Nothing selected.[/yellow] Re-run [bold]tj onboard[/bold] "
+            "[warn]Nothing selected.[/warn] Re-run [bold]tj onboard[/bold] "
             "and pick at least one."
         )
         ctx.exit(1)
@@ -2657,7 +2565,7 @@ def _onboard_combination(
 
     console.print()
     console.print(
-        f"[bold green]Combination setup complete[/bold green] "
+        f"[ok]\u2713 Combination setup complete[/ok] "
         f"[dim]({', '.join(done)})[/dim]"
     )
     _print_setup_complete_home()
@@ -2682,7 +2590,7 @@ def _print_restart_banner(app_name: str) -> None:
 
     body = Text()
     body.append("Restart ", style="bold")
-    body.append(app_name, style="bold yellow")
+    body.append(app_name, style="warn.strong")
     body.append(" now for the new settings to take effect.\n", style="bold")
     body.append(
         f"A {app_name} session already running will keep sending telemetry to "
@@ -2693,8 +2601,8 @@ def _print_restart_banner(app_name: str) -> None:
     console.print(
         Panel(
             body,
-            title="[bold]Action required[/bold]",
-            border_style="yellow",
+            title="[warn.strong]Action required[/warn.strong]",
+            border_style="warn",
             padding=(1, 2),
         )
     )
@@ -2725,34 +2633,34 @@ def _print_claude_code_restart_panel() -> None:
     body = Text.from_markup(
         "Running sessions keep sending telemetry to the old endpoint. "
         "Today's activity won't reach TokenJam until they restart.\n\n"
-        "1. Quit Claude Code in [bold]every terminal[/bold] open on this "
+        "1. Quit Claude Code in [label]every terminal[/label] open on this "
         "project.\n\n"
-        "2. Relaunch [bold]claude[/bold] in the same folder. Your history "
+        "2. Relaunch [accent]claude[/accent] in the same folder. Your history "
         "is safe:\n"
-        "     [bold]claude -c[/bold]        → reopen this project's latest "
+        "     [accent]claude -c[/accent]        → reopen this project's latest "
         "conversation\n"
-        "     [bold]claude --resume[/bold]  → pick any earlier one from a "
+        "     [accent]claude --resume[/accent]  → pick any earlier one from a "
         "list\n"
         # Two deliberately indented lines (not one auto-wrapped one): Rich
         # wraps continuation text back to the panel margin, not to the
         # sub-list's hanging indent, so a single long parenthetical rendered
         # its second line flush-left under "2." instead of under the paren.
-        "     [dim](a fresh claude works too; resuming is optional.\n"
-        "      tj adds a recap of where you left off when you resume)[/dim]\n\n"
-        "3. Confirm data is flowing:  [bold]tj onboard --claude-code "
-        "--verify-only[/bold]"
+        "     [muted](a fresh claude works too; resuming is optional.\n"
+        "      tj adds a recap of where you left off when you resume)[/muted]\n\n"
+        "3. Confirm data is flowing:  [accent]tj onboard --claude-code "
+        "--verify-only[/accent]"
     )
     console.print(
         Panel(
             body,
-            title="[bold]Action required: restart Claude Code[/bold]",
-            border_style="yellow",
+            title="[warn.strong]Action required: restart Claude Code[/warn.strong]",
+            border_style="warn",
             padding=(1, 2),
         )
     )
     console.print(
-        "[dim]Each relaunched terminal shows as its own dashboard tile; "
-        "claude --as <name> labels it.[/dim]"
+        "[muted]Each relaunched terminal shows as its own dashboard tile;[/muted] "
+        "[accent]claude --as <name>[/accent] [muted]labels it.[/muted]"
     )
 
 
@@ -3346,7 +3254,7 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
     config_path = config.config_path
     if config_path is None:
         console.print(
-            "[red]No tj config found — nothing to add a project to.[/red]"
+            "[error]No tj config found — nothing to add a project to.[/error]"
         )
         console.print(
             "Run [bold]tj onboard[/bold] first to set up Claude Code "
@@ -3413,11 +3321,11 @@ def _install_daemon(config_path: str) -> str | None:
         elif system == "Linux":
             return _install_systemd(config_path)
         else:
-            console.print(f"[yellow]Background daemon not supported on {system}. "
-                          "Run `tj serve` manually.[/yellow]")
+            console.print(f"[warn]Background daemon not supported on {system}. "
+                          "Run `tj serve` manually.[/warn]")
             return None
     except Exception as e:
-        console.print(f"[yellow]Daemon installation failed: {e}[/yellow]")
+        console.print(f"[warn]Daemon installation failed: {e}[/warn]")
         console.print("[dim]You can run `tj serve` manually instead.[/dim]")
         return None
 
@@ -3483,9 +3391,9 @@ def _daemon_program_args(config_path: str) -> list[str] | None:
 
 def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
     console.print(
-        f"[yellow]No durable `tj` entrypoint found — skipping {unit_kind} "
+        f"[warn]No durable `tj` entrypoint found — skipping {unit_kind} "
         "install rather than pointing it at a throwaway uvx/pipx cache path "
-        "that `uv cache prune` would silently delete.[/yellow]"
+        "that `uv cache prune` would silently delete.[/warn]"
     )
     console.print(
         "[dim]Install tokenjam persistently (`uv tool install tokenjam` or "
@@ -3539,8 +3447,8 @@ def _install_launchd(config_path: str) -> str | None:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        console.print(f"[yellow]Daemon plist written to {plist_path} but "
-                      f"launchctl load failed.[/yellow]")
+        console.print(f"[warn]Daemon plist written to {plist_path} but "
+                      f"launchctl load failed.[/warn]")
         console.print("[dim]Try loading manually:[/dim]")
         console.print(f"  launchctl load {plist_path}")
         console.print("[dim]Or run the server directly:[/dim]")

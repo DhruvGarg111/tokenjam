@@ -1570,7 +1570,6 @@ code.md-code {
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <a href="#/traces" class="nav-link" data-view="traces" data-lens="observe"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
-  <a href="#/analytics" class="nav-link" data-view="analytics" data-lens="observe"><span class="icon">&#9636;</span> Analytics</a>
   <a href="#/alerts" class="nav-link" data-view="alerts" data-lens="observe"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
@@ -5032,18 +5031,30 @@ function RunDetailView({ runId }) {
 // ============================
 // Traces View
 // ============================
+// Sort options for the Traces list (trace-cost-ranking). "recent" is the
+// historical default (reverse-chronological, additive-safe); "cost" is the
+// dedicated entry point onto the most expensive traces in the window.
+const TRACE_SORTS = ['recent', 'cost'];
+
 function TracesListView({ params }) {
   // Filters come from the URL (issue #112). `result` maps to the API's `status`.
-  const DEFAULTS = { since: '24h', result: '', agent_id: '' };
+  const DEFAULTS = { since: '24h', result: '', agent_id: '', sort: 'recent', min_cost: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const result = readParam(params, 'result', DEFAULTS.result, v => ['ok', 'error'].includes(v));
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
-  const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
+  const sort = readParam(params, 'sort', DEFAULTS.sort, v => TRACE_SORTS.includes(v));
+  const minCost = readParam(params, 'min_cost', DEFAULTS.min_cost, v => !isNaN(parseFloat(v)));
+  const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, sort, min_cost: minCost, [k]: v }, DEFAULTS);
 
   const [traces, setTraces] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
   const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
+  // Window-level cost distribution behind the outlier badge (Tukey's-fence
+  // rule) -- carried from the server so the plain-language explanation always
+  // matches the flags actually rendered. Null until the first fetch resolves,
+  // or if the backend didn't ship the block (older server behind a newer UI).
+  const [outlierRule, setOutlierRule] = useState(null);
   const TRACE_PAGE_SIZE = 100;
   // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
   // until the first /traces fetch settles, show a loading shimmer rather than
@@ -5053,25 +5064,65 @@ function TracesListView({ params }) {
 
   const load = useCallback(async ({ append = false } = {}) => {
     const offset = append ? traces.length : 0;
+    const minCostUsd = minCost !== '' && !isNaN(parseFloat(minCost)) ? parseFloat(minCost) : undefined;
     const [td, sd] = await Promise.all([
-      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: TRACE_PAGE_SIZE, offset }),
+      api('/traces', {
+        since, status: result || undefined, agent_id: agentId || undefined,
+        sort, min_cost_usd: minCostUsd, limit: TRACE_PAGE_SIZE, offset,
+      }),
       api('/status'),
     ]);
     const nextTraces = td.traces || [];
     setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
     setTotalCount(td.total_count ?? nextTraces.length);
     setFraming(td.framing || null);
+    setOutlierRule(td.outlier_rule || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
     setLoaded(true);
-  }, [since, result, agentId, traces.length]);
+  }, [since, result, agentId, sort, minCost, traces.length]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  // Plain-language statement of the outlier rule, with the actual numbers for
+  // this window (never just a bare badge) -- conservative wording, no claim
+  // of more rigor than a box-plot rule actually provides. The rule itself is
+  // computed server-side on real cost_usd regardless of plan tier (it's the
+  // same magnitude signal as the token totals), but the DOLLAR figures in the
+  // copy must still respect plan-tier framing (#187/#249) -- a subscription
+  // or local install never gets a bare $ in the explanation, only the flag.
+  const outlierDollarsShown = !perItemUsesTokens(framing);
+  const outlierNote = (() => {
+    if (!outlierRule) return null;
+    if (outlierRule.threshold_usd == null) {
+      return `Cost outliers need at least ${outlierRule.min_sample} priced traces in this window to measure a reliable range; this window has ${outlierRule.sample_size}, so none are flagged.`;
+    }
+    if (!outlierDollarsShown) {
+      return `Traces marked "outlier" cost far more than the rest of this window's traces: above the top of the typical range (a box-plot style rule over ${outlierRule.sample_size} priced traces), not a fraud or error signal. Dollar amounts aren't shown on your plan; compare the token totals instead.`;
+    }
+    return `Traces marked "outlier" cost more than ${fmtCost(outlierRule.threshold_usd)}: above the top of the typical cost range for this window (Q1 ${fmtCost(outlierRule.q1_usd)} to Q3 ${fmtCost(outlierRule.q3_usd)}, plus 1.5x that range, over ${outlierRule.sample_size} priced traces). This is a box-plot style rule, not a fraud or error signal.`;
+  })();
+  const outlierTooltip = () => {
+    if (!outlierRule || outlierRule.threshold_usd == null) return 'Cost outlier for this window';
+    if (!outlierDollarsShown) {
+      return 'Cost outlier for this window: above the top of the typical range (box-plot rule), based on ' + outlierRule.sample_size + ' priced traces. Dollar amounts aren\'t shown on your plan.';
+    }
+    return [
+      'Cost outlier for this window.',
+      'Above the typical range: Q1 ' + fmtCost(outlierRule.q1_usd) + ' to Q3 ' + fmtCost(outlierRule.q3_usd) + ', plus 1.5x that range.',
+      'Threshold: above ' + fmtCost(outlierRule.threshold_usd) + '.',
+      'Based on ' + outlierRule.sample_size + ' priced traces in this window.',
+    ].join('\n');
+  };
 
   return html`
     <div class="page-title">Traces</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on a trace row for details</div>
+    <div class="view-toggle" style="margin:0 0 12px">
+      <button class=${sort === 'recent' ? 'active' : ''} onClick=${() => setFilter('sort', 'recent')}>Most recent</button>
+      <button class=${sort === 'cost' ? 'active' : ''} onClick=${() => setFilter('sort', 'cost')}>Most expensive</button>
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
@@ -5085,10 +5136,13 @@ function TracesListView({ params }) {
         <option value="ok">ok</option>
         <option value="error">error</option>
       </select>
+      <input type="number" min="0" step="0.0001" placeholder="Min cost $" value=${minCost}
+        onChange=${e => setFilter('min_cost', e.target.value)} style="width:110px" title="Only show traces costing at least this much" />
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${() => load()}>Refresh</button>
     </div>
     ${traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
+    ${outlierNote ? html`<div class="meta" style="margin-top:-8px">${outlierNote}</div>` : null}
     ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
       : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
@@ -5102,7 +5156,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
+              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}${t.is_outlier ? html`<span class="badge badge-warning" style="margin-left:6px" title=${outlierTooltip()}>outlier</span>` : null}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>
@@ -5135,12 +5189,16 @@ function TraceDetailView({ traceId }) {
   // Waterfall bar-sizing mode (#244): cost / tokens / duration. null = follow
   // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
   const [wfMode, setWfMode] = useState(null);
+  // Rank spans WITHIN this trace by cost (trace-cost-ranking): span_ids of the
+  // costliest spans, most expensive first, so a runaway single span is
+  // findable without scanning the whole waterfall by eye.
+  const [topCostSpanIds, setTopCostSpanIds] = useState([]);
 
   // Poll so a live trace's spans appear without re-navigating. Selection is
   // tracked by span_id, so replacing the spans array preserves it.
   const load = useCallback(() => {
     api('/traces/' + traceId)
-      .then(d => { setSpans(d.spans || []); setFraming(d.framing || null); })
+      .then(d => { setSpans(d.spans || []); setFraming(d.framing || null); setTopCostSpanIds(d.top_cost_span_ids || []); })
       .catch(() => {});
   }, [traceId]);
 
@@ -5222,6 +5280,19 @@ function TraceDetailView({ traceId }) {
       <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
       <span><b>${spans.length}</b> spans</span>
     </div>
+    ${topCostSpanIds.length > 0 ? html`
+      <div class="meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-8px 0 12px">
+        <span>Costliest spans in this trace:</span>
+        ${topCostSpanIds.map((sid, i) => {
+          const s = byId[sid];
+          if (!s) return null;
+          // Plan-tier framed, same as every other per-span figure in this view
+          // (#187/#249): dollars for api/unknown, tokens when $ is suppressed.
+          const label = wfUseTokens ? fmtTokens(spanTokens(s)) + ' tok' : fmtFramedDollar(s.cost_usd, framing);
+          return html`<span class="badge badge-warning" style="cursor:pointer" title=${'Rank #' + (i + 1) + ' by cost in this trace. Click to jump to it below.'} onClick=${() => setSelected(sid)}>#${i + 1} ${spanPrimaryName(s)} · ${label}</span>`;
+        })}
+      </div>
+    ` : null}
     <div class="wf-toolbar">
       <div class="wf-legend">
         <span><i class="wf-kind-dot llm"></i>LLM</span>
@@ -5651,16 +5722,39 @@ function buildCacheSeries(resp, useTokens) {
   return { data: [xs, sav], hitSpark, hitRate, bucket, coarsened: grid.coarsened };
 }
 
+// Attribution (multi-tenant cost) dimensions the Cost view can group/filter
+// by, beyond the original total/model/agent (#SDK dashboard shape). Keyed the
+// same as the `group_by` query param / API value. `label` drives the dropdown
+// option text + the table's leading column header.
+const COST_ATTRIBUTION_DIMS = [
+  ['tenant', 'By tenant'],
+  ['feature', 'By feature'],
+  ['environment', 'By environment'],
+  ['prompt_version', 'By prompt version'],
+];
+const COST_GROUP_BY_LABELS = {
+  day: 'Date', agent: 'Agent', model: 'Model',
+  tenant: 'Tenant', feature: 'Feature', environment: 'Environment',
+  prompt_version: 'Prompt version',
+};
+
 function CostView({ params }) {
   const DEFAULTS = { since: '7d', group_by: 'total', agent_id: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const groupBy = readParam(params, 'group_by', DEFAULTS.group_by,
-    v => ['total', 'model', 'agent'].includes(v));
+    v => ['total', 'model', 'agent', ...COST_ATTRIBUTION_DIMS.map(d => d[0])].includes(v));
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
   const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
+  // The chart's stacked-series data only ever splits by model/agent (the
+  // /cost `series` field carries no tenant/feature/environment/prompt_version
+  // breakdown) — an attribution dim's chart falls back to a single Total line
+  // so it stays accurate rather than mislabeling an agent/model split as the
+  // requested dimension (see buildCostSeries).
+  const isAttributionDim = COST_ATTRIBUTION_DIMS.some(d => d[0] === groupBy);
 
   const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
     totalTokens: 0, framing: null, costResp: null, compare: null, cacheResp: null });
+  const [tenants, setTenants] = useState({ loading: true, data: null });
 
   const load = useCallback(async (opts = {}) => {
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
@@ -5689,12 +5783,40 @@ function CostView({ params }) {
     }
   }, [since, groupBy, agentId]);
 
+  // Top-tenants-by-spend concentration panel (#SDK dashboard shape) — its own
+  // fetch, independent of the table's group_by, so switching "group by" away
+  // from tenant doesn't blank this panel. Best-effort: a failure renders the
+  // panel's own error text, never the whole Cost screen.
+  const loadTenants = useCallback(async (opts = {}) => {
+    setTenants(s => ({ ...s, loading: true }));
+    try {
+      const d = await api('/cost/tenants', { since, agent_id: agentId || undefined, top_n: 10 }, opts);
+      setTenants({ loading: false, data: d });
+    } catch (e) {
+      setTenants({ loading: false, data: null, error: e.message || String(e) });
+    }
+  }, [since, agentId]);
+  // Same cadence as `load` below, in ONE effect: Refresh/the 30s poll used to
+  // only re-run `load`, so Cost totals updated while this panel kept showing
+  // whatever it fetched on mount (or on the last `since`/`agentId` change).
+  // Re-running this effect also covers the since/agentId-changed case on its
+  // own (both `load` and `loadTenants` change identity then), so no separate
+  // mount-only effect is needed.
+  const refreshAll = useCallback((opts = {}) => {
+    load(opts);
+    loadTenants(opts);
+  }, [load, loadTenants]);
+
   // Poll bypasses the GET cache so the 30s refresh always hits the network.
-  useEffect(() => { load(); const t = setInterval(() => load({ noCache: true }), 30000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    refreshAll();
+    const t = setInterval(() => refreshAll({ noCache: true }), 30000);
+    return () => clearInterval(t);
+  }, [refreshAll]);
 
   const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
-  const series = buildCostSeries(costResp, groupBy, useTokens);
+  const series = buildCostSeries(costResp, isAttributionDim ? 'total' : groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
   const cacheSeries = buildCacheSeries(cacheResp, useTokens);
 
@@ -5735,9 +5857,10 @@ function CostView({ params }) {
         <option value="total">Total</option>
         <option value="model">By model</option>
         <option value="agent">By agent</option>
+        ${COST_ATTRIBUTION_DIMS.map(([v, label]) => html`<option value=${v}>${label}</option>`)}
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
-      <button class="btn" onClick=${load}>Refresh</button>
+      <button class="btn" onClick=${refreshAll}>Refresh</button>
     </div>
 
     ${error ? html`
@@ -5753,6 +5876,7 @@ function CostView({ params }) {
       <div class="chart-card">
         <div class="chart-head">
           <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
+          ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line — the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
           <div class="chart-meta">
             <span class="chart-total">${totalDisplay}</span>
             <${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />
@@ -5798,10 +5922,21 @@ function CostView({ params }) {
       </div>
     ` : null}
 
+    ${!error && !loading && isAttributionDim && rows.length === 0 ? html`
+      <div class="chart-card">
+        <div class="empty" style="padding:24px 0">
+          No ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()} data in this window.
+          ${costResp && costResp.attribution_coverage && !costResp.attribution_coverage[groupBy].has_data
+            ? html`Set <code class="mono">${costResp.attribution_coverage[groupBy].attribute}</code> at the call site (an OTel span or resource attribute) to see spend broken down by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}.`
+            : html`No spend in this window carried a ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()} value.`}
+        </div>
+      </div>
+    ` : null}
+
     ${!error && !loading && rows.length > 0 ? html`
       <div class="table-wrap"><table>
         <thead><tr>
-          <th>${tableMode === 'day' ? 'Date' : tableMode === 'agent' ? 'Agent' : 'Model'}</th>
+          <th>${COST_GROUP_BY_LABELS[tableMode] || 'Group'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
           <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
@@ -5830,6 +5965,52 @@ function CostView({ params }) {
         </tbody>
       </table></div>
     ` : null}
+
+    ${!error ? html`<${TopTenantsPanel} tenants=${tenants} framing=${framing} />` : null}
+  `;
+}
+
+// Top-N tenants by spend (#SDK dashboard shape): the concentration view that
+// answers "which customers are driving the bill". Degrades honestly (Critical
+// Rule 14): renders a "set tokenjam.tenant_id" empty state — never a blank or
+// misleading chart — when no span in the window carries a tenant_id.
+function TopTenantsPanel({ tenants, framing }) {
+  const { loading, data } = tenants;
+  return html`
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title">Top tenants by spend</div>
+      </div>
+      ${loading ? html`<div class="shimmer" style="height:120px"></div>` : (!data || !data.has_data) ? html`
+        <div class="empty" style="padding:24px 0">
+          No tenant data in this window. Set <code class="mono">${(data && data.attribute) || 'tokenjam.tenant_id'}</code>
+          at the call site (an OTel span attribute, or via <code class="mono">tokenjam.sdk.attribution.attribution(tenant_id=...)</code>
+          for auto-instrumented calls) to see spend concentration by customer/tenant.
+        </div>
+      ` : html`
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>Tenant</th><th>Cost</th><th>Share of total</th><th>Calls</th><th>Trend</th>
+          </tr></thead>
+          <tbody>
+            ${data.rows.map(r => html`
+              <tr>
+                <td class="mono">${r.tenant_id}</td>
+                <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
+                <td>${r.share_of_total != null ? (r.share_of_total * 100).toFixed(1) + '%' : '-'}</td>
+                <td>${fmtTokens(r.call_count)}</td>
+                <td>${r.delta_pct != null
+                  ? html`<${TrendChip} pct=${r.delta_pct} prevThin=${false} />`
+                  : html`<span class="dim">new</span>`}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table></div>
+        ${data.unattributed_cost_usd > 0 ? html`
+          <div class="chart-foot"><span class="dim">${fmtFramedDollar(data.unattributed_cost_usd, framing)} of spend in this window has no tenant set and isn't included above.</span></div>
+        ` : null}
+      `}
+    </div>
   `;
 }
 
@@ -6027,11 +6208,58 @@ function BudgetRow({ scope, label, daily, session, effectiveDaily, effectiveSess
   `;
 }
 
+// Provider spend-forecast ceiling — the OTHER budget object on this screen.
+// Distinct from BudgetRow (per-agent daily/session ALERT caps, checked on
+// every ingested span): this is a per-provider recurring monthly ceiling that
+// Optimize's Budget projection analyzer projects the current run rate
+// against. Editing it here means the projection can never point at a ceiling
+// this screen doesn't also show.
+function ProviderBudgetRow({ provider, usd, cycleStartDay, highlighted, onSave }) {
+  const [usdVal, setUsdVal] = useState(usd != null ? String(usd) : '');
+  const [cycleVal, setCycleVal] = useState(cycleStartDay != null ? String(cycleStartDay) : '1');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onSave(provider, usdVal, cycleVal);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return html`
+    <tr id=${'provider-budget-' + provider} style=${highlighted ? 'background:var(--surface-hover, rgba(127,127,127,0.08))' : ''}>
+      <td class="mono">${provider}</td>
+      <td>
+        <input type="number" min="0" step="0.01" placeholder="no ceiling"
+          value=${usdVal} onInput=${e => setUsdVal(e.target.value)}
+          style="width:120px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:13px" />
+      </td>
+      <td>
+        <input type="number" min="1" max="28" step="1" placeholder="1"
+          value=${cycleVal} onInput=${e => setCycleVal(e.target.value)}
+          style="width:70px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:13px" />
+      </td>
+      <td>
+        <button class="btn" onClick=${save} disabled=${saving}
+          style="padding:4px 12px;font-size:12px">
+          ${saving ? 'Saving...' : saved ? '✓ Saved' : 'Save'}
+        </button>
+      </td>
+    </tr>
+  `;
+}
+
 function BudgetView({ params }) {
-  // `provider` deep-link param (#112). The budget surface is per-agent today, so
-  // there's nothing to filter on yet — we preserve the param so the deep-link
-  // round-trips and surface it as a clearable chip. Provider-scoped budget
-  // content arrives with budget-projection surfacing (#114).
+  // `provider` deep-link param (#112), now wired to the provider spend-forecast
+  // table below: Optimize's Budget projection links here with `?provider=X` so
+  // the ceiling it projected against is highlighted where it's editable.
   const provider = readParam(params, 'provider', '');
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
@@ -6052,6 +6280,14 @@ function BudgetView({ params }) {
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, []);
 
+  // Scroll the deep-linked provider's forecast row into view (arriving from
+  // Optimize's Budget projection via #/budget?provider=X, #114).
+  useEffect(() => {
+    if (!provider || !data) return;
+    const el = document.getElementById('provider-budget-' + provider);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [provider, data]);
+
   const handleSave = async (scope, dailyStr, sessionStr) => {
     // Empty field means "no limit" — send 0 so the server runs validate_budget_value(0) → None.
     const daily = dailyStr !== '' ? parseFloat(dailyStr) : 0;
@@ -6064,18 +6300,55 @@ function BudgetView({ params }) {
     setData(updated);
   };
 
+  const handleSaveProvider = async (prov, usdStr, cycleStr) => {
+    // Empty field means "no ceiling" — send 0 so the server runs validate_budget_value(0) → None.
+    const usd = usdStr !== '' ? parseFloat(usdStr) : 0;
+    const cycleStartDay = cycleStr !== '' ? parseInt(cycleStr, 10) : 1;
+    const updated = await apiPost('/budget/provider', {
+      provider: prov,
+      usd,
+      cycle_start_day: cycleStartDay,
+    });
+    setData(updated);
+  };
+
+  const [newProvider, setNewProvider] = useState('');
+  // Providers typed into "Add" but not yet saved — kept local-only so typing a
+  // name doesn't round-trip an empty [budget.<provider>] stanza to the server
+  // (POST /budget/provider drops a provider entirely once every field on it
+  // is unset, which would otherwise make the just-added row vanish again).
+  const [pendingProviders, setPendingProviders] = useState([]);
+  const addProvider = () => {
+    const p = newProvider.trim();
+    if (p) {
+      setPendingProviders(prev => prev.includes(p) ? prev : [...prev, p]);
+      setNewProvider('');
+    }
+  };
+
   if (error) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
   if (!data) return html`<div class="empty">Loading...</div>`;
 
   const agentEntries = Object.entries(data.agents || {});
+  const providerBudgets = data.provider_budgets || {};
+  // Every provider we know about: configured + the one deep-linked from
+  // Optimize's projection (even with no ceiling set yet) + any just-added
+  // pending row not yet saved.
+  const providerNames = Array.from(new Set([
+    ...Object.keys(providerBudgets),
+    ...(provider ? [provider] : []),
+    ...pendingProviders,
+  ])).sort();
 
   return html`
     <div class="page-title">Budget</div>
     ${provider ? html`<div class="filters"><button class="btn" onClick=${() => navigate('budget', {}, {})}>provider: ${provider} ✕</button></div>` : null}
 
-    <div style="font-size:13px;font-weight:600;margin-bottom:8px">Budget limits</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px">Per-agent budget caps</div>
     <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
-      Clear a field or enter 0 to remove a limit. Changes are written to your config file immediately.
+      An enforcement ceiling per agent, per day/session. Fires a real-time alert the moment an
+      agent's spend crosses the line. Clear a field or enter 0 to remove a limit. Changes are
+      written to your config file immediately.
     </div>
     <div class="table-wrap"><table>
       <thead><tr><th>Scope</th><th>Daily (USD)</th><th>Per-session (USD)</th><th></th></tr></thead>
@@ -6104,6 +6377,47 @@ function BudgetView({ params }) {
             No agents configured yet. Run your agent once to register it.
           </td></tr>
         ` : null}
+      </tbody>
+    </table></div>
+
+    <div style="font-size:13px;font-weight:600;margin-top:28px;margin-bottom:8px">Provider spend forecast</div>
+    <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
+      A recurring monthly ceiling per provider, scoped to its billing cycle rather than a single
+      agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>
+      projects your current run rate against — it is advisory only (a forecast, never an alert).
+      Clear a field or enter 0 to remove the ceiling.
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Provider</th><th>Monthly ceiling (USD)</th><th>Cycle start day</th><th></th></tr></thead>
+      <tbody>
+        ${providerNames.map(p => html`
+          <${ProviderBudgetRow}
+            key=${p}
+            provider=${p}
+            usd=${(providerBudgets[p] || {}).usd}
+            cycleStartDay=${(providerBudgets[p] || {}).cycle_start_day}
+            highlighted=${p === provider}
+            onSave=${handleSaveProvider}
+          />
+        `)}
+        ${providerNames.length === 0 ? html`
+          <tr><td colspan="4" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+            No provider budgets configured yet.
+          </td></tr>
+        ` : null}
+        <tr>
+          <td>
+            <input type="text" placeholder="provider (e.g. anthropic)" value=${newProvider}
+              onInput=${e => setNewProvider(e.target.value)}
+              style="width:160px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:13px" />
+          </td>
+          <td colspan="2" style="color:var(--text-dim);font-size:12px">Enter a ceiling in the new row below, then Save.</td>
+          <td>
+            <button class="btn" style="padding:4px 12px;font-size:12px" onClick=${addProvider}>
+              Add
+            </button>
+          </td>
+        </tr>
       </tbody>
     </table></div>
 
@@ -6468,10 +6782,15 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         ${(!dollarsSuppressed(framing) && usd == null && tok != null) ? html`<div class="opt-line dim">No dollar figure: no session in this window carries a priced, cache-capable model to estimate the cache_control-adoption saving from. The token estimate above still applies to the compaction lever, which is cache-agnostic.</div>` : null}
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     } else if (name === 'cache-recommend') {
+      // This analyzer is Anthropic-only by design (structural prefix
+      // detection, not a cross-provider extension — see cache_recommend.py).
+      // A non-Anthropic user must be told their calls were EXCLUDED, not left
+      // to read a bare "no prefixes found" as "you have no repetition."
+      const skippedProvider = fd.skipped_provider_count || 0;
       body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled. Set [capture] prompts = true to run this analyzer.'}</div>`
         : (fd.candidates || []).length ? html`<div class="opt-line">${fd.candidates.length} prefix candidate(s) for cache_control:</div>
           <table class="opt-table"><tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.prefix_hash || '').slice(0, 8)}…</td><td>${c.occurrences}× shared</td><td>~${fmtTokens(c.estimated_cacheable_tokens)} cacheable</td></tr>`)}</tbody></table>`
-        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.</div>`;
+        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.${skippedProvider ? ` ${skippedProvider} call(s) on a non-Anthropic provider were excluded from this analysis: this analyzer only looks at Anthropic calls today.` : ''}</div>`;
     } else if (name === 'script') {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
@@ -6775,8 +7094,14 @@ function OptimizeView({ params }) {
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
         <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling — not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
-        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}</div>`)}
-        <div class="opt-caveat">! This projects your current run rate forward against the ceiling — it identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the budget.</div>
+        ${st.opt.budgets.map(b => html`<div class="opt-line">
+          <a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)} title="Edit this provider's monthly ceiling on the Budget screen">${b.provider}</a>:
+          run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs
+          ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling
+          (<a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)}>configured for ${b.provider}</a>, cycle resets day ${b.cycle_start_day})
+          ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}
+        </div>`)}
+        <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a> — not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
         ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
         <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a> — the fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}
@@ -7406,6 +7731,9 @@ const ANALYTICS_DIMENSIONS = [
   ['model', 'Model'], ['agent', 'Agent'], ['provider', 'Provider'], ['tool', 'Tool'],
   ['tool_category', 'Tool category'], ['kind', 'Span kind'], ['request_type', 'Request type'],
   ['day', 'Day'],
+  // SDK cost-attribution dimensions (#SDK dashboard shape).
+  ['tenant', 'Tenant'], ['feature', 'Feature'], ['environment', 'Environment'],
+  ['prompt_version', 'Prompt version'],
 ];
 const ANALYTICS_CHARTS = [['bar', 'Bars'], ['line', 'Lines'], ['hbar', 'Leaderboard']];
 // Built-in presets (close #214 leaderboard + #216 multi-series as preset views).
@@ -7534,10 +7862,14 @@ function downloadCsv(filename, text) {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-// `route` lets the pivot live on another screen (the merged Dashboard preview
-// reuses it under #/dashboard); `embedded` drops the standalone title + window
-// picker so the host screen owns those. Default args preserve the standalone
-// #/analytics behavior exactly.
+// `route` lets the pivot live on another screen (the Dashboard reuses it under
+// #/dashboard, which is now the ONLY way to reach this component: the
+// standalone #/analytics route was retired, since it was a second nav entry
+// for the exact same explorer the Dashboard already embeds. Old #/analytics
+// links alias to the Dashboard instead of 404ing — see primaryKeyFor).
+// `embedded` drops the standalone title + window picker so the host screen
+// owns those. Default args keep this signature call-compatible even though
+// nothing invokes it bare anymore.
 function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null }) {
   const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
     agent_id: '', provider: '', model: '', tool: '' };
@@ -7774,13 +8106,14 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 }
 
 // ============================
-// Merged Dashboard (PREVIEW, #/dashboard) — prototype for design review.
+// Merged Dashboard (#/dashboard) — the Improve lens's main triage front door.
 // ============================
-// Composes the Overview triage front-door (spend hero + run-rate, compact
+// Composes the triage front-door (spend hero + run-rate, compact
 // recoverable-waste + health bands) with the Analytics pivot explorer as the
-// hero canvas. Purely additive: a NEW route that reuses the existing helpers /
-// components (SpendChart, recoverableTiles, HealthTile, AnalyticsView) — it does
-// NOT touch the standalone Overview/Analytics screens or the default landing.
+// hero canvas, reusing the existing helpers / components (SpendChart,
+// recoverableTiles, HealthTile, AnalyticsView). The standalone Overview and
+// Analytics screens this once sat alongside are both retired now: #/overview
+// and #/analytics alias here (see primaryKeyFor) rather than 404ing.
 // One window selector (header) drives BOTH the triage fetch and the embedded
 // explorer (which reads `since` from the same URL params).
 // ---- Review inbox (Improve lens home) ----
@@ -7895,33 +8228,21 @@ function belowInboxFloor(item) {
 // non-null number. dollarsSuppressed() itself is NOT touched by this set — it
 // still governs every other surface in the app unchanged.
 const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
-// RELEARN-CLUSTER ONLY. A relearn cluster scans unbounded history, so it has
-// no window to observe a figure over and states its own 30-day-basis
-// `estimated_monthly_*` instead — the one remaining monthly-basis figure in
-// the product. A COST proposal never comes through here: it carries the one
-// canonical `past_overspend_*` and renders via `pastOverspendFigure` below.
-// Do not "unify" the two by pacing the cost figure onto this basis; the whole
-// point of the collapse was that a paced twin of the observed figure existed
-// and a surface rendered it by mistake.
-function monthlyUsdForDisplay(item) {
-  return NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer) ? null : item.estimated_monthly_usd;
-}
 
 // Rank by tokens — the one figure every item on this page carries, priced or
 // not (a resend/deadweight/subagent/verbosity advisory has real recoverable
 // tokens but no dollar rate at all). Dollars stay a per-item DISPLAY
-// preference (requirement #2, estMonthlyLine below) decoupled from ranking:
-// comparing a $-priced item against a tokens-only one would mean inventing a
-// $/token conversion rate to make them comparable, which the spec forbids
-// (never invent a rate silently). Sorting by tokens uniformly means the
-// rendered order is always monotonic even though some rows DISPLAY dollars —
-// the sort key and a token-only row's display value are the same number.
-// Ranks on the observed past-overspend token figure where the item carries
-// one (every cost proposal does), falling back to the monthly token figure
-// for a relearn cluster, which has no window to observe one over. Ranking on
-// the same quantity the row DISPLAYS keeps the rendered order monotonic.
-function sortByEstMonthly(items) {
-  const rank = i => (i.past_overspend_tokens != null ? i.past_overspend_tokens : (i.estimated_monthly_tokens || 0));
+// preference decoupled from ranking: comparing a $-priced item against a
+// tokens-only one would mean inventing a $/token conversion rate to make them
+// comparable, which the spec forbids (never invent a rate silently). Sorting
+// by tokens uniformly means the rendered order is always monotonic even
+// though some rows DISPLAY dollars — the sort key and a token-only row's
+// display value are the same number. A relearn cluster carries
+// `past_overspend_tokens` on exactly the same basis a cost proposal does
+// (there is no separate monthly-basis figure any more), so one ranking
+// function now serves both tabs.
+function sortByPastOverspend(items) {
+  const rank = i => (i.past_overspend_tokens || 0);
   return [...items].sort((a, b) => rank(b) - rank(a));
 }
 
@@ -7950,40 +8271,20 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
-// A relearn tail item's headline est./mo figure — dollars first when a rate
-// exists and the plan tier doesn't suppress dollars, tokens as fallback
-// (requirement #2). RELEARN CLUSTERS ONLY (see `monthlyUsdForDisplay`); the
-// cost tab passes its own past-tense `summary` to CollapsedTailRow instead.
-// `suppressed` is always `false` on this page (the founder-approved
-// always-dollars carve-out above `sortByEstMonthly`); the parameter survives
-// so this function still degrades correctly if that ever changes.
-function estMonthlyLine(item, suppressed) {
-  const usd = monthlyUsdForDisplay(item);
-  const toks = item.estimated_monthly_tokens;
-  if (!suppressed && usd != null) {
-    return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
-  }
-  if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
-  return { big: '—', sub: '' };
-}
-
-// --- Relearn cluster: observed cost, and the write-economics verdict -------
+// --- Relearn cluster: observed cost only, no forward claim ------------------
 //
-// A recurring-mistake row used to render exactly ONE number — the forward
-// `estimated_monthly_*` claim, captioned "est. / mo". That figure is GATED:
-// `write_budget.py` zeroes it whenever no permanent rule is worth offering.
+// A recurring-mistake row used to render a SECOND number — a forward
+// `estimated_monthly_*` claim, captioned "est. / mo". That figure was GATED:
+// `write_budget.py` zeroed it whenever no permanent rule was worth offering.
 // On a real corpus that meant 50 of 55 rows rendering "$0.00 est./mo" with no
 // reason given, while those same 55 clusters had already cost $46 of observed
 // spend between them. A zero with no explanation reads as "this was free",
 // which is the exact inversion of what the gate means: the gate is a gap in
-// OUR fix library, never a finding that the failure was harmless (CLAUDE.md
-// anti-pattern 32b).
+// OUR fix library, never a finding that the failure was harmless.
 //
-// So the row now LEADS with what the recurrence already cost — ungated, past
-// tense, straight off `past_overspend_*` — and states a forward figure only
-// where a fix is genuinely on offer. The two vocabularies stay strictly
-// apart, per the same rule that governs the cost cards: an observation is
-// past tense and never netted, a claim is forward and always gated.
+// Founder decision: the forward claim is deleted from the card entirely, not
+// merely de-emphasised. A relearn cluster now shows its PAST figure only —
+// straight off `past_overspend_*` — same as every other analyzer's card.
 function relearnObservedFigure(cluster) {
   const usd = cluster.past_overspend_usd;
   const toks = cluster.past_overspend_tokens;
@@ -8148,27 +8449,11 @@ function PastOverspendTile({ block }) {
     </div>`;
 }
 
-// Same priceable-majority rule as InboxStatTiles (requirement #2): dollars
-// only when at least half the collapsed items are themselves priceable, so a
-// tail of 7 tokens-only advisories plus 1 small-dollar one still reads in
-// tokens rather than understating itself as a tiny dollar sum.
-function combinedEstMonthly(items, suppressed) {
-  const priceable = items.filter(i => monthlyUsdForDisplay(i) != null);
-  const leadWithUsd = !suppressed && items.length > 0 && priceable.length * 2 >= items.length;
-  if (leadWithUsd) return fmtUsd(priceable.reduce((s, i) => s + monthlyUsdForDisplay(i), 0));
-  return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
-}
-
-// The relearn tail's summary on the SAME basis its expanded rows now use
-// (`relearnObservedFigure`). Without this the collapsed row advertised a
-// combined forward est./mo while every row inside it led with observed cost —
-// and since the write budget zeroes the forward figure for a suppressed
-// cluster, a tail of 40 gated clusters summarised itself as "$0.00 combined"
-// while containing tens of dollars of real, already-billed spend.
-//
-// Returns null when no item carries an observed figure (a pre-observed-fields
-// cache), so the caller falls back to the forward summary rather than
-// printing a confident $0.00.
+// The tail's summary line, on the SAME past-tense basis its expanded rows
+// use (`pastOverspendFigure` / `relearnObservedFigure` — both read
+// `past_overspend_*`, the one canonical dollar field). Returns null when no
+// item carries an observed figure (a pre-observed-fields cache), so the
+// caller states nothing rather than printing a confident $0.00.
 function combinedObservedCost(items) {
   const observed = items.filter(i => i.past_overspend_usd != null);
   if (observed.length) {
@@ -8179,14 +8464,13 @@ function combinedObservedCost(items) {
   return null;
 }
 
-// The collapsed long-tail row: count + combined est./mo, an expand toggle,
-// and the bulk Dismiss all / (optional) Mark all applied actions (requirement
-// #3). `renderItem` renders one expanded tail row in the caller's own shape
-// (a RecurringMistakeRow or a CostProposalCard).
-// `summary` overrides the default "combined est./mo" line for a tab whose
-// items are stated in the past tense (the cost advisories) — the recurring-
-// mistakes tab has no observed window to report one over, so it keeps the
-// projected figure. Each tab therefore says what its own rows say.
+// The collapsed long-tail row: count + combined figure, an expand toggle, and
+// the bulk Dismiss all / (optional) Mark all applied actions. `renderItem`
+// renders one expanded tail row in the caller's own shape (a
+// RecurringMistakeRow or a CostProposalCard). `summary` is always supplied by
+// the caller now — both tabs state their combined figure in the past tense,
+// off `combinedObservedCost` — so there is no separate forward-basis default
+// to fall back to any more.
 function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, onMarkAllApplied, renderItem }) {
   const [open, setOpen] = useState(false);
   if (tail.length === 0) return null;
@@ -8194,7 +8478,7 @@ function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, 
     <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span class="sz-link" onClick=${() => setOpen(o => !o)}>
-          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel} · ${summary || ('~' + combinedEstMonthly(tail, suppressed) + ' combined est./mo')}
+          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel}${summary ? ' · ' + summary : ''}
         </span>
         <span style="margin-left:auto;display:flex;gap:14px">
           ${onMarkAllApplied ? html`<span class="sz-link" onClick=${onMarkAllApplied}>Mark all applied</span>` : null}
@@ -8222,25 +8506,14 @@ function relearnBadge(cluster) {
 // preserves the existing bulk-dismiss flow (requirement #9) — not in the
 // mockup's own sketch, but the bulk action it drives is explicitly required.
 function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed }) {
-  // Observed first, projection second (see `relearnObservedFigure`). `observed`
-  // is null only for a pre-observed-fields cache, in which case the forward
-  // figure renders instead — under its own "est. / mo" caption, never
-  // relabelled as something that already happened.
+  // The card's only figure: what the recurrence already cost. No forward
+  // claim renders anywhere on this row any more — this was retired: a
+  // relearn cluster shows its PAST figure only, deleted from
+  // the card entirely rather than de-emphasised. `observed` is null only for
+  // a pre-observed-fields cache (a cache written before these fields
+  // existed), in which case the row falls back to a bare dash.
   const observed = relearnObservedFigure(cluster);
-  const est = estMonthlyLine(cluster, suppressed);
-  const headline = observed || est;
-  // The forward claim is a SECOND line, and only where a fix is really on
-  // offer. A suppressed cluster's gross saving is not claimable, so it is not
-  // rendered anywhere on this row — showing it would be the precise defect
-  // this row's gate note exists to explain.
-  //
-  // Tested on the NUMBER, never on the formatted string: `fmtUsd` output is a
-  // display concern and comparing against "$0.00" would silently start showing
-  // zero rows the day that formatting changes.
-  const forwardUsd = monthlyUsdForDisplay(cluster);
-  const forwardTokens = cluster.estimated_monthly_tokens;
-  const showForward = observed && cluster.write_offered !== false
-    && ((forwardUsd != null && forwardUsd > 0) || (forwardUsd == null && forwardTokens > 0));
+  const headline = observed || { big: '—', sub: '' };
   const gate = writeGateNote(cluster);
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
   return html`
@@ -8262,13 +8535,10 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
         ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
       </div>
       <div style="text-align:right;flex-shrink:0">
-        ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
-              asserted "estimated", stacking four lines in this column. Matches
-              the cost cards' single caption so both tabs read alike. The basis
-              stays on hover. */ ''}
-        <div class="mono" style="color:var(--accent);font-weight:600" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${headline.big}</div>
-        <div class="dim" style="font-size:11px">${observed ? 'already cost' : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
-        ${showForward ? html`<div class="dim" style="font-size:11px">~${est.big} / mo if fixed</div>` : null}
+        ${/* One caption, one figure — matches the cost cards' single caption
+              so both tabs read alike. The basis stays on hover. */ ''}
+        <div class="mono" style="color:var(--accent);font-weight:600" title=${cluster.past_overspend_basis || 'occurrences x a conservative per-turn token cost — review before applying'}>${headline.big}</div>
+        <div class="dim" style="font-size:11px">already cost${headline.sub ? ' · ' + headline.sub : ''}</div>
         ${/* The row's only affordance used to be the title styled as a link,
               so the constructive action was invisible next to a prominent
               bulk Dismiss. Name the verb. */ ''}
@@ -8456,27 +8726,38 @@ function daysAgoLabel(iso) {
 // removed in commit c0316aba for making unsupportable realized-savings
 // claims; see the note above InboxStatTiles).
 //
-// The two ledgers are on DIFFERENT time bases and this function does not
-// pretend otherwise — it returns bare `usd`/`tokens`, and the caller labels
-// them per kind. For a COST marker it is `past_overspend_usd`/`_tokens`, the
-// window-observed avoidable figure carried straight onto the ledger record by
-// cost_apply.mark_applied — the same one canonical field the open card
-// rendered. For RELEARN it is `verify.estimated_monthly_usd/tokens`, the
-// cluster's own 30-day-basis figure stamped once by
-// relearn_apply.apply_relearn_fix (relearn scans unbounded history and has no
-// window to observe a figure over; it is the ONE remaining monthly-basis
-// figure in the product and it is never mixed into a cost total).
+// The two ledgers are on DIFFERENT storage shapes but the SAME one canonical
+// field now — this function does not pretend otherwise, it returns bare
+// `usd`/`tokens`, and the caller labels them per kind. For a COST marker it
+// is `past_overspend_usd`/`_tokens`, the window-observed avoidable figure
+// carried straight onto the ledger record by cost_apply.mark_applied. For
+// RELEARN it is `verify.past_overspend_usd/tokens`, the same field snapshotted
+// once by relearn_apply.apply_relearn_fix at the moment of apply — a relearn
+// cluster shows its past figure only, same as every other analyzer's card, so
+// there is no separate monthly-basis figure to reach for here any more.
 //
 // Applies the same NOT_A_SAVINGS_CLAIM_ANALYZERS exclusion a resend/TRIM
-// marker needs here too, inlined rather than routed through
-// monthlyUsdForDisplay (which is relearn-shaped).
+// marker needs here too.
+// Read-only compat for records applied BEFORE the past_overspend_* collapse:
+// a pre-upgrade `applied_fixes.json` entry snapshotted its estimate under the
+// retired forward-savings field names (`estimated_monthly_usd`/`_tokens`) --
+// `verify.*` for relearn, top-level for a cost marker. Falling back to those
+// only when the canonical field is genuinely absent (`!= null`, so a real `0`
+// is never mistaken for "missing") keeps the figure on the Applied tab for an
+// existing ledger entry instead of it silently disappearing the moment this
+// function started reading only the new names. Never a write path: nothing
+// here re-persists the legacy field onto the record.
 function appliedEstimate(rec) {
   const isRelearn = rec.kind === 'relearn';
-  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.past_overspend_usd;
+  const source = isRelearn ? (rec.verify || {}) : rec;
+  const usd = source.past_overspend_usd != null
+    ? source.past_overspend_usd : source.estimated_monthly_usd;
+  const tokens = source.past_overspend_tokens != null
+    ? source.past_overspend_tokens : source.estimated_monthly_tokens;
   return {
     isRelearn,
     usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
-    tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.past_overspend_tokens,
+    tokens,
   };
 }
 
@@ -8881,7 +9162,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
     <div style="margin:10px 0 18px">
     ${/* Both figures now sit in ONE tile row: what was avoidable (past tense,
           observed, server-computed) beside what has been applied. The old
-          full-width band above this row was removed on founder call — see
+          full-width band above this row was removed — see
           `PastOverspendTile`. The two tiles remain different claims about
           different sets, so neither caption restates the other and nothing
           invites adding them together. */ ''}
@@ -8921,10 +9202,15 @@ function ReviewInboxView({ params }) {
   const [tab, setTab] = useState('mistakes');   // 'mistakes' | 'advisories' | 'applied'
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
   // Fetched but no longer used to decide dollar-vs-tokens on this page — the
-  // founder-approved always-dollars carve-out (see `suppressed` below) means
-  // this page ignores dollarsSuppressed() entirely. Kept in case a future
-  // qualifier note wants the raw framing block.
+  // always-dollars carve-out (see `suppressed` below) means this page ignores
+  // dollarsSuppressed() entirely. Kept in case a future qualifier note wants
+  // the raw framing block.
   const [relearnFraming, setRelearnFraming] = useState(null);
+  // Full-corpus dominant persona (`/relearn/proposals`'s own `persona` key,
+  // mirroring `opt.persona` on the Optimize payload — see runner.py). Used
+  // ONLY to disclose why the mistakes tab is empty for an SDK-dominant
+  // window; never to change routing.
+  const [reviewPersona, setReviewPersona] = useState('unknown');
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
@@ -8955,6 +9241,7 @@ function ReviewInboxView({ params }) {
         failuresExamined: f.failures_examined,
       });
       setRelearnFraming(r.framing || null);
+      setReviewPersona(r.persona || 'unknown');
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -9142,9 +9429,9 @@ function ReviewInboxView({ params }) {
   // Sort + long-tail collapse (requirement #3), independently per tab. Deep-
   // linking to a specific analyzer skips the collapse on the advisories tab —
   // a highlighted card must never be hidden inside a folded tail.
-  const sortedRelearn = sortByEstMonthly(shownRelearn);
+  const sortedRelearn = sortByPastOverspend(shownRelearn);
   const { top: topRelearn, tail: tailRelearn } = splitTopAndTail(sortedRelearn);
-  const sortedCost = sortByEstMonthly(shownCost);
+  const sortedCost = sortByPastOverspend(shownCost);
   const { top: topCost, tail: tailCost } = analyzerFocus
     ? { top: sortedCost, tail: [] } : splitTopAndTail(sortedCost);
 
@@ -9201,7 +9488,11 @@ function ReviewInboxView({ params }) {
         ${d.error ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>` : null}
         ${!d.error && d.loading ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>` : null}
         ${!d.error && !d.loading && d.status === 'never_run' ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
-        ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
+        ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? (
+          reviewPersona === 'sdk'
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center">This detector reads Claude Code's own on-disk session transcripts, so it does not apply to SDK sessions and will never find anything here: an empty tab is not a signal you're doing great, it's this detector structurally unable to see your usage. See <span class="sz-link" onClick=${() => setTab('advisories')}>Cost advisories</span> for the analyzers that do read SDK telemetry.</div>`
+            : html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>`
+        ) : null}
         ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`) : null}
         <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
           summary=${combinedObservedCost(tailRelearn)}
@@ -9263,6 +9554,21 @@ function DashboardView({ params }) {
   // only the window changes, so the hero keeps its slice across window switches.
   const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: '30d' });
   const [d, setD] = useState({ loading: true, empty: false, error: null });
+
+  // A retired #/analytics link lands here (primaryKeyFor aliases it to
+  // 'dashboard') with its metric/group_by/stack/chart/since params intact, but
+  // the explorer it deep-links to is below the triage band, not at the top of
+  // the page. Scroll straight to it so an old bookmark still opens "the same
+  // view it used to" rather than a triage band the link never promised. Reads
+  // location.hash directly (not route state, which DashboardView never
+  // receives) and re-checks on every params change since this view stays
+  // mounted (keep-alive) across navigations.
+  useEffect(() => {
+    const isAnalyticsAlias = location.hash.replace(/^#\/?/, '').split(/[?/]/)[0] === 'analytics';
+    if (!isAnalyticsAlias) return;
+    const el = document.getElementById('dash-explore');
+    if (el) el.scrollIntoView({ block: 'start' });
+  }, [params]);
 
   // Triage fetch — same parallel fast=true pattern as Overview (#124): /cost is
   // load-bearing (no .catch), the rest degrade individually. The Analytics hero
@@ -9379,13 +9685,13 @@ function DashboardView({ params }) {
           accent-blue, and this one is a diagnosis of money already spent.
           Different row, different colour treatment, different tense; a reader
           must not be able to add the two together. */ ''}
-    ${/* The past-overspend hero band rendered here. Removed on founder call
-          (2026-07-26): it read as heavy at the top of the page. The figure now
-          lives as a compact tile on the Review inbox — the surface you act on
-          it from. `heroPast` is still fetched on its own effect below and
-          deliberately left in place: re-adding any Dashboard summary of this
-          figure must reuse that same server block rather than reduce over
-          whatever cards happen to be rendered. */ ''}
+    ${/* The past-overspend hero band rendered here. Removed: it read as heavy
+          at the top of the page. The figure now lives as a compact tile on
+          the Review inbox — the surface you act on it from. `heroPast` is
+          still fetched on its own effect below and deliberately left in
+          place: re-adding any Dashboard summary of this figure must reuse
+          that same server block rather than reduce over whatever cards
+          happen to be rendered. */ ''}
 
     ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
       : html`
@@ -9443,7 +9749,7 @@ function DashboardView({ params }) {
 
         <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
-        <div class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
+        <div id="dash-explore" class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
         <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;
 }
@@ -9454,7 +9760,7 @@ function DashboardView({ params }) {
 // existing view still renders, this only decides which nav group frames it.
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
-  traces: 'observe', cost: 'observe', analytics: 'observe', alerts: 'observe', drift: 'observe',
+  traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
   optimize: 'observe', budget: 'observe',
 };
 
@@ -9475,7 +9781,6 @@ const PRIMARY_VIEWS = [
   ['sessions',  StatusView],
   ['traces',    TracesListView],
   ['cost',      CostView],
-  ['analytics', AnalyticsView],
   ['alerts',    AlertsView],
   ['drift',     DriftView],
   ['optimize',  OptimizeView],
@@ -9486,13 +9791,16 @@ const PRIMARY_KEYS = new Set(PRIMARY_VIEWS.map(([k]) => k));
 const EMPTY_PARAMS = new URLSearchParams();
 const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
 
-// Map a raw route to the keep-alive primary key that frames it. #/overview is a
-// retired alias for the Dashboard; #/status and #/runs are silent aliases for
-// Sessions (they render the same StatusView); #/optimize/summarize is the
-// Summarize sub-view. Anything else is its own view key.
+// Map a raw route to the keep-alive primary key that frames it. #/overview and
+// #/analytics are retired aliases for the Dashboard (the standalone Analytics
+// screen was the same AnalyticsView the Dashboard already embeds as its
+// "Explore" section, so the separate route was a second door to one room);
+// #/status and #/runs are silent aliases for Sessions (they render the same
+// StatusView); #/optimize/summarize is the Summarize sub-view. Anything else
+// is its own view key.
 function primaryKeyFor(route) {
   const v = route.view;
-  if (v === 'overview') return 'dashboard';
+  if (v === 'overview' || v === 'analytics') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   return v;

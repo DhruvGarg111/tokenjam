@@ -239,7 +239,7 @@ class OpusQuotaAudit:
     # (segment_estimate_confidence + the bootstrap CI below), not two numbers.
     percent_quota_misallocated: float = 0.0
     percent_sessions: float = 0.0
-    # Segment accounting + confidence (design §5.2 / §6, founder D3). The number
+    # Segment accounting + confidence (design §5.2 / §6, D3). The number
     # is a heuristic estimate, shown with an explicit label + a WIDE bootstrap
     # interval that resamples SEGMENTS (not sessions), so the band widens honestly
     # when few segments carry the estimate. ci low/high are None below 2 segments

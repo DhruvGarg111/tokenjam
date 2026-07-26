@@ -216,6 +216,22 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
         service_instance_id=attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID),
         run_id=attrs.get(TjAttributes.RUN_ID),
         parent_session_id=attrs.get(TjAttributes.PARENT_SESSION_ID),
+        # -- SDK cost-attribution dimensions --
+        # environment/service_version/commit_sha are typically resource-level
+        # (set once per process/deployment); tenant_id/feature/prompt template
+        # identity are typically span-level (per call). Both merge into `attrs`
+        # above (span wins on conflict), so a producer may set either at
+        # whichever level fits its instrumentation.
+        tenant_id=attrs.get(TjAttributes.TENANT_ID),
+        feature=attrs.get(TjAttributes.FEATURE),
+        environment=attrs.get(ResourceAttributes.DEPLOYMENT_ENVIRONMENT_NAME),
+        service_version=attrs.get(ResourceAttributes.SERVICE_VERSION),
+        commit_sha=(
+            attrs.get(ResourceAttributes.VCS_REF_HEAD_REVISION)
+            or attrs.get(ResourceAttributes.VCS_REPOSITORY_REF_REVISION)
+        ),
+        prompt_template_id=attrs.get(TjAttributes.PROMPT_TEMPLATE_ID),
+        prompt_template_version=attrs.get(TjAttributes.PROMPT_TEMPLATE_VERSION),
     )
 
 

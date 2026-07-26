@@ -88,6 +88,7 @@ from tokenjam.core.context_diagnostic import (
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.analyzers.resend_tail import (
     MIN_SESSION_CONTEXT_TOKENS,
+    RELEARN_RESEND_BOUNDARY,
     introduced_tokens,
     main_thread_turns,
     premium_driver_role,
@@ -188,7 +189,9 @@ RESEND_ESTIMATE_BASIS = (
     "Right-sizing stacks on top: the same offloaded volume priced at the "
     "cheaper same-family model's input rate instead of the premium one. "
     "Computed over main-thread spans only, so it never overlaps the subagent "
-    "analyzer's own claim."
+    "analyzer's own claim. Boundary against the relearn analyzer, which prices "
+    "failed-call recovery over some of the same turns: "
+    + RELEARN_RESEND_BOUNDARY + "."
 )
 
 @dataclass(frozen=True)
@@ -262,6 +265,20 @@ COMPACTION_FIX = (
     "prompt size, regardless of whether caching is on. This is a manual, "
     "per-session action, so it never fixes the pattern going forward — treat "
     "it as immediate relief for an already-full session, not the durable fix."
+)
+
+# The SDK-persona fallback when no priced `cache_control` example exists
+# (``fix_cache_control`` == ""). `/compact` is a Claude Code interactive
+# command an SDK caller has no access to, so it must never be shown here —
+# unlike COMPACTION_FIX above, this stays scoped to what any SDK caller
+# controls directly: the content it assembles into the next request, not a
+# harness-specific command.
+RESEND_SDK_TRIM_FIX = (
+    "Trim or summarize the accumulated context before including it in the "
+    "next request instead of resending it unchanged turn over turn. This is "
+    "the same repeated volume this finding measures; cutting it at the call "
+    "site directly reduces future prompt size, independent of whether "
+    "caching is enabled."
 )
 
 # The durable claude-code lever: a rung-1 CLAUDE.md rule (same write machinery
