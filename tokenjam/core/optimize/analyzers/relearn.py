@@ -123,12 +123,18 @@ DISTILL_MODEL = "haiku"
 COMPACTION_PROMPT_DROP_RATIO = 0.5
 
 ESTIMATE_BASIS = (
-    "occurrences x the MEASURED cost of one extra assistant turn in the "
-    "sessions the cluster actually occurred in (median billed cost per call, "
-    "divided back through those sessions' own input rate) — never the inflated "
-    "whole-session footprint, and never a fixed guess: a failed tool call "
-    "forces the model to emit a recovery turn a successful call would not have "
-    "needed, and in a coding session a turn re-sends the whole context. That "
+    "the MEASURED length of each failure's RECOVERY ARC — the assistant turns "
+    "between hitting the pothole and getting the same tool to work again, "
+    "walked from the session's own step order — priced at the MEASURED cost of "
+    "one turn in the sessions the cluster occurred in (median billed cost per "
+    "call, divided back through those sessions' own input rate). Not one turn "
+    "per failure: on a real corpus the median failure costs 2 turns and some "
+    "families over 4, so a flat one-turn charge halves the figure. Turns shared "
+    "by two overlapping failures are split between them, so a burst of potholes "
+    "never bills the same turn twice. Never the inflated whole-session "
+    "footprint, and never a fixed guess: a failed tool call forces the model to "
+    "emit recovery turns a successful call would not have needed, and in a "
+    "coding session a turn re-sends the whole context. That "
     "forced turn is the CLAIM, and it is the part no other analyzer prices — "
     + RELEARN_RESEND_BOUNDARY + ". Observed here but NOT claimed here: the error text's own re-read "
     "tail, priced at ~1,500 tokens (the size of a block of error text) x the "
@@ -148,9 +154,12 @@ ESTIMATE_BASIS = (
 #: `ESTIMATE_BASIS` above and must never be described with it: that one is a
 #: forward, netted, gated CLAIM; this is a backward, ungated OBSERVATION.
 PAST_OVERSPEND_BASIS = (
-    "observed occurrences x the MEASURED cost of one extra assistant turn in "
-    "the sessions the cluster occurred in (the recovery turn a failed call "
-    "forces and a successful one does not), PLUS the error text's own measured "
+    "each observed failure's MEASURED recovery arc (the assistant turns between "
+    "hitting the pothole and the same tool succeeding again, median 2 on a real "
+    "corpus rather than the 1 a flat charge assumes, with turns shared by "
+    "overlapping failures split between them) x the MEASURED cost of one "
+    "assistant turn in the sessions the cluster occurred in, PLUS the error "
+    "text's own measured "
     "re-read tail, priced at the rate the contributing sessions actually "
     "billed at. "
     "Accumulated over the scanned corpus, NOT paced to 30 days. Deliberately "
@@ -638,6 +647,104 @@ class FailureEpisode:
     kind:        str            # method_spine move kind: delegate/dead_end/verify/act
     is_retry:    bool
     depth:       int            # 0 = main thread, >0 = nested subagent
+    #: How many assistant turns this failure actually cost, MEASURED by walking
+    #: forward to the turn where the same tool finally succeeded (see
+    #: `_stamp_detour_turns`). ``None`` when it could not be measured — the
+    #: archive and OTel lanes have spans, not an ordered step list, so they
+    #: carry no detour and fall back to 1.0 (the conservative floor, and the
+    #: value the whole analyzer assumed before this was measured).
+    detour_turns: float | None = None
+
+
+#: Stop looking for the recovery turn after this many steps. Past it the agent
+#: has abandoned the approach rather than retried it, and whatever it went on to
+#: do is no longer attributable to this failure. Measured on the local corpus,
+#: 95.4% of failures recover well inside this bound.
+MAX_RECOVERY_SCAN_STEPS = 40
+
+
+def _stamp_detour_turns(ordered: list[tuple[int, str, Any]], total_steps: int) -> None:
+    """Measure what each failure actually cost, in assistant turns, and stamp it.
+
+    THE ASSUMPTION THIS REPLACES. Every figure in this module used to price one
+    occurrence as exactly ONE forced turn: a failed call makes the model emit a
+    recovery turn a successful call would not have needed. That is the right
+    SHAPE and the wrong SIZE. A failure is rarely one turn — the agent reads the
+    error, tries something, often fails again, and only then recovers. Measured
+    over 914 failure-bearing sessions on the local corpus (2026-07-26): the
+    median failure costs 2 turns and the mean 2.47, so the old basis understated
+    every relearn figure by about half. Per-family it ranges from 0.97x
+    (a git branch that already exists — one clean retry) to 4.62x (a stale-read
+    race, where the agent re-reads, re-edits and races the linter again).
+
+    WHY THE UNION, AND NOT THE SUM. Two failures a step apart have OVERLAPPING
+    recovery windows, and billing each one its own full detour charges the same
+    assistant turn twice. That is the CLAUDE.md rule 27 double-count, just
+    inside one analyzer instead of between two, and it is not small: on the
+    corpus the naive sum is 2.45x per occurrence against a true union of 2.07x,
+    so 15.3% of it is the same turns counted repeatedly. A turn claimed by k
+    overlapping failures is therefore split 1/k between them — every detour turn
+    in a session is billed exactly once, however many potholes were in flight.
+
+    ``ordered`` is ``[(step_index, tool_name, episode), ...]`` in walk order for
+    ONE session, already filtered to real failures. Mutates the episodes in
+    place. Never raises: an unmeasurable session just leaves ``detour_turns``
+    at ``None``, which prices at the old 1.0.
+    """
+    if not ordered:
+        return
+
+    # Where does each tool next SUCCEED? Built once per session rather than
+    # rescanned per failure, so a long session stays linear.
+    succeeded_at: dict[str, list[int]] = {}
+    for index, tool_name, episode in ordered:
+        if episode is None:                       # a success marker, not a failure
+            succeeded_at.setdefault(tool_name, []).append(index)
+
+    failures = [(i, t, e) for i, t, e in ordered if e is not None]
+    windows: list[tuple[Any, set[int]]] = []
+    measured: list[int] = []
+    for index, tool_name, episode in failures:
+        recovery = next(
+            (
+                s for s in succeeded_at.get(tool_name, [])
+                if index < s <= index + MAX_RECOVERY_SCAN_STEPS
+            ),
+            None,
+        )
+        if recovery is None:
+            windows.append((episode, set()))      # resolved below, once a median exists
+            continue
+        span = recovery - index
+        measured.append(span)
+        windows.append((episode, set(range(index + 1, index + 1 + span))))
+
+    # A failure that never recovered inside the scan window DID cost something —
+    # the agent abandoned the approach, which is not cheaper than retrying it.
+    # Its length is genuinely unmeasurable though, so it is charged this
+    # session's OWN median detour rather than the scan cap (which would let the
+    # unknown case dominate) or a global constant (which would not be measured
+    # from this user's data at all). No median to borrow => the 1.0 floor.
+    import statistics
+
+    fallback = max(int(statistics.median(measured)) if measured else 1, 1)
+    resolved: list[tuple[Any, set[int]]] = []
+    for (index, _tool, episode), (_e, window) in zip(failures, windows):
+        if window:
+            resolved.append((episode, window))
+            continue
+        end = min(index + 1 + fallback, total_steps + 1)
+        resolved.append((episode, set(range(index + 1, end))))
+
+    # Split every shared turn evenly across the failures claiming it.
+    claims: dict[int, int] = {}
+    for _episode, window in resolved:
+        for step in window:
+            claims[step] = claims.get(step, 0) + 1
+    for episode, window in resolved:
+        episode.detour_turns = round(
+            sum(1.0 / claims[step] for step in window), 4,
+        ) if window else 1.0
 
 
 def _walk_moves(
@@ -692,13 +799,26 @@ def extract_failures_for_session(
     spine = build_method_spine(story)
 
     failures: list[FailureEpisode] = []
-    for step, move, depth in _walk_moves(real_steps, spine, 0):
+    # `(step_index, tool_name, episode_or_None)` in walk order. SUCCESSES are
+    # recorded too, with a None episode, because the recovery measurement needs
+    # to know where each tool started working again — see `_stamp_detour_turns`.
+    # The index is the position in the flattened walk, subagent steps included,
+    # which is the sequence the model actually emitted turns for.
+    ordered: list[tuple[int, str, Any]] = []
+    for step_index, (step, move, depth) in enumerate(_walk_moves(real_steps, spine, 0)):
         for tool in step.get("tools") or []:
+            tool_name = tool.get("name") or "unknown"
             if tool.get("status") != "error":
+                ordered.append((step_index, tool_name, None))
                 continue
             error_text = tool.get("error") or ""
             if is_user_decline(error_text):
-                continue  # a human's own choice, not a relearn — see is_user_decline
+                # A human's own choice, not a relearn (see is_user_decline). It
+                # is not a RECOVERY either, so it is dropped from `ordered`
+                # entirely rather than recorded as a success — counting a
+                # declined call as the moment the tool started working would
+                # end a detour that never actually ended.
+                continue
             failures.append(FailureEpisode(
                 session_id=session_id,
                 repo=repo,
@@ -710,6 +830,8 @@ def extract_failures_for_session(
                 is_retry=bool(move.get("is_retry")),
                 depth=depth,
             ))
+            ordered.append((step_index, tool_name, failures[-1]))
+    _stamp_detour_turns(ordered, len(real_steps))
     return failures
 
 
@@ -799,7 +921,12 @@ def _below_threshold_residue(
         _measured_turn_tokens(conn, sessions, profile)
         or GROUNDED_TOKENS_PER_OCCURRENCE
     )
-    tokens = occurrences * turn_tokens
+    # Same recovery-arc basis the kept clusters use (see `build_proposals`) —
+    # this has to move whenever the head term moves, or the docstring's "same
+    # head-term basis" promise silently becomes false.
+    tokens = round(sum(
+        f.detour_turns or 1.0 for c in dropped for f in c.failures
+    ) * turn_tokens)
     return {
         "clusters": len(dropped),
         "occurrences": occurrences,
@@ -1660,7 +1787,20 @@ def build_proposals(
         #
         # Conflating them priced the retry as though it were the text.
         turn_tokens = _measured_turn_tokens(conn, sessions, profile)
-        head_tokens = occurrences * (turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE)
+        # NOT `occurrences x one turn`. A failure costs the whole recovery ARC —
+        # the turns between hitting the pothole and getting the same tool to
+        # work again — which is measured per occurrence at extraction time and
+        # medians 2 turns on a real corpus, not 1. Overlapping arcs are already
+        # de-duplicated there (a turn shared by two failures is split between
+        # them), so summing per-occurrence detours here cannot double-count.
+        # An occurrence with no measurable arc (the archive and OTel lanes have
+        # spans, not ordered steps) falls back to 1.0: the old assumption, kept
+        # as the conservative floor rather than back-filled with a corpus
+        # average measured on a different lane.
+        detour_turns = sum(f.detour_turns or 1.0 for f in cluster.failures)
+        head_tokens = round(
+            detour_turns * (turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE)
+        )
         # `multiplier - 1` is the tail's own share (`cache_read_ratio x tail`),
         # kept on the TEXT basis rather than rescaled by the head.
         text_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE

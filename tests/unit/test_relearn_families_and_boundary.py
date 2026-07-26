@@ -131,3 +131,120 @@ def test_the_boundary_names_the_counterfactual_not_the_token_class():
     lowered = RELEARN_RESEND_BOUNDARY.lower()
     assert "should not have happened" in lowered
     assert "size of calls that had to" in lowered
+
+
+# --- The recovery arc ---------------------------------------------------------
+# relearn used to price one forced turn per failure. Measured on a real corpus
+# the median failure costs 2 turns and some families over 4, so the flat charge
+# halved every figure. These pin the measurement and, more importantly, the
+# de-duplication that keeps a burst of potholes from billing one turn twice.
+
+def _ep(session="s", tool="Bash"):
+    from tokenjam.core.optimize.analyzers.relearn import FailureEpisode
+
+    return FailureEpisode(
+        session_id=session, repo="r", ts=None, tool_name=tool, label="",
+        error_text="boom", kind="act", is_retry=False, depth=0,
+    )
+
+
+def test_a_failure_costs_the_turns_until_its_tool_works_again():
+    from tokenjam.core.optimize.analyzers.relearn import _stamp_detour_turns
+
+    fail = _ep()
+    # fail at step 0; Bash succeeds again at step 3 => a 3-turn detour.
+    _stamp_detour_turns([(0, "Bash", fail), (3, "Bash", None)], total_steps=10)
+    assert fail.detour_turns == 3.0
+
+
+def test_a_clean_one_retry_recovery_still_costs_one_turn():
+    """The floor case, and the value the whole analyzer used to assume."""
+    from tokenjam.core.optimize.analyzers.relearn import _stamp_detour_turns
+
+    fail = _ep()
+    _stamp_detour_turns([(0, "Bash", fail), (1, "Bash", None)], total_steps=5)
+    assert fail.detour_turns == 1.0
+
+
+def test_overlapping_recovery_arcs_never_bill_the_same_turn_twice():
+    """CLAUDE.md rule 27's double-count, inside one analyzer instead of between
+    two. Two failures one step apart both recover at step 3, so turns 2 and 3
+    are claimed by both and must be split, not charged twice."""
+    from tokenjam.core.optimize.analyzers.relearn import _stamp_detour_turns
+
+    first, second = _ep(), _ep()
+    _stamp_detour_turns(
+        [(0, "Bash", first), (1, "Bash", second), (3, "Bash", None)],
+        total_steps=10,
+    )
+    # Naive sum would be 3 + 2 = 5 turns for a stretch that only contains 3.
+    assert first.detour_turns + second.detour_turns == pytest.approx(3.0)
+    assert first.detour_turns > second.detour_turns   # the earlier one owns step 1 alone
+
+
+def test_a_shared_turn_is_split_evenly_and_never_lost():
+    from tokenjam.core.optimize.analyzers.relearn import _stamp_detour_turns
+
+    a, b, c = _ep(), _ep(), _ep()
+    _stamp_detour_turns(
+        [(0, "Bash", a), (0, "Bash", b), (0, "Bash", c), (1, "Bash", None)],
+        total_steps=5,
+    )
+    # One turn of recovery, three failures claiming it: a third each, summing
+    # to the one turn that was actually spent (the field is rounded to 4dp, so
+    # the split is exact only to that precision — deliberately, since a stored
+    # figure that renders is worth more than a repeating decimal).
+    for episode in (a, b, c):
+        assert episode.detour_turns == pytest.approx(1 / 3, abs=1e-4)
+    assert sum(e.detour_turns for e in (a, b, c)) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_a_different_tool_succeeding_does_not_end_the_arc():
+    """Recovery means THIS tool working again. A Read succeeding in the middle
+    of a Bash flail is not the Bash pothole being resolved."""
+    from tokenjam.core.optimize.analyzers.relearn import _stamp_detour_turns
+
+    fail = _ep(tool="Bash")
+    _stamp_detour_turns(
+        [(0, "Bash", fail), (1, "Read", None), (2, "Read", None), (4, "Bash", None)],
+        total_steps=10,
+    )
+    assert fail.detour_turns == 4.0
+
+
+def test_a_failure_that_never_recovers_is_charged_the_sessions_own_median():
+    """The agent abandoned the approach, which is not cheaper than retrying it.
+    Its length is unmeasurable, so it borrows this session's measured median
+    rather than the scan cap (which would let the unknown case dominate) or a
+    global constant (which would not be measured from this user's data)."""
+    from tokenjam.core.optimize.analyzers.relearn import _stamp_detour_turns
+
+    measured, abandoned = _ep(), _ep()
+    _stamp_detour_turns(
+        [(0, "Bash", measured), (2, "Bash", None), (50, "Grep", abandoned)],
+        total_steps=60,
+    )
+    assert measured.detour_turns == 2.0
+    assert abandoned.detour_turns == 2.0        # the session's own median, not 40
+
+
+def test_recovery_beyond_the_scan_window_does_not_count_as_recovery():
+    from tokenjam.core.optimize.analyzers.relearn import (
+        MAX_RECOVERY_SCAN_STEPS,
+        _stamp_detour_turns,
+    )
+
+    fail = _ep()
+    far = MAX_RECOVERY_SCAN_STEPS + 5
+    _stamp_detour_turns([(0, "Bash", fail), (far, "Bash", None)], total_steps=far + 5)
+    # No median to borrow => the conservative 1.0 floor, never `far`.
+    assert fail.detour_turns == 1.0
+
+
+def test_an_unmeasurable_lane_prices_at_the_old_one_turn_floor():
+    """The archive and OTel lanes carry spans, not ordered steps. They must fall
+    back to the previous assumption rather than inherit a multiplier measured on
+    a different lane."""
+    episode = _ep()
+    assert episode.detour_turns is None
+    assert (episode.detour_turns or 1.0) == 1.0
