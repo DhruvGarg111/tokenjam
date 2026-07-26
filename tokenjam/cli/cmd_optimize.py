@@ -456,7 +456,7 @@ DE_MINIMIS_SHARE = 0.01
 
 # Findings that must NEVER be collapsed into the "Minor findings" pointer by
 # token share. `relearn` is a recurring-failure-cluster finding, not a
-# token-reclamation one — its `estimated_recoverable_tokens` is a soft
+# token-reclamation one — its `past_overspend_tokens` is a soft
 # occurrence×heuristic estimate for the Lens inbox, not a real fraction of the
 # window. Ranking it by that share let a heavy `--since 365d` window (huge
 # denominator) push real clusters below DE_MINIMIS_SHARE and hide them behind a
@@ -503,7 +503,7 @@ def _reclaimable_share(finding: Any, window_total_tokens: int) -> float | None:
     analyzer's own diagnostic empty-state message (e.g. "no tool spans in
     this window") behind a generic pointer.
     """
-    tokens = getattr(finding, "estimated_recoverable_tokens", None)
+    tokens = getattr(finding, "past_overspend_tokens", None)
     if tokens is None or window_total_tokens <= 0:
         return None
     return max(float(tokens), 0.0) / window_total_tokens
@@ -821,7 +821,7 @@ def _render_report(
     # nothing-burger could occupy the top numbered slot just because its
     # analyzer happened to run first — e.g. "① Model downgrade: 28% of
     # sessions match" when those sessions held ~0% of the window's tokens
-    # (#97). Rank by estimated_recoverable_tokens / window.total_tokens
+    # (#97). Rank by past_overspend_tokens / window.total_tokens
     # instead. Three buckets:
     #   major    — real, meaningful share: numbered slot, full render.
     #   unranked — no quantified estimate at all (disabled / no candidates):
@@ -995,7 +995,21 @@ def _render_downgrade(
 
     `persona` picks the call-to-action at the bottom (#97) — see
     `_render_downgrade_cta`.
+
+    The driver-role case leads when it fired: it is the primary case, and on a
+    coding-agent corpus it carries essentially all of the analyzer's dollars.
+    The tiny-session block below it is skipped entirely when no session matched
+    it, so the header never reports "0% of sessions" over a real finding.
     """
+    if d.driver_sessions:
+        _render_driver_role(d, pricing_mode, marker)
+        marker = " "
+    if d.candidate_sessions <= 0:
+        # No tiny-session candidates, so there is no `bench_command` and no
+        # model swap for the CTA to talk about: the driver-role block above
+        # carries its own fix, which is a CLAUDE.md rule rather than a swap.
+        return
+
     console.print(
         f"  [bold]{marker} Downsize:[/bold] "
         f"{d.percent_of_sessions:.0f}% of sessions match a smaller-model "
@@ -1076,6 +1090,41 @@ def _render_downgrade(
     )
     if d.bench_command:
         _render_downgrade_cta(d.bench_command, persona)
+
+
+def _render_driver_role(
+    d: DowngradeFinding, pricing_mode: str, marker: str,
+) -> None:
+    """The primary case: a premium model drove undelegated work inline.
+
+    Dollars are suppressed outside `api` pricing exactly as the tiny-session
+    block suppresses them — the token figure carries the finding instead, since
+    a flat-rate plan's re-read tail is real quota even when it is not a bill.
+    """
+    swaps = ", ".join(f"{m} → {alt}" for m, alt in sorted(d.driver_substitutes.items()))
+    console.print(
+        f"  [bold]{marker} Model role:[/bold] a premium model drove "
+        f"{d.driver_sessions} of {d.total_sessions} sessions inline, without "
+        f"dispatching a single worker"
+    )
+    console.print(
+        f"     • [bold]{format_tokens(d.driver_tail_tokens)}[/bold] tokens were "
+        f"re-read purely because that work stayed in the main thread"
+    )
+    if pricing_mode == "api":
+        console.print(
+            f"     • Routing it to a worker would have saved "
+            f"[bold]{format_cost(d.driver_recoverable_usd)}[/bold] in the window "
+            f"({format_cost(d.driver_offload_usd)} of re-reads + "
+            f"{format_cost(d.driver_tier_usd)} of tier difference)"
+        )
+    if swaps:
+        console.print(f"     • Suggested worker tier: [dim]{swaps}[/dim]")
+    console.print(
+        "     • [dim]Your own thread stays on the premium model — what moves is "
+        "the context-heavy work, not the driver.[/dim]"
+    )
+    console.print()
 
 
 def _render_downgrade_cta(bench_command: str, persona: str) -> None:
@@ -1485,10 +1534,10 @@ def _render_cache_root_causes(
                 f"[dim]~{format_tokens(c.assumed_prefix_tokens)} assumed prefix[/dim]"
             )
             if pricing_mode == "api":
-                if c.estimated_recoverable_usd is not None:
+                if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
                         f"estimated recoverable over this window"
                     )
                 else:
@@ -1537,10 +1586,10 @@ def _render_cache_root_causes(
                     "prefix itself is likely changing between calls[/dim]"
                 )
             if pricing_mode == "api":
-                if c.estimated_recoverable_usd is not None:
+                if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
                         f"wasted writing this prefix over this window"
                     )
                 else:
@@ -1567,10 +1616,10 @@ def _render_cache_root_causes(
                 f"prior turn)[/dim]"
             )
             if pricing_mode == "api":
-                if c.estimated_recoverable_usd is not None:
+                if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
                         f"estimated recoverable over this window"
                     )
                 else:
@@ -1659,9 +1708,9 @@ def _render_cache_recommend(
         # show. On api, a candidate can still have no priced rate for its
         # model, in which case we say why rather than print a $0.00.
         if pricing_mode == "api":
-            if c.estimated_recoverable_usd is not None:
+            if c.past_overspend_usd is not None:
                 console.print(
-                    f"           [dim]≈[/dim] [green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                    f"           [dim]≈[/dim] [green]{format_cost(c.past_overspend_usd)}[/green] "
                     f"estimated over this window [dim](model {c.model})[/dim]"
                 )
             else:
@@ -1672,9 +1721,9 @@ def _render_cache_recommend(
         console.print(f"           [dim italic]{sample}[/dim italic]")
         _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
 
-    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+    if pricing_mode == "api" and finding.past_overspend_usd is not None:
         console.print(
-            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"     • [green]~{format_cost(finding.past_overspend_usd)}[/green] "
             f"estimated recoverable across these candidates [dim](reads after "
             f"the first occurrence, minus one cache write per prefix)[/dim]"
         )
@@ -1995,17 +2044,101 @@ def _render_subagent(
     # this finding its ranked slot. Dollars for api-billed users; the token quota
     # otherwise (same category discipline as the peer analyzers). Honest
     # "estimated recoverable" framing only; the caveat below still governs.
-    if finding.estimated_recoverable_tokens is not None:
-        if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
-            recov = format_cost(finding.estimated_recoverable_usd)
+    if finding.past_overspend_tokens is not None:
+        if pricing_mode == "api" and finding.past_overspend_usd is not None:
+            recov = format_cost(finding.past_overspend_usd)
         else:
-            recov = f"{format_tokens(finding.estimated_recoverable_tokens)} tokens"
+            recov = f"{format_tokens(finding.past_overspend_tokens)} tokens"
         console.print(
             f"     • [green]~{recov}[/green] estimated recoverable "
             f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
         )
 
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
+def _relearn_observed_cost(cluster, *, pricing_mode: str = "api") -> str:
+    """What this cluster ALREADY COST, as a short display string.
+
+    Reads ``past_overspend_*`` straight off the cluster and derives nothing:
+    the figure is ungated on purpose (a cluster with no fix template in our
+    library, and a cluster whose rule is uneconomic to keep, both still cost
+    real money) and no future maintenance cost is netted out of it.
+
+    Dollars only for api-billed users, the same category discipline every peer
+    renderer follows; a subscription user sees the token figure instead of a
+    price they were never charged. Empty string when the cluster carries
+    neither field — a cache written before they existed — so the caller omits
+    the segment rather than printing a confident zero.
+    """
+    usd = getattr(cluster, "past_overspend_usd", None)
+    tokens = getattr(cluster, "past_overspend_tokens", None)
+    if pricing_mode == "api" and usd:
+        return format_cost(usd)
+    if tokens:
+        return f"~{format_tokens(tokens)} tok"
+    return ""
+
+
+def _relearn_write_gate_line(cluster) -> str:
+    """Why no permanent fix is on offer for this cluster, or "" when one is.
+
+    The reason string is the write budget's OWN sentence
+    (``core/optimize/write_budget.py`` owns the wording so the CLI, the API
+    payload and the Review inbox row cannot drift into three explanations of
+    one flag). The payback arithmetic is appended only where the budget
+    actually computed one: a rung-3 hook is never sent as prompt text, so it
+    has no standing cost and no ratio at all.
+    """
+    if getattr(cluster, "write_offered", True):
+        return ""
+    # The SHORT label here, not the full sentence: a real corpus gates ~50 of
+    # 55 clusters, so the long form would print a paragraph under every row.
+    # The full sentence still renders where there is room for it (the expanded
+    # Review card, `--json`).
+    short = str(getattr(cluster, "write_blocked_short", "") or "").strip()
+    if not short:
+        short = _short_reason_fallback(cluster)
+    if not short:
+        return ""
+    per_session = getattr(cluster, "standing_cost_tokens_per_session", 0) or 0
+    ratio = getattr(cluster, "payback_ratio", None)
+    if not per_session or ratio is None:
+        return f"no permanent fix offered: {short}"
+    return (
+        f"no permanent fix offered: {short} "
+        f"(~{format_tokens(per_session)} tok/session forever, "
+        f"modelled payback {ratio:.2f}x)"
+    )
+
+
+def _short_reason_fallback(cluster) -> str:
+    """Derive the short label from the long reason for a cluster read out of a
+    cache written before ``write_blocked_short`` existed. Keeps an older cache
+    rendering the verdict instead of silently dropping it."""
+    from tokenjam.core.optimize.write_budget import short_reason
+
+    return short_reason(getattr(cluster, "write_blocked_reason", "") or "")
+
+
+def _render_relearn_gate_summary(clusters) -> None:
+    """One line naming how many clusters carry no permanent fix, and why.
+
+    Without it the list reads as though every cluster is actionable. It is
+    stated as a gap in what WE can act on — never as a finding that the
+    remaining failures were harmless, which is the reading a bare count
+    invites.
+    """
+    gated = [c for c in clusters if not getattr(c, "write_offered", True)]
+    if not gated:
+        return
+    console.print(
+        f"     [dim]{len(gated)} of {len(clusters)} carry no permanent fix of "
+        f"their own (no derived template, a rule modelled as costing more to "
+        f"keep than it returns, or this window's rule budget). Each still cost "
+        f"what is shown above: the gate is a gap in what we can act on, not a "
+        f"finding that the failure was harmless.[/dim]"
+    )
 
 
 def _render_relearn(
@@ -2036,15 +2169,28 @@ def _render_relearn(
         f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
         f"recurring blockers this agent silently re-hits"
     )
+    # Lead each row with what the recurrence ALREADY COST, not with the
+    # fix-gated forward claim. The write budget zeroes that claim whenever no
+    # permanent rule is worth offering, which on a real corpus is the large
+    # majority of clusters — so a forward-only line printed "$0.00" for most
+    # of the list while those same clusters had spent real money. A gate on
+    # our side is a gap in OUR fix library, never a finding that the failure
+    # was free (CLAUDE.md anti-pattern 32b).
     for c in finding.clusters[:10]:
+        cost = _relearn_observed_cost(c, pricing_mode=pricing_mode)
         console.print(
             f"       [bold]{c.signature}[/bold]  "
             f"{c.occurrences} occurrence{'s' if c.occurrences != 1 else ''} / "
             f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
             f"[dim](rung {c.rung})[/dim]"
+            + (f"  [bold]{cost}[/bold] [dim]already spent[/dim]" if cost else "")
         )
+        gate = _relearn_write_gate_line(c)
+        if gate:
+            console.print(f"         [dim]{gate}[/dim]")
     if len(finding.clusters) > 10:
         console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
+    _render_relearn_gate_summary(finding.clusters)
     console.print(
         "     [dim]Review + apply fixes in the Lens Review inbox, or see "
         "full detail with [bold]tj optimize relearn --json[/bold].[/dim]"
@@ -2124,10 +2270,15 @@ def _render_summarize(
     silently dropped from plain-text `tj optimize` output and only reachable
     via `--json`.
 
-    Tokens-only by design (see core/optimize/analyzers/summarize.py):
-    `estimated_recoverable_usd` is intentionally None — there's no per-file
-    call telemetry to amortize a dollar figure over — so this renderer never
-    fabricates one, only the per-call token reduction.
+    The per-file line is the one-time, per-CALL reduction (`file_reduction_
+    tokens`); `past_overspend_tokens` and `past_overspend_usd`
+    are both per-WINDOW, because these files are always-on context and the
+    reduction is realized on every session that loads them (see
+    core/optimize/analyzers/summarize.py). The window line only appears
+    when the analyzer could observe how many sessions actually load the files
+    — it is never fabricated from a default rate — and it goes through
+    `render_savings` so a subscription/local plan sees the same framing every
+    other analyzer gives it.
     """
     console.print(_finding_header(marker, "Summarize:"))
     if not finding.candidates:
@@ -2137,12 +2288,24 @@ def _render_summarize(
         )
         return
 
-    tokens = finding.estimated_recoverable_tokens or 0
+    file_reduction_tokens = getattr(finding, "file_reduction_tokens", None) or 0
     console.print(
         f"     • [bold]{finding.files}[/bold] file{'s' if finding.files != 1 else ''} "
-        f"summarizable, ~[bold]{format_tokens(tokens)}[/bold] per call "
+        f"summarizable, ~[bold]{format_tokens(file_reduction_tokens)}[/bold] per call "
         f"[dim](aggregate {finding.reduction_pct}% prose reduction)[/dim]"
     )
+    recoverable_usd = getattr(finding, "past_overspend_usd", None)
+    window_tokens = finding.past_overspend_tokens or 0
+    if recoverable_usd:
+        savings = render_savings(
+            recoverable_usd, window_tokens, Framing(pricing_mode=pricing_mode),
+        )
+        if savings != "—":
+            console.print(
+                f"       [green]~{savings}[/green] across the "
+                f"[bold]{finding.sessions_examined}[/bold] session(s) in this "
+                f"window that re-send these files on every call"
+            )
     for c in finding.candidates[:5]:
         console.print(
             f"       [dim]{c.path}[/dim]  [dim]({c.scope})[/dim]  "
@@ -2325,9 +2488,9 @@ def _render_placement(
             f"       [dim]… and {len(finding.candidates) - 10} more.[/dim]"
         )
 
-    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+    if pricing_mode == "api" and finding.past_overspend_usd is not None:
         console.print(
-            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"     • [green]~{format_cost(finding.past_overspend_usd)}[/green] "
             f"estimated price difference over this window "
             f"[dim](the same work, billed at the Batch API's flat rate)[/dim]"
         )
@@ -2433,7 +2596,7 @@ def _render_resend(
     # repeat_share itself is measured against.
     framing = Framing(pricing_mode=pricing_mode, window_total_tokens=finding.prompt_tokens_total)
     recoverable = render_savings(
-        finding.estimated_recoverable_usd, finding.estimated_recoverable_tokens, framing,
+        finding.past_overspend_usd, finding.past_overspend_tokens, framing,
     )
     console.print()
     if recoverable != "—":

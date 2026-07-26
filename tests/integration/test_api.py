@@ -701,7 +701,7 @@ async def test_optimize_chain_framing_and_recoverable_fields(client):
     findings = data.get("findings") or {}
     for name in ("cache", "script", "trim"):
         if name in findings:
-            assert "estimated_recoverable_usd" in findings[name]
+            assert "past_overspend_usd" in findings[name]
             assert "estimate_basis" in findings[name]
 
 
@@ -768,7 +768,9 @@ async def test_budget_framing_reflects_configured_subscription_plan(db):
     assert framing["pricing_mode"] == "subscription"
     assert framing["plan_tier"] == "max_5x"
     assert framing["plan_label"] == "Max 5x plan"
-    assert framing["display_rule"] == "suppress_dollars_for_subscription_share"
+    # Dollars are shown by default (assume API pricing), qualified as a
+    # list-price equivalent — never suppressed for a subscription plan.
+    assert framing["display_rule"] == "show_dollars_with_qualifier"
 
 
 async def test_get_alerts_returns_list(client):

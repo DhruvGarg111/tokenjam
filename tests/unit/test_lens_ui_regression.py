@@ -463,7 +463,7 @@ def test_cache_savings_honesty_framing(html):
     assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
     assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
     # the recoverable overlay is no longer wired into the cache chart
-    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" not in html
+    assert "fmtFramedDollar(cacheResp.past_overspend_usd" not in html
 
 
 def test_cache_savings_chart_is_best_effort(html):
@@ -2236,7 +2236,7 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     # The panel must never re-derive analysis in JS — it renders server-computed
     # measured vs estimated fields straight from the endpoint payload.
     assert "measured_recovered_tokens" in html
-    assert "estimated_recoverable_tokens" in html
+    assert "past_overspend_tokens" in html
 
 
 # --- cost proposals in the Review inbox (advise-only) ---------------------- #
@@ -2268,6 +2268,20 @@ def test_subagent_cost_card_has_workspace_apply_flow(html):
     # Human-readable, uppercase analyzer-category badge (inbox redesign
     # requirement #4) — replaced the old lowercase COST_ANALYZER_LABELS map.
     assert "subagent: 'SUBAGENT'" in html
+
+
+def test_summarize_cost_card_links_to_curate_diff_instead_of_a_bare_apply(html):
+    # summarize is a real peer card now, but its fix is a reviewed
+    # rewrite (structure kept, prose compressed) driven by its own curate ->
+    # diff -> apply lifecycle, which already tracks staged/applied state.
+    # The card's ONE affordance must route there instead of offering the
+    # generic advise-only "Mark applied" marker or an inline Apply button.
+    start = html.index("function CostProposalCard")
+    end = html.index("function InboxStatTiles", start)
+    card = html[start:end]
+    assert "prop.analyzer === 'summarize'" in card
+    assert "Review in Summarize" in card
+    assert "summarize:  { title: 'Summarize'" in html
 
 
 def test_relearn_example_session_links_only_when_resolvable(html):
@@ -2365,9 +2379,11 @@ def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
     assert "suppressed" in tile
-    assert "'~' + fmtTokens(totalToks) + ' tok'" in tile
+    # The open-items half of this component is now the past-overspend band
+    # (server-computed, always dollars-with-tokens, no suppression choice to
+    # make). What survives here is the applied tile, which still honors a
+    # truthy `suppressed` by leading with tokens.
     assert "'~' + fmtTokens(appliedTokSum) + ' tok'" in tile
-    assert "fmtUsd(totalUsd)" in tile
     assert "fmtUsd(appliedUsdSum)" in tile
 
 
@@ -2483,30 +2499,98 @@ def test_dollars_suppressed_reads_the_server_display_rule(html):
         assert rule in html, f"missing suppressing display_rule {rule}"
 
 
-# --- the estimated-recoverable tile: dollars-vs-tokens by the ≥half rule --- #
-def test_estimated_recoverable_tile_leads_with_dollars_only_at_half_priceable(html):
-    # Behavioral requirement #2: the headline "ESTIMATED RECOVERABLE" tile
-    # shows dollars (with tokens in the sub-line) only when at least half the
-    # OPEN items across both tabs are priceable; otherwise it leads with
-    # tokens, same as the mockup's own tokens variant.
+# --- the headline is the server's past-overspend band, not a JS sum -------- #
+# SUPERSEDES the old "ESTIMATED RECOVERABLE / mo" tile tests. The founder
+# decision this replaces them under: the product leads with what the flagged
+# behaviours ALREADY cost (past tense, window-observed), not with what a fix
+# might return. A past figure is checkable against a bill the user already
+# paid; a forward one asks them to trust a projection of a month that has not
+# happened, and trust is the scarce resource.
+def test_inbox_headline_is_the_past_overspend_tile(html):
+    # 2026-07-26 founder call: the full-width band was removed and this figure
+    # now occupies the compact tile slot beside "Fixes applied". The TENSE
+    # decision above is unchanged -- only the shape moved.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "priceable.length * 2 >= openItems.length" in tile
-    # The `est.` pill was dropped for the denser mockup styling, so the
-    # estimate framing has to survive in the tile's own label + hover title —
-    # the figure must never read as a measured number.
-    assert ">Estimated recoverable " in tile
-    assert "sum of each open item's est./mo figure" in tile
+    assert "<${PastOverspendTile} block=${pastOverspend}" in tile
+    # It sits IN the tile row, beside the applied tile -- not on its own row
+    # above it, which is what made it read as a heavy banner.
+    row = tile[tile.index('display:flex;gap:14px'):]
+    assert "<${PastOverspendTile}" in row
+    assert "Fixes applied" in row
+    # The old forward-looking headline and its vocabulary are gone from here.
+    assert ">Estimated recoverable " not in tile
+    assert "est./mo" not in tile
 
 
-def test_estimated_tile_hides_when_there_are_no_open_items(html):
-    # Nothing open on either tab means nothing honest to lead a "recoverable"
-    # headline with, so that half of the tile hides rather than showing a zero.
+def test_inbox_headline_number_comes_from_the_payload_not_a_client_side_sum(html):
+    # Single-compute-path: the headline figure is the server's own rollup over
+    # the open set (GET /relearn/cost-proposals -> past_overspend), so it is
+    # the same number the Dashboard hero renders. It must not be reduced over
+    # whatever cards happen to be on screen — a local dismiss changes one
+    # person's view, not what was spent.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "openItems.length > 0 ? html`" in tile
+    assert "reduce" not in tile.split("const appliedPriceable")[0]
+    assert "priceable.length * 2 >= openItems.length" not in tile
+
+
+def test_past_overspend_tile_hides_when_nothing_is_open(html):
+    # Nothing open means no observed figure to state, so the tile hides rather
+    # than rendering a fabricated zero — but the excluded-waste line still has
+    # to render, which is why it now lives BELOW the tile row rather than
+    # inside the tile that can disappear.
+    start = html.index("function InboxStatTiles")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "hasOpenOverspend ? html`" in tile
+    band_start = html.index("function PastOverspendTile")
+    band = html[band_start:html.index("\n}", band_start)]
+    assert "if (!causes && !toks) return null;" in band
+    # The note is not nested inside the conditional tile.
+    note_at = tile.index("<${ExcludedWasteNote}")
+    assert "hasOpenOverspend" not in tile[note_at - 200:note_at]
+
+
+# --- #326: excluded waste (summarize) is stated + linked, never summed ----- #
+def test_inbox_stat_tiles_renders_the_excluded_cross_reference(html):
+    start = html.index("function ExcludedWasteNote")
+    end = html.index("function ReviewInboxView", start)
+    block = html[start:end]
+    # Rendered inside InboxStatTiles, not just defined standalone.
+    assert "<${ExcludedWasteNote} excluded=${excluded} />" in block
+    # Once, not twice: it used to render both inside the band's `note` slot and
+    # again in a bare fallback band. With the band gone it has ONE home, below
+    # the tile row, where it renders whether or not the tile does.
+    assert block.count("<${ExcludedWasteNote} excluded=${excluded} />") == 1
+    # Never folded into the blue tile's own dollar figure — only ever a
+    # separate stated line with a link out.
+    assert "not summed above" in block
+    assert "Review it" in block
+    assert "#/optimize/summarize" in block
+
+
+def test_review_inbox_view_fetches_and_threads_excluded_from_the_rollup(html):
+    view = html[html.index("function ReviewInboxView"):]
+    end = view.index("function ", len("function ReviewInboxView"))
+    view = view[:end]
+    assert "setCostExcluded((r.past_overspend && r.past_overspend.excluded) || {})" in view
+    assert "excluded=${costExcluded}" in view
+
+
+def test_estimated_tile_still_renders_with_only_excluded_waste_and_no_open_items(html):
+    # Summarize can be the ONLY recoverable figure in a given scan (no cost
+    # advisories, no recurring mistakes yet) — the tile must still surface it
+    # rather than disappearing the way the pre-#326 empty state did (issue
+    # #326: "the product's largest recoverable figure invisible from the
+    # headline a user reads").
+    start = html.index("function InboxStatTiles")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "hasExcluded" in tile
+    assert "openItems.length === 0 && appliedCount === 0 && !hasExcluded" in tile
 
 
 # --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
@@ -2547,7 +2631,7 @@ def test_old_pending_relearn_stat_line_replaced_by_the_combined_stat_tiles(html)
     # strategies" placeholder this test used to guard against is gone too.
     assert '<b style="color:var(--accent)">0</b> strategies' not in html
     assert "strategies" not in html
-    assert "estTokens: f.estimated_recoverable_tokens" not in html
+    assert "estTokens: f.past_overspend_tokens" not in html
     assert "~${fmtTokens(d.estTokens)} tok</b> recoverable" not in html
     assert "function InboxStatTiles" in html
 
@@ -2560,7 +2644,7 @@ def test_select_all_checkbox_sits_beside_the_bulk_dismiss_button(html):
     # checked" rather than inside a <thead><th>.
     assert "function SelectAllCheckbox" in html
     assert (
-        "<${SelectAllCheckbox} total=${visible.length} "
+        "<${SelectAllCheckbox} total=${shownRelearn.length} "
         "selected=${selectedCount} onToggle=${toggleAll} />"
     ) in html
     # The per-row checkbox is still present, just inside a flat row now.
@@ -2588,7 +2672,7 @@ def test_select_all_toggles_off_when_everything_is_selected(html):
     assert "else next.add(sig)" in fn
     # The component delegates to it over the RENDERED row set.
     assert (
-        "nextSelectAllSelection(visible.map(c => c.signature), prev)"
+        "nextSelectAllSelection(shownRelearn.map(c => c.signature), prev)"
     ) in html
 
 
@@ -2600,8 +2684,8 @@ def test_select_all_applies_only_to_the_rendered_rows(html):
     start = html.index("const selectedVisible =")
     end = html.index("const modalCluster =", start)
     block = html[start:end]
-    assert "visible.filter(c => checked.has(c.signature))" in block
-    assert "visible.map(c => c.signature)" in block
+    assert "shownRelearn.filter(c => checked.has(c.signature))" in block
+    assert "shownRelearn.map(c => c.signature)" in block
     assert "d.clusters" not in block
     # The filter that makes `visible` a strict subset is still in place. This
     # previously pinned the `!appliedSigs.has(...)` form verbatim, which meant
@@ -2645,7 +2729,7 @@ def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
     start = html.index("const dismissChecked =")
     end = html.index("const modalCluster =", start)
     fn = html[start:end]
-    assert "visible.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
     assert "...checked]" not in fn
 
 

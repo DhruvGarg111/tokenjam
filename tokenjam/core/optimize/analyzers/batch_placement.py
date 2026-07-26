@@ -96,8 +96,8 @@ class BatchPlacementFinding:
     window_cost_usd:     float = 0.0
     candidate_cost_usd:  float = 0.0
     percent_of_window_cost: float = 0.0
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:      str = BATCH_ESTIMATE_BASIS
     estimate_confidence: str = "estimated"
     friction:            str = BATCH_FRICTION_NOTE
@@ -325,8 +325,8 @@ def analyze_batch_placement(
             round(100.0 * candidate_cost / window_cost_usd, 1)
             if window_cost_usd > 0 else 0.0
         ),
-        estimated_recoverable_usd=round(candidate_cost * BATCH_DISCOUNT, 6),
-        estimated_recoverable_tokens=sum(c.tokens for c in candidates),
+        past_overspend_usd=round(candidate_cost * BATCH_DISCOUNT, 6),
+        past_overspend_tokens=sum(c.tokens for c in candidates),
         min_sessions_for_cadence=min_sessions_for_cadence,
         min_group_cost_usd=min_group_cost_usd,
     )

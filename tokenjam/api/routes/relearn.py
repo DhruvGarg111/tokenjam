@@ -448,14 +448,37 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     ``"ready"``/``"computing"`` in that case) — the inbox shows a small
     inline warning rather than pretending the last refresh succeeded.
 
-    ``rollup`` is Component E's single "estimated recoverable" headline
-    (``cost_proposals.estimated_recoverable_rollup``): the sum of
-    ``estimated_recoverable_usd`` across the OPEN proposals only — every
+    ``past_overspend`` is THE aggregate — the ONLY one this endpoint returns
+    (``cost_proposals.past_overspend_rollup``): the sum of
+    ``past_overspend_usd``/``_tokens`` across the OPEN proposals only — every
     proposal whose signature isn't already in the (non-reverted) cost-applied
-    ledger. Computed here, not client-side, so the headline reflects every
-    viewer's state consistently (a browser's local "dismiss" never affects
-    this figure — dismissing hides a card from one person's view, it doesn't
-    change what's actually still outstanding)."""
+    ledger. It is the AVOIDABLE portion of what the flagged behaviours already
+    cost over the analyzed window, observed rather than projected. Computed
+    here, not client-side, so the Dashboard hero and the Review inbox headline
+    read one server-computed figure and cannot disagree (a browser's local
+    "dismiss" never affects it — dismissing hides a card from one person's
+    view, it doesn't change what's actually still outstanding).
+
+    There is deliberately no second aggregate and no forward/paced one. A
+    ``rollup`` key carrying ``estimated_recoverable_*`` plus a
+    ``projected_usd_30d`` used to sit beside this block; the first had become
+    the same number under another name and the second was it times a pace
+    ratio, so a surface could render any of three near-identical dollar
+    figures. Both are gone.
+
+    The block also carries ``observed_cost_usd`` — the full observed COST of
+    the same behaviours, including the part never shown to be avoidable — as
+    its own key, never summed into the headline and never labelled waste; and
+    ``excluded`` (e.g. ``{"summarize": {...}}`` when that analyzer found
+    something), waste this headline deliberately does NOT sum in because it has
+    its own review surface, stated instead of silently dropped.
+
+    Each proposal carries the same figures per-card
+    (``past_overspend_usd``/``_tokens``/``_basis``, plus ``observed_cost_*``
+    and ``coverage_note`` where the total cost is a genuinely different
+    quantity) so a card never re-derives its own headline. relearn's clusters
+    are NOT folded in here: relearn reaches this aggregate through its own
+    ``cost:relearn`` proposal like any other analyzer, counted once."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
@@ -470,16 +493,20 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         if rec.get("state") != "reverted"
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
-    # The window this batch of proposals was actually computed over (#273) —
-    # stored alongside them at recompute time, never re-derived here, so the
-    # rollup's projection ratio matches the data that produced these figures.
+    # The window this batch of proposals was actually computed over — stored
+    # alongside them at recompute time, never re-derived here, so the window the
+    # headline names is the window the figures were observed over. Deliberately
+    # NOT accompanied by `active_days`/`n_sessions`: the rollup is a window
+    # observation, so there is no pace to project it at and nothing to project
+    # from (see `past_overspend_rollup`).
     rollup_kwargs: dict[str, Any] = {}
     if block:
         if block.get("cost_window_days"):
             rollup_kwargs["window_days"] = block["cost_window_days"]
-        rollup_kwargs["active_days"] = block.get("cost_active_days") or 0
-        rollup_kwargs["n_sessions"] = block.get("cost_n_sessions") or 0
-    rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals, **rollup_kwargs)
+        rollup_kwargs["excluded"] = block.get("cost_excluded")
+    past_overspend = cost_proposals_mod.past_overspend_rollup(
+        open_proposals, **rollup_kwargs,
+    )
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)
@@ -498,7 +525,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         "status": status,
         "computed_at": block.get("cost_computed_at") if block else None,
         "proposals": proposals,
-        "rollup": rollup,
+        "past_overspend": past_overspend,
         "framing": framing,
         "degraded": bool(last_error),
         "last_error": last_error,

@@ -909,6 +909,42 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
+/* Past overspend — deliberately NOT an opportunity treatment. Every "here is
+   what you could get back" surface in this app is accent-blue (.rec-tile,
+   .rec-amount, the inbox's blue-bordered tile) or success-green (measured);
+   this one is a DIAGNOSIS of money already spent, so it takes neither. The
+   figure renders in body text under a warn-toned left rule, in its own
+   full-width band that never shares a row or a grid with a forward-looking
+   figure. If a reader can mistake this for a claimable number, the feature is
+   net-negative — the colour separation is load-bearing, not decoration. */
+.po-band {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--warn); border-radius: 8px;
+  padding: 14px 16px; margin: 0 0 14px;
+}
+.po-eyebrow {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-dim); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.po-figure {
+  font-family: 'Geist Mono', monospace; font-weight: 700; color: var(--text);
+  font-size: 32px; line-height: 1.15; margin: 6px 0 0;
+}
+.po-band.compact .po-figure { font-size: 24px; }
+.po-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; }
+.po-amount { font-family: 'Geist Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text); }
+/* "Observed", never "estimated": distinct from .estimated-tag (amber) and
+   .measured-tag (green, the removed verify layer's vocabulary — do not reuse
+   it here, this is not a realized-savings claim). Neutral on purpose: an
+   observation makes no claim that needs a colour. */
+.po-observed-tag {
+  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-dim); border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
+}
+.po-basis { margin-top: 8px; font-size: 11.5px; color: var(--text-dim); }
+.po-basis > summary { cursor: pointer; color: var(--text-dim); }
+.po-basis p { margin: 6px 0 0; line-height: 1.5; }
 a.health-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -2392,7 +2428,7 @@ function componentWasteTooltip(meta, fmtFn) {
 // Per-analyzer legend-wording override for the component-waste chart/legend,
 // keyed by the API's stable `analyzer` registry name (never `title`, which is
 // display text). `placement` is the one entry today (CLAUDE.md anti-pattern
-// #22): its `estimated_recoverable_usd`/`_tokens` is a PRICE difference on
+// #22): its `past_overspend_usd`/`_tokens` is a PRICE difference on
 // the SAME tokens (the Batch API bills the same work at half rate, freeing
 // nothing), so its legend row must never wear the "estimated recoverable"
 // wording/tag every sibling analyzer shares here — this mirrors the wording
@@ -2424,8 +2460,8 @@ function buildComponentWaste(resp, useTokens, isApi) {
     })
     .map(r => ({
       title: r.title, component: r.component, analyzer: r.analyzer,
-      value: useTokens ? (r.estimated_recoverable_tokens || 0) : (r.estimated_recoverable_usd || 0),
-      usd: r.estimated_recoverable_usd, tokens: r.estimated_recoverable_tokens,
+      value: useTokens ? (r.past_overspend_tokens || 0) : (r.past_overspend_usd || 0),
+      usd: r.past_overspend_usd, tokens: r.past_overspend_tokens,
       basis: r.estimate_basis || '', caveat: r.caveat || '',
     }))
     .filter(r => r.value > 0);
@@ -6133,7 +6169,7 @@ function BudgetView({ params }) {
 // ============================
 // Per-analyzer display metadata for the recoverable band + Optimize sections.
 // cache-recommend / budget-projection are intentionally absent from the savings
-// band (no estimated_recoverable_usd); they surface elsewhere.
+// band (no past_overspend_usd); they surface elsewhere.
 const ANALYZER_META = {
   downsize:   { title: 'Downsize',   hint: 'Route candidate sessions to a cheaper model' },
   cache:      { title: 'Cache',      hint: 'Raise cache-read efficacy toward the 80% ceiling' },
@@ -6146,6 +6182,7 @@ const ANALYZER_META = {
   deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
   resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
   placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
+  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files — review a compression in the curate/diff surface' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -6198,25 +6235,32 @@ function capitalize(name) {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 }
 
-// Mirror core/framing.render_savings: api/unknown → dollars; subscription →
-// token-share of the cycle; local → token count. The mode is server-decided.
+// Mirror core/framing's dollars-by-default rule: dollars unless the server
+// explicitly suppressed them (local inference, or an all-unknown plan mix —
+// see dollarsSuppressed below). Subscription no longer suppresses: dollars
+// price all traffic at API list rates and render with framing.qualifier_text
+// carrying the list-price-equivalent caveat. The `window_total_tokens`
+// token-share fallback stays for the rare case a payload only carries
+// `display_rule`-less legacy framing (pricing_mode-only fallback below).
 function fmtFramedSavings(usd, tokens, framing) {
-  const mode = framing ? framing.pricing_mode : 'api';
-  if (mode === 'subscription') {
+  if (dollarsSuppressed(framing)) {
     if (tokens == null) return '—';
-    if (framing.window_total_tokens > 0) return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    const mode = framing ? framing.pricing_mode : 'api';
+    if (mode === 'subscription' && framing.window_total_tokens > 0) {
+      return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    }
     return fmtTokens(tokens) + ' tokens';
   }
-  if (mode === 'local') return tokens == null ? '—' : fmtTokens(tokens) + ' tokens';
   return usd == null ? '—' : fmtCost(usd);
 }
 
 // Is the server telling us NOT to lead with dollars? Reads the explicit
 // server-side decision (`display_rule`, core/framing.py) rather than
-// re-deriving it, with a pricing_mode fallback for older payloads. True for a
-// subscription-dominant corpus (a dollar figure there covers only the
-// API-billed slice, so it understates), for local inference, and for an
-// unknown plan. Callers make TOKENS the headline in that case.
+// re-deriving it, with a pricing_mode fallback for older payloads. True for
+// local inference (no marginal cost to price) and an all-unknown plan mix.
+// Subscription is deliberately NOT in this set — dollars price all traffic at
+// API list rates and are shown with a list-price-equivalent qualifier.
+// Callers make TOKENS the headline only in the suppressed case.
 const DOLLARS_SUPPRESSED_RULES = new Set([
   'suppress_dollars_for_subscription_share', 'tokens_only', 'suppress_dollars_unknown',
 ]);
@@ -6269,8 +6313,8 @@ function classifyFinding(name, fd, skipped) {
   if (fd && fd.enabled === false) {
     return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
   }
-  const usd = fd ? fd.estimated_recoverable_usd : null;
-  const tokens = fd ? fd.estimated_recoverable_tokens : null;
+  const usd = fd ? fd.past_overspend_usd : null;
+  const tokens = fd ? fd.past_overspend_tokens : null;
   if (usd != null && usd > 0) {
     return { state: 'actionable', usd, tokens, basis: fd.estimate_basis || '' };
   }
@@ -6293,7 +6337,7 @@ function classifyFinding(name, fd, skipped) {
 
 // Flatten the optimize report into recoverable-band tiles, each carrying a
 // state (see classifyFinding). Registry-driven: downsize is a typed slot; any
-// wave-2 finding carrying the `estimated_recoverable_usd` contract field becomes
+// wave-2 finding carrying the `past_overspend_usd` contract field becomes
 // a tile (so a future `reuse` analyzer appears with no UI change).
 // cache-recommend / budget-projection lack the field → excluded by contract.
 // Persona-disabled analyzers (`opt.persona_disabled_analyzers`, sourced from
@@ -6316,7 +6360,7 @@ function recoverableTiles(opt) {
   }
   Object.keys(f).forEach(k => {
     if (disabled.has(k)) return;
-    if (f[k] && 'estimated_recoverable_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
+    if (f[k] && 'past_overspend_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
   });
   skipped.forEach(k => {
     if (disabled.has(k)) return;
@@ -6411,8 +6455,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       <table class="opt-table"><thead><tr><th>Agent</th><th>Cadence</th><th>Tokens</th>${isApi ? html`<th>Spend → batch rate</th>` : null}</tr></thead>
         <tbody>${fd.candidates.slice(0, 10).map(c => html`<tr><td class="mono">${c.agent_id}</td><td>${c.sessions} session${c.sessions !== 1 ? 's' : ''} every ${fmtCadence(c.median_gap_seconds)}</td><td>${fmtTokens(c.tokens)}</td>${isApi ? html`<td class="mono">${fmtCost(c.cost_usd)} → <span style="color:var(--success)">${fmtCost(c.cost_usd - c.estimated_batch_saving_usd)}</span></td>` : null}</tr>`)}</tbody></table>
       ${fd.candidates.length > 10 ? html`<div class="opt-line dim">…and ${fd.candidates.length - 10} more.</div>` : null}
-      ${isApi && fd.estimated_recoverable_usd != null ? html`
-        <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.estimated_recoverable_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
+      ${isApi && fd.past_overspend_usd != null ? html`
+        <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.past_overspend_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
         : html`<div class="opt-line dim" style="margin-top:8px">The Batch API's discount is an api-billed price lever, so no dollar figure is shown for this plan. The workload sizes above still say how much work fits the shape.</div>`}
       ${fd.friction ? html`<div class="opt-caveat">! ${fd.friction}</div>` : null}`;
   } else {
@@ -6429,7 +6473,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       // alike) — only the fix differs, so both fixes always render, labeled
       // by who acts on them. `repeat_share === null` is the below-threshold
       // empty state; name the reason from `notes` rather than an empty card.
-      const usd = fd.estimated_recoverable_usd, tok = fd.estimated_recoverable_tokens;
+      const usd = fd.past_overspend_usd, tok = fd.past_overspend_tokens;
       const median = fd.repeat_share_median, p90 = fd.repeat_share_p90;
       body = fd.repeat_share == null ? html`
         <div class="opt-line dim">${(fd.notes && fd.notes[0]) || 'Not enough data in this window to measure a repeat share.'}</div>`
@@ -6534,8 +6578,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
   // (CLAUDE.md anti-pattern #22 — the generic "estimated recoverable" wording
   // below would be dishonest for a figure that frees no tokens at all).
   const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
-  const recUsd = name === 'placement' ? null : (fd ? fd.estimated_recoverable_usd : null);
-  const recTok = name === 'placement' ? null : (fd ? fd.estimated_recoverable_tokens : null);
+  const recUsd = name === 'placement' ? null : (fd ? fd.past_overspend_usd : null);
+  const recTok = name === 'placement' ? null : (fd ? fd.past_overspend_tokens : null);
   const rec = (recUsd != null || recTok != null) ? fmtFramedSavings(recUsd, recTok, framing) : null;
 
   return html`<section class="opt-section" id=${'opt-' + name}>
@@ -6553,8 +6597,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
 // is an observed post-recommendation span-mix shift (correlation), never a
 // projected figure and never "tokenjam saved you".
 function RecommendationsPanel({ rec }) {
-  const estTok = rec.estimated_recoverable_tokens || 0;
-  const estUsd = rec.estimated_recoverable_usd || 0;
+  const estTok = rec.past_overspend_tokens || 0;
+  const estUsd = rec.past_overspend_usd || 0;
   const measTok = rec.measured_recovered_tokens || 0;
   const measUsd = rec.measured_recovered_usd || 0;
   const rows = (rec.rows || []).slice(0, 12);
@@ -7853,15 +7897,46 @@ function SelectAllCheckbox({ total, selected, onToggle }) {
 
 const INBOX_COLLAPSE_THRESHOLD = 8;
 
+//: Noise floor for BOTH tabs. A card worth less than this is not worth a row:
+//: acting on it costs the reader more attention than the fix returns, and on a
+//: real corpus the sub-$5 tail is the bulk of the card count for a small
+//: fraction of the money. Founder call, 2026-07-26.
+//
+// Two rules that keep this a display filter rather than a quiet write-off:
+//   * ONLY A KNOWN FIGURE CAN BE JUDGED SMALL. An item with no dollar figure
+//     is unpriced, not cheap, so the floor never hides it — hiding it would
+//     turn "we could not price this" into "this did not matter", which is the
+//     same inversion the analyzer gates already had to be corrected for.
+//   * WHAT IS HIDDEN IS STATED. Each tab renders a line naming how many rows
+//     the floor removed and what they cost combined, so the filter is never
+//     silent shrinkage. The headline figure is untouched: it is the server's
+//     own total over every open proposal, and it still counts these.
+const INBOX_MIN_USD = 5;
+
+// True only for an item whose OWN priced figure is under the floor. Reads the
+// same `past_overspend_usd` the row renders, so what is filtered and what is
+// displayed can never disagree.
+function belowInboxFloor(item) {
+  const usd = item && item.past_overspend_usd;
+  return usd != null && usd < INBOX_MIN_USD;
+}
+
 // Founder-approved carve-out, scoped to the Review inbox ONLY: the resend
 // ("TRIM") card's own dollar figure is a structural token-share measurement,
 // not a savings claim (RESEND_HONESTY_CAVEAT in analyzers/context_resend.py
 // says so explicitly), so this page treats it as unpriced for every
-// dollar-first decision below even though estimated_monthly_usd carries a
-// real, non-null number for it. Every other analyzer's dollar figure is a
-// genuine recoverable estimate. dollarsSuppressed() itself is NOT touched by
-// this set — it still governs every other surface in the app unchanged.
+// dollar-first decision below even though its dollar field carries a real,
+// non-null number. dollarsSuppressed() itself is NOT touched by this set — it
+// still governs every other surface in the app unchanged.
 const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
+// RELEARN-CLUSTER ONLY. A relearn cluster scans unbounded history, so it has
+// no window to observe a figure over and states its own 30-day-basis
+// `estimated_monthly_*` instead — the one remaining monthly-basis figure in
+// the product. A COST proposal never comes through here: it carries the one
+// canonical `past_overspend_*` and renders via `pastOverspendFigure` below.
+// Do not "unify" the two by pacing the cost figure onto this basis; the whole
+// point of the collapse was that a paced twin of the observed figure existed
+// and a surface rendered it by mistake.
 function monthlyUsdForDisplay(item) {
   return NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer) ? null : item.estimated_monthly_usd;
 }
@@ -7875,9 +7950,30 @@ function monthlyUsdForDisplay(item) {
 // (never invent a rate silently). Sorting by tokens uniformly means the
 // rendered order is always monotonic even though some rows DISPLAY dollars —
 // the sort key and a token-only row's display value are the same number.
+// Ranks on the observed past-overspend token figure where the item carries
+// one (every cost proposal does), falling back to the monthly token figure
+// for a relearn cluster, which has no window to observe one over. Ranking on
+// the same quantity the row DISPLAYS keeps the rendered order monotonic.
 function sortByEstMonthly(items) {
-  const rank = i => i.estimated_monthly_tokens || 0;
+  const rank = i => (i.past_overspend_tokens != null ? i.past_overspend_tokens : (i.estimated_monthly_tokens || 0));
   return [...items].sort((a, b) => rank(b) - rank(a));
+}
+
+// What the noise floor removed, stated rather than silently dropped. Renders
+// nothing when the floor caught nothing, so a small clean inbox stays clean.
+//
+// Deliberately NOT an expandable row: these are items the product has decided
+// are not worth the reader's attention, and giving them a toggle re-creates
+// the noise the floor exists to remove. The count and the combined figure are
+// enough to prove nothing was swept under the rug — the headline above still
+// counts them, and `tj optimize <analyzer> --json` still lists them in full.
+function BelowFloorNote({ items, label }) {
+  if (!items || items.length === 0) return null;
+  const usd = items.reduce((s, i) => s + (i.past_overspend_usd || 0), 0);
+  return html`
+    <div class="dim" style="font-size:12px;padding:10px 14px;border-top:1px solid var(--border)">
+      ${items.length} smaller ${label} under ${fmtUsd(INBOX_MIN_USD)} ${items.length === 1 ? 'is' : 'are'} hidden · ${fmtUsd(usd)} combined, still counted in the total above.
+    </div>`;
 }
 
 // Top N normally, the remainder folded into one collapsible row (behavioral
@@ -7888,10 +7984,10 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
-// A tail item's headline est./mo figure — dollars first when a rate exists
-// and the plan tier doesn't suppress dollars, tokens as fallback (requirement
-// #2). Works for both relearn clusters and cost proposals: both carry the
-// same `estimated_monthly_usd`/`estimated_monthly_tokens` field names.
+// A relearn tail item's headline est./mo figure — dollars first when a rate
+// exists and the plan tier doesn't suppress dollars, tokens as fallback
+// (requirement #2). RELEARN CLUSTERS ONLY (see `monthlyUsdForDisplay`); the
+// cost tab passes its own past-tense `summary` to CollapsedTailRow instead.
 // `suppressed` is always `false` on this page (the founder-approved
 // always-dollars carve-out above `sortByEstMonthly`); the parameter survives
 // so this function still degrades correctly if that ever changes.
@@ -7905,6 +8001,187 @@ function estMonthlyLine(item, suppressed) {
   return { big: '—', sub: '' };
 }
 
+// --- Relearn cluster: observed cost, and the write-economics verdict -------
+//
+// A recurring-mistake row used to render exactly ONE number — the forward
+// `estimated_monthly_*` claim, captioned "est. / mo". That figure is GATED:
+// `write_budget.py` zeroes it whenever no permanent rule is worth offering.
+// On a real corpus that meant 50 of 55 rows rendering "$0.00 est./mo" with no
+// reason given, while those same 55 clusters had already cost $46 of observed
+// spend between them. A zero with no explanation reads as "this was free",
+// which is the exact inversion of what the gate means: the gate is a gap in
+// OUR fix library, never a finding that the failure was harmless (CLAUDE.md
+// anti-pattern 32b).
+//
+// So the row now LEADS with what the recurrence already cost — ungated, past
+// tense, straight off `past_overspend_*` — and states a forward figure only
+// where a fix is genuinely on offer. The two vocabularies stay strictly
+// apart, per the same rule that governs the cost cards: an observation is
+// past tense and never netted, a claim is forward and always gated.
+function relearnObservedFigure(cluster) {
+  const usd = cluster.past_overspend_usd;
+  const toks = cluster.past_overspend_tokens;
+  if (usd != null) return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
+  if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
+  // A cache written before the observed fields existed carries neither. Return
+  // null so the caller falls back to the forward figure WITH its own caption,
+  // rather than relabelling a projection as an observation.
+  return null;
+}
+
+// The write-economics verdict in one reader-facing line, or null when a
+// permanent fix is actually on offer.
+//
+// `write_blocked_reason` is the budget's OWN sentence — `write_budget.py`
+// owns that wording so the CLI, the API payload and this row cannot drift
+// into three different explanations of one flag. The payback arithmetic is
+// appended only when the budget actually computed one: a rung-3 hook is never
+// sent as prompt text, so it has no standing cost and no ratio, and printing
+// "payback null" there would invent a verdict the model never reached.
+//
+// Hedged deliberately ("on the quantities we can count"): the net-negative
+// verdict does not count what a rule saves by PREVENTING a failure, and the
+// measurement that would settle it returned null. See write_budget.py's
+// module docstring.
+function writeGateNote(cluster) {
+  if (cluster.write_offered !== false) return null;
+  // The SHORT label, stamped server-side by `write_budget.short_reason` — a
+  // real corpus gates ~50 of 55 clusters, so the full sentence would turn the
+  // list into a wall of text. The long form still renders on the expanded
+  // card, where there is room for it.
+  const short = cluster.write_blocked_short;
+  if (!short) return null;
+  const perSession = cluster.standing_cost_tokens_per_session;
+  const ratio = cluster.payback_ratio;
+  if (!perSession || ratio == null) return 'No permanent fix offered: ' + short + '.';
+  return 'No permanent fix offered: ' + short + ' (~' + fmtTokens(perSession) +
+    ' tok/session forever, modelled payback ' + ratio.toFixed(2) + '×).';
+}
+
+// --- Past overspend: the number this product LEADS with -------------------
+//
+// Every figure below is PAST TENSE and window-OBSERVED: what the flagged
+// behaviour already cost, priced at the rates it actually billed at, over a
+// window that has already happened. Nothing here is projected, and the word
+// "recoverable" appears on none of these surfaces — a forward figure asks the
+// reader to trust a model of their next month, an observation asks them to
+// check a bill they already paid.
+//
+// The headline is the AVOIDABLE amount, never the total cost. Waste is only
+// ever what could have been avoided; unavoidable spend is cost. This band once
+// led with `resend`'s full cost-of-re-sending figure, which was ~16x its
+// avoidable figure — implicitly asserting that 94% of it had been shown to be
+// unavoidable. It had not: that money was analysed on the model-role card,
+// filtered out below the context floor, or outside the re-read tail
+// definition. The total still renders, below the headline, with COST wording
+// and never as waste or overspend (`observedCostSentence`).
+//
+// Read straight off the payload, never derived here (the single-compute-path
+// rule): `past_overspend_usd`/`_tokens`/`_basis` per card, and the headline
+// totals off the response's own `past_overspend` block, which the server
+// computes once over the open set so the Dashboard hero and the Review inbox
+// headline are the same number by construction rather than by coincidence.
+// No pacing ratio is ever applied on this side (or on the server side —
+// see `cost_proposals.past_overspend_rollup`).
+function pastOverspendFigure(item) {
+  const usd = item.past_overspend_usd;
+  const toks = item.past_overspend_tokens;
+  if (usd != null) return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
+  if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
+  if (item.observed_cost_usd != null || item.observed_cost_tokens != null) {
+    // A cost-only card (relearn): no avoidable figure was computed at all, on
+    // purpose (its own coverage_note says why). A bare dash beside the cost
+    // line above would read as "nothing recoverable" rather than "not
+    // priced", so state the absence in words instead.
+    return { big: 'Not priced', sub: '', noAvoidable: true };
+  }
+  return { big: '—', sub: '' };
+}
+
+// "over the last 30 days" — the window the figure was observed over, taken
+// from the payload rather than from whatever window picker the surrounding
+// screen happens to be set to (the Dashboard's picker changes the cost chart,
+// not the window these proposals were computed against).
+function pastWindowLabel(days) {
+  const n = Number(days || 0);
+  if (!n) return 'the analyzed window';
+  return 'the last ' + (Number.isInteger(n) ? n : n.toFixed(0)) + ' days';
+}
+
+// The SECOND past-tense sentence, rendered ONLY where the total observed COST
+// and the avoidable figure are genuinely different quantities — today `resend`
+// alone. For every other analyzer the two are one quantity and this returns
+// null, so the card shows one number instead of saying the same thing twice.
+//
+// Cost wording only, never waste/overspend: this total includes spend nobody
+// established was avoidable. It is also deliberately NOT a ratio framing
+// ("only 6% of it was recoverable"): a ratio between two figures computed over
+// DIFFERENT POPULATIONS means nothing, which is exactly the reading
+// `coverage_note` exists to prevent. Two plain past-tense sentences, nothing
+// joining them arithmetically.
+function observedCostSentence(item) {
+  const usd = item.observed_cost_usd;
+  const toks = item.observed_cost_tokens;
+  if (usd == null && toks == null) return null;
+  if (usd != null) return 'In total, this behaviour cost ' + fmtUsd(usd) + ' over the same window.';
+  return 'In total, this behaviour cost ~' + fmtTokens(toks) + ' tokens over the same window.';
+}
+
+// The observed-overspend figure as a TILE, sized and shaped to sit in the
+// stat row beside "Fixes applied" — not as a full-width hero band.
+//
+// It led the page as a large band with three paragraphs of prose and a
+// derivation accordion. Founder call, 2026-07-26: that band read as heavy and
+// was removed from both the Dashboard and the Review inbox; this figure now
+// occupies the compact slot the old forward-looking "est. savings" tile used
+// to hold, which is the shape the page was asked for.
+//
+// What did NOT change, because it is honesty discipline rather than layout:
+//   * the number is the server's `past_overspend` block, read verbatim, never
+//     reduced over the rendered cards, so it cannot drift from what the
+//     endpoint computed;
+//   * it stays past tense and observed, and carries no recovery vocabulary;
+//   * the TOTAL observed cost is still disclosed and still worded as cost
+//     rather than waste (rule 30 — the gap between the two is what was not
+//     analysed, never a finding of necessity). It moved into the tile's
+//     tooltip and sub-line rather than a paragraph, but it did not vanish;
+//   * the full derivation still travels with the figure, on hover.
+function PastOverspendTile({ block }) {
+  if (!block) return null;
+  const usd = block.past_overspend_usd;
+  const toks = block.past_overspend_tokens;
+  const causes = block.proposal_count || 0;
+  if (!causes && !toks) return null;
+  const win = pastWindowLabel(block.window_days);
+  const cost = block.observed_cost_usd;
+  // Everything the removed prose used to state, kept intact as the figure's
+  // own hover text so no disclosure is lost with the layout.
+  const derivation = [
+    block.basis, block.disclosure,
+    cost != null
+      ? `Those same behaviours cost ${fmtUsd(cost)} in total over ${win}. That is cost, not waste: the rest of it was not shown to be avoidable, so it is reported separately and never added to the figure above.`
+      : '',
+    block.cost_disclosure,
+  ].filter(Boolean).join('\n\n');
+  return html`
+    <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+      <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">
+        What you could have avoided
+        <span class="po-observed-tag" title=${block.disclosure || ''}>observed</span>
+      </div>
+      ${/* Past tense in the figure's own caption, not only in the label: a
+            screenshot of this tile has to carry its own tense. */ ''}
+      <div style="font-size:24px;font-weight:600;margin-top:4px" title=${derivation}>${usd != null ? fmtUsd(usd) : '—'}</div>
+      <div class="dim" style="font-size:12px;margin-top:2px">
+        was avoidable over ${win}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''}${causes ? ' · ' + causes + ' cause' + (causes === 1 ? '' : 's') : ''}
+      </div>
+      ${cost != null ? html`
+        <div class="dim" style="font-size:11px;margin-top:2px" title=${block.cost_disclosure || ''}>
+          of ${fmtUsd(cost)} total cost — that is cost, not waste
+        </div>` : null}
+    </div>`;
+}
+
 // Same priceable-majority rule as InboxStatTiles (requirement #2): dollars
 // only when at least half the collapsed items are themselves priceable, so a
 // tail of 7 tokens-only advisories plus 1 small-dollar one still reads in
@@ -7916,18 +8193,42 @@ function combinedEstMonthly(items, suppressed) {
   return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
 }
 
+// The relearn tail's summary on the SAME basis its expanded rows now use
+// (`relearnObservedFigure`). Without this the collapsed row advertised a
+// combined forward est./mo while every row inside it led with observed cost —
+// and since the write budget zeroes the forward figure for a suppressed
+// cluster, a tail of 40 gated clusters summarised itself as "$0.00 combined"
+// while containing tens of dollars of real, already-billed spend.
+//
+// Returns null when no item carries an observed figure (a pre-observed-fields
+// cache), so the caller falls back to the forward summary rather than
+// printing a confident $0.00.
+function combinedObservedCost(items) {
+  const observed = items.filter(i => i.past_overspend_usd != null);
+  if (observed.length) {
+    return fmtUsd(observed.reduce((s, i) => s + i.past_overspend_usd, 0)) + ' already spent, combined';
+  }
+  const toks = items.reduce((s, i) => s + (i.past_overspend_tokens || 0), 0);
+  if (toks) return '~' + fmtTokens(toks) + ' tok already spent, combined';
+  return null;
+}
+
 // The collapsed long-tail row: count + combined est./mo, an expand toggle,
 // and the bulk Dismiss all / (optional) Mark all applied actions (requirement
 // #3). `renderItem` renders one expanded tail row in the caller's own shape
 // (a RecurringMistakeRow or a CostProposalCard).
-function CollapsedTailRow({ tail, suppressed, itemLabel, onDismissAll, onMarkAllApplied, renderItem }) {
+// `summary` overrides the default "combined est./mo" line for a tab whose
+// items are stated in the past tense (the cost advisories) — the recurring-
+// mistakes tab has no observed window to report one over, so it keeps the
+// projected figure. Each tab therefore says what its own rows say.
+function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, onMarkAllApplied, renderItem }) {
   const [open, setOpen] = useState(false);
   if (tail.length === 0) return null;
   return html`
     <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span class="sz-link" onClick=${() => setOpen(o => !o)}>
-          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel} · ~${combinedEstMonthly(tail, suppressed)} combined est./mo
+          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel} · ${summary || ('~' + combinedEstMonthly(tail, suppressed) + ' combined est./mo')}
         </span>
         <span style="margin-left:auto;display:flex;gap:14px">
           ${onMarkAllApplied ? html`<span class="sz-link" onClick=${onMarkAllApplied}>Mark all applied</span>` : null}
@@ -7955,7 +8256,26 @@ function relearnBadge(cluster) {
 // preserves the existing bulk-dismiss flow (requirement #9) — not in the
 // mockup's own sketch, but the bulk action it drives is explicitly required.
 function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed }) {
+  // Observed first, projection second (see `relearnObservedFigure`). `observed`
+  // is null only for a pre-observed-fields cache, in which case the forward
+  // figure renders instead — under its own "est. / mo" caption, never
+  // relabelled as something that already happened.
+  const observed = relearnObservedFigure(cluster);
   const est = estMonthlyLine(cluster, suppressed);
+  const headline = observed || est;
+  // The forward claim is a SECOND line, and only where a fix is really on
+  // offer. A suppressed cluster's gross saving is not claimable, so it is not
+  // rendered anywhere on this row — showing it would be the precise defect
+  // this row's gate note exists to explain.
+  //
+  // Tested on the NUMBER, never on the formatted string: `fmtUsd` output is a
+  // display concern and comparing against "$0.00" would silently start showing
+  // zero rows the day that formatting changes.
+  const forwardUsd = monthlyUsdForDisplay(cluster);
+  const forwardTokens = cluster.estimated_monthly_tokens;
+  const showForward = observed && cluster.write_offered !== false
+    && ((forwardUsd != null && forwardUsd > 0) || (forwardUsd == null && forwardTokens > 0));
+  const gate = writeGateNote(cluster);
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
   return html`
     <div class="cur-row" style="display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border)" key=${cluster.signature}>
@@ -7968,14 +8288,21 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
         <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
         <span class="badge badge-warning" style="margin-left:6px" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
         <div class="dim" style="font-size:12px;margin-top:3px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
+        ${/* Why no permanent fix is offered, stated on the row rather than
+              left to a $0.00 the reader has to interpret. Carries the payback
+              arithmetic where the budget computed one, so the counterintuitive
+              part — that codifying a lesson usually costs more than it saves —
+              is legible instead of living only in a JSON field. */ ''}
+        ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
       </div>
       <div style="text-align:right;flex-shrink:0">
         ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
               asserted "estimated", stacking four lines in this column. Matches
-              the cost cards' single "est. / mo · <tokens>" caption so both tabs
-              read alike. The basis stays on hover. */ ''}
-        <div class="mono" style="color:var(--accent);font-weight:600" title=${cluster.monthly_rate_basis || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${est.big}</div>
-        <div class="dim" style="font-size:11px">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
+              the cost cards' single caption so both tabs read alike. The basis
+              stays on hover. */ ''}
+        <div class="mono" style="color:var(--accent);font-weight:600" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${headline.big}</div>
+        <div class="dim" style="font-size:11px">${observed ? 'already cost' : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
+        ${showForward ? html`<div class="dim" style="font-size:11px">~${est.big} / mo if fixed</div>` : null}
         ${/* The row's only affordance used to be the title styled as a link,
               so the constructive action was invisible next to a prominent
               bulk Dismiss. Name the verb. */ ''}
@@ -8054,6 +8381,23 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
             rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
           </div>
+          ${/* What this recurrence ALREADY COST, before any gate. Rendered on
+                the expanded card as well as the row because this is the one
+                figure that stays true whether or not our library has a fix
+                for it — a cluster we cannot act on still spent the money. */ ''}
+          ${(cluster.past_overspend_usd != null || cluster.past_overspend_tokens != null) ? html`
+            <div class="opt-section" style="margin:0 0 14px">
+              <div class="opt-title" style="font-size:13px">What this already cost</div>
+              <div class="sz-note" style="margin-top:4px" title=${cluster.past_overspend_basis || ''}>
+                ${cluster.past_overspend_usd != null ? fmtUsd(cluster.past_overspend_usd) : '~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens'}
+                ${/* Leading space is explicit: htm does not preserve the
+                      newline between an interpolation and the literal text
+                      that follows it, so without it this reads "tokensover". */ ''}
+                ${cluster.past_overspend_usd != null && cluster.past_overspend_tokens ? ' · ~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens ' : ' '}
+                over the scanned corpus, priced at the rates these sessions were billed at. Observed, not projected, and not netted against any fix's cost.
+                ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail — the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
+              </div>
+            </div>` : null}
           <div class="opt-section" style="margin:0 0 14px">
             <div class="opt-title" style="font-size:13px">Proposed fix</div>
             <div class="sz-note" style="margin-top:4px">${cluster.proposed_fix}</div>
@@ -8075,6 +8419,19 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             <div class="opt-section" style="margin:0 0 6px">
               <div class="opt-title" style="font-size:13px">No apply path <span class="dim" style="font-weight:400">· advise-only</span></div>
               <div class="sz-note" style="margin-top:4px">${cluster.advise_only_reason || 'Every agent in this cluster is a service tokenjam has no workspace for, so there is no file to write a fix into. Apply the recommendation yourself, then measure it with tj relearn verify --otel.'}</div>
+              ${/* The arithmetic behind a net-negative verdict, shown rather
+                    than asserted: a permanent rule is re-sent on every future
+                    session, so its cost scales with the same session count the
+                    saving does and what survives is a ratio. Hedged on
+                    purpose — the model does not count what the rule saves by
+                    preventing the failure, and the measurement that would
+                    settle that returned null. */ ''}
+              ${(cluster.payback_ratio != null && cluster.standing_cost_tokens_per_session) ? html`
+                <div class="sz-note" style="margin-top:8px">
+                  A permanent rule for this would carry ~${fmtTokens(cluster.standing_cost_tokens_per_session)} tokens into every future session, forever.
+                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? ' — under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
+                  <div style="margin-top:4px" class="dim">This is a modelled comparison, not an observed one. It does not count what the rule might save by preventing the failure in the first place; the measurement that would settle that returned no usable signal.</div>
+                </div>` : null}
             </div>
           ` : !result ? html`
             <div class="opt-section" style="margin:0 0 6px">
@@ -8126,27 +8483,34 @@ function daysAgoLabel(iso) {
   return days === 1 ? '1 day ago' : days + ' days ago';
 }
 
-// A merged applied record's (`rec.kind`: 'relearn' | 'cost') own estimate, in
-// the same `estimated_monthly_usd`/`estimated_monthly_tokens` shape open
-// items carry — a bounded, point-in-time snapshot taken at the moment of
-// apply, NEVER a live re-measurement (behavioral requirement #7, REVISED:
-// the perpetual verify/receipts layer that would have produced a real
-// measured figure was removed in commit c0316aba for making unsupportable
-// realized-savings claims; see the note above InboxStatTiles). For relearn,
-// `verify.estimated_monthly_usd/tokens` (stamped once by relearn_apply.
-// apply_relearn_fix); for a cost marker, the proposal's own estimate, carried
-// straight onto the ledger record by cost_apply.mark_applied. Shared by
-// AppliedItemRow (per-row) and InboxStatTiles (summed across all applied).
+// A merged applied record's (`rec.kind`: 'relearn' | 'cost') own figure — a
+// bounded, point-in-time snapshot taken at the moment of apply, NEVER a live
+// re-measurement (behavioral requirement #7, REVISED: the perpetual
+// verify/receipts layer that would have produced a real measured figure was
+// removed in commit c0316aba for making unsupportable realized-savings
+// claims; see the note above InboxStatTiles).
+//
+// The two ledgers are on DIFFERENT time bases and this function does not
+// pretend otherwise — it returns bare `usd`/`tokens`, and the caller labels
+// them per kind. For a COST marker it is `past_overspend_usd`/`_tokens`, the
+// window-observed avoidable figure carried straight onto the ledger record by
+// cost_apply.mark_applied — the same one canonical field the open card
+// rendered. For RELEARN it is `verify.estimated_monthly_usd/tokens`, the
+// cluster's own 30-day-basis figure stamped once by
+// relearn_apply.apply_relearn_fix (relearn scans unbounded history and has no
+// window to observe a figure over; it is the ONE remaining monthly-basis
+// figure in the product and it is never mixed into a cost total).
+//
 // Applies the same NOT_A_SAVINGS_CLAIM_ANALYZERS exclusion a resend/TRIM
-// marker needs here too — a cost applied record, unlike an open proposal,
-// has no `estimated_monthly_usd` field of its own to route through
-// monthlyUsdForDisplay, so the check is inlined instead.
+// marker needs here too, inlined rather than routed through
+// monthlyUsdForDisplay (which is relearn-shaped).
 function appliedEstimate(rec) {
   const isRelearn = rec.kind === 'relearn';
-  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.estimated_recoverable_usd;
+  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.past_overspend_usd;
   return {
-    estimated_monthly_usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
-    estimated_monthly_tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.estimated_recoverable_tokens,
+    isRelearn,
+    usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
+    tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.past_overspend_tokens,
   };
 }
 
@@ -8172,8 +8536,8 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
   const enforcement = rec.enforcement;
   const isEnforcement = isRelearn && ENFORCEMENT_RUNGS.has(rec.rung);
   const est = appliedEstimate(rec);
-  const usd = est.estimated_monthly_usd;
-  const toks = est.estimated_monthly_tokens;
+  const usd = est.usd;
+  const toks = est.tokens;
   const revertUrl = isRelearn ? `/relearn/${rec.id}/revert` : `/relearn/cost-applied/${rec.id}/revert`;
 
   return html`
@@ -8229,12 +8593,18 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
 const COST_BADGE_BY_ANALYZER = {
   downsize: 'DOWNSIZE', cache: 'CACHE', 'cache-recommend': 'CACHE', trim: 'TRIM',
   subagent: 'SUBAGENT', deadweight: 'DEADWEIGHT', script: 'SCRIPT', reuse: 'REUSE',
-  verbosity: 'VERBOSITY', placement: 'PLACEMENT', resend: 'TRIM',
+  verbosity: 'VERBOSITY', placement: 'PLACEMENT', resend: 'TRIM', summarize: 'SUMMARIZE',
 };
 
+// Thousands-grouped once the figure is big enough to need it: the past-overspend
+// headline is a four- or five-digit number a user is meant to read at a glance
+// (and screenshot), and "$7423.93" reads as noise where "$7,423.93" reads as
+// money. Sub-dollar figures keep four decimals — a cache advisory worth $0.0031
+// is still worth stating exactly.
 function fmtUsd(v) {
   const n = Number(v || 0);
-  return '$' + (Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2));
+  if (Math.abs(n) < 1) return '$' + n.toFixed(4);
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // Copy-to-clipboard for a snippet fix, same robust pattern as RestoreButton:
@@ -8278,11 +8648,18 @@ const APPLY_KIND_COPY = {
   mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
 };
 
-function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
-  // Headline figure is the MONTHLY basis (requirement #1 — this page always
-  // reads "/ mo", never a raw window total), suppressed to tokens-only per
-  // the plan-tier framing the same way every dollar figure on this page is.
-  const est = estMonthlyLine(prop, suppressed);
+function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, suppressed, windowDays }) {
+  // Headline figure is the card's own PAST OVERSPEND: what this behaviour
+  // already cost over the analyzed window, read straight off the payload
+  // (`past_overspend_usd`/`_tokens`, stamped server-side by
+  // `cost_proposals._with_past_overspend`). This replaced the projected
+  // "est./mo" headline: a figure the user can check against a bill they have
+  // already paid costs them no trust to accept, and a forward figure depends
+  // on how many sessions they run next month, which nothing here can know.
+  const est = pastOverspendFigure(prop);
+  // Rendered only where the total observed cost and the avoidable figure are
+  // genuinely different quantities (resend); null everywhere else.
+  const observedCost = observedCostSentence(prop);
   // Two apply-capable shapes, routed through two different endpoints:
   //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
   //    is a workspace surface an orchestrator reads, not a value tokenjam can
@@ -8363,15 +8740,30 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
+        ${/* Body-coloured, never accent-blue: the accent on this page belongs
+              to figures a fix returns, and this one is money already gone. */ ''}
         <span style="margin-left:auto;text-align:right">
-          <span class="mono" style="color:var(--accent);font-size:14px;font-weight:600" title=${prop.estimate_basis || 'estimated / correlational'}>${est.big}</span>
-          <div class="dim" style="font-size:10px">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
+          <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
+          <div class="dim" style="font-size:10px">${est.noAvoidable ? 'no avoidable figure on this card' : ('avoidable over ' + pastWindowLabel(windowDays) + (est.sub ? ' · ' + est.sub : ''))}</div>
         </span>
       </div>
       ${/* One description paragraph: what we saw, what to do, and the honesty
             caveat (Rule 14 — the caveat always renders, never a separate
             heading-laden block). No section headings, no evidence link. */ ''}
       <div class="sz-note" style="margin-top:8px">${[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')}</div>
+      ${/* The second past-tense sentence, resend only: the FULL cost of the
+            behaviour, stated as cost. It is bigger than the headline because
+            the headline only counts what was shown to be avoidable — and the
+            coverage line immediately after says why the rest wasn't, so the
+            gap is never left to read as "94% of this was unavoidable". */ ''}
+      ${observedCost ? html`<div class="sz-note" style="margin-top:4px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
+      ${prop.coverage_note ? html`<div class="dim" style="font-size:11px;margin-top:4px">${prop.coverage_note}</div>` : null}
+      ${prop.past_overspend_basis ? html`
+        <details class="po-basis">
+          <summary>How this number was derived</summary>
+          <p>${prop.past_overspend_basis}</p>
+          ${prop.observed_cost_basis ? html`<p>${prop.observed_cost_basis}</p>` : null}
+        </details>` : null}
       ${prop.suggestion ? html`
         <div style="margin-top:10px">
           <div class="opt-title" style="font-size:12.5px">
@@ -8424,7 +8816,17 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
           ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
         </div>
-      `) : html`
+      `) : prop.analyzer === 'summarize' ? html`
+        ${/* summarize's real fix lives in its own curate -> diff -> apply
+              lifecycle, which already tracks what's staged/applied — "Mark
+              applied" here would be a second, disconnected ledger for the
+              same state. The card's one affordance is the link to that
+              surface, worded as a review action, never a claimable "Apply". */ ''}
+        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+          <a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || '#/optimize/summarize'}>Review in Summarize →</a>
+          <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+        </div>
+      ` : html`
         <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>
           ${/* Dismiss is the secondary, discarding action — plain text, so the
@@ -8436,17 +8838,22 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
     </div>`;
 }
 
-// The two headline stat tiles (mockup): ESTIMATED RECOVERABLE / mo (blue,
-// combined across BOTH open tabs) and FIXES APPLIED (green).
+// The headline band + the FIXES APPLIED tile.
 //
-// Tile 1's dollars-vs-tokens choice is behavioral requirement #2's rule:
-// dollars first, with tokens in the sub-line, when at least half the open
-// items are priceable; else tokens (the mockup's own tokens variant).
-// `suppressed` is passed through for completeness but is always `false` on
-// this page — see the founder-approved always-dollars carve-out above
-// sortByEstMonthly: the Review inbox ignores dollarsSuppressed() and shows
-// dollars unconditionally wherever an item has a genuine one, unlike every
-// other dollar figure in the app.
+// The headline used to be an "estimated recoverable / mo" tile summed in JS
+// across both open tabs. It is now the server's own past-overspend block
+// (`PastOverspendTile`), for two reasons that are not stylistic:
+//   * TENSE. What the product leads with is now what the flagged behaviours
+//     ALREADY cost, not what a fix might return. The past figure is checkable
+//     against a bill the user has already paid; the forward one asks them to
+//     trust a projection of a month that hasn't happened.
+//   * SOURCE. It is read from `GET /relearn/cost-proposals`'s `past_overspend`
+//     block rather than reduced over the rendered cards, so it is the same
+//     number the Dashboard hero shows, by construction. A locally-dismissed
+//     card changes one person's view; it does not change what was spent.
+// The applied tile below still reports each fix's own estimate at apply time
+// — a different claim about a different set (see requirement #7 note below),
+// deliberately left on its own basis rather than folded into the headline.
 //
 // Tile 2 (requirement #7, REVISED — supersedes an earlier "verified saved"
 // draft of this tile). This repo deliberately removed its post-hoc verify/
@@ -8459,38 +8866,61 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // shows per row), never a live re-measurement of what happened afterward. A
 // bounded verify redesign is a separate, later product decision — see
 // c0316aba before building one.
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed }) {
-  // monthlyUsdForDisplay excludes resend/TRIM's structural (not-a-savings-
-  // claim) dollar figure from this tile the same way estMonthlyLine does for
-  // the individual rows. appliedEstimates needs no equivalent call here — its
-  // own producer, appliedEstimate(), already applies the exclusion.
-  const priceable = openItems.filter(i => monthlyUsdForDisplay(i) != null);
-  const leadWithUsd = !suppressed && openItems.length > 0 && priceable.length * 2 >= openItems.length;
-  const totalUsd = priceable.reduce((s, i) => s + monthlyUsdForDisplay(i), 0);
-  const totalToks = openItems.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0);
+// `excluded` (from GET /relearn/cost-proposals's past_overspend.excluded) is
+// waste this page's own totals deliberately do NOT sum in — currently only
+// `summarize`, which keeps its own curate/diff review surface rather than a
+// peer card here (see COST_ANALYZERS's docstring server-side). Left unstated
+// it reads as "the biggest figure the product computes doesn't exist"; this
+// renders it as an explicit line with a link to where it lives, never folded
+// into the headline band's own number (a different review flow, not a peer
+// figure to add).
+//
+// Reads the WINDOW figure (`past_overspend_usd`), not the projected
+// monthly one: it sits under a past-tense headline, and mixing a "/mo"
+// projection into that band would put two time bases side by side under one
+// tense. `summarize`'s window figure is itself an observed window overspend
+// (its per-call reduction priced over the calls that were actually made), so
+// the past tense is honest for it.
+function ExcludedWasteNote({ excluded }) {
+  const entries = Object.values(excluded || {}).filter(e => e && e.past_overspend_usd != null);
+  if (entries.length === 0) return null;
+  return html`
+    <div class="dim" style="font-size:12px;margin-top:6px">
+      ${entries.map(e => html`
+        A further ${fmtUsd(e.past_overspend_usd)} went on ${e.label || 'Summarize'} over the same window (its own review surface, not summed above) ·
+        <a class="sz-link" href=${e.href || '#/optimize/summarize'}>Review it →</a>
+      `)}
+    </div>`;
+}
 
-  const appliedPriceable = appliedEstimates.filter(i => i.estimated_monthly_usd != null);
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed, excluded, pastOverspend }) {
+  const appliedPriceable = appliedEstimates.filter(i => i.usd != null);
   const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
-  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.estimated_monthly_usd, 0);
-  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0);
+  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.usd, 0);
+  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.tokens || 0), 0);
   // Falls back to the bare count when nothing applied carries an estimate —
   // never a fabricated "$0"/"0 tok" standing in for "no data".
   const appliedBig = appliedLeadWithUsd ? fmtUsd(appliedUsdSum)
     : appliedTokSum > 0 ? '~' + fmtTokens(appliedTokSum) + ' tok'
     : String(appliedCount);
 
-  if (openItems.length === 0 && appliedCount === 0) return null;
+  const hasExcluded = Object.keys(excluded || {}).length > 0;
+  // Whether the server's block actually has something to state. Checked here
+  // rather than inside the band so the excluded-waste note has a home when it
+  // doesn't (see below).
+  const hasOpenOverspend = !!(pastOverspend
+    && ((pastOverspend.proposal_count || 0) > 0 || pastOverspend.past_overspend_tokens));
+  if (openItems.length === 0 && appliedCount === 0 && !hasExcluded) return null;
   return html`
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
-      ${openItems.length > 0 ? html`
-        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;border-color:rgba(var(--accent-rgb,120,120,255),0.35)">
-          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="dim" style="font-weight:400">/ mo</span></div>
-          <div style="font-size:24px;font-weight:600;color:var(--accent);margin-top:4px" title="sum of each open item's est./mo figure — review before applying">
-            ${leadWithUsd ? fmtUsd(totalUsd) : '~' + fmtTokens(totalToks) + ' tok'}
-          </div>
-          <div class="dim" style="font-size:12px;margin-top:2px">across ${openItems.length} open item${openItems.length === 1 ? '' : 's'} · review before applying</div>
-        </div>
-      ` : null}
+    <div style="margin:10px 0 18px">
+    ${/* Both figures now sit in ONE tile row: what was avoidable (past tense,
+          observed, server-computed) beside what has been applied. The old
+          full-width band above this row was removed on founder call — see
+          `PastOverspendTile`. The two tiles remain different claims about
+          different sets, so neither caption restates the other and nothing
+          invites adding them together. */ ''}
+    <div style="display:flex;gap:14px;flex-wrap:wrap">
+      ${hasOpenOverspend ? html`<${PastOverspendTile} block=${pastOverspend} />` : null}
       <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
         <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes applied</div>
         ${/* The green belongs to the label, not the figure: the number reads as
@@ -8507,6 +8937,14 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
           ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
           : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>
       </div>
+    </div>
+    ${/* Below the row, not inside a tile: this names waste the page's own
+          totals deliberately do NOT sum in (currently `summarize`, which keeps
+          its own review surface). It used to hang off the removed band's
+          `note` slot and would have disappeared with it — the one thing that
+          must survive the band's removal, since leaving it unstated reads as
+          "the biggest figure the product computes doesn't exist". */ ''}
+    <${ExcludedWasteNote} excluded=${excluded} />
     </div>`;
 }
 
@@ -8534,6 +8972,10 @@ function ReviewInboxView({ params }) {
   const [costDegraded, setCostDegraded] = useState(false); // a recompute failed even though a good result still renders
   const [costLastError, setCostLastError] = useState(null);
   const [costFraming, setCostFraming] = useState(null);    // plan-tier framing for the cost-advisory dollars
+  const [costExcluded, setCostExcluded] = useState({});    // #326: waste NOT summed into the headline (e.g. summarize)
+  // The server's past-overspend block, rendered verbatim as this page's
+  // headline and by the Dashboard hero. Never re-derived from the cards.
+  const [costPastOverspend, setCostPastOverspend] = useState(null);
   const [costApplied, setCostApplied] = useState([]);      // marked-applied cost proposals
   const [marking, setMarking] = useState(null);            // signature currently being marked applied
 
@@ -8567,6 +9009,8 @@ function ReviewInboxView({ params }) {
       setCostDegraded(!!r.degraded);
       setCostLastError(r.last_error || null);
       setCostFraming(r.framing || null);
+      setCostExcluded((r.past_overspend && r.past_overspend.excluded) || {});
+      setCostPastOverspend(r.past_overspend || null);
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
       const r = await api('/relearn/cost-applied');
@@ -8626,11 +9070,19 @@ function ReviewInboxView({ params }) {
     ...(applied || []).filter(r => r.state !== 'reverted').map(r => r.signature),
   ]);
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigsAll.has(c.signature));
+
+  // The sub-$5 noise floor for this tab (see INBOX_MIN_USD). Declared here,
+  // immediately after `visible` and ABOVE every selection helper, so the tab
+  // count, "select all" and "dismiss checked" all operate on exactly the rows
+  // a reader can see. A bulk action that can reach a row nobody was shown is
+  // the failure mode this ordering exists to prevent.
+  const floorRelearn = visible.filter(belowInboxFloor);
+  const shownRelearn = visible.filter(c => !belowInboxFloor(c));
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
     // Only the selected rows that are actually listed: a stale signature left in
     // `checked` after its row was approved must not be swept along silently.
-    const next = new Set([...dismissed, ...visible.filter(c => checked.has(c.signature)).map(c => c.signature)]);
+    const next = new Set([...dismissed, ...shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)]);
     setDismissed(next); saveDismissedRelearns(next);
     setChecked(new Set());
   };
@@ -8655,11 +9107,11 @@ function ReviewInboxView({ params }) {
   // in this session, and `checked` is not pruned when a row leaves the list, so
   // counting raw `checked` would both overstate the button's blast radius and
   // let select-all reach a row the user cannot see.
-  const selectedVisible = visible.filter(c => checked.has(c.signature));
+  const selectedVisible = shownRelearn.filter(c => checked.has(c.signature));
   const selectedCount = selectedVisible.length;
   // Clicking a fully-selected box clears it; anything else selects the lot.
   const toggleAll = () => setChecked(
-    prev => nextSelectAllSelection(visible.map(c => c.signature), prev));
+    prev => nextSelectAllSelection(shownRelearn.map(c => c.signature), prev));
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
   // Review queue: the signatures still to visit AFTER the open one. Opening a
   // single row leaves it empty, so the modal shows no queue chrome.
@@ -8679,7 +9131,24 @@ function ReviewInboxView({ params }) {
     ? { index: reviewTotal - reviewQueue.length, total: reviewTotal }
     : null;
   const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
-  const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
+  // The `relearn` cost proposal is a ROLLUP participant, not a card. relearn
+  // reaches the aggregate surfaces through it (past_overspend_rollup and the
+  // Dashboard hero were structurally blind to the whole self-improve loop
+  // before it existed — see cost_proposals._relearn_to_proposals), but this
+  // page already renders every relearn CLUSTER individually, with a richer
+  // treatment than a cost card can give. Showing the aggregate card too would
+  // put the same money on the page twice and re-fill the inbox this page was
+  // just downsized to keep clear.
+  const visibleCost = (costProps || []).filter(p =>
+    p.analyzer !== 'relearn' && !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
+
+  // Cost side of the sub-$5 noise floor (see INBOX_MIN_USD; the relearn side
+  // is declared with `visible` above, where the selection helpers can reach
+  // it). A deep link must still resolve to its card even when that card is
+  // small: an analyzer-focused view skips the floor, or an Optimize page's
+  // "review it →" would land on a tab that looks empty.
+  const floorCost = analyzerFocus ? [] : visibleCost.filter(belowInboxFloor);
+  const shownCost = analyzerFocus ? visibleCost : visibleCost.filter(p => !belowInboxFloor(p));
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
@@ -8707,9 +9176,9 @@ function ReviewInboxView({ params }) {
   // Sort + long-tail collapse (requirement #3), independently per tab. Deep-
   // linking to a specific analyzer skips the collapse on the advisories tab —
   // a highlighted card must never be hidden inside a folded tail.
-  const sortedRelearn = sortByEstMonthly(visible);
+  const sortedRelearn = sortByEstMonthly(shownRelearn);
   const { top: topRelearn, tail: tailRelearn } = splitTopAndTail(sortedRelearn);
-  const sortedCost = sortByEstMonthly(visibleCost);
+  const sortedCost = sortByEstMonthly(shownCost);
   const { top: topCost, tail: tailCost } = analyzerFocus
     ? { top: sortedCost, tail: [] } : splitTopAndTail(sortedCost);
 
@@ -8739,11 +9208,11 @@ function ReviewInboxView({ params }) {
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
 
-    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} />
+    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} pastOverspend=${costPastOverspend} />
 
     <div class="tab-bar" role="tablist">
-      <button class="tab ${tab === 'mistakes' ? 'active' : ''}" role="tab" aria-selected=${tab === 'mistakes'} onClick=${() => setTab('mistakes')}>Recurring mistakes (${visible.length})</button>
-      <button class="tab ${tab === 'advisories' ? 'active' : ''}" role="tab" aria-selected=${tab === 'advisories'} onClick=${() => setTab('advisories')}>Cost advisories (${visibleCost.length})</button>
+      <button class="tab ${tab === 'mistakes' ? 'active' : ''}" role="tab" aria-selected=${tab === 'mistakes'} onClick=${() => setTab('mistakes')}>Recurring mistakes (${shownRelearn.length})</button>
+      <button class="tab ${tab === 'advisories' ? 'active' : ''}" role="tab" aria-selected=${tab === 'advisories'} onClick=${() => setTab('advisories')}>Cost advisories (${shownCost.length})</button>
       <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>Applied (${appliedOpenCount})</button>
     </div>
 
@@ -8759,7 +9228,7 @@ function ReviewInboxView({ params }) {
             The two bulk actions sit BELOW the scroll box, where you land after
             reading the rows you are acting on. */ ''}
       <label style="display:flex;align-items:center;gap:8px;margin:0 2px 6px;font-size:12.5px;cursor:pointer;width:fit-content">
-        <${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />
+        <${SelectAllCheckbox} total=${shownRelearn.length} selected=${selectedCount} onToggle=${toggleAll} />
         <span class="dim">Select all${selectedCount ? ` · ${selectedCount} selected` : ''}</span>
       </label>
       <div class="cur-listbox">
@@ -8769,8 +9238,10 @@ function ReviewInboxView({ params }) {
         ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
         ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`) : null}
         <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
+          summary=${combinedObservedCost(tailRelearn)}
           onDismissAll=${() => dismissMany(tailRelearn.map(c => c.signature))}
           renderItem=${c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`} />
+        <${BelowFloorNote} items=${floorRelearn} label="recurring mistakes" />
       </div>
       <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
         <button class="cur-btn primary" disabled=${selectedCount === 0}
@@ -8794,11 +9265,18 @@ function ReviewInboxView({ params }) {
         ${costStatus === 'never_run' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
         ${costStatus === 'error' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>` : null}
         ${costStatus === 'ready' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No open cost advisories right now.</div>` : null}
-        ${topCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`)}
+        ${topCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} windowDays=${costPastOverspend && costPastOverspend.window_days} />`)}
+        ${/* The tail's own line is stated in the same tense as the rows it
+              hides. It adds up the payload figures of the items in THIS
+              collapse group (a subset only the client knows about, since the
+              split point is a rendering decision); it never re-derives a
+              figure, and the page's headline still comes from the server. */ ''}
         <${CollapsedTailRow} tail=${tailCost} suppressed=${suppressed} itemLabel="cost advisories"
+          summary=${fmtUsd(tailCost.reduce((s, p) => s + (p.past_overspend_usd || 0), 0)) + ' avoidable, combined'}
           onDismissAll=${() => dismissMany(tailCost.map(p => p.signature))}
           onMarkAllApplied=${() => markManyApplied(tailCost)}
-          renderItem=${p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`} />
+          renderItem=${p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} windowDays=${costPastOverspend && costPastOverspend.window_days} />`} />
+        <${BelowFloorNote} items=${floorCost} label="cost advisories" />
       </div>
     ` : null}
 
@@ -8856,6 +9334,22 @@ function DashboardView({ params }) {
     }
   }, [since]);
 
+  // The hero's data is fetched on its OWN effect, deliberately not folded into
+  // the triage `Promise.all` above: that batch resolves only when its SLOWEST
+  // member does (a 30-day `/optimize` pass over a large DB is minutes), and a
+  // headline stat that waits on an analyzer sweep is a headline nobody sees.
+  // This read is a cheap lookup of an already-stored block (it never triggers a
+  // recompute) and is the SAME endpoint the Review inbox headline reads, so the
+  // two surfaces state one number computed once server-side.
+  const [heroPast, setHeroPast] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api('/relearn/cost-proposals')
+      .then(r => { if (live) setHeroPast((r && r.past_overspend) || null); })
+      .catch(() => { /* the hero is additive; a failure just hides it */ });
+    return () => { live = false; };
+  }, []);
+
   useEffect(() => {
     load();
     // The live tiles (/status, /traces, /alerts, /drift) are excluded from the
@@ -8911,6 +9405,21 @@ function DashboardView({ params }) {
       <div class="filters" style="margin:0">${winPicker}</div>
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    ${/* THE HERO STAT. Past tense, window-observed, above everything else on
+          the page: it answers "why should I care" before any surface below it
+          answers "what should I do". Deliberately NOT inside the triage band
+          — that band's tiles are forward-looking opportunity figures in
+          accent-blue, and this one is a diagnosis of money already spent.
+          Different row, different colour treatment, different tense; a reader
+          must not be able to add the two together. */ ''}
+    ${/* The past-overspend hero band rendered here. Removed on founder call
+          (2026-07-26): it read as heavy at the top of the page. The figure now
+          lives as a compact tile on the Review inbox — the surface you act on
+          it from. `heroPast` is still fetched on its own effect below and
+          deliberately left in place: re-adding any Dashboard summary of this
+          figure must reuse that same server block rather than reduce over
+          whatever cards happen to be rendered. */ ''}
 
     ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
       : html`

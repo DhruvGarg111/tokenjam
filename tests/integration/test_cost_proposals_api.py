@@ -114,7 +114,7 @@ async def test_mark_cost_applied_round_trip(app, client):
     assert rec["applied_at"]
     # The ledger carries the STORED estimate, not anything a caller named.
     assert rec["signature"] == prop["signature"]
-    assert rec["estimated_recoverable_usd"] == prop["estimated_recoverable_usd"]
+    assert rec["past_overspend_usd"] == prop["past_overspend_usd"]
 
     applied = (await client.get("/api/v1/relearn/cost-applied")).json()
     assert len(applied["applied"]) == 1
@@ -145,7 +145,7 @@ async def test_mark_applied_refuses_a_caller_supplied_estimate(app, client, conf
 
     r = await client.post(
         "/api/v1/relearn/cost-proposals/apply",
-        json={"proposal_id": prop["proposal_id"], "estimated_recoverable_usd": 9999.0},
+        json={"proposal_id": prop["proposal_id"], "past_overspend_usd": 9999.0},
         headers=hdr,
     )
     assert r.status_code == 422
@@ -306,7 +306,7 @@ async def test_cost_apply_workspace_writes_skill_for_a_rung2_proposal_and_revert
                 example_session_ids=["det-0", "det-1", "det-2"],
             )],
             sessions_examined=25, degraded=False,
-            estimated_recoverable_usd=0.5, estimated_recoverable_tokens=12_500,
+            past_overspend_usd=0.5, past_overspend_tokens=12_500,
             estimate_basis="script basis",
         ),
         persona="claude-code",
@@ -373,14 +373,50 @@ async def test_cost_applied_payload_carries_plan_tier_framing(client):
 
 
 async def test_cost_proposals_payload_carries_plan_tier_framing(client):
-    """The estimated-recoverable tile picks its unit from the same server-side
-    decision as the measured tile beside it, so the two never disagree."""
+    """The headline tile picks its unit from the same server-side decision as
+    the measured tile beside it, so the two never disagree."""
     r = await client.get("/api/v1/relearn/cost-proposals")
     assert r.status_code == 200
     payload = r.json()
     assert payload["framing"]["display_rule"]
-    # The rollup carries both units plus the coverage the tile has to quote.
-    rollup = payload["rollup"]
-    assert "estimated_recoverable_tokens" in rollup
-    assert "token_proposal_count" in rollup
-    assert "deduplicated_proposal_count" in rollup
+    # ONE aggregate block, carrying both units plus the coverage the tile must
+    # quote. There is deliberately no second `rollup` key beside it.
+    assert "rollup" not in payload
+    block = payload["past_overspend"]
+    assert "past_overspend_tokens" in block
+    assert "token_proposal_count" in block
+    assert "deduplicated_proposal_count" in block
+
+
+# --- the past-overspend headline ships on the payload ---------------------- #
+# The gap this closes: the backend priced the observed figure correctly, wrote
+# an honesty basis for it, and handed it to a dashboard that never rendered it.
+# Both leading surfaces (the Dashboard hero and the Review inbox headline) read
+# THIS block, so it has to be on the payload of the endpoint they already call.
+
+async def test_cost_proposals_payload_carries_the_past_overspend_block(app, client):
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    refresh = await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    assert refresh.status_code == 200
+
+    payload = (await client.get("/api/v1/relearn/cost-proposals")).json()
+    block = payload["past_overspend"]
+    assert block["past_overspend_usd"] >= 0
+    assert "window_days" in block
+    assert block["basis"]
+    assert block["disclosure"]
+
+    # The observed COST total ships as its own key and is never the headline:
+    # the avoidable figure is a subset of it, so they may not be summed.
+    assert "observed_cost_usd" in block
+    # No retired per-analyzer dollar field, and no pace to project at.
+    assert "projection_ratio" not in block
+    assert not [k for k in block if "monthly" in k or "projected" in k]
+
+    # Every proposal carries its own past-tense figure, so a card never has to
+    # re-derive its own headline.
+    for proposal in payload["proposals"]:
+        assert "past_overspend_usd" in proposal
+        assert "past_overspend_basis" in proposal
+        assert "estimated_recoverable_usd" not in proposal
+        assert "estimated_monthly_usd" not in proposal

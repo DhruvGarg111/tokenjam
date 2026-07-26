@@ -283,16 +283,16 @@ def _collect_recoverable(report) -> list[dict]:
     def add(name: str, finding) -> None:
         if finding is None:
             return
-        usd = getattr(finding, "estimated_recoverable_usd", None)
-        tok = getattr(finding, "estimated_recoverable_tokens", None)
+        usd = getattr(finding, "past_overspend_usd", None)
+        tok = getattr(finding, "past_overspend_tokens", None)
         if not ((usd is not None and usd > 0) or (tok is not None and tok > 0)):
             return
         out.append({
             "analyzer": name,
             "title": _ANALYZER_TITLE.get(name, name.replace("-", " ").title()),
             "component": _ANALYZER_COMPONENT.get(name, "call"),
-            "estimated_recoverable_usd": usd,
-            "estimated_recoverable_tokens": tok,
+            "past_overspend_usd": usd,
+            "past_overspend_tokens": tok,
             "estimate_basis": getattr(finding, "estimate_basis", "") or "",
             "caveat": getattr(finding, "caveat", "") or "",
         })
@@ -301,10 +301,10 @@ def _collect_recoverable(report) -> list[dict]:
     for name, finding in (getattr(report, "findings", None) or {}).items():
         if name == "downsize":
             continue
-        if hasattr(finding, "estimated_recoverable_usd"):
+        if hasattr(finding, "past_overspend_usd"):
             add(name, finding)
     out.sort(
-        key=lambda r: (r["estimated_recoverable_usd"] or 0.0, r["estimated_recoverable_tokens"] or 0),
+        key=lambda r: (r["past_overspend_usd"] or 0.0, r["past_overspend_tokens"] or 0),
         reverse=True,
     )
     return out
@@ -317,7 +317,7 @@ def _collect_recoverable(report) -> list[dict]:
 # below is therefore a GROSS ceiling across N overlapping analyzers, not a
 # simultaneously-achievable total — summing the list's own figures would be
 # summing waste that was measured twice. This is a presentation fix only: no
-# individual analyzer's `estimated_recoverable_usd` is touched or reduced here
+# individual analyzer's `past_overspend_usd` is touched or reduced here
 # (house rule: never quietly deflate a figure the user can act on). The single
 # largest entry, in contrast, IS honest on its own — acting on it alone
 # recovers at least that much, because it isn't a sum of anything.
@@ -372,7 +372,7 @@ async def get_cost_components(
             # says is too heavy for per-request HTTP use ("callers that serve
             # this over HTTP MUST cache the result, not compute it per-
             # request" — core/optimize/analyzers/relearn.py). Worse, its
-            # `RelearnFinding` never carries `estimated_recoverable_usd`, so
+            # `RelearnFinding` never carries `past_overspend_usd`, so
             # `_collect_recoverable` below silently discards its result no
             # matter what — running it here was guaranteed dead work on every
             # request. Excluding it by name changes nothing about what this
@@ -380,7 +380,7 @@ async def get_cost_components(
             # while removing that tax; the Review inbox
             # (api/routes/relearn.py) already serves relearn's finding from
             # its own background-refreshed cache. `deadweight` DOES
-            # contribute (it has `estimated_recoverable_usd`) so it still
+            # contribute (it has `past_overspend_usd`) so it still
             # runs here, but now via the persistent transcript parse cache
             # (core.transcript_cache, wired into its `run(ctx)` entry point)
             # so a warm cache makes repeat requests cheap instead of
@@ -395,8 +395,8 @@ async def get_cost_components(
         except Exception:
             recoverable = []
 
-    total_rec_usd = sum(r["estimated_recoverable_usd"] or 0.0 for r in recoverable)
-    total_rec_tokens = sum(r["estimated_recoverable_tokens"] or 0 for r in recoverable)
+    total_rec_usd = sum(r["past_overspend_usd"] or 0.0 for r in recoverable)
+    total_rec_tokens = sum(r["past_overspend_tokens"] or 0 for r in recoverable)
     largest = recoverable[0] if recoverable else None
 
     return {
@@ -412,8 +412,8 @@ async def get_cost_components(
         "recoverable_overlap_note": _recoverable_overlap_note(recoverable),
         # The one entry in `recoverable` that is honest as a standalone claim:
         # it isn't a sum of anything, so it's the floor a reader can act on.
-        "largest_recoverable_usd": largest["estimated_recoverable_usd"] if largest else None,
-        "largest_recoverable_tokens": largest["estimated_recoverable_tokens"] if largest else None,
+        "largest_recoverable_usd": largest["past_overspend_usd"] if largest else None,
+        "largest_recoverable_tokens": largest["past_overspend_tokens"] if largest else None,
         "largest_recoverable_analyzer": largest["analyzer"] if largest else None,
         "framing": _framing_block(db, config, agent_id, total_cost, total_tokens),
     }
@@ -457,8 +457,8 @@ async def get_cost_cache(
             )
             cache_finding = (report.findings or {}).get("cache")
             if cache_finding is not None:
-                recoverable_usd = getattr(cache_finding, "estimated_recoverable_usd", None)
-                recoverable_tokens = getattr(cache_finding, "estimated_recoverable_tokens", None)
+                recoverable_usd = getattr(cache_finding, "past_overspend_usd", None)
+                recoverable_tokens = getattr(cache_finding, "past_overspend_tokens", None)
                 estimate_basis = getattr(cache_finding, "estimate_basis", "") or ""
         except Exception:
             pass
@@ -467,8 +467,8 @@ async def get_cost_cache(
         **block,
         "total_captured_usd": round(total_captured, 8),
         "total_captured_tokens": total_captured_tokens,
-        "estimated_recoverable_usd": recoverable_usd,
-        "estimated_recoverable_tokens": recoverable_tokens,
+        "past_overspend_usd": recoverable_usd,
+        "past_overspend_tokens": recoverable_tokens,
         "estimate_basis": estimate_basis,
         "framing": _framing_block(db, config, agent_id, total_captured, total_captured_tokens),
     }

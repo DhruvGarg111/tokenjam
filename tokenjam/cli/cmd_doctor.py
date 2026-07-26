@@ -76,6 +76,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 15. Onboarded-but-silent — first-signal diagnosis (issue #80)
     checks.append(_check_onboarding_first_signal(config, ctx.obj["db"]))
 
+    # 16. Transcript ingest completeness — on-disk sessions never ingested,
+    #     still recoverable only until Claude Code prunes the transcript.
+    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -155,7 +159,7 @@ def _check_ingest_secret(config: object) -> dict:
 def _check_prometheus(config: object) -> dict:
     if config.export.prometheus.enabled:
         return {"name": "Prometheus", "level": "ok",
-                "message": f"Enabled on port {config.export.prometheus.port}"}
+                "message": "Prometheus export enabled."}
     return {"name": "Prometheus", "level": "info",
             "message": "Prometheus export disabled."}
 
@@ -438,6 +442,67 @@ def _check_span_staleness(db: object) -> dict:
         }
     return {"name": "Live-span freshness", "level": "ok",
             "message": f"Most recent span is {age_hours:.1f}h old."}
+
+
+def _check_transcript_ingest_gap(config: object, db: object) -> dict:
+    """Surface on-disk Claude Code sessions that were never ingested.
+
+    The live OTLP path drops any session whose shell lacked the telemetry env
+    vars or that ran while `tj serve` was down/unreachable — Claude Code's
+    exporter has no retry and no buffer. The transcript survives on disk, but
+    only until Claude Code prunes it (~30 days), after which the session is
+    unrecoverable. `_check_span_staleness` above catches "nothing is arriving
+    right now"; this catches the subtler steady-state case where *most* sessions
+    arrive and a slice silently doesn't.
+
+    Scoped to a recent window so the check stays fast and only reports sessions
+    that are still recoverable — anything older than the rotation horizon is
+    gone regardless of what we say about it.
+    """
+    from datetime import timedelta
+
+    from tokenjam.core.transcript_sync import CLAUDE_CODE_ROTATION_DAYS
+    from tokenjam.utils.time_parse import utcnow
+
+    name = "Transcript ingest completeness"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        from tokenjam.core.transcript_sync import reconcile_claude_code
+
+        since = utcnow() - timedelta(days=CLAUDE_CODE_ROTATION_DAYS)
+        report = reconcile_claude_code(db, since=since)
+    except Exception as e:  # never let a health check crash `tj doctor`
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not compare transcripts: {e}"}
+
+    if not report.root.exists():
+        return {"name": name, "level": "info",
+                "message": f"No Claude Code transcripts found at {report.root}."}
+    if report.missing_count == 0:
+        return {"name": name, "level": "ok",
+                "message": (f"All {report.disk_sessions} on-disk session(s) in the last "
+                            f"{CLAUDE_CODE_ROTATION_DAYS}d are ingested.")}
+
+    days_left = report.days_until_rotation()
+    horizon = (f" Oldest is ~{days_left:.0f} day(s) from being pruned."
+               if days_left is not None else "")
+    auto = getattr(getattr(config, "ingest", None), "auto_catch_up", False)
+    remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
+              "to close it now." if auto else
+              " Automatic catch-up is off ([ingest] auto_catch_up) — run "
+              "`tj backfill claude-code`.")
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{report.missing_count} on-disk session(s) are not ingested."
+            f"{horizon}{remedy}"
+        ),
+    }
 
 
 def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:

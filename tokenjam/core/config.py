@@ -78,8 +78,6 @@ class OtlpConfig:
 @dataclass
 class PrometheusConfig:
     enabled: bool = True
-    port:    int  = 9464
-    path:    str  = "/metrics"
 
 
 @dataclass
@@ -364,6 +362,31 @@ class LoopConfig:
 
 
 @dataclass
+class IngestConfig:
+    """`[ingest]` — continuous transcript ingestion by the `tj serve` daemon.
+
+    Claude Code's OTLP exporter has no retry and no buffer, so a session whose
+    shell lacked the telemetry env vars, or that ran while the daemon was down
+    or pointed at a stale port, is dropped permanently by the live path. The
+    on-disk transcript still exists — but only for ~30 days, after which Claude
+    Code prunes it and the session is unrecoverable.
+
+    So the daemon re-runs the (idempotent) Claude Code backfill over a bounded
+    recent window: once shortly after startup, so downtime self-heals, and then
+    on an interval, so an ongoing live-path miss is closed within minutes
+    instead of waiting for a human to remember `tj backfill claude-code`.
+
+    `startup_lookback_days` is deliberately wider than `lookback_hours`: the
+    startup pass has to cover however long the daemon was down, while the
+    steady-state pass only has to cover one interval plus slack.
+    """
+    auto_catch_up:        bool = True
+    interval_minutes:     int  = 30
+    lookback_hours:       int  = 48
+    startup_lookback_days: int = 14
+
+
+@dataclass
 class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
@@ -378,6 +401,7 @@ class TjConfig:
     summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
     optimize: OptimizeConfig          = field(default_factory=OptimizeConfig)
     loop:     LoopConfig              = field(default_factory=LoopConfig)
+    ingest:   IngestConfig            = field(default_factory=IngestConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
     # Manual session_id -> human label overrides ([session_labels] in TOML).
@@ -556,9 +580,7 @@ def _parse(raw: dict) -> TjConfig:
     )
     prom_raw = export_raw.get("prometheus", {})
     prometheus = PrometheusConfig(
-        enabled=prom_raw.get("enabled", True),
-        port=prom_raw.get("port", PrometheusConfig.port),
-        path=prom_raw.get("path", PrometheusConfig.path),
+        enabled=prom_raw.get("enabled", True)
     )
     export = ExportConfig(otlp=otlp, prometheus=prometheus)
 
@@ -623,6 +645,22 @@ def _parse(raw: dict) -> TjConfig:
     loop_raw = raw.get("loop", {})
     loop_cfg = LoopConfig(
         transcript_path=loop_raw.get("transcript_path") or None,
+    )
+
+    # [ingest] — the daemon's continuous transcript catch-up. Defaults are on:
+    # without it, completeness depends on a human running a CLI command.
+    ingest_raw = raw.get("ingest", {})
+    ingest_cfg = IngestConfig(
+        auto_catch_up=bool(ingest_raw.get("auto_catch_up", IngestConfig.auto_catch_up)),
+        interval_minutes=int(
+            ingest_raw.get("interval_minutes", IngestConfig.interval_minutes)
+        ),
+        lookback_hours=int(
+            ingest_raw.get("lookback_hours", IngestConfig.lookback_hours)
+        ),
+        startup_lookback_days=int(
+            ingest_raw.get("startup_lookback_days", IngestConfig.startup_lookback_days)
+        ),
     )
 
     summarize = SummarizeConfig(
@@ -717,6 +755,7 @@ def _parse(raw: dict) -> TjConfig:
         summarize=summarize,
         optimize=optimize,
         loop=loop_cfg,
+        ingest=ingest_cfg,
         budgets=budgets,
         policies=policies,
         session_labels=dict(raw.get("session_labels", {})),

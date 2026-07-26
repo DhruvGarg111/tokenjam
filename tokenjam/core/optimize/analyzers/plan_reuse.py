@@ -294,15 +294,27 @@ def run(ctx: AnalyzerContext) -> None:
             skeleton_session_id=by_recency[0].session_id,
         ))
 
-    # Rank by the conservative (cache-reuse) recoverable amount, descending.
+    # Cluster listing order (independent of the finding-level headline basis
+    # below): rank by the conservative cache-reuse amount, descending.
     surfaced.sort(key=lambda c: c.cache_reuse_recoverable_usd, reverse=True)
 
     finding.clusters = surfaced
     if surfaced:
-        finding.estimated_recoverable_usd = round(
+        # Headline uses the CONSERVATIVE cache-reuse premise (a template only
+        # removes the re-plan delta: avg cost x (reps - 1)), not the
+        # script-replacement upper bound (avg cost x reps). The first planning
+        # call in a cluster had to happen — there was nothing to reuse yet —
+        # so the headline may not charge for it. This matters more now that
+        # every surface states these figures in the PAST tense ("this is what
+        # you already overspent"): "you wasted $X" where X includes necessary
+        # work is a claim a user can disprove on inspection, and on a
+        # 2-repetition cluster it is a 2x overclaim. The upper bound stays
+        # available per-cluster as script_replacement_recoverable_usd/_tokens
+        # for the template-authoring case. See REUSE_ESTIMATE_BASIS.
+        finding.past_overspend_usd = round(
             sum(c.cache_reuse_recoverable_usd for c in surfaced), 6
         )
-        finding.estimated_recoverable_tokens = sum(
+        finding.past_overspend_tokens = sum(
             c.cache_reuse_recoverable_tokens for c in surfaced
         )
 

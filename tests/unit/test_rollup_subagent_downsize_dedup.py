@@ -3,13 +3,14 @@
 ``downsize`` aggregates per session and ``subagent`` aggregates per
 (session, sub_agent_id) over the SAME spans. Their signatures are structurally
 different (``cost:downsize:<agent>`` vs ``cost:subagent[:<name>]``), so
-``estimated_recoverable_rollup``'s dedup-by-signature can't catch an overlap —
+``past_overspend_rollup``'s dedup-by-signature can't catch an overlap —
 the populations have to be disjoint at the source. These tests pin that: the
 same class of guard ``_per_agent_cache_recoverable_by_model`` provides for the
 cache family, applied to downsize/subagent.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -19,7 +20,7 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import analyze_model_downgrade, build_report
 from tokenjam.core.optimize.cost_proposals import (
     cost_proposals_from_report,
-    estimated_recoverable_rollup,
+    past_overspend_rollup,
 )
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span
@@ -66,7 +67,7 @@ def test_downsize_excludes_subagent_tokens_from_its_candidate_figure(db):
     finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
     assert finding is not None
     assert finding.candidate_sessions == 1
-    assert finding.estimated_recoverable_tokens == MAIN_INPUT + MAIN_OUTPUT
+    assert finding.past_overspend_tokens == MAIN_INPUT + MAIN_OUTPUT
     assert finding.actual_cost_usd == pytest.approx(MAIN_COST, abs=1e-6)
 
 
@@ -105,7 +106,7 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     def _gross(p):
         return (p.gross_recoverable_tokens
                 if p.gross_recoverable_tokens is not None
-                else (p.estimated_recoverable_tokens or 0))
+                else (p.past_overspend_tokens or 0))
 
     def _gross_for(analyzer: str) -> int:
         return sum(_gross(p) for p in proposals if p.analyzer == analyzer)
@@ -124,8 +125,87 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     # Together: the two populations partition the session rather than overlap.
     assert sum(_gross(p) for p in proposals) <= SESSION_TOKENS
 
-    rollup = estimated_recoverable_rollup(proposals)
+    rollup = past_overspend_rollup(proposals)
     # The netted rollup never claims more than the session actually spent.
-    assert rollup["estimated_recoverable_tokens"] <= SESSION_TOKENS
+    assert rollup["past_overspend_tokens"] <= SESSION_TOKENS
     # The dollar side can only ever claim the session's real spend back.
-    assert rollup["estimated_recoverable_usd"] <= MAIN_COST + SUB_COST
+    assert rollup["past_overspend_usd"] <= MAIN_COST + SUB_COST
+
+
+# --- resend's compound offload claim vs the subagent card --------------------
+# Same class of guard, third pair. `resend` prices the re-read tail that
+# offloading main-thread work removes, plus the right-sizing delta on that same
+# offloaded material. Both are computed over `sub_agent_id IS NULL` spans in
+# context-heavy sessions, so they can never reach the spans `subagent` prices
+# (which are `sub_agent_id IS NOT NULL` by construction) nor the small
+# structural sessions `downsize` flags.
+
+def test_resend_offload_claim_never_reaches_subagent_or_downsize_spans(db):
+    from tokenjam.core.optimize.analyzers.context_resend import (
+        MIN_SESSION_CONTEXT_TOKENS,
+    )
+
+    start = utcnow() - timedelta(days=2)
+    # A delegating session, so the offloadable share is measurable at all.
+    for i in range(3):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+            input_tokens=1_000, cache_tokens=500, output_tokens=100, cost_usd=0.05,
+            session_id="deleg", sub_agent_id=None, start_time=start + timedelta(minutes=i),
+        ))
+    for i in range(3):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+            input_tokens=2_000, output_tokens=100, cost_usd=0.10,
+            session_id="deleg", sub_agent_id="researcher",
+            start_time=start + timedelta(minutes=10 + i),
+        ))
+    # A context-heavy in-thread session where the offload saving is claimed.
+    heavy_main_cost = 0.0
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+            input_tokens=MIN_SESSION_CONTEXT_TOKENS,
+            cache_tokens=MIN_SESSION_CONTEXT_TOKENS * i,
+            output_tokens=500, cost_usd=1.0,
+            session_id="heavy", sub_agent_id=None,
+            start_time=start + timedelta(hours=1, minutes=i),
+        ))
+        heavy_main_cost += 1.0
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=100, output_tokens=10, cost_usd=0.01,
+        session_id="pad", sub_agent_id=None, start_time=start,
+    ))
+
+    since, until = _window()
+    report = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                          findings=["resend", "subagent"])
+    resend = report.findings["resend"]
+    assert resend.past_overspend_usd is not None
+
+    # The claim is bounded by what the main thread actually spent: it prices a
+    # tail and a rate delta on main-thread material, never the subagent spans
+    # the `subagent` card already claims.
+    assert resend.past_overspend_usd <= heavy_main_cost + 0.15
+    # And it is strictly smaller than the observed cost of the same re-sending.
+    assert resend.cost_of_waste_usd > resend.past_overspend_usd
+
+    proposals = cost_proposals_from_report(report)
+    resend_card = next(p for p in proposals if p.analyzer == "resend")
+    assert resend_card.cost_of_waste_usd == resend.cost_of_waste_usd
+
+    # cost-of-waste is structurally excluded from the headline: the rollup reads
+    # only the `estimated_*` fields, so the gross can never inflate it. Pinned
+    # by removing the recoverable figures and watching the rollup go to zero
+    # while the gross is still sitting on the card.
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == pytest.approx(
+        sum(p.past_overspend_usd or 0.0 for p in proposals)
+    )
+    stripped = [
+        replace(p, past_overspend_usd=None, past_overspend_tokens=None)
+        for p in proposals
+    ]
+    assert any(p.cost_of_waste_usd for p in stripped)
+    assert past_overspend_rollup(stripped)["past_overspend_usd"] == 0.0

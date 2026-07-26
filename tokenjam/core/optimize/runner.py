@@ -113,6 +113,21 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # retired; re-enable if the signature is redesigned to a subsequence
         # or prefix match that tolerates heterogeneous coding work.
         "script",
+        # Reuse asserts something no telemetry can establish for an
+        # interactive coding agent: that two planning calls were semantically
+        # interchangeable. Measured against a real corpus, the clustering that
+        # backs the claim has no content signal (every member's prompt-prefix
+        # hash is null, so clustering falls back to bare tool-name sequence),
+        # no time window, no prior-failure exclusion, and the large majority
+        # of its dollar figure comes from a null-tool-signature catch-all
+        # bucket ("nothing followed the plan") rather than any actual
+        # repeated plan. DECISION: disabled for this persona; the concept
+        # stays worth rebuilding behind a real content signal, a recency
+        # window, and a prior-failure exclusion. This gate applies to
+        # `claude-code` only — the defects measured above are specific to
+        # this corpus; the SDK case is a separate, unmeasured question and is
+        # deliberately left ungated.
+        "reuse",
     }),
 }
 
@@ -363,8 +378,8 @@ def report_from_dict(d: dict) -> OptimizeReport:
             window_total_tokens=int(dd.get("window_total_tokens", 0)),
             percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),
             monthly_tokens_in_candidates=int(dd.get("monthly_tokens_in_candidates", 0)),
-            estimated_recoverable_usd=dd.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=dd.get("estimated_recoverable_tokens"),
+            past_overspend_usd=dd.get("past_overspend_usd"),
+            past_overspend_tokens=dd.get("past_overspend_tokens"),
             estimate_basis=str(dd.get("estimate_basis", "")),
             estimate_confidence=str(dd.get("estimate_confidence", "heuristic")),
             # Sampling confidence (#308) — round-trip n + the CI bounds.
@@ -495,8 +510,8 @@ def _build_finding_constructors() -> dict:
             rows=rows, flagged=flagged,
             confidence=d.get("confidence", "structural"),
             efficacy_ceiling=d.get("efficacy_ceiling", 0.80),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
             uncached_agents=uncached, thrash_agents=thrash,
@@ -513,8 +528,8 @@ def _build_finding_constructors() -> dict:
             skipped_provider_count=int(d.get("skipped_provider_count", 0)),
             confidence=d.get("confidence", "structural"),
             hint=d.get("hint"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             min_prefix_occurrences=int(d.get("min_prefix_occurrences", MIN_PREFIX_OCCURRENCES)),
         )
@@ -527,8 +542,8 @@ def _build_finding_constructors() -> dict:
             degraded=bool(d.get("degraded", False)),
             confidence=d.get("confidence", "structural"),
             caveat=d.get("caveat", ""),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
@@ -549,8 +564,8 @@ def _build_finding_constructors() -> dict:
             per_prompt=per_prompt,
             confidence=d.get("confidence", "structural"),
             hint=d.get("hint"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
@@ -566,8 +581,8 @@ def _build_finding_constructors() -> dict:
         return ReuseFinding(
             clusters=clusters,
             capture_mode=d.get("capture_mode", "tool_sequence_only"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             confidence=d.get("confidence", "heuristic"),
             hint=d.get("hint", ""),
@@ -588,8 +603,8 @@ def _build_finding_constructors() -> dict:
             flagged=flagged,
             confidence=d.get("confidence", "structural"),
             caveat=d.get("caveat", ""),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
@@ -599,13 +614,17 @@ def _build_finding_constructors() -> dict:
         return SummarizeFinding(
             candidates=cands,
             files=int(d.get("files", 0)),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
+            file_reduction_tokens=d.get("file_reduction_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
             caveat=d.get("caveat", SUMMARIZE_HONESTY_CAVEAT),
             reduction_pct=d.get("reduction_pct"),
             avg_reduction_pct=d.get("avg_reduction_pct"),
+            sessions_examined=int(d.get("sessions_examined", 0) or 0),
+            calls_per_session=d.get("calls_per_session"),
+            rate_basis=d.get("rate_basis", ""),
         )
 
     def _relearn(d: dict) -> RelearnFinding:
@@ -620,7 +639,14 @@ def _build_finding_constructors() -> dict:
             failures_examined=int(d.get("failures_examined", 0)),
             distilled_clusters=int(d.get("distilled_clusters", 0)),
             dropped_codified=int(d.get("dropped_codified", 0)),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            # `int(... or 0)` like every other count above: the field is a
+            # non-optional int, and a dict written before it existed returns
+            # None. Also restore the USD twin -- relearn was the one reader in
+            # this module dropping it, so a rehydrated report silently lost
+            # relearn's observed dollar figure while keeping its token figure.
+            past_overspend_tokens=int(d.get("past_overspend_tokens") or 0),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_basis=d.get("past_overspend_basis", ""),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
             caveat=d.get("caveat", ""),
@@ -637,8 +663,8 @@ def _build_finding_constructors() -> dict:
             suggested_max_tokens=d.get("suggested_max_tokens"),
             confidence=d.get("confidence", "structural"),
             caveat=d.get("caveat", VERBOSITY_HONESTY_CAVEAT),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
@@ -653,8 +679,8 @@ def _build_finding_constructors() -> dict:
             servers=servers,
             dead_servers=dead_servers,
             tax_table=tax_table,
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "estimated"),
             caveat=d.get("caveat", DEADWEIGHT_HONESTY_CAVEAT),
@@ -680,8 +706,8 @@ def _build_finding_constructors() -> dict:
             caveat=d.get("caveat", RESEND_HONESTY_CAVEAT),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
             notes=list(d.get("notes") or []),
         )
 
@@ -692,8 +718,8 @@ def _build_finding_constructors() -> dict:
             window_cost_usd=float(d.get("window_cost_usd", 0.0)),
             candidate_cost_usd=float(d.get("candidate_cost_usd", 0.0)),
             percent_of_window_cost=float(d.get("percent_of_window_cost", 0.0)),
-            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
-            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_tokens=d.get("past_overspend_tokens"),
             estimate_basis=d.get("estimate_basis", BATCH_ESTIMATE_BASIS),
             estimate_confidence=d.get("estimate_confidence", "estimated"),
             friction=d.get("friction", BATCH_FRICTION_NOTE),

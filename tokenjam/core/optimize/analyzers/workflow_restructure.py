@@ -124,8 +124,8 @@ class WorkflowRestructureFinding:
     )
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when no cluster cleared the threshold.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # The effective cluster-instance bar this run applied (config-overridable,
@@ -256,10 +256,10 @@ def run(ctx: AnalyzerContext) -> None:
         sessions_examined=len(session_signatures),
         degraded=not has_tool_inputs,
         min_cluster_instances=min_cluster_instances,
-        estimated_recoverable_usd=(
+        past_overspend_usd=(
             round(total_cluster_cost, 6) if has_clusters else None
         ),
-        estimated_recoverable_tokens=(
+        past_overspend_tokens=(
             total_cluster_tokens if has_clusters else None
         ),
         estimate_basis=(

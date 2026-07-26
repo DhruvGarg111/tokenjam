@@ -292,8 +292,8 @@ class PromptBloatFinding:
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when the analyzer is not ready (capture off, extra
     # missing) or no bloat was found.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # The effective significance bar this run applied (config-overridable,
@@ -632,8 +632,8 @@ def run(ctx: AnalyzerContext) -> None:
         total_chars=total_chars,
         per_prompt=per_prompt[:10],
         prompts_with_provenance=prompts_with_provenance,
-        estimated_recoverable_usd=rec_usd,
-        estimated_recoverable_tokens=rec_tokens,
+        past_overspend_usd=rec_usd,
+        past_overspend_tokens=rec_tokens,
         significance_threshold=significance_threshold,
         estimate_basis=(
             "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "

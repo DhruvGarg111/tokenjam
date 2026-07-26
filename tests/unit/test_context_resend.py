@@ -197,21 +197,27 @@ def test_aggregate_is_token_weighted_not_averaged(db):
 # Recoverable-estimate tests (honesty discipline: fraction, not full share)
 # --------------------------------------------------------------------------
 
-def test_estimated_recoverable_tokens_uses_avoidable_fraction(db):
+def test_past_overspend_tokens_uses_avoidable_fraction(db):
     _seed_session(db, "heavy", [1000, 1000, 1000, 1000])
     _seed_session(db, "pad1", [500])
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
     expected = round(AVOIDABLE_FRACTION_OF_REPEAT * finding.repeat_tokens)
-    assert finding.estimated_recoverable_tokens == expected
+    assert finding.past_overspend_tokens == expected
     # Never the full repeat share: recoverable must be strictly less than
     # repeat_tokens (0.683 < 1.0).
-    assert finding.estimated_recoverable_tokens < finding.repeat_tokens
+    assert finding.past_overspend_tokens < finding.repeat_tokens
 
 
-def test_estimated_recoverable_usd_prices_uncached_share_at_rate_delta(db):
-    """Fully-uncached session: uncached_fraction == 1.0, so usd is exactly
-    repeat_tokens x (input - cache-read rate) x AVOIDABLE_FRACTION_OF_REPEAT."""
+def test_cost_of_waste_is_observed_and_never_the_recoverable_figure(db):
+    """The gross cost of re-sent context is an OBSERVATION on its own field.
+
+    It used to be absent entirely while `past_overspend_usd` carried the
+    cache_control-adoption delta. Now the two are separate quantities: the gross
+    is priced per token class at what it really billed (cache reads at the
+    cache-read rate, the still-uncached repeat at the input rate) and is never
+    the same number as the recoverable one.
+    """
     _seed_session(db, "heavy", [1000, 1000, 1000, 1000], cache_ratio=0.0,
                   provider="anthropic", model="claude-haiku-4-5")
     _seed_session(db, "pad1", [500])
@@ -219,28 +225,33 @@ def test_estimated_recoverable_usd_prices_uncached_share_at_rate_delta(db):
     finding = _run(db, _config())
 
     rates = get_rates("anthropic", "claude-haiku-4-5")
+    # Fully uncached, so the whole repeat volume bills at the input rate and
+    # there are no cache reads to add.
     heavy_repeat_tokens = 3000  # sum=4000, max=1000
-    expected_usd = round(
-        heavy_repeat_tokens / 1_000_000
-        * (rates.input_per_mtok - rates.cache_read_per_mtok)
-        * AVOIDABLE_FRACTION_OF_REPEAT,
-        6,
-    )
-    assert finding.estimated_recoverable_usd == pytest.approx(expected_usd)
+    expected_gross = round(heavy_repeat_tokens / 1_000_000 * rates.input_per_mtok, 6)
+    assert finding.cost_of_waste_usd == pytest.approx(expected_gross)
+    assert finding.cost_of_waste_basis
+    # No subagent anywhere in the window, so nothing measures the offloadable
+    # share and no recoverable dollar figure is claimed at all.
+    assert finding.offloadable_share is None
+    assert finding.past_overspend_usd is None
+    assert finding.cost_of_waste_usd != finding.past_overspend_usd
 
 
-def test_fully_cached_session_recovers_no_usd_but_still_tokens(db):
-    """Same repeat_share/repeat_tokens as the uncached case, but already
-    100% cached: the cache_control-adoption dollar opportunity must be
-    absent (already captured), even though the compaction token estimate
-    still applies. This is what stops the analyzer double-counting
-    cache_efficacy's own recoverable figure."""
-    _seed_session(db, "cached", [1000, 1000, 1000, 1000], cache_ratio=1.0)
-    _seed_session(db, "pad1", [500])  # single-turn: contributes 0 repeat
-    _seed_session(db, "pad2", [500])  # single-turn: contributes 0 repeat
+def test_cost_of_waste_prices_cache_reads_at_the_cache_read_rate(db):
+    """A fully-cached session still cost real money to re-send — just a tenth
+    of the uncached rate. A zero here would read as "re-reading is free"."""
+    _seed_session(db, "cached", [1000, 1000, 1000, 1000], cache_ratio=1.0,
+                  provider="anthropic", model="claude-haiku-4-5")
+    _seed_session(db, "pad1", [500])
+    _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens > 0
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    # Every cache read IS re-sent context: 4 turns x 1000 cached tokens.
+    assert finding.cost_of_waste_usd == pytest.approx(
+        round(4000 / 1_000_000 * rates.cache_read_per_mtok, 6)
+    )
+    assert finding.past_overspend_tokens > 0
 
 
 def test_recoverable_usd_none_when_no_priced_model(db):
@@ -249,8 +260,273 @@ def test_recoverable_usd_none_when_no_priced_model(db):
     _seed_session(db, "pad1", [500])
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens is not None
+    assert finding.past_overspend_usd is None
+    assert finding.cost_of_waste_usd is None
+    assert finding.past_overspend_tokens is not None
+
+
+def _seed_mixed_model_session(db, session_id, sizes, models, *, cache_ratio=0.0, start=None):
+    """Like `_seed_session` but each turn can carry its OWN (provider, model)
+    instead of one model for the whole session."""
+    start = start or datetime(2026, 5, 10, tzinfo=UTC)
+    db.upsert_session(make_session(session_id=session_id, plan_tier="api"))
+    for i, (size, (provider, model)) in enumerate(zip(sizes, models)):
+        cache_tok = int(size * cache_ratio)
+        input_tok = size - cache_tok
+        db.insert_span(make_llm_span(
+            session_id=session_id, provider=provider, model=model,
+            input_tokens=input_tok, cache_tokens=cache_tok, output_tokens=50,
+            cost_usd=0.01, start_time=start + timedelta(minutes=i),
+        ))
+
+
+def test_cost_of_waste_prices_each_turn_at_its_own_model_not_the_dominant_one(db):
+    """A session that mixes models must price EACH turn's re-sent volume at
+    THAT turn's own model's rate, not at whichever model dominated the turn
+    count. Two opus turns ($5/MTok) and two haiku turns ($1/MTok), tied on
+    turn count, all uncached and equally sized -- the correct figure prices
+    each turn's own uncached-repeat share at its own rate."""
+    _seed_mixed_model_session(db, "mixed", [1000, 1000, 1000, 1000], [
+        ("anthropic", "claude-opus-4-8"), ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-haiku-4-5"), ("anthropic", "claude-haiku-4-5"),
+    ])
+    _seed_session(db, "pad1", [500])
+    _seed_session(db, "pad2", [500])
+    finding = _run(db, _config())
+
+    opus = get_rates("anthropic", "claude-opus-4-8")
+    haiku = get_rates("anthropic", "claude-haiku-4-5")
+    # sum=4000, max=1000 (tie) -> repeat_tokens=3000, split evenly across the
+    # 4 equally-sized turns: 750 uncached-repeat tokens per turn.
+    per_turn_uncached_repeat = 750
+    expected = (
+        2 * (per_turn_uncached_repeat / 1_000_000 * opus.input_per_mtok)
+        + 2 * (per_turn_uncached_repeat / 1_000_000 * haiku.input_per_mtok)
+    )
+    # What pricing the WHOLE session at a single dominant model (a tie here,
+    # but the old code's Counter.most_common(1) picks one) would have given --
+    # strictly higher than the correct mixed figure since it prices some
+    # cheap-model volume at the expensive rate (or vice versa; either way it
+    # cannot equal the correctly split figure for these two distinct rates).
+    all_opus_estimate = 3000 / 1_000_000 * opus.input_per_mtok
+    all_haiku_estimate = 3000 / 1_000_000 * haiku.input_per_mtok
+
+    assert finding.cost_of_waste_usd == pytest.approx(round(expected, 6))
+    assert finding.cost_of_waste_usd != pytest.approx(round(all_opus_estimate, 6))
+    assert finding.cost_of_waste_usd != pytest.approx(round(all_haiku_estimate, 6))
+    assert all_haiku_estimate < finding.cost_of_waste_usd < all_opus_estimate
+
+
+# --------------------------------------------------------------------------
+# The offload lever: measured from this corpus's own sub_agent_id telemetry
+# --------------------------------------------------------------------------
+
+def _seed_offload_corpus(db):
+    """One delegating session (which measures the offloadable share) plus one
+    context-heavy in-thread session (where the saving is then claimed)."""
+    start = datetime(2026, 5, 10, tzinfo=UTC)
+    db.upsert_session(make_session(session_id="delegator", plan_tier="api"))
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            session_id="delegator", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=1000, cache_tokens=1000, output_tokens=100,
+            cost_usd=0.01, start_time=start + timedelta(minutes=i),
+        ))
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            session_id="delegator", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=1000, cache_tokens=0, output_tokens=100,
+            cost_usd=0.01, sub_agent_id="researcher",
+            start_time=start + timedelta(minutes=10 + i),
+        ))
+    # Context-heavy main-thread session: prompt grows past
+    # MIN_SESSION_CONTEXT_TOKENS, so offloading has something to remove.
+    db.upsert_session(make_session(session_id="inthread", plan_tier="api"))
+    for i in range(5):
+        db.insert_span(make_llm_span(
+            session_id="inthread", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=20_000, cache_tokens=20_000 * i, output_tokens=500,
+            cost_usd=0.5, start_time=start + timedelta(hours=1, minutes=i),
+        ))
+    _seed_session(db, "pad1", [500])
+
+
+def test_offloadable_share_is_measured_from_sub_agent_id(db):
+    """The avoidable fraction comes from the user's own delegation behaviour,
+    not from the cross-corpus 68.3% constant the token claim still uses."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.offloadable_share is not None
+    assert 0.0 < finding.offloadable_share < 1.0
+    assert finding.offloadable_share != pytest.approx(AVOIDABLE_FRACTION_OF_REPEAT)
+
+
+def test_recoverable_usd_is_offload_plus_rightsize_and_excludes_gross(db):
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.offload_recoverable_usd is not None
+    assert finding.rightsize_recoverable_usd is not None
+    assert finding.past_overspend_usd == pytest.approx(
+        round(finding.offload_recoverable_usd + finding.rightsize_recoverable_usd, 6)
+    )
+    # The whole point of the split: the recoverable claim is a small fraction
+    # of what re-sending actually cost, and the gross never leaks into it.
+    assert finding.cost_of_waste_usd > finding.past_overspend_usd
+
+
+def _seed_recoverable_corpus(db, first_turn_model):
+    """Same shape as `_seed_offload_corpus`, except the FIRST main-thread turn
+    of the in-thread session -- the one with the largest re-read tail, since
+    it's the one read back by every later turn -- uses `first_turn_model`
+    while every later turn stays on the expensive model."""
+    start = datetime(2026, 5, 10, tzinfo=UTC)
+    db.upsert_session(make_session(session_id="delegator", plan_tier="api"))
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            session_id="delegator", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=1000, cache_tokens=1000, output_tokens=100,
+            cost_usd=0.01, start_time=start + timedelta(minutes=i),
+        ))
+    for i in range(4):
+        db.insert_span(make_llm_span(
+            session_id="delegator", provider="anthropic", model="claude-opus-4-8",
+            input_tokens=1000, cache_tokens=0, output_tokens=100,
+            cost_usd=0.01, sub_agent_id="researcher",
+            start_time=start + timedelta(minutes=10 + i),
+        ))
+    db.upsert_session(make_session(session_id="inthread", plan_tier="api"))
+    models = [first_turn_model] + ["claude-opus-4-8"] * 4
+    for i, model in enumerate(models):
+        db.insert_span(make_llm_span(
+            session_id="inthread", provider="anthropic", model=model,
+            input_tokens=20_000, cache_tokens=20_000 * i, output_tokens=500,
+            cost_usd=0.5, start_time=start + timedelta(hours=1, minutes=i),
+        ))
+    _seed_session(db, "pad1", [500])
+
+
+def test_offload_recoverable_prices_each_turn_at_its_own_model(db):
+    """Changing ONLY the first main-thread turn's model (the one with the
+    largest re-read tail) must move the offload-recoverable figure --
+    otherwise it is still being priced off whichever model dominates the turn
+    count (4 opus turns vs. 1 other), not per turn. Under the old
+    dominant-model-only code this comparison would be a no-op: the dominant
+    model stays opus in both runs, so the figure would not move at all."""
+    _seed_recoverable_corpus(db, "claude-opus-4-8")
+    all_opus = _run(db, _config())
+
+    cheap_db = InMemoryBackend()
+    _seed_recoverable_corpus(cheap_db, "claude-haiku-4-5")
+    mixed = _run(cheap_db, _config())
+
+    assert all_opus.offload_recoverable_usd is not None
+    assert mixed.offload_recoverable_usd is not None
+    # A cheaper first-turn model must pull the recoverable figure DOWN.
+    assert mixed.offload_recoverable_usd < all_opus.offload_recoverable_usd
+
+
+# --------------------------------------------------------------------------
+# Coverage: the two dollar figures are computed over DIFFERENT populations,
+# and the analyzer has to say so rather than letting their ratio imply that
+# everything outside the avoidable figure was unavoidable.
+# --------------------------------------------------------------------------
+
+def test_cost_is_partitioned_by_the_same_predicate_the_avoidable_figure_uses(db):
+    """The three coverage buckets must exactly re-sum to the cost figure.
+
+    If they don't, the card would be stating a coverage split that isn't the
+    one the code applied — which is worse than stating nothing, because a
+    reader would trust it.
+    """
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.cost_of_waste_usd is not None
+    parts = (
+        finding.cost_in_scope_usd,
+        finding.cost_driver_role_usd,
+        finding.cost_no_lever_usd,
+    )
+    assert all(p is not None for p in parts)
+    assert sum(parts) == pytest.approx(finding.cost_of_waste_usd, abs=1e-5)
+    # And the session counts partition the priced sessions the same way.
+    assert finding.sessions_in_scope >= 1
+    assert (finding.sessions_in_scope + finding.sessions_no_lever
+            + finding.driver_role_sessions) <= finding.sessions_examined
+
+
+def test_a_cost_figure_never_ships_without_a_coverage_note(db):
+    """The invariant behind the card copy: any window that produces a cost
+    figure produces the prose that stops its gap to the avoidable figure being
+    read as a measurement of what was unavoidable."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.cost_of_waste_usd is not None
+    assert finding.coverage_note
+    assert "COVERAGE" in finding.coverage_note
+    # The load-bearing sentence: the gap is un-analysed, not established.
+    assert "NOT a measurement of what was unavoidable" in finding.coverage_note
+
+
+def test_sessions_below_the_context_floor_are_counted_as_cost_but_not_analysed(db):
+    """The exact asymmetry this ticket was filed for: a session too small for
+    an offload lever still bills, so it belongs in the cost figure — but it is
+    dropped from the avoidability calculation, and the card has to say which
+    sessions and how many dollars that was."""
+    _seed_offload_corpus(db)
+    # A small session: real repeat volume, nowhere near MIN_SESSION_CONTEXT_TOKENS.
+    _seed_session(db, "small", [1000, 1000, 1000], provider="anthropic",
+                  model="claude-opus-4-8")
+    finding = _run(db, _config())
+    assert finding.sessions_no_lever >= 1
+    assert finding.cost_no_lever_usd is not None and finding.cost_no_lever_usd > 0
+    assert "never accumulate" in finding.coverage_note
+    # It is genuinely in the cost total and genuinely out of the avoidable one.
+    assert finding.cost_of_waste_usd > finding.cost_in_scope_usd
+
+
+def test_the_tail_definition_gap_is_stated_not_left_implicit(db):
+    """Inside the sessions that ARE analysed, only the compaction-bounded
+    main-thread tail is claimable — much smaller than the raw repeat volume the
+    cost figure prices. Surfacing the ceiling separates 'outside the tail
+    definition' from 'discounted by the measured share'."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.offload_ceiling_usd is not None
+    # The ceiling is the un-discounted tail, so it bounds the offload term from
+    # above and is itself bounded by the in-scope cost.
+    assert finding.offload_recoverable_usd <= finding.offload_ceiling_usd + 1e-9
+    assert finding.offload_ceiling_usd <= finding.cost_in_scope_usd + 1e-9
+    assert "compaction-bounded main-thread re-read tail" in finding.coverage_note
+
+
+def test_offloadable_share_discloses_its_behavioural_basis_and_sample_size(db):
+    """The share is measured over the sessions that delegate and applied to the
+    ones that never do — a behavioural sample generalized onto the population
+    with the most headroom. That is defensible only if the basis string says
+    so, with the sample size, every time it is shown."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.offloadable_share is not None
+    assert finding.offloadable_share_sessions >= 1
+    assert finding.offloadable_share_sessions_total > finding.offloadable_share_sessions
+    basis = finding.estimate_basis
+    assert "BEHAVIOURAL BASIS AND SAMPLE SIZE" in basis
+    assert f"{finding.offloadable_share_sessions:,} of " in basis
+    assert "dispatch a subagent at all" in basis
+    # It must NOT be presented as a structural property of the work.
+    assert "not how much of this window's in-thread work was structurally offloadable" in basis
+
+
+def test_no_delegating_session_means_no_offload_claim(db):
+    """Nothing to measure the share from, so nothing is claimed — never a
+    fraction invented to fill the gap."""
+    _seed_session(db, "heavy", [1000, 1000, 1000, 1000])
+    _seed_session(db, "pad1", [500])
+    _seed_session(db, "pad2", [500])
+    finding = _run(db, _config())
+    assert finding.offloadable_share is None
+    assert finding.past_overspend_usd is None
+    assert any("offload lever" in n for n in finding.notes)
 
 
 # --------------------------------------------------------------------------
@@ -333,6 +609,6 @@ def test_finding_round_trips_through_report_dict(db):
     original = report.findings["resend"]
     restored = rebuilt.findings["resend"]
     assert restored.repeat_share == original.repeat_share
-    assert restored.estimated_recoverable_tokens == original.estimated_recoverable_tokens
+    assert restored.past_overspend_tokens == original.past_overspend_tokens
     assert len(restored.examples) == len(original.examples)
     assert restored.examples[0].session_id == original.examples[0].session_id

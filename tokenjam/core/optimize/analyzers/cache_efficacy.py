@@ -82,8 +82,8 @@ class CacheEfficacyFinding:
     efficacy_ceiling: float = EFFICACY_CEILING
     # Recoverable-savings contract (#111). See types.DowngradeFinding for the
     # field semantics. None when no row has a caching dimension to recover.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # Root-caused per-agent proposals (A1/A2/A3, see the section below). Empty
@@ -251,8 +251,8 @@ class UncachedAgentCandidate:
     sessions:      int
     assumed_prefix_tokens: int      # p25 of per-call input_tokens (conservative)
     cache_control_snippet: str = ""  # the one-paste fix, this agent's own values
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis: str = ""
 
 
@@ -274,8 +274,8 @@ class ThrashAgentCandidate:
     ttl_worth_it:    bool | None  = None
     ttl_breakeven_usd: float | None = None
     cache_control_snippet: str = ""
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis: str = ""
 
 
@@ -291,8 +291,8 @@ class LookbackMissCandidate:
     miss_count:    int
     avg_prior_turn_blocks: float
     cache_control_snippet: str = ""
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis: str = ""
 
 
@@ -486,7 +486,7 @@ def _classify_a1(
         agent_id=agent_id, provider=provider, model=model, calls=len(calls),
         sessions=sessions, assumed_prefix_tokens=prefix,
         cache_control_snippet=_uncached_snippet(model, prefix),
-        estimated_recoverable_usd=usd, estimated_recoverable_tokens=tokens,
+        past_overspend_usd=usd, past_overspend_tokens=tokens,
         estimate_basis=(
             "assumed stable prefix = this agent's own p25 per-call input "
             "tokens; recoverable = calls x prefix x (input rate - cache-read "
@@ -552,7 +552,7 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
     else:
         snippet = SILENT_INVALIDATOR_CHECKLIST
 
-    # Rollup contract: `estimated_recoverable_usd` feeds a generic cross-card
+    # Rollup contract: `past_overspend_usd` feeds a generic cross-card
     # dollar rollup, so it must only ever be populated when THIS card's own
     # recommended fix actually recovers it. The "instability" checklist and
     # the ttl_worth_it==True variant both recommend a fix that closes the
@@ -570,7 +570,7 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
         inter_call_gap_p50_minutes=round(gap_p50, 2),
         ttl_worth_it=ttl_worth_it, ttl_breakeven_usd=ttl_breakeven_usd,
         cache_control_snippet=snippet,
-        estimated_recoverable_usd=recoverable_usd,
+        past_overspend_usd=recoverable_usd,
         estimate_basis=(
             "wasted = cache-write tokens x (write rate - cache-read rate); "
             "what was paid to write the prefix versus what the same tokens "
@@ -640,7 +640,7 @@ def _classify_a3(
         miss_count=miss_count,
         avg_prior_turn_blocks=round(sum(miss_blocks) / len(miss_blocks), 1),
         cache_control_snippet=_lookback_snippet(model),
-        estimated_recoverable_usd=usd, estimated_recoverable_tokens=tokens,
+        past_overspend_usd=usd, past_overspend_tokens=tokens,
         estimate_basis=(
             f"cache breakpoints look back at most {LOOKBACK_BLOCK_LIMIT} "
             "content blocks; a proxy block count (tool-call spans between two "
@@ -712,8 +712,8 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["cache"] = CacheEfficacyFinding(
         rows=rows,
         flagged=[r for r in rows if r.flagged],
-        estimated_recoverable_usd=rec_usd,
-        estimated_recoverable_tokens=rec_tokens,
+        past_overspend_usd=rec_usd,
+        past_overspend_tokens=rec_tokens,
         min_input_tokens=min_input_tokens,
         efficacy_threshold=efficacy_threshold,
         min_calls_for_root_cause=min_calls,
