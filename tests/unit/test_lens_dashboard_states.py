@@ -46,11 +46,18 @@ _node = pytest.mark.skipif(
 
 
 def _state_machine_source() -> str:
-    """The two pure deciders, lifted straight out of the served page."""
+    """The two pure deciders, lifted straight out of the served page.
+
+    ``UNKNOWN_FIGURE`` is declared up with the formatters (the KPI row needs it
+    too, and one page must not show two different kinds of "unknown"), so it is
+    lifted separately rather than falling inside the deciders' slice.
+    """
     src = _UI.read_text(encoding="utf-8")
+    glyph_line = "const UNKNOWN_FIGURE = '?';"
+    assert glyph_line in src, "the unknown-figure glyph moved; update this extractor"
     start = src.index("function recoverableBandState")
     end = src.index("function HealthTile", start)
-    return src[start:end]
+    return glyph_line + "\n" + src[start:end]
 
 
 def _run_js(expr: str):
@@ -259,6 +266,38 @@ def test_the_degradable_triage_reads_no_longer_fall_back_to_empty_defaults(html)
         "api('/relearn/proposals').catch(() => ({ finding: null }))",
     ):
         assert gone not in html
+
+
+def test_an_unreported_kpi_field_is_unknown_not_zero(html):
+    # fmtCount(null) returns the string "0" and fmtCost(null) returns "$0.0000".
+    # Both are shared formatters used by every screen, so the guard sits at the
+    # KPI call site instead: a field the payload omitted must not become a figure.
+    assert "const kpiFigure = (v, fmt) => (v == null ? UNKNOWN_FIGURE : fmt(v));" in html
+    assert "value: kpiFigure(kpis.tokens, fmtTokens)" in html
+    assert "value: kpiFigure(kpis.sessions, fmtCount)" in html
+    assert "value: kpiFigure(kpis.events, fmtCount)" in html
+    # And the bare formatters are no longer handed those fields directly.
+    assert "fmtCount(kpis.sessions)" not in html
+    assert "fmtCount(kpis.events)" not in html
+    assert "fmtTokens(kpis.tokens)" not in html
+
+
+def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
+    # `(null || 0) / fee` rendered "0.0× plan value" and fmtCost(null) rendered
+    # "$0.0000"; on a spend tile a zero reads as "this window cost you nothing".
+    spend = html[html.index("function spendTileDisplay"):]
+    spend = spend[:spend.index("function PlanBadge")]
+    assert "const unknown = spendUsd == null;" in spend
+    assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
+    assert "value: unknown ? UNKNOWN_FIGURE : fmtCost(spendUsd)" in spend
+    assert "(spendUsd || 0) / framing.plan_monthly_usd" not in spend
+
+
+def test_one_page_shows_one_kind_of_unknown(html):
+    # The Health tiles and the KPI row share the glyph, so a half-loaded page does
+    # not show a "?" in one band and something else in another.
+    assert html.count("const UNKNOWN_FIGURE = '?';") == 1
+    assert "HEALTH_UNKNOWN = " not in html
 
 
 def test_an_unknown_health_tile_says_which_kind_of_unknown_it_is(html):

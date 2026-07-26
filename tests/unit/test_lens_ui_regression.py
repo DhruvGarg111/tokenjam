@@ -1215,8 +1215,13 @@ def test_analytics_spend_tile_uses_value_multiplier_for_subscription(html):
     # subscription, never "% of cycle" and never raw $ — plan VALUE, not spend.
     assert "function spendTileDisplay(spendUsd, framing)" in html
     assert "+ '× plan value'" in html
-    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd
-    assert "(spendUsd || 0) / framing.plan_monthly_usd" in html
+    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd. The `|| 0`
+    # that used to sit on the numerator is gone deliberately: it turned an
+    # unreported spend field into "0.0x plan value", so the null case is now
+    # caught before the division and renders as unknown instead (see
+    # test_lens_dashboard_states.py).
+    assert "const mult = spendUsd / framing.plan_monthly_usd;" in html
+    assert "const unknown = spendUsd == null;" in html
     # the tile no longer renders fmtFramedDollar (the "% of cycle") for spend
     assert "const spendVal = fmtFramedDollar(kpis.spend, framing);" not in html
     assert "const spend = spendTileDisplay(kpis.spend, framing);" in html
@@ -1227,8 +1232,10 @@ def test_analytics_count_tiles_have_thousand_separators(html):
     # raw String() integers.
     assert "function fmtCount(n)" in html
     assert "toLocaleString('en-US')" in html
-    assert "value: fmtCount(kpis.sessions)" in html
-    assert "value: fmtCount(kpis.events)" in html
+    # Routed through kpiFigure so an omitted field reads as unknown rather than
+    # as fmtCount(null)'s "0"; the formatter itself is unchanged.
+    assert "value: kpiFigure(kpis.sessions, fmtCount)" in html
+    assert "value: kpiFigure(kpis.events, fmtCount)" in html
     assert "value: String(kpis.sessions)" not in html
     assert "value: String(kpis.events)" not in html
 

@@ -5498,10 +5498,28 @@ function fmtPerItemCost(costUsd, tokenTotal, framing) {
 // Integer count with thousand separators (#262): "23954" → "23,954". For the
 // Sessions / Events KPI tiles, which are exact counts (not abbreviated like
 // fmtTokens "23.9k").
+//
+// NOTE the null case: this returns the STRING "0", and fmtCost(null) likewise
+// returns "$0.0000". Both are long-standing behaviour of formatters shared by
+// every screen in the app, so they are left exactly as they are; the guard for
+// "the payload never reported this field" belongs at the call site, which is
+// what kpiFigure() below does. Do not hand either formatter a value you have
+// not confirmed exists.
 function fmtCount(n) {
   if (n == null) return '0';
   return Math.round(n).toLocaleString('en-US');
 }
+
+// The single glyph this app uses in place of a figure it does not have. Not a 0,
+// and not a dash either (a dash reads as "none"); a question mark is the one mark
+// that cannot be mistaken for a measurement. Shared by the Health tiles and the
+// KPI row so one page never shows two different kinds of "unknown".
+const UNKNOWN_FIGURE = '?';
+
+// Format a KPI field, or say we do not have it. A field the server omitted is
+// UNKNOWN, and "0 Sessions" for an unreported count is the same lie as a health
+// tile showing 0 for a read that failed.
+const kpiFigure = (v, fmt) => (v == null ? UNKNOWN_FIGURE : fmt(v));
 
 // The Spend KPI tile under plan-tier framing (#262). For SUBSCRIPTION, the
 // confusing "% of cycle" is replaced by an honest implied-value MULTIPLIER —
@@ -5512,13 +5530,20 @@ function fmtCount(n) {
 // already conveys volume. Returns {label, value} or null (drop the tile).
 function spendTileDisplay(spendUsd, framing) {
   const mode = framing && framing.pricing_mode;
+  // An unreported spend field is unknown, not zero. Both branches below would
+  // otherwise manufacture one: `(null || 0) / fee` renders "0.0× plan value" and
+  // fmtCost(null) renders "$0.0000", and on a spend tile a zero reads as "this
+  // window cost you nothing". Checked before the mode branches so neither can.
+  const unknown = spendUsd == null;
   if (mode === 'subscription') {
     if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
-    const mult = (spendUsd || 0) / framing.plan_monthly_usd;  // == (% of cycle) / 100
+    if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };
+    const mult = spendUsd / framing.plan_monthly_usd;    // == (% of cycle) / 100
     return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
   }
   if (mode === 'local') return null;                     // no plan fee to multiply against
-  return { label: 'Spend', value: fmtCost(spendUsd) };   // api / unknown → dollars
+  // api / unknown → dollars
+  return { label: 'Spend', value: unknown ? UNKNOWN_FIGURE : fmtCost(spendUsd) };
 }
 
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
@@ -6821,11 +6846,6 @@ function recoverableBandState(phase, data, tileCount) {
   return 'scanning';
 }
 
-// The mark a health tile shows in place of a figure it does not have. Not a 0,
-// and not an em dash either (that reads as "none"); a question mark is the one
-// glyph that cannot be misread as a measurement.
-const HEALTH_UNKNOWN = '?';
-
 // Why a tile has no figure, in its own words. A tile inherits its source's
 // outcome, so it can be specific: "still scanning" (the read is outstanding past
 // the band's wait) is a different fact from "couldn't load" (it failed), and
@@ -6846,7 +6866,7 @@ const HEALTH_UNKNOWN_SUB = {
 function healthValueFor(status, value) {
   if (status === 'ready') return String(value);
   if (status === 'loading') return null;
-  return HEALTH_UNKNOWN;
+  return UNKNOWN_FIGURE;
 }
 
 // `status` decides what the tile may SAY, independently of `value`:
@@ -8242,11 +8262,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
           series: kpiSparkValues(resp, 'spend'), delta: deltas.spend });
       }
-      tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
+      // kpiFigure, not the bare formatter: a field the payload omitted renders as
+      // unknown rather than as fmtCount(null)'s "0" or fmtTokens(null)'s dash.
+      tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: kpiFigure(kpis.tokens, fmtTokens),
         series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
-      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: fmtCount(kpis.sessions),
+      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: kpiFigure(kpis.sessions, fmtCount),
         series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
-      tiles.push({ key: 'events', label: 'Events', cost: false, value: fmtCount(kpis.events),
+      tiles.push({ key: 'events', label: 'Events', cost: false, value: kpiFigure(kpis.events, fmtCount),
         series: kpiSparkValues(resp, 'events'), delta: deltas.events });
       return html`
         <div class="kpi-row">
