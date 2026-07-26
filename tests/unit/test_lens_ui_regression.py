@@ -277,13 +277,21 @@ def test_overview_fetches_in_parallel(html):
 
 def test_overview_error_handling_is_asymmetric(html):
     # /cost is load-bearing: NO .catch, so its failure surfaces the error state.
-    # The other five panels keep .catch fallbacks so one failing panel renders
-    # empty instead of blanking the Overview. Don't unify these (#124 review).
+    # The other panels still degrade individually so one failing panel never
+    # blanks the Dashboard. Don't unify these (#124 review).
     assert "api('/cost', { since, group_by: 'day' }).catch" not in html  # no catch on /cost
     assert "api('/cost', { since, group_by: 'day' })," in html           # bare, inside Promise.all
     assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
-    assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" in html
-    assert "api('/drift').catch(() => ({ agents: [] }))" in html
+    # How they degrade changed: a read that feeds a tile making a factual claim
+    # is settled into a tagged {ok, data} outcome rather than an empty default,
+    # because an empty default let a failed read publish a zero and its
+    # reassuring caption ("0 unread alerts / all clear"). See
+    # test_lens_dashboard_states.py for the rule and the behavioural tests.
+    assert "settled(api('/drift'))" in html
+    assert "const settled = (p) => p.then(data => ({ ok: true, data }), error => ({ ok: false, error }));" in html
+    # And the slow analyzer sweep is no longer a member of this batch at all:
+    # a Promise.all resolves on its slowest member, and this one is minutes long.
+    assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" not in html
 
 
 def test_overview_empty_gate_considers_historical_cost(html):
@@ -304,11 +312,20 @@ def test_overview_empty_gate_considers_historical_cost(html):
     # Fix pattern PRESENT: /cost is fetched in the parallel fan-out, and the
     # empty gate considers historical cost/tokens (not just agents/traces).
     assert "const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;" in ov
-    assert "const empty = !hasCost && !hasAgents && !hasTraces;" in ov
+    # The gate has since been tightened further: its /status and /traces inputs
+    # must have actually ANSWERED before it may claim there is no telemetry, so a
+    # failed read can no longer show "No data yet" to a user with a full history.
+    assert (
+        "const empty = !hasCost && status.ok && !agents.length "
+        "&& traces.ok && !traceList.length;"
+    ) in ov
     # /cost stays load-bearing (no .catch) inside the fan-out.
     assert "api('/cost', { since, group_by: 'day' })," in ov
-    # /status is now degradable (moved into the parallel fetch with a .catch).
-    assert "api('/status').catch(() => ({ agents: [] }))" in ov
+    # /status is still degradable and still inside the parallel fetch; it just
+    # degrades to a tagged outcome now instead of `{ agents: [] }`, so its
+    # failure can no longer be read as "this user has no agents".
+    assert "settled(api('/status'))" in ov
+    assert "api('/status').catch(() => ({ agents: [] }))" not in ov
 
 
 # --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #

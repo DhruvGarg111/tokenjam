@@ -935,6 +935,41 @@ a.health-tile.attn { border-color: var(--warn); }
 .health-value { font-family: 'Geist Mono', monospace; font-size: 24px; font-weight: 700; }
 .health-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 .health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
+/* --- Triage band: the states that are NOT "here is your answer" ------------ */
+/* A health tile whose source has not answered. The number slot renders a
+   shimmer (still checking) or a neutral "?" (the read failed), never a 0: on
+   this band a zero reads as an all-clear ("no unread alerts", "no agents
+   drifting"), which is the single most misleading thing an unknown figure could
+   claim. The .attn border is withheld too — an unanswered read is no basis for
+   raising an alarm either. */
+.health-value-skel { height: 27px; max-width: 2.4em; margin: 1px 0 2px; }
+.health-value.unknown { color: var(--text-faint); }
+/* Recoverable-waste band placeholders. Skeleton tiles hold the band's shape
+   while the analyzer sweep runs, so a slow answer reads as pending rather than
+   as a page that broke; .band-msg carries the honest sentence for a wait that
+   ran out or a read that failed, and is deliberately wordy where the tiles are
+   terse — "we do not know" needs a reason and a next step, a number does not. */
+.rec-skel { height: 62px; border-radius: 8px; }
+.band-msg {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  padding: 12px 14px; font-size: 12.5px; color: var(--text-dim);
+}
+.band-msg.warn { border-left: 3px solid var(--warn); }
+.band-msg.err { border-left: 3px solid var(--error); }
+.band-msg b {
+  display: block; color: var(--text); font-family: 'Geist Mono', monospace;
+  font-size: 12.5px; font-weight: 600; margin-bottom: 5px;
+}
+.band-msg p { margin: 0 0 9px; line-height: 1.5; max-width: 52ch; }
+.band-note { margin-top: 8px; font-size: 11.5px; color: var(--text-faint); line-height: 1.45; max-width: 52ch; }
+.band-stale { font-size: 12px; color: var(--warn); margin-bottom: 8px; }
+.band-stale .sz-link { margin-left: 6px; }
+/* The shimmer is the only motion on this band, and it is decorative: it says
+   "pending", which the accompanying text also says. Honor a reduced-motion
+   preference by holding the flat surface colour instead of animating. */
+@media (prefers-reduced-motion: reduce) {
+  .shimmer { animation: none; background: var(--surface2); }
+}
 .opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
@@ -6672,11 +6707,96 @@ function rankTiles(tiles, findingRank) {
     .map(x => x.t);
 }
 
-function HealthTile({ label, value, attention, href, sub }) {
-  return html`<a class="health-tile ${attention ? 'attn' : ''}" href=${href}>
-    <div class="health-value">${value}</div>
+// ---- Triage-band state machine (honest-absence rules) --------------------- //
+// The Dashboard's two triage bands each make FACTUAL CLAIMS ("no recoverable
+// candidates", "0 unread alerts", "within baseline"). Every one of those claims
+// needs a completed read behind it, and the reads behind them are independently
+// fallible and — for /optimize, an analyzer sweep that is minutes long on a
+// large history — independently slow. The original code funnelled all of them
+// through `.catch(() => <empty default>)`, which erases the difference between
+// "the answer is nothing" and "there is no answer": a timed-out /optimize
+// arrived at the tiles as an empty report and printed "No recoverable
+// candidates." over a corpus holding thousands of dollars of them.
+//
+// So the decision of what a band is ALLOWED TO SAY is factored out here, into
+// two pure functions with no rendering in them. They are the single place that
+// rule lives, and being pure they are directly testable under node
+// (tests/unit/test_lens_dashboard_states.py, same extraction trick as
+// test_lens_select_all_behaviour.py) rather than only string-matched.
+
+// What the "Recoverable waste" band renders, from its read's outcome.
+//   phase — 'loading' | 'ready' | 'timeout' | 'error' (see DashboardView)
+//   data  — the last COMPLETE /optimize payload we hold, or null for none ever
+// Returns one of:
+//   'tiles'    — complete answer, candidates to show
+//   'none'     — complete answer, nothing recoverable. The ONLY state permitted
+//                to state that there is nothing here.
+//   'stale'    — we hold a complete answer AND the latest refresh did not land;
+//                show the old tiles, labelled as the last complete result.
+//   'scanning' — no answer yet and still waiting.
+//   'timeout'  — stopped waiting without an answer. Unknown, not empty.
+//   'failed'   — the read errored. Unknown, not empty.
+function recoverableBandState(phase, data, tileCount) {
+  // A held answer always wins over the absence of a fresh one: showing the last
+  // complete result (labelled) beats blanking a band we do have numbers for.
+  if (data) {
+    if (phase === 'timeout' || phase === 'error') return 'stale';
+    return tileCount > 0 ? 'tiles' : 'none';
+  }
+  if (phase === 'timeout') return 'timeout';
+  if (phase === 'error') return 'failed';
+  return 'scanning';
+}
+
+// The mark a health tile shows in place of a figure it does not have. Not a 0,
+// and not an em dash either (that reads as "none"); a question mark is the one
+// glyph that cannot be misread as a measurement.
+const HEALTH_UNKNOWN = '?';
+
+// Why a tile has no figure, in its own words. A tile inherits its source's
+// outcome, so it can be specific: "still scanning" (the read is outstanding past
+// the band's wait) is a different fact from "couldn't load" (it failed), and
+// telling the user which one it is decides whether waiting is worth anything.
+const HEALTH_UNKNOWN_SUB = {
+  loading: 'checking',
+  timeout: 'still scanning',
+  error: "couldn't load",
+};
+
+// What goes in a health tile's number slot. 'loading' returns null, meaning the
+// caller renders a shimmer there instead; anything other than an answered read
+// returns the unknown mark. A caller cannot get a number out of this function
+// for a source that did not answer, which is the point: the zero it would
+// otherwise have derived from an empty fallback is the dangerous placeholder.
+// 'timeout' does NOT return null — an indefinite shimmer would read as progress
+// past the point where we have admitted we do not know.
+function healthValueFor(status, value) {
+  if (status === 'ready') return String(value);
+  if (status === 'loading') return null;
+  return HEALTH_UNKNOWN;
+}
+
+// `status` decides what the tile may SAY, independently of `value`:
+//   'ready'   — the source answered; render the figure and let `attention` and
+//               `sub` speak
+//   'loading' — no answer yet; shimmer in the number slot, "checking" sub-line
+//   'timeout' — outstanding past the band's wait; "?" and "still scanning"
+//   'error'   — the source failed; "?" and "couldn't load"
+function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
+  const shown = healthValueFor(status, value);
+  const unknown = status !== 'ready';
+  return html`<a class="health-tile ${!unknown && attention ? 'attn' : ''}" href=${href}>
+    ${shown === null
+      ? html`<div class="shimmer health-value-skel" title="still checking"></div>`
+      : html`<div class="health-value ${unknown ? 'unknown' : ''}">${shown}</div>`}
     <div class="health-label">${label}</div>
-    ${sub ? html`<div class="health-sub">${sub}</div>` : null}
+    ${/* The sub-line is where the unknown states explain themselves. An answered
+          tile keeps whatever caption the caller gave it; an unanswered one
+          replaces it, because that caption ("all clear", "within baseline") is
+          exactly the claim we have no basis for. */ ''}
+    ${unknown
+      ? html`<div class="health-sub">${HEALTH_UNKNOWN_SUB[status] || HEALTH_UNKNOWN_SUB.error}</div>`
+      : (sub ? html`<div class="health-sub">${sub}</div>` : null)}
   </a>`;
 }
 
@@ -9548,6 +9668,20 @@ function ReviewInboxView({ params }) {
   `;
 }
 
+// How long the recoverable-waste band waits before it admits it does not know.
+// Measured against a real 794MB corpus over a 30-day window: 356s idle, 480s
+// while the page was also polling, both HTTP 200 with findings. The cap sits
+// above the worse of those with headroom, so an answer that IS coming still
+// lands in the normal state and the notice never cries wolf on a scan that was
+// simply slow. A cap that is too LOW is the failure mode to avoid here: the
+// request is not cancelled at the cap, so a late answer still fills the band in,
+// and the only cost of waiting longer is a shimmer nobody can read a claim into.
+const OPTIMIZE_WAIT_MS = 10 * 60 * 1000;
+const OPTIMIZE_WAIT_MIN = Math.round(OPTIMIZE_WAIT_MS / 60000);
+// Skeleton tiles held during the sweep. Four is what the band typically fills
+// with, so the placeholder does not resize the page when the answer lands.
+const REC_SKELETON_TILES = [0, 1, 2, 3];
+
 function DashboardView({ params }) {
   const since = readParam(params, 'since', '30d', validSince);
   // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
@@ -9570,46 +9704,161 @@ function DashboardView({ params }) {
     if (el) el.scrollIntoView({ block: 'start' });
   }, [params]);
 
-  // Triage fetch — same parallel fast=true pattern as Overview (#124): /cost is
-  // load-bearing (no .catch), the rest degrade individually. The Analytics hero
-  // fetches independently, so a triage failure never blanks the explorer.
+  // Settle a degradable read into a TAGGED outcome instead of an empty default.
+  // This replaced a row of `.catch(() => ({ alerts: [] }))`-style fallbacks: each
+  // of those reads feeds a Health tile that states a fact, and an empty default
+  // makes the tile state "zero" when what actually happened is "we never found
+  // out". `.ok` is the flag every tile below renders from; the payload is only
+  // consulted once `.ok` is true.
+  const settled = (p) => p.then(data => ({ ok: true, data }), error => ({ ok: false, error }));
+
+  // Triage fetch — the FAST reads only. /optimize used to sit in this batch and
+  // is now on its own state machine below (see loadOptimize): a Promise.all
+  // resolves only when its slowest member does, and on a large corpus that
+  // member is an analyzer sweep of several minutes, so the entire band —
+  // recoverable tiles AND all five health tiles — was replaced by one anonymous
+  // shimmer rectangle for the whole wait, saying nothing at all. Everything
+  // here answers in well under a second, so the health tiles now fill in
+  // promptly and the slow band states its own progress beside them.
+  // /cost stays load-bearing (no settle): the empty gate depends on it, so its
+  // failure is legitimately the whole view's error. The Analytics hero fetches
+  // independently, so a triage failure never blanks the explorer.
   const load = useCallback(async () => {
     try {
-      // Fetch /cost (load-bearing, no .catch) alongside /status and the rest so
-      // the empty gate can consider HISTORICAL spend, not just live agents. A DB
-      // whose sessions are all >24h old reports 0 active agents but still has a
-      // full cost history — that user upgrading to review past spend must NOT
-      // see "No data yet" (the front door was gating purely on active agents and
+      // Fetch /cost (load-bearing) alongside /status and the rest so the empty
+      // gate can consider HISTORICAL spend, not just live agents. A DB whose
+      // sessions are all >24h old reports 0 active agents but still has a full
+      // cost history — that user upgrading to review past spend must NOT see
+      // "No data yet" (the front door was gating purely on active agents and
       // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces, relearn] = await Promise.all([
+      const [cost, status, compare, al, drift, traces, relearn] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
-        api('/status').catch(() => ({ agents: [] })),
+        settled(api('/status')),
+        // /cost/compare feeds no tile on this page, so it keeps its plain
+        // null fallback: there is no claim here for an empty default to
+        // falsify. Left exactly as it was.
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
-        api('/optimize', { since, fast: 'true' }).catch(() => null),
-        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
-        api('/drift').catch(() => ({ agents: [] })),
-        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
-        api('/relearn/proposals').catch(() => ({ finding: null })),
+        settled(api('/alerts', { since, unread: 'true' })),
+        settled(api('/drift')),
+        settled(api('/traces', { since, limit: 6 })),
+        settled(api('/relearn/proposals')),
       ]);
-      // "No data yet" only when there is genuinely NO telemetry: no cost history
-      // AND no tokens AND no sessions/agents AND no traces. Historical cost or
-      // an optimize finding is enough to render the tiles.
+      // "No data yet. TokenJam is listening." is itself a factual claim, so all
+      // three of its inputs must have ANSWERED before it may be shown. A failed
+      // /status or /traces read means "we could not check", never "you have no
+      // sessions"; when either is unknown the page renders the normal tiles,
+      // which state their own uncertainty, rather than the front-door empty card
+      // telling a user with a full history that nothing has been recorded.
       const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;
-      const hasAgents = !!(status.agents && status.agents.length);
-      const hasTraces = !!(traces.traces && traces.traces.length);
-      const empty = !hasCost && !hasAgents && !hasTraces;
-      setD({ loading: false, empty, error: null, cost, compare, opt,
-        alerts: al.alerts || [], drift, traces: traces.traces || [],
-        pendingFixes: ((relearn && relearn.finding && relearn.finding.clusters) || []).length });
+      const agents = (status.ok && status.data.agents) || [];
+      const traceList = (traces.ok && traces.data.traces) || [];
+      const empty = !hasCost && status.ok && !agents.length && traces.ok && !traceList.length;
+      setD({ loading: false, empty, error: null, cost, compare,
+        alerts: al, drift, traces, relearn });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
   }, [since]);
 
+  // ---- The recoverable-waste read, on its own state machine ---------------- //
+  // GET /optimize runs the analyzer sweep server-side. Measured against a real
+  // 794MB local corpus over a 30-day window it answered HTTP 200 with five
+  // findings after 356s idle and 480s while the page was also polling.
+  // `fast=true` only drops `trim`, which is persona-disabled on a claude-code
+  // corpus anyway, so the flag buys nothing here. That cost is a server-side
+  // problem tracked separately and is not what this code fixes. What this code
+  // fixes is the UI's account of it:
+  // the band must never turn a non-answer into a claim of absence, and must stay
+  // honest for the several minutes an answer can legitimately take without
+  // reading as frozen.
+  //
+  // `phase` is the single source of truth for what the band may say:
+  //   'loading' — a sweep is in flight; we do not know yet
+  //   'ready'   — a response arrived; `data` is what it said
+  //   'timeout' — we stopped waiting; still unknown
+  //   'error'   — the read failed; still unknown
+  // 'timeout' and 'error' stay distinct because the user's next move differs
+  // (keep waiting on something still running, vs. retry something that broke),
+  // and neither may ever be rendered as 'ready' with an empty report.
+  const [optState, setOptState] = useState({ phase: 'loading', data: null, error: null });
+  // A sweep that is still running server-side even though we stopped waiting for
+  // it. Tracked separately from `phase` precisely because 'timeout' does NOT
+  // mean the request went away.
+  const optInFlight = useRef(false);
+  const optRun = useRef(0);       // generation counter; stale settles are dropped
+  const optTimer = useRef(null);
+
+  const armOptWait = useCallback(() => {
+    const run = optRun.current;
+    clearTimeout(optTimer.current);
+    optTimer.current = setTimeout(() => {
+      // Only a still-'loading' read of THIS generation may time out; a sweep that
+      // already answered (or was superseded) is untouched.
+      setOptState(s => (optRun.current === run && s.phase === 'loading'
+        ? { phase: 'timeout', data: s.data, error: null } : s));
+    }, OPTIMIZE_WAIT_MS);
+  }, []);
+
+  const loadOptimize = useCallback(() => {
+    // Never more than ONE sweep in flight. The 30s poll below used to re-enter
+    // this read unconditionally; with a 45s response cache in front of an
+    // endpoint that takes minutes, every other poll opened ANOTHER concurrent
+    // sweep over the same DuckDB file, so the page got slower the longer it
+    // stayed open. That contention is why the same request measured 356s idle
+    // and 480s with the page polling.
+    if (optInFlight.current) return;
+    const run = ++optRun.current;
+    optInFlight.current = true;
+    // Keep any answer we already hold while refreshing: a slow refresh must not
+    // blank numbers that are still the last complete result.
+    setOptState(s => ({ phase: 'loading', data: s.data, error: null }));
+    armOptWait();
+
+    const resolve = (next) => {
+      optInFlight.current = false;
+      clearTimeout(optTimer.current);
+      setOptState(s => (optRun.current === run ? next(s) : s));
+    };
+    // The request is deliberately NOT abandoned when the wait runs out: it is a
+    // read whose answer is still worth having whenever it lands, so this handler
+    // stays attached past the timeout and fills the band in on its own. The page
+    // recovers without the user doing anything, rather than stranding them on a
+    // timeout notice for an answer that did eventually arrive.
+    api('/optimize', { since, fast: 'true' }).then(
+      data => resolve(() => ({ phase: 'ready', data, error: null })),
+      err => resolve(s => ({ phase: 'error', data: s.data, error: err.message || String(err) })),
+    );
+  }, [since, armOptWait]);
+
+  // Two different next moves behind one control, because the two unknown states
+  // have two different causes. On a TIMEOUT the sweep is still running, so the
+  // useful action is to go back to waiting and let it land; firing a second
+  // sweep would only add another minutes-long scan of the same DB and slow the
+  // first one down. On an ERROR nothing is in flight, so it issues a fresh read.
+  const retryOptimize = () => {
+    if (optInFlight.current) {
+      setOptState(s => ({ phase: 'loading', data: s.data, error: null }));
+      armOptWait();
+      return;
+    }
+    loadOptimize();
+  };
+
+  useEffect(() => {
+    loadOptimize();
+    return () => {
+      // Invalidate this generation so a late settle cannot write into a view
+      // that has moved to a different window.
+      optRun.current++;
+      optInFlight.current = false;
+      clearTimeout(optTimer.current);
+    };
+  }, [loadOptimize]);
+
   // The hero's data is fetched on its OWN effect, deliberately not folded into
   // the triage `Promise.all` above: that batch resolves only when its SLOWEST
-  // member does (a 30-day `/optimize` pass over a large DB is minutes), and a
-  // headline stat that waits on an analyzer sweep is a headline nobody sees.
+  // member does, and a headline stat that waits on an analyzer sweep is a
+  // headline nobody sees.
   // This read is a cheap lookup of an already-stored block (it never triggers a
   // recompute) and is the SAME endpoint the Review inbox headline reads, so the
   // two surfaces state one number computed once server-side.
@@ -9623,15 +9872,22 @@ function DashboardView({ params }) {
   }, []);
 
   useEffect(() => {
+    const poll = () => {
+      if (document.visibilityState !== 'visible') return;
+      load();
+      // The sweep is polled too, so a wait that timed out still gets picked back
+      // up without the user asking; loadOptimize's own in-flight guard makes this
+      // a no-op while one is running, so the poll can never stack sweeps.
+      loadOptimize();
+    };
     load();
     // The live tiles (/status, /traces, /alerts, /drift) are excluded from the
     // GET cache, so each poll refetches them fresh; the slow /cost, /optimize and
     // /relearn reads honor the short cache TTL (refresh within ~45s).
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
-    const onVis = () => { if (document.visibilityState === 'visible') load(); };
-    document.addEventListener('visibilitychange', onVis);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
-  }, [load]);
+    const timer = setInterval(poll, 30000);
+    document.addEventListener('visibilitychange', poll);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', poll); };
+  }, [load, loadOptimize]);
 
   const winPicker = html`
     <select value=${since} onChange=${e => setWin(e.target.value)}>
@@ -9655,11 +9911,35 @@ function DashboardView({ params }) {
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
-  const tiles = (!d.loading && !d.empty && !d.error) ? recoverableTiles(d.opt) : [];
-  const budgets = (d.opt && d.opt.budgets) || [];
+  // Tiles are derived ONLY from an answer we actually hold. Passing an absent
+  // report into recoverableTiles() is the original bug in one line: a missing
+  // report and an empty report both flatten to [], and the band then printed
+  // "No recoverable candidates." for a read that had simply not come back.
+  const optData = optState.data;
+  const tiles = optData ? recoverableTiles(optData) : [];
+  const bandState = recoverableBandState(optState.phase, optData, tiles.length);
+
+  // Budgets ride on the same /optimize payload, so the "Budgets at risk" tile
+  // inherits that read's outcome: 0 with the caption "none configured" is a
+  // claim about the user's config, and an unanswered sweep cannot make it.
+  const budgets = (optData && optData.budgets) || [];
   const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
-  const driftN = driftSignalCount(d.drift);
-  const errTraces = (d.traces || []).filter(t => t.status_code === 'error').length;
+  // Mirrors the band's own phase rather than flattening to "failed": a sweep
+  // still running past the wait says "still scanning", one that errored says it
+  // couldn't load, and the two must not be reported as the same thing.
+  const budgetStatus = optData ? 'ready' : optState.phase;
+
+  // Each remaining health figure is derived from its OWN read's outcome, and
+  // `tileStatus` is what decides whether the figure may be shown at all. While
+  // the whole batch is still in flight (d.loading) nothing has answered yet, so
+  // every tile is 'loading' rather than 0.
+  const tileStatus = (outcome) => (d.loading || !outcome) ? 'loading' : (outcome.ok ? 'ready' : 'error');
+  const alertList = (d.alerts && d.alerts.ok && d.alerts.data.alerts) || [];
+  const traceList = (d.traces && d.traces.ok && d.traces.data.traces) || [];
+  const relearnClusters = (d.relearn && d.relearn.ok && d.relearn.data.finding
+    && d.relearn.data.finding.clusters) || [];
+  const driftN = driftSignalCount(d.drift && d.drift.ok ? d.drift.data : null);
+  const errTraces = traceList.filter(t => t.status_code === 'error').length;
 
   // Run-rate projection folded into a one-line caption under the explorer's KPI
   // row — the dashboard's single spend headline lives there, not as a separate
@@ -9697,12 +9977,46 @@ function DashboardView({ params }) {
       : html`
         <!-- Triage band: recoverable waste + health. Spend is NOT shown here —
              it lives once, in the explorer's Spend KPI tile + chart below. -->
+        ${/* No blanket "the whole band is loading" shimmer any more. That single
+              90px grey rectangle stood in for BOTH bands until the slowest read
+              in the batch resolved, which on a large corpus meant several
+              minutes of an anonymous grey box that named nothing it was waiting
+              for. Each band now renders its own labelled structure immediately
+              and each tile states its own read's status, so the page is
+              legible from the first paint. */ ''}
         ${d.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:8px">Couldn't load triage: ${d.error}</div><button class="btn" onClick=${load}>Retry</button></div>`
-          : d.loading ? html`<div class="shimmer" style="height:90px"></div>`
           : html`
             <div class="dash-triage">
               <div class="dash-col">
                 <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+                ${/* recoverableBandState() decided which of the six states this
+                      is; the branches below only render. The ONE branch allowed
+                      to say there is nothing recoverable is 'none', which
+                      requires a completed response. */ ''}
+                ${bandState === 'scanning' ? html`
+                  <div class="tile-grid compact">
+                    ${REC_SKELETON_TILES.map(i => html`<div class="shimmer rec-skel" key=${i}></div>`)}
+                  </div>
+                  <div class="band-note">Scanning your history for recoverable waste. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
+                ${bandState === 'timeout' ? html`
+                  <div class="band-msg warn">
+                    <b>Still scanning after ${OPTIMIZE_WAIT_MIN} minutes.</b>
+                    <p>We don't know yet whether there is recoverable waste in this window. The scan hasn't answered; that is not the same as an all-clear, so this band is showing you nothing rather than a zero.</p>
+                    <button class="btn" onClick=${retryOptimize}>Keep waiting</button>
+                  </div>` : null}
+                ${bandState === 'failed' ? html`
+                  <div class="band-msg err">
+                    <b>Couldn't scan for recoverable waste.</b>
+                    <p>${optState.error || 'The request failed.'}</p>
+                    <p>Until this succeeds there is no basis for saying whether recoverable waste exists here, so no figure is shown.</p>
+                    <button class="btn" onClick=${retryOptimize}>Try again</button>
+                  </div>` : null}
+                ${bandState === 'stale' ? html`
+                  <div class="band-stale">
+                    ⚠ the latest scan ${optState.phase === 'timeout' ? 'has not answered yet' : 'failed'}; these are the last complete results
+                    <span class="sz-link" onClick=${retryOptimize}>${optState.phase === 'timeout' ? 'keep waiting' : 'try again'}</span>
+                  </div>` : null}
+                ${bandState === 'tiles' || bandState === 'none' || bandState === 'stale' ? html`
                 <div class="tile-grid compact">
                   ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
                     : tiles.map(t => {
@@ -9728,21 +10042,32 @@ function DashboardView({ params }) {
                         ${explain ? html`<div class="rec-hint">${explain}</div>` : null}
                       </a>`;
                     })}
-                </div>
+                </div>` : null}
               </div>
               <div class="dash-col">
                 <div class="band-label">Health at a glance</div>
+                ${/* Every tile below carries the status of the read it is derived
+                      from. Each one used to take its figure from a `.catch(() =>
+                      <empty>)` fallback, so a failed read published a 0 with a
+                      reassuring caption: "0 unread alerts / all clear",
+                      "0 agents drifting / within baseline", "0 budgets at risk /
+                      none configured". Those are the worst possible lies on a
+                      health band, because a zero here reads as "you are fine".
+                      An unanswered read now renders a shimmer or a "?" and says
+                      which it is. */ ''}
                 <div class="tile-grid compact">
-                  <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
-                    sub="the loop, review inbox" />
-                  <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
-                    href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
+                  <${HealthTile} label="Pending fixes" value=${relearnClusters.length} attention=${relearnClusters.length > 0} href="#/review"
+                    status=${tileStatus(d.relearn)} sub="the loop, review inbox" />
+                  <${HealthTile} label="Unread alerts" value=${alertList.length} attention=${alertList.length > 0}
+                    status=${tileStatus(d.alerts)}
+                    href="#/alerts?unread=true" sub=${alertList.length ? alertList[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
-                    sub=${driftN ? 'review baselines' : 'within baseline'} />
+                    status=${tileStatus(d.drift)} sub=${driftN ? 'review baselines' : 'within baseline'} />
                   <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
+                    status=${budgetStatus}
                     sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
-                  <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
-                    sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
+                  <${HealthTile} label="Recent activity" value=${traceList.length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
+                    status=${tileStatus(d.traces)} sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
                 </div>
               </div>
             </div>`}
