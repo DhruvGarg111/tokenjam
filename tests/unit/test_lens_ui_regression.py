@@ -2261,7 +2261,9 @@ def test_cost_proposals_wired_into_review_inbox(html):
     # advisories" tab existing again would be the regression, not its absence.
     assert "Cost advisories" not in html
     assert "Recurring mistakes (" not in html
-    assert ">Open (${shownItems.length})<" in html
+    # The count is conditional now, because printing "(0)" before the page knows
+    # its own numbers reads as "you are all clear" on a non-empty inbox.
+    assert "Open ${openCountKnown ? html`(${shownItems.length})`" in html
 
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
@@ -2971,6 +2973,74 @@ def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
     # is a reading surface, not a dense card.
     modal = html[html.index("function RelearnApplyModal"):html.index("function daysAgoLabel")]
     assert "inbox-row" not in modal
+
+
+def test_a_recompute_never_blanks_rows_the_page_already_has(html):
+    # THE correctness bug. Both endpoints serve their CACHED result immediately and
+    # merely flag `status: "computing"` while a refresh runs, so the page had 55
+    # clusters and 16 proposals in hand while printing a bare "Loading…", omitting
+    # the avoided tile, and rendering the tab as "Open (0)". Zero is the most
+    # misleading value this page can print: it reads as "you are all clear".
+    view = html[html.index("function ReviewInboxView"):]
+
+    # "Has this page had an answer yet" is a DIFFERENT question from "is a scan
+    # running", and conflating them is what caused the bug.
+    assert "const firstLoad = d.loading || !costLoaded" in view
+    assert "const scanning = d.status === 'computing' || costStatus === 'computing'" in view
+    # `costStatus` cannot stand in for "loaded": it initialises to 'never_run',
+    # indistinguishable from a real fresh install.
+    assert "const [costLoaded, setCostLoaded] = useState(false)" in view
+    assert "finally { setCostLoaded(true); }" in view
+
+    # Rows render unconditionally; only the EMPTY branch is gated. So a recompute
+    # can never blank a list that has rows.
+    assert "${topOpen.map(renderRow)}" in view
+    assert "${openItems.length === 0 ? (" in view
+    # Skeletons are for the two states that genuinely have nothing: still
+    # fetching, or a real first scan in flight.
+    assert "const showSkeleton = openItems.length === 0 && (firstLoad || (scanning && d.status !== 'never_run'))" in view
+    assert "<${InboxSkeletonRow} key=${i} />" in view
+    assert "Loading…" not in view, "the bare loading string must be gone"
+
+
+def test_no_count_or_tile_is_rendered_before_the_page_knows_it(html):
+    # A count the page does not know is not printed as 0, and the tiles hold their
+    # final positions so nothing shifts when the numbers land.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "const openCountKnown = !firstLoad" in view
+    assert "const appliedCountKnown = appliedLoaded" in view
+    # A PARTIAL count is as wrong as a zero: it would be replaced a moment later,
+    # which is the layout jump this rule exists to prevent. So both ledgers must
+    # have answered, not just one.
+    assert "d.loading || !costLoaded" in view
+    # Shimmer chips reserve the digits' width in both tabs.
+    assert view.count('class="shimmer" style="display:inline-block;width:20px') == 2
+
+    tile = html[html.index("function InboxStatTiles"):html.index("function ReviewInboxView")]
+    assert "if (loading && openItems.length === 0 && appliedCount === 0 && !hasExcluded)" in tile
+    assert "loading=${firstLoad}" in view
+
+    # Reused the app's existing shimmer primitive rather than inventing a loader,
+    # and nothing fakes progress on a scan of unknown length. Asserted on MARKUP,
+    # not on words: the components' own comments name the things they avoid, so a
+    # bare substring ban matches the explanation and fails on correct code.
+    assert ".shimmer {" in html
+    skel = html[html.index("function InboxSkeletonRow"):html.index("function InboxLoadingNote")]
+    assert 'class="shimmer"' in skel
+    assert "animation" not in skel, "the skeleton must not roll its own animation"
+    assert "<progress" not in html
+    # One animation in the app, the pre-existing shimmer. A second @keyframes
+    # would mean a new loader was invented here.
+    assert html.count("@keyframes shimmer") == 1
+    # Motion is suppressed for a reader who asked for none.
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert ".shimmer { animation: none; }" in html
+
+    # The state says what it is doing, from what the server actually reported, and
+    # never invents a number or a percentage.
+    note = html[html.index("function InboxLoadingNote"):html.index("// --- The row's description block")]
+    assert "sessionsScanned != null" in note
+    assert "A scan is running now" in note
 
 
 def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):

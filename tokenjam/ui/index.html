@@ -847,6 +847,13 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   animation: shimmer 1.4s ease infinite;
 }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+/* A loading placeholder must not animate for a reader who asked for no motion.
+   Applied to `.shimmer` itself rather than to one screen's copy of it, so every
+   shimmer in the app inherits the guard; the placeholder still reads as a
+   placeholder because the gradient stays. */
+@media (prefers-reduced-motion: reduce) {
+  .shimmer { animation: none; }
+}
 
 /* Overview + Optimize (issue #114) */
 .ov-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
@@ -8107,6 +8114,63 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
+// --- Loading state: placeholders shaped like the rows they become -----------
+//
+// The bug this replaced was a correctness bug, not a styling one. Both endpoints
+// serve their CACHED result immediately and merely flag `status: "computing"`
+// when a refresh is in flight, so the page had 55 clusters and 16 proposals in
+// hand while printing a bare "Loading…", omitting the avoided tile, and rendering
+// the tab as "Open (0)". A zero is the single most misleading value this page can
+// print: it reads as "you are all clear" on an inbox holding thousands of dollars.
+//
+// Three server states that used to collapse into one dead screen, now distinct:
+//   * `computing` WITH cached rows -> render the rows, and let the header's own
+//     "scanning…" be the quiet refreshing indicator. Never blank the list for a
+//     recompute.
+//   * `computing` with NOTHING cached -> a first scan really is running, so say so
+//     and hold the geometry with skeletons.
+//   * `never_run` / a completed-but-empty scan -> the existing empty states.
+//
+// The skeleton mirrors the real row's geometry (title line, the 3-line clamped
+// description block, a fix block, an action row) so real content FILLS IN rather
+// than replacing a differently-shaped block. Motion is the app's existing
+// `.shimmer` and nothing else: no spinner, no bouncing dots, and above all no
+// progress bar, which on a scan of unknown length could only fake progress.
+function InboxSkeletonRow() {
+  return html`
+    <div class="opt-section inbox-row" aria-hidden="true" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="shimmer" style="height:13px;width:38%"></div>
+        <div class="shimmer" style="height:11px;width:64px;flex-shrink:0"></div>
+        <div class="shimmer" style="height:13px;width:74px;margin-left:auto;flex-shrink:0"></div>
+      </div>
+      ${/* Same height the real description block is clamped to, so the switch to
+            real text moves nothing. */ ''}
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">
+        <div class="shimmer" style="height:12px;width:100%"></div>
+        <div class="shimmer" style="height:12px;width:100%"></div>
+        <div class="shimmer" style="height:12px;width:72%"></div>
+      </div>
+      <div class="shimmer" style="height:30px;width:132px;margin-top:14px;border-radius:6px"></div>
+    </div>`;
+}
+
+// What the page is actually doing, stated rather than animated. The most engaging
+// thing this state can say is the truth, and the server knows it: once a scan has
+// reported its corpus, name the size. Before that there is genuinely nothing to
+// report but the step being performed, so it says only that and never invents a
+// number or a percentage.
+function InboxLoadingNote({ scanning, sessionsScanned }) {
+  const corpus = sessionsScanned != null
+    ? ` Scanning ${sessionsScanned.toLocaleString('en-US')} sessions of history.` : '';
+  return html`
+    <div class="dim" style="font-size:12px;margin:0 2px 8px">
+      ${scanning
+        ? 'A scan is running now, and this is the first one, so there is no earlier result to show yet.' + corpus
+        : 'Reading the last completed scan.' + corpus}
+    </div>`;
+}
+
 // --- The row's description block: the same height on every row --------------
 //
 // Wraps whatever prose a row has in a fixed-line clamp with an in-place
@@ -9252,7 +9316,7 @@ function ExcludedWasteNote({ excluded }) {
     </div>`;
 }
 
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed, excluded, pastOverspend }) {
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
   const appliedPriceable = appliedEstimates.filter(i => i.usd != null);
   const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
   const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.usd, 0);
@@ -9269,6 +9333,22 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
   // doesn't (see below).
   const hasOpenOverspend = !!(pastOverspend
     && ((pastOverspend.proposal_count || 0) > 0 || pastOverspend.past_overspend_tokens));
+  // While the page does not yet know its own numbers, the tiles hold their final
+  // positions as placeholders. Returning null here (the old behaviour) made the
+  // whole band appear only once data landed, so the tab bar and the list jumped
+  // down the page at that moment. A placeholder cannot be mistaken for a figure,
+  // whereas an absent tile plus a "0" count read as a clean inbox.
+  if (loading && openItems.length === 0 && appliedCount === 0 && !hasExcluded) {
+    return html`
+      <div style="margin:10px 0 18px;display:flex;gap:14px;flex-wrap:wrap" aria-hidden="true">
+        ${[0, 1].map(i => html`
+          <div key=${i} class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+            <div class="shimmer" style="height:11px;width:44%"></div>
+            <div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>
+            <div class="shimmer" style="height:12px;width:66%;margin-top:6px"></div>
+          </div>`)}
+      </div>`;
+  }
   if (openItems.length === 0 && appliedCount === 0 && !hasExcluded) return null;
   return html`
     <div style="margin:10px 0 18px">
@@ -9343,6 +9423,12 @@ function ReviewInboxView({ params }) {
   // headline and by the Dashboard hero. Never re-derived from the cards.
   const [costPastOverspend, setCostPastOverspend] = useState(null);
   const [costApplied, setCostApplied] = useState([]);      // marked-applied cost proposals
+  // Has each fetch ANSWERED once? Distinct from `status`, which is the server's
+  // scan state and arrives WITH data. `costStatus` cannot stand in for this: it
+  // initialises to 'never_run', which is indistinguishable from a real never_run,
+  // so a fresh page load looked like a fresh install.
+  const [costLoaded, setCostLoaded] = useState(false);
+  const [appliedLoaded, setAppliedLoaded] = useState(false);
   const [marking, setMarking] = useState(null);            // signature currently being marked applied
 
   const load = useCallback(async () => {
@@ -9373,6 +9459,7 @@ function ReviewInboxView({ params }) {
       const r = await api('/relearn/applied');
       setApplied(r.applied || []);
     } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
+    finally { setAppliedLoaded(true); }
   }, []);
 
   const loadCost = useCallback(async () => {
@@ -9386,6 +9473,7 @@ function ReviewInboxView({ params }) {
       setCostExcluded((r.past_overspend && r.past_overspend.excluded) || {});
       setCostPastOverspend(r.past_overspend || null);
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
+    finally { setCostLoaded(true); }
     try {
       const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
@@ -9541,6 +9629,23 @@ function ReviewInboxView({ params }) {
     ...visibleCost,                                   // already carry kind: 'cost'
   ];
 
+  // --- What the page KNOWS, versus what the server is DOING -----------------
+  //
+  // Two different questions that used to be conflated, which is what made the
+  // loading state lie. `firstLoad` is "has this page had an answer yet"; `scanning`
+  // is "is a recompute in flight", and a recompute arrives WITH the cached result,
+  // so it must never blank anything.
+  const firstLoad = d.loading || !costLoaded;
+  const scanning = d.status === 'computing' || costStatus === 'computing';
+  // A count is printed only once BOTH ledgers have answered. A partial count is
+  // as wrong as a zero: it would be replaced a moment later, which is the layout
+  // jump this rule exists to prevent.
+  const openCountKnown = !firstLoad;
+  const appliedCountKnown = appliedLoaded;
+  // Nothing cached AND nothing to show yet: the only state that earns skeletons.
+  // With cached rows in hand the list renders, whatever the scan is doing.
+  const showSkeleton = openItems.length === 0 && (firstLoad || (scanning && d.status !== 'never_run'));
+
   // The sub-$5 noise floor (see INBOX_MIN_USD), now once over the whole list
   // instead of once per tab. A deep-linked card is exempt so an Optimize page's
   // "review it →" always resolves to something, even when that card is small;
@@ -9622,13 +9727,16 @@ function ReviewInboxView({ params }) {
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
 
-    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} pastOverspend=${costPastOverspend} />
+    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} pastOverspend=${costPastOverspend} loading=${firstLoad} />
 
     ${/* TWO tabs. The open list is one list; "Applied" answers a different
           question and keeps its own. */ ''}
     <div class="tab-bar" role="tablist">
-      <button class="tab ${tab === 'open' ? 'active' : ''}" role="tab" aria-selected=${tab === 'open'} onClick=${() => setTab('open')}>Open (${shownItems.length})</button>
-      <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>Applied (${appliedOpenCount})</button>
+      ${/* A count the page does not know yet is not rendered as 0. A shimmer chip
+            holds the digits' width so the label does not reflow when the real
+            number arrives. */ ''}
+      <button class="tab ${tab === 'open' ? 'active' : ''}" role="tab" aria-selected=${tab === 'open'} onClick=${() => setTab('open')}>Open ${openCountKnown ? html`(${shownItems.length})` : html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`}</button>
+      <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>Applied ${appliedCountKnown ? html`(${appliedOpenCount})` : html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`}</button>
     </div>
 
     ${tab === 'open' ? html`
@@ -9667,17 +9775,24 @@ function ReviewInboxView({ params }) {
           <span class="dim">Select all ${bulkRelearn.length} tokenjam can apply${selectedCount ? ` · ${selectedCount} selected` : ''}</span>
         </label>` : null}
       <div>
-        ${/* The empty states are reached only when the list is ACTUALLY empty,
-              so a partial failure never hides rows that did load. Ordered
-              most-specific first: a hard error, then never-scanned, then a
-              genuinely empty result. */ ''}
+        ${/* The empty states are reached only when the list is ACTUALLY empty, so
+              a partial failure never hides rows that did load, and a recompute
+              NEVER does: `status: "computing"` arrives together with the cached
+              result, which is precisely what the old gate got wrong.
+
+              Ordered most-specific first: a hard error, then the two states that
+              legitimately have nothing yet (still fetching, or a genuinely first
+              scan in flight) which get skeletons, then never-scanned, then a
+              completed-but-empty result. */ ''}
         ${openItems.length === 0 ? (
           d.error && costStatus === 'error'
             ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load the inbox: ${d.error}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
           : d.error
             ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>`
-          : d.loading
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>`
+          : showSkeleton
+            ? html`
+                <${InboxLoadingNote} scanning=${!firstLoad && scanning} sessionsScanned=${d.sessionsScanned} />
+                ${[0, 1, 2, 3].map(i => html`<${InboxSkeletonRow} key=${i} />`)}`
           : costStatus === 'error'
             ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
           : d.status === 'never_run' && costStatus === 'never_run'
