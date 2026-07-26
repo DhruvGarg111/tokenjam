@@ -1085,8 +1085,9 @@ def _relearn_gate_labels() -> dict[str, str]:
     return {
         wb.REASON_PLACEHOLDER: "have no derived fix template",
         wb.REASON_NET_NEGATIVE: (
-            "are net-negative to codify (the standing cost of the rule "
-            "would exceed what it recovers)"
+            "are modelled as net-negative to codify (the rule's standing cost "
+            "would exceed what it recovers; the value of PREVENTING the "
+            "failure is not counted)"
         ),
         wb.REASON_BUDGET_FULL: (
             "are budget-deferred (this window's permanent-rule budget is "
@@ -2749,8 +2750,12 @@ def _apply_write_budget(
         lane_budget_tokens=wb.COST_WRITE_BUDGET_TOKENS,
         lane_max_writes=wb.COST_MAX_OFFERED_WRITES,
         # The summarize analyzer's own measurement of the files these rules
-        # append to. Absent (it is deliberately not a COST_ANALYZER, so a
-        # caller must ask for it) leaves the lane cap standing alone.
+        # append to. `summarize` IS a COST_ANALYZER (see that tuple's own
+        # docstring), so a normal recompute carries the finding and this
+        # resolves to a real footprint. The absent case is the exception, not
+        # the rule: a report built without summarize (a scoped `tj optimize
+        # <analyzer>` run, or an older cache) leaves the lane cap standing
+        # alone.
         existing_agent_file_tokens=wb.measured_agent_file_tokens(
             findings.get("summarize"),
         ),

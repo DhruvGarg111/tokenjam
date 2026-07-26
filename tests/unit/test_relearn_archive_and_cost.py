@@ -419,8 +419,186 @@ def test_relearn_coverage_note_breaks_down_gated_clusters_by_reason(db):
     note = proposals[0].coverage_note
     assert note
     assert "2 have no derived fix template" in note
-    assert "3 are net-negative" in note
+    # "modelled as", not a bare "are": the net-negative verdict is arithmetic
+    # over quantities we can count, and it does not count what the rule saves
+    # by preventing the failure (write_budget's module docstring).
+    assert "3 are modelled as net-negative" in note
     assert "1 are budget-deferred" in note
     # The load-bearing closing sentence: absence of a figure is not evidence
     # of necessity.
     assert "not a measurement of what was unavoidable" in note
+
+
+# --------------------------------------------------------------------------- #
+# The verdict has to be VISIBLE, not merely computed (#346).
+#
+# Every quantity below already existed on the dataclass; none of it reached a
+# renderer. A card whose write was suppressed showed a bare, unexplained
+# "$0.00 est./mo" — on a real corpus that was ~44 of 55 rows — while those same
+# clusters had already spent real money. The gate is a gap in OUR fix library,
+# never a finding that the failure was harmless, and the surfaces now have to
+# say so.
+# --------------------------------------------------------------------------- #
+
+
+def test_suppressed_cluster_carries_a_short_gate_label(db):
+    """A suppressed write stamps BOTH the long sentence and the short label.
+
+    The short form is what a dense list can afford to render; without it the
+    CLI and the inbox row would each invent their own abbreviation of the
+    budget's sentence, which is the drift `write_budget` owns the wording to
+    prevent.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import cluster_failures
+
+    failures = []
+    for i in range(MIN_RECURRING_SESSIONS):
+        session_id = f"s{i}"
+        _priced_session(db, session_id)
+        failures.append(_episode(
+            session_id,
+            "File has not been read yet. Read it first before writing to it.",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+        ))
+    clusters = list(cluster_failures(failures).values())
+    underwater = build_projection_basis(30.0, 30, 500_000)
+    proposals, _ = build_proposals(
+        clusters, conn=db.conn, window_days=30.0, persona="claude-code",
+        projection=underwater, repo_cwd_map={"demo": "/tmp/demo"},
+    )
+    p = proposals[0]
+    assert not p.write_offered
+    assert p.write_blocked_reason, "the long sentence must survive for the card"
+    assert p.write_blocked_short, "the short label must exist for the list"
+    # Short really is short: a list renders one line per row, not a paragraph.
+    assert len(p.write_blocked_short) < len(p.write_blocked_reason)
+    assert "\n" not in p.write_blocked_short
+
+
+def test_short_reason_covers_every_suppression_reason():
+    """Every reason `write_budget` can emit has a short form.
+
+    A reason added upstream without one degrades to a generic label rather
+    than rendering blank — but the five it ships with are named, so a silent
+    "no permanent fix offered" on a known reason is a regression.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+
+    known = [
+        wb.REASON_PLACEHOLDER, wb.REASON_NET_NEGATIVE, wb.REASON_BUDGET_FULL,
+        wb.REASON_FAMILY_MERGED, wb.REASON_CEILING_REACHED,
+    ]
+    for reason in known:
+        short = wb.short_reason(reason)
+        assert short and short != "no permanent fix offered", reason
+    # Falsy in, falsy out: an offered write has nothing to say.
+    assert wb.short_reason("") == ""
+    # Unknown reason still reports THAT something gated the write.
+    assert wb.short_reason("something new") == "no permanent fix offered"
+
+
+def test_cli_relearn_row_leads_with_observed_cost_not_the_gated_claim(db):
+    """The CLI row states what the recurrence already cost, and never states a
+    suppressed write's gross saving as though it were claimable."""
+    from tokenjam.cli.cmd_optimize import (
+        _relearn_observed_cost,
+        _relearn_write_gate_line,
+    )
+    from tokenjam.core.optimize.analyzers.relearn import cluster_failures
+
+    failures = []
+    for i in range(MIN_RECURRING_SESSIONS):
+        session_id = f"c{i}"
+        _priced_session(db, session_id)
+        failures.append(_episode(
+            session_id,
+            "File has not been read yet. Read it first before writing to it.",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+        ))
+    clusters = list(cluster_failures(failures).values())
+    underwater = build_projection_basis(30.0, 30, 500_000)
+    proposals, _ = build_proposals(
+        clusters, conn=db.conn, window_days=30.0, persona="claude-code",
+        projection=underwater, repo_cwd_map={"demo": "/tmp/demo"},
+    )
+    p = proposals[0]
+    assert p.net_negative
+    # The claim is zero...
+    assert p.estimated_recoverable_tokens == 0
+    # ...and yet the row still shows a non-empty observed cost.
+    cost = _relearn_observed_cost(p, pricing_mode="api")
+    assert cost, "a suppressed cluster must still render what it cost"
+    assert cost not in ("$0.00", "~0 tok")
+    # And it says WHY no fix is offered, with the arithmetic.
+    gate = _relearn_write_gate_line(p)
+    assert gate
+    assert "no permanent fix offered" in gate
+    assert "payback" in gate
+    # A subscription user sees tokens, never a price they were not charged.
+    assert _relearn_observed_cost(p, pricing_mode="subscription").endswith("tok")
+
+
+def test_offered_cluster_has_no_gate_line(db):
+    """The gate line is strictly for suppressed writes; an offered fix renders
+    none, so the list does not accuse every row of being un-actionable."""
+    from tokenjam.cli.cmd_optimize import _relearn_write_gate_line
+
+    offered = RelearnCluster(
+        signature="ok", title="ok", family_key="fam", sessions=3, occurrences=3,
+        repos=["demo"], rung=1, scope="project", proposed_fix="do the thing",
+        write_offered=True, write_blocked_reason="",
+    )
+    assert _relearn_write_gate_line(offered) == ""
+
+
+def test_net_negative_wording_is_modelled_not_observed():
+    """#355: the verdict is arithmetic over quantities we can count, and the
+    measurement that would settle it returned null. No surface may state it as
+    an observed result, and the blind spot is named in the module docstring."""
+    from tokenjam.core.optimize import write_budget as wb
+
+    assert "quantities we can count" in wb.REASON_NET_NEGATIVE
+    assert "modelled" in wb.REASON_NET_NEGATIVE
+    # The prevention blind spot is stated to the user, not just to the reader
+    # of the source.
+    assert "preventing" in wb.REASON_NET_NEGATIVE
+    doc = wb.__doc__ or ""
+    assert "blind spot" in doc.lower()
+    assert "repeat-task-codification-measurement" in doc
+
+
+def test_short_label_is_derived_on_read_for_an_older_cache():
+    """The Review inbox reads the STORED proposal cache, and the row renders
+    only the short label. A cache written before that field existed must still
+    produce one, or every gated row silently loses its explanation for a whole
+    upgrade cycle — the exact invisibility the label was added to fix.
+
+    Mirrors the existing on-read stamping of `proposal_id` / `advise_only_reason`.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+    from tokenjam.core.optimize.relearn_proposals import stamp_proposal_ids
+
+    legacy = {
+        "clusters": [
+            # No `write_blocked_short` key at all, and the PRE-hedging wording
+            # of the net-negative sentence — exactly what the previous build
+            # wrote to disk.
+            {
+                "signature": "old", "write_offered": False,
+                "write_blocked_reason": wb.LEGACY_REASON_NET_NEGATIVE,
+            },
+            {
+                "signature": "current", "write_offered": False,
+                "write_blocked_reason": wb.REASON_PLACEHOLDER,
+            },
+        ],
+    }
+    out = stamp_proposal_ids(legacy)["clusters"]
+    assert out[0]["write_blocked_short"] == wb.short_reason(wb.REASON_NET_NEGATIVE)
+    assert out[0]["write_blocked_short"] != "no permanent fix offered", (
+        "the legacy net-negative wording must not degrade to the generic label"
+    )
+    assert out[1]["write_blocked_short"] == wb.short_reason(wb.REASON_PLACEHOLDER)
+    # Pure: the input dict is never mutated (the stamper runs inside a cache
+    # write and must never surprise its caller).
+    assert "write_blocked_short" not in legacy["clusters"][0]

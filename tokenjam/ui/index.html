@@ -7960,6 +7960,63 @@ function estMonthlyLine(item, suppressed) {
   return { big: '—', sub: '' };
 }
 
+// --- Relearn cluster: observed cost, and the write-economics verdict -------
+//
+// A recurring-mistake row used to render exactly ONE number — the forward
+// `estimated_monthly_*` claim, captioned "est. / mo". That figure is GATED:
+// `write_budget.py` zeroes it whenever no permanent rule is worth offering.
+// On a real corpus that meant 50 of 55 rows rendering "$0.00 est./mo" with no
+// reason given, while those same 55 clusters had already cost $46 of observed
+// spend between them. A zero with no explanation reads as "this was free",
+// which is the exact inversion of what the gate means: the gate is a gap in
+// OUR fix library, never a finding that the failure was harmless (CLAUDE.md
+// anti-pattern 32b).
+//
+// So the row now LEADS with what the recurrence already cost — ungated, past
+// tense, straight off `past_overspend_*` — and states a forward figure only
+// where a fix is genuinely on offer. The two vocabularies stay strictly
+// apart, per the same rule that governs the cost cards: an observation is
+// past tense and never netted, a claim is forward and always gated.
+function relearnObservedFigure(cluster) {
+  const usd = cluster.past_overspend_usd;
+  const toks = cluster.past_overspend_tokens;
+  if (usd != null) return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
+  if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
+  // A cache written before the observed fields existed carries neither. Return
+  // null so the caller falls back to the forward figure WITH its own caption,
+  // rather than relabelling a projection as an observation.
+  return null;
+}
+
+// The write-economics verdict in one reader-facing line, or null when a
+// permanent fix is actually on offer.
+//
+// `write_blocked_reason` is the budget's OWN sentence — `write_budget.py`
+// owns that wording so the CLI, the API payload and this row cannot drift
+// into three different explanations of one flag. The payback arithmetic is
+// appended only when the budget actually computed one: a rung-3 hook is never
+// sent as prompt text, so it has no standing cost and no ratio, and printing
+// "payback null" there would invent a verdict the model never reached.
+//
+// Hedged deliberately ("on the quantities we can count"): the net-negative
+// verdict does not count what a rule saves by PREVENTING a failure, and the
+// measurement that would settle it returned null. See write_budget.py's
+// module docstring.
+function writeGateNote(cluster) {
+  if (cluster.write_offered !== false) return null;
+  // The SHORT label, stamped server-side by `write_budget.short_reason` — a
+  // real corpus gates ~50 of 55 clusters, so the full sentence would turn the
+  // list into a wall of text. The long form still renders on the expanded
+  // card, where there is room for it.
+  const short = cluster.write_blocked_short;
+  if (!short) return null;
+  const perSession = cluster.standing_cost_tokens_per_session;
+  const ratio = cluster.payback_ratio;
+  if (!perSession || ratio == null) return 'No permanent fix offered: ' + short + '.';
+  return 'No permanent fix offered: ' + short + ' (~' + fmtTokens(perSession) +
+    ' tok/session forever, modelled payback ' + ratio.toFixed(2) + '×).';
+}
+
 // --- Past overspend: the number this product LEADS with -------------------
 //
 // Every figure below is PAST TENSE and window-OBSERVED: what the flagged
@@ -8086,6 +8143,26 @@ function combinedEstMonthly(items, suppressed) {
   return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
 }
 
+// The relearn tail's summary on the SAME basis its expanded rows now use
+// (`relearnObservedFigure`). Without this the collapsed row advertised a
+// combined forward est./mo while every row inside it led with observed cost —
+// and since the write budget zeroes the forward figure for a suppressed
+// cluster, a tail of 40 gated clusters summarised itself as "$0.00 combined"
+// while containing tens of dollars of real, already-billed spend.
+//
+// Returns null when no item carries an observed figure (a pre-observed-fields
+// cache), so the caller falls back to the forward summary rather than
+// printing a confident $0.00.
+function combinedObservedCost(items) {
+  const observed = items.filter(i => i.past_overspend_usd != null);
+  if (observed.length) {
+    return fmtUsd(observed.reduce((s, i) => s + i.past_overspend_usd, 0)) + ' already spent, combined';
+  }
+  const toks = items.reduce((s, i) => s + (i.past_overspend_tokens || 0), 0);
+  if (toks) return '~' + fmtTokens(toks) + ' tok already spent, combined';
+  return null;
+}
+
 // The collapsed long-tail row: count + combined est./mo, an expand toggle,
 // and the bulk Dismiss all / (optional) Mark all applied actions (requirement
 // #3). `renderItem` renders one expanded tail row in the caller's own shape
@@ -8129,7 +8206,26 @@ function relearnBadge(cluster) {
 // preserves the existing bulk-dismiss flow (requirement #9) — not in the
 // mockup's own sketch, but the bulk action it drives is explicitly required.
 function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed }) {
+  // Observed first, projection second (see `relearnObservedFigure`). `observed`
+  // is null only for a pre-observed-fields cache, in which case the forward
+  // figure renders instead — under its own "est. / mo" caption, never
+  // relabelled as something that already happened.
+  const observed = relearnObservedFigure(cluster);
   const est = estMonthlyLine(cluster, suppressed);
+  const headline = observed || est;
+  // The forward claim is a SECOND line, and only where a fix is really on
+  // offer. A suppressed cluster's gross saving is not claimable, so it is not
+  // rendered anywhere on this row — showing it would be the precise defect
+  // this row's gate note exists to explain.
+  //
+  // Tested on the NUMBER, never on the formatted string: `fmtUsd` output is a
+  // display concern and comparing against "$0.00" would silently start showing
+  // zero rows the day that formatting changes.
+  const forwardUsd = monthlyUsdForDisplay(cluster);
+  const forwardTokens = cluster.estimated_monthly_tokens;
+  const showForward = observed && cluster.write_offered !== false
+    && ((forwardUsd != null && forwardUsd > 0) || (forwardUsd == null && forwardTokens > 0));
+  const gate = writeGateNote(cluster);
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
   return html`
     <div class="cur-row" style="display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border)" key=${cluster.signature}>
@@ -8142,14 +8238,21 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
         <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
         <span class="badge badge-warning" style="margin-left:6px" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
         <div class="dim" style="font-size:12px;margin-top:3px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
+        ${/* Why no permanent fix is offered, stated on the row rather than
+              left to a $0.00 the reader has to interpret. Carries the payback
+              arithmetic where the budget computed one, so the counterintuitive
+              part — that codifying a lesson usually costs more than it saves —
+              is legible instead of living only in a JSON field. */ ''}
+        ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
       </div>
       <div style="text-align:right;flex-shrink:0">
         ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
               asserted "estimated", stacking four lines in this column. Matches
-              the cost cards' single "est. / mo · <tokens>" caption so both tabs
-              read alike. The basis stays on hover. */ ''}
-        <div class="mono" style="color:var(--accent);font-weight:600" title=${cluster.monthly_rate_basis || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${est.big}</div>
-        <div class="dim" style="font-size:11px">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
+              the cost cards' single caption so both tabs read alike. The basis
+              stays on hover. */ ''}
+        <div class="mono" style="color:var(--accent);font-weight:600" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${headline.big}</div>
+        <div class="dim" style="font-size:11px">${observed ? 'already cost' : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
+        ${showForward ? html`<div class="dim" style="font-size:11px">~${est.big} / mo if fixed</div>` : null}
         ${/* The row's only affordance used to be the title styled as a link,
               so the constructive action was invisible next to a prominent
               bulk Dismiss. Name the verb. */ ''}
@@ -8228,6 +8331,20 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
             rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
           </div>
+          ${/* What this recurrence ALREADY COST, before any gate. Rendered on
+                the expanded card as well as the row because this is the one
+                figure that stays true whether or not our library has a fix
+                for it — a cluster we cannot act on still spent the money. */ ''}
+          ${(cluster.past_overspend_usd != null || cluster.past_overspend_tokens != null) ? html`
+            <div class="opt-section" style="margin:0 0 14px">
+              <div class="opt-title" style="font-size:13px">What this already cost</div>
+              <div class="sz-note" style="margin-top:4px" title=${cluster.past_overspend_basis || ''}>
+                ${cluster.past_overspend_usd != null ? fmtUsd(cluster.past_overspend_usd) : '~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens'}
+                ${cluster.past_overspend_usd != null && cluster.past_overspend_tokens ? ' · ~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens' : ''}
+                over the scanned corpus, priced at the rates these sessions were billed at. Observed, not projected, and not netted against any fix's cost.
+                ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail — the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
+              </div>
+            </div>` : null}
           <div class="opt-section" style="margin:0 0 14px">
             <div class="opt-title" style="font-size:13px">Proposed fix</div>
             <div class="sz-note" style="margin-top:4px">${cluster.proposed_fix}</div>
@@ -8249,6 +8366,19 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             <div class="opt-section" style="margin:0 0 6px">
               <div class="opt-title" style="font-size:13px">No apply path <span class="dim" style="font-weight:400">· advise-only</span></div>
               <div class="sz-note" style="margin-top:4px">${cluster.advise_only_reason || 'Every agent in this cluster is a service tokenjam has no workspace for, so there is no file to write a fix into. Apply the recommendation yourself, then measure it with tj relearn verify --otel.'}</div>
+              ${/* The arithmetic behind a net-negative verdict, shown rather
+                    than asserted: a permanent rule is re-sent on every future
+                    session, so its cost scales with the same session count the
+                    saving does and what survives is a ratio. Hedged on
+                    purpose — the model does not count what the rule saves by
+                    preventing the failure, and the measurement that would
+                    settle that returned null. */ ''}
+              ${(cluster.payback_ratio != null && cluster.standing_cost_tokens_per_session) ? html`
+                <div class="sz-note" style="margin-top:8px">
+                  A permanent rule for this would carry ~${fmtTokens(cluster.standing_cost_tokens_per_session)} tokens into every future session, forever.
+                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? ' — under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
+                  <div style="margin-top:4px" class="dim">This is a modelled comparison, not an observed one. It does not count what the rule might save by preventing the failure in the first place; the measurement that would settle that returned no usable signal.</div>
+                </div>` : null}
             </div>
           ` : !result ? html`
             <div class="opt-section" style="margin:0 0 6px">
@@ -9041,6 +9171,7 @@ function ReviewInboxView({ params }) {
         ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
         ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`) : null}
         <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
+          summary=${combinedObservedCost(tailRelearn)}
           onDismissAll=${() => dismissMany(tailRelearn.map(c => c.signature))}
           renderItem=${c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`} />
       </div>

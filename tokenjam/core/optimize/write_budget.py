@@ -31,6 +31,26 @@ with the same session count, so the count cancels and what survives is a
 ratio (``payback_ratio = gross / standing``). Same amortization shape, one
 term different; this deliberately reuses that shape rather than inventing a
 second scheme.
+
+**The net-negative verdict is a MODEL, not a measurement — and it has one
+known blind spot.** Everything above is arithmetic over two modelled
+quantities: what a rule costs to carry (session pace x block size) and what
+the cluster it addresses is worth gross. The cost side is counted; the
+PREVENTION side is not. A rule that stops an agent flailing may save more
+than the failure it is priced against — the avoided retry, the abandoned
+branch, the human interrupt — and none of that appears in ``gross``. So a
+sub-1.0 ``payback_ratio`` means "this rule does not pay for itself *on the
+quantities we can count*", never "codifying this was shown to lose money".
+
+The measurement that would settle it was run on 2026-07-26 and returned
+neither a validation nor a refutation: the before/after signal is not
+obtainable from the current corpus at any usable confidence, and the one
+project expected to show a saving measured null. See
+``docs/internal/repeat-task-codification-measurement.md``. The suppression
+stands — there is no evidence it is wrong, only no evidence it is right — but
+no string in this module or its consumers may describe the verdict as an
+observed result. Re-open the empirical question only after the
+task-statement / model instrumentation lands.
 """
 from __future__ import annotations
 
@@ -132,10 +152,14 @@ REASON_PLACEHOLDER = (
     "No specific fix was derived for this pattern, so there is no rule worth "
     "writing permanently. The example sessions are still listed for review."
 )
+#: Deliberately hedged ("on the quantities we can count"): this is a modelled
+#: comparison, not an observed one, and it does not count what a rule saves by
+#: PREVENTING a flail. See the module docstring's blind-spot note.
 REASON_NET_NEGATIVE = (
-    "A permanent rule for this would cost more to keep than it recovers: it is "
-    "re-sent on every future session, and that standing cost exceeds the "
-    "estimated saving."
+    "On the quantities we can count, a permanent rule for this would cost more "
+    "to keep than it recovers: it is re-sent on every future session, and that "
+    "modelled standing cost exceeds the estimated saving. Not counted: what the "
+    "rule might save by preventing the failure in the first place."
 )
 REASON_BUDGET_FULL = (
     "Deferred: this window's permanent-rule budget is already allocated to "
@@ -159,6 +183,56 @@ REASON_CEILING_REACHED = (
     "Your agent files already carry more standing per-session context than the "
     "budget allows to grow. Compress them (see the summarize findings) before "
     "adding new permanent rules."
+)
+
+#: The same five verdicts as a SHORT label, for a dense list where the full
+#: sentence would be a paragraph per row (a real corpus gates ~50 of 55
+#: clusters, so the long form turns the list into a wall of text). Keyed by the
+#: exact long string, so a reason added above without a short form here
+#: degrades to a generic label instead of silently rendering blank.
+#:
+#: Same rule as the long forms: this module owns the wording, so the CLI list,
+#: the Review inbox row and the API payload cannot drift into three different
+#: names for one flag. The long sentence still renders wherever there is room
+#: for it (the expanded card, `--json`).
+#: Populated at the bottom of this section, once every long reason is defined.
+REASON_SHORT_BY_REASON: dict[str, str] = {}
+
+
+def short_reason(reason: str) -> str:
+    """The compact label for a suppression reason, for list rendering.
+
+    Returns "" for an empty reason (a write that WAS offered) so callers can
+    treat falsy as "nothing to say", and a generic label for an unrecognised
+    reason rather than dropping the fact that something gated the write.
+    """
+    reason = str(reason or "").strip()
+    if not reason:
+        return ""
+    return REASON_SHORT_BY_REASON.get(reason, "no permanent fix offered")
+
+
+REASON_SHORT_BY_REASON.update({
+    REASON_PLACEHOLDER: "no fix template derived",
+    REASON_NET_NEGATIVE: "a rule would cost more to keep than it returns",
+    REASON_BUDGET_FULL: "deferred — this window's rule budget is spent",
+    REASON_FAMILY_MERGED: "covered by another cluster's rule",
+    REASON_CEILING_REACHED: "blocked — agent files already too large to grow",
+})
+
+#: The net-negative sentence as it read BEFORE the modelled/observed hedging.
+#: A stored proposal cache written by the previous build still carries this
+#: exact string, and the Review inbox reads that cache directly — without the
+#: alias every net-negative row would degrade to the generic label for one
+#: upgrade cycle, which is precisely the invisibility the short label exists to
+#: fix. Delete once no supported release can still have written it.
+LEGACY_REASON_NET_NEGATIVE = (
+    "A permanent rule for this would cost more to keep than it recovers: it is "
+    "re-sent on every future session, and that standing cost exceeds the "
+    "estimated saving."
+)
+REASON_SHORT_BY_REASON[LEGACY_REASON_NET_NEGATIVE] = (
+    REASON_SHORT_BY_REASON[REASON_NET_NEGATIVE]
 )
 
 #: Named once so every card, basis string and test refers to the same sentence.

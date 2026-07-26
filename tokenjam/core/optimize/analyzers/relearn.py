@@ -992,6 +992,11 @@ class RelearnCluster:
     # lane renders it with this reason in place of the generic OTel one.
     write_offered:                    bool = True
     write_blocked_reason:             str = ""
+    #: The same verdict as a short label, for a dense list where the sentence
+    #: above would be a paragraph per row. Derived from the reason by
+    #: `write_budget.short_reason`, never phrased locally, so the CLI list and
+    #: the Review inbox row cannot name one flag two ways.
+    write_blocked_short:              str = ""
 
 
 @dataclass
@@ -1277,7 +1282,11 @@ def build_proposals(
     is unaffected either way — only the apply path is.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
-    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER, is_placeholder_fix
+    from tokenjam.core.optimize.write_budget import (
+        REASON_PLACEHOLDER,
+        is_placeholder_fix,
+        short_reason,
+    )
 
     repo_cwd_map = repo_cwd_map or {}
     write_offered = persona in {"claude-code", "mixed"}
@@ -1420,6 +1429,9 @@ def build_proposals(
             past_reread_usd=past_reread_usd,
             write_offered=has_real_fix,
             write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
+            write_blocked_short=(
+                "" if has_real_fix else short_reason(REASON_PLACEHOLDER)
+            ),
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -1561,6 +1573,7 @@ def _apply_write_budget(
             net_negative=decision.net_negative,
             write_offered=decision.offered,
             write_blocked_reason=decision.reason,
+            write_blocked_short=wb.short_reason(decision.reason),
             # A suppressed write has no apply path, which is exactly what
             # `advise_only` already means to every surface. Reusing that flag
             # (rather than teaching each renderer a second one) makes the

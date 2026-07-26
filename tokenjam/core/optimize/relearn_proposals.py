@@ -131,6 +131,8 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
     again on read) means a cache written before either existed still resolves
     without a recompute.
     """
+    from tokenjam.core.optimize.write_budget import short_reason
+
     clusters = finding.get("clusters")
     if not isinstance(clusters, list):
         return dict(finding)
@@ -139,6 +141,17 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
             **c,
             "proposal_id": proposal_id_for(str(c.get("signature") or "")),
             "advise_only_reason": advise_only_reason(c),
+            # Derived on read for the same reason the two above are: a cache
+            # written before this field existed still has to resolve without a
+            # recompute. The Review inbox row renders ONLY the short label (the
+            # long sentence is a paragraph, and a real corpus gates ~50 of 55
+            # clusters), so without this stamp an older cache would silently
+            # drop the gate note from every row — the exact invisibility the
+            # short label was added to fix.
+            "write_blocked_short": (
+                c.get("write_blocked_short")
+                or short_reason(c.get("write_blocked_reason") or "")
+            ),
         }
         if isinstance(c, dict) else c
         for c in clusters
