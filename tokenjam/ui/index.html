@@ -8340,7 +8340,10 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
               <div class="opt-title" style="font-size:13px">What this already cost</div>
               <div class="sz-note" style="margin-top:4px" title=${cluster.past_overspend_basis || ''}>
                 ${cluster.past_overspend_usd != null ? fmtUsd(cluster.past_overspend_usd) : '~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens'}
-                ${cluster.past_overspend_usd != null && cluster.past_overspend_tokens ? ' · ~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens' : ''}
+                ${/* Leading space is explicit: htm does not preserve the
+                      newline between an interpolation and the literal text
+                      that follows it, so without it this reads "tokensover". */ ''}
+                ${cluster.past_overspend_usd != null && cluster.past_overspend_tokens ? ' · ~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens ' : ' '}
                 over the scanned corpus, priced at the rates these sessions were billed at. Observed, not projected, and not netted against any fix's cost.
                 ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail — the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
               </div>
