@@ -298,6 +298,9 @@ def recompute_now(
         finding = compute_relearn_finding(
             conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
             persona=persona,
+            # The archive lane's horizon: what tokenjam kept, not what Claude
+            # Code left on disk. See `compute_relearn_finding`.
+            retention_days=getattr(getattr(config, "storage", None), "retention_days", None),
         )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to

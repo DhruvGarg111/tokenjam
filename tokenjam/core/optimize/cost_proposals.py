@@ -87,9 +87,21 @@ COST_CORRELATIONAL_CAVEAT = (
 #: ``report.findings["summarize"]`` directly (not this proposal list) to size
 #: every OTHER analyzer's rule-writing budget, and this card is never
 #: ``apply_capable`` so it never enters that netting pass itself.
+#: ``relearn`` (recurring agent failures) IS here, for the same founder
+#: decision that re-admitted ``summarize``: the Review inbox is the complete
+#: index of everything actionable, not the list of things whose apply flow
+#: happens to live here. relearn was the last analyzer whose measured cost
+#: reached NO aggregate surface at all — it produces ``RelearnCluster``s, not
+#: ``CostProposal``s, so ``past_overspend_rollup`` and
+#: ``estimated_recoverable_rollup`` were both structurally blind to it and the
+#: Dashboard hero's "what waste already cost you" omitted the entire
+#: self-improve loop. ``_relearn_to_proposals`` adds exactly one aggregate
+#: card, never one per cluster (relearn's own per-cluster rows in the Review
+#: inbox are richer and stay the detail view), and it is never
+#: ``apply_capable``: the apply path is relearn's own reviewed write flow.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
-    "script", "reuse", "verbosity", "resend", "summarize",
+    "script", "reuse", "verbosity", "resend", "summarize", "relearn",
 )
 
 
@@ -283,9 +295,11 @@ class CostProposal:
     # what recurs, not the fix. `"one_time"` is reserved for a future
     # analyzer whose estimate is a genuinely single fixed occurrence, which
     # must set it explicitly at its own call site when it's added.
-    # (relearn's `RelearnCluster` estimates are a SEPARATE, unbounded-history
-    # system with no fixed window — not adapted into a `CostProposal` at all,
-    # so it carries no `scaling` field and is out of scope here.)
+    # relearn IS adapted now (`_relearn_to_proposals`), but its card carries no
+    # `estimated_recoverable_*` at all (rule 27 — see that adapter's
+    # docstring), so `_with_rollup_projection` has nothing to project and this
+    # window's ratio never touches a figure derived from relearn's own,
+    # different horizon.
     scaling:               str = "per_session"
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
@@ -938,6 +952,127 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
         advise_text=advise,
         estimated_recoverable_usd=usd,
         estimated_recoverable_tokens=tokens,
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
+    )]
+
+
+#: Where a relearn card routes: the Review inbox, which is where relearn's own
+#: per-cluster rows and their apply flow already live.
+RELEARN_REVIEW_HREF = "#/review"
+
+
+def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
+    """One window-wide card for the ``relearn`` (recurring agent failures)
+    finding — see ``COST_ANALYZERS``'s docstring for why relearn is a member.
+
+    ONE card, never one per cluster. relearn already renders every cluster
+    individually in the Review inbox, with a richer treatment than a cost card
+    could give (apply path, rung badge, example sessions). What it lacked was
+    any presence on an AGGREGATE surface: it is a ``RelearnCluster``, not a
+    ``CostProposal``, so ``past_overspend_rollup`` and
+    ``estimated_recoverable_rollup`` could not see a cent of it and the
+    Dashboard hero's "what waste already cost you" total silently omitted the
+    entire self-improve loop. This adapter closes exactly that gap and nothing
+    more.
+
+    ONE number, past tense. ``cost_of_waste_*`` is what the recurrences ALREADY
+    COST, summed across EVERY cluster including the ones with no fix template
+    and the ones whose rule is uneconomic to keep. Ungated and un-netted on
+    purpose: "we have no action for this" is not "this was unavoidable", and a
+    fix's future maintenance cost is not subtracted from money already spent.
+    ``_with_past_overspend`` stamps it as ``past_overspend_*``.
+
+    The forward CLAIM is deliberately left off this card
+    (``estimated_recoverable_*`` stays ``None``, so no ``past_avoidable_*`` is
+    stamped either). relearn prices each occurrence at one re-issued turn TIMES
+    its measured re-read tail, and that tail is re-sent context — the exact
+    quantity ``resend`` already claims in full. Two analyzers claiming the same
+    spans in ``estimated_recoverable_rollup`` is CLAUDE.md rule 27, and the
+    rollup's signature dedup cannot catch it. The claim is not lost: it lives
+    where it always has, on relearn's own per-cluster rows in the Review inbox,
+    counted once. ``baseline`` carries the re-read share so the overlap is
+    inspectable rather than merely asserted.
+
+    Deliberately never ``apply_capable``: relearn's apply path is its own
+    reviewed rung-1/rung-2 write flow (``POST /relearn/apply``), which this
+    adapter must not shadow with a second, thinner one — the same routing
+    choice ``_summarize_to_proposals`` makes.
+    """
+    if finding is None:
+        return []
+    clusters = list(getattr(finding, "clusters", []) or [])
+    past_usd = getattr(finding, "past_overspend_usd", None)
+    past_tokens = int(getattr(finding, "past_overspend_tokens", 0) or 0)
+    if not clusters or (past_usd is None and past_tokens <= 0):
+        # Nothing observed, or nothing priceable — a card with no figure to
+        # lead with would state "worth nothing" for "not measured".
+        return []
+
+    occurrences = sum(int(getattr(c, "occurrences", 0) or 0) for c in clusters)
+    window_days = getattr(finding, "window_days", None)
+    span = f" over {window_days:.0f} days" if window_days else ""
+    shown = ", ".join(str(getattr(c, "title", "") or c.signature) for c in clusters[:3])
+    if len(clusters) > 3:
+        shown += f", +{len(clusters) - 3} more"
+    plural = "" if len(clusters) == 1 else "s"
+    evidence = (
+        f"{len(clusters)} recurring failure cluster{plural} "
+        f"({occurrences} occurrence(s)){span}: {shown}."
+    )
+    headline = _money(past_usd) if past_usd is not None else f"~{past_tokens:,} tok"
+    advise = (
+        f"Review the {len(clusters)} recurring failure cluster{plural} in the "
+        "Review inbox (or `tj optimize relearn --json`). Each carries its own "
+        "example sessions and, where a fix template matched, a reviewable "
+        "rung-1/rung-2 write. Clusters with no fix template still appear here: "
+        "they cost this money whether or not our library has a remedy for "
+        "them yet."
+    )
+    return [CostProposal(
+        kind="cost",
+        analyzer="relearn",
+        signature="cost:relearn",
+        title=f"{len(clusters)} recurring agent failure{plural} already cost {headline}",
+        target_key={
+            "href": RELEARN_REVIEW_HREF,
+            "clusters": [str(getattr(c, "signature", "")) for c in clusters],
+        },
+        evidence=evidence,
+        baseline={
+            "clusters": len(clusters),
+            "occurrences": occurrences,
+            "sessions_scanned": int(getattr(finding, "sessions_scanned", 0) or 0),
+            "transcript_sessions_scanned": int(
+                getattr(finding, "transcript_sessions_scanned", 0) or 0,
+            ),
+            "archived_sessions_scanned": int(
+                getattr(finding, "archived_sessions_scanned", 0) or 0,
+            ),
+            "window_days": window_days,
+            "corpus_basis": str(getattr(finding, "corpus_basis", "") or ""),
+            # Counted, never claimed — see `relearn.BELOW_THRESHOLD_BASIS`.
+            "below_threshold_occurrences": int(
+                getattr(finding, "below_threshold_occurrences", 0) or 0,
+            ),
+            "below_threshold_past_overspend_usd": getattr(
+                finding, "below_threshold_past_overspend_usd", None,
+            ),
+            # The re-read SHARE of the figure above (a component, not an
+            # addend). Carried so the overlap with `resend`'s re-sent-context
+            # figure is inspectable — the reason this card states no forward
+            # claim at all (CLAUDE.md rule 27; see the docstring).
+            "past_reread_tokens": int(getattr(finding, "past_reread_tokens", 0) or 0),
+            "past_reread_usd": getattr(finding, "past_reread_usd", None),
+            # The claim, for reference only. NOT on `estimated_recoverable_*`:
+            # it must not enter `estimated_recoverable_rollup` beside resend's.
+            "relearn_claim_usd": getattr(finding, "estimated_recoverable_usd", None),
+            "relearn_claim_tokens": getattr(finding, "estimated_recoverable_tokens", None),
+        },
+        advise_text=advise,
+        cost_of_waste_usd=past_usd,
+        cost_of_waste_tokens=past_tokens or None,
+        cost_of_waste_basis=str(getattr(finding, "past_overspend_basis", "") or ""),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
     )]
@@ -2525,6 +2660,7 @@ def cost_proposals_from_report(
             _pick("resend"),
         ),
         (_summarize_to_proposals, _pick("summarize")),
+        (_relearn_to_proposals, _pick("relearn")),
     )
     for adapter, finding in adapters:
         try:

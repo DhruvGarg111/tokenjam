@@ -8901,7 +8901,16 @@ function ReviewInboxView({ params }) {
     ? { index: reviewTotal - reviewQueue.length, total: reviewTotal }
     : null;
   const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
-  const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
+  // The `relearn` cost proposal is a ROLLUP participant, not a card. relearn
+  // reaches the aggregate surfaces through it (past_overspend_rollup and the
+  // Dashboard hero were structurally blind to the whole self-improve loop
+  // before it existed — see cost_proposals._relearn_to_proposals), but this
+  // page already renders every relearn CLUSTER individually, with a richer
+  // treatment than a cost card can give. Showing the aggregate card too would
+  // put the same money on the page twice and re-fill the inbox this page was
+  // just downsized to keep clear.
+  const visibleCost = (costProps || []).filter(p =>
+    p.analyzer !== 'relearn' && !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
