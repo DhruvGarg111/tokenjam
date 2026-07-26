@@ -7916,82 +7916,103 @@ function monthlyUsdForDisplay(item) {
 // replaces both, so the axis that genuinely changes what the reader does next
 // has to travel ON the row instead of being the tab they picked.
 //
-// THREE values, never two. "Can tj apply this, yes or no" collapses the middle
-// case, and the middle case is the biggest one: most rows carry the exact
-// change to make but no writer to make it. Rendering those as a no-op is the
-// dead end this axis exists to prevent.
+// TWO ORTHOGONAL FACTS, NOT ONE ENUM. This started as a three-valued enum
+// (write / snippet / none) and that was wrong, because the two are not mutually
+// exclusive and the card has never treated them as such: `CostProposalCard`
+// renders `${prop.suggestion ? ...}` and `${prop.apply_capable ? ...}` as two
+// INDEPENDENT conditionals, and `deadweight`'s mcp_remove proposal is exactly
+// the overlap case, showing a copyable snippet AND a confirm-target apply
+// control together. An enum has to pick one of those to report, so it
+// necessarily lies about that row. Two booleans cannot.
 //
-// Computed from the SAME flags the fix block itself gates on, so a badge can
-// never advertise an action the card then refuses:
-//   * 'write'   tj makes the change. RELEARN: the write budget offered a rule
-//               (`write_offered`) and the cluster is not advise-only — which
-//               is exactly `RelearnApplyModal`'s own gate, so a row badged
-//               this way can never open a modal saying "nothing to approve".
-//               COST: `apply_capable`, the same flag the apply controls below
-//               are gated on.
-//   * 'snippet' tj hands over the exact change and the user applies it. COST:
-//               `suggestion`. RELEARN: `advise_snippet_offered`, stamped
-//               server-side (`relearn_proposals.advise_snippet_offered`) and
-//               true when `proposed_fix` is a real derived recommendation
-//               rather than the "no fix template matched" placeholder. The
-//               snippet IS the deliverable for this bucket, so it renders in a
-//               labelled copy box on the row, never behind a hover or a
-//               footnote.
-//   * 'none'    no writer and no snippet. `summarize` (its fix lives in its own
-//               curate/diff/apply lifecycle, so the row is a hop into it) and
-//               the clusters no fix template matched (the real next step is the
-//               example sessions). Stated in words; a row here must never be a
-//               blank space the reader is expected to interpret.
+//   inboxCanApply(item)    tj makes the change itself. RELEARN: the write
+//                          budget offered a rule (`write_offered`) and the
+//                          cluster is not advise-only, which is exactly
+//                          `RelearnApplyModal`'s own gate, so a row tagged this
+//                          way can never open a modal reading "nothing to
+//                          approve". COST: `apply_capable`, the same flag the
+//                          apply controls are gated on.
+//                          Drives: checkbox eligibility, the primary action,
+//                          and bulk scope.
 //
-// Never keyed on analyzer identity. The day a `downsize` proposal becomes
-// apply-capable its rows change bucket with no edit here, and an analyzer we
-// have not written yet is classified correctly on arrival.
-const MECH_WRITE = 'write';
-const MECH_SNIPPET = 'snippet';
-const MECH_NONE = 'none';
-
-function inboxMechanism(item) {
-  if (!item) return MECH_NONE;
-  if (item.kind === 'relearn') {
-    // Mirror of RelearnApplyModal's gate, deliberately in that order: a
-    // budget-gated cluster is stamped `advise_only` by the detector too, so
-    // this cannot promise a write the modal will decline.
-    if (!item.advise_only && item.write_offered !== false) return MECH_WRITE;
-    if (item.advise_snippet_offered && String(item.proposed_fix || '').trim()) return MECH_SNIPPET;
-    return MECH_NONE;
-  }
-  // A cost proposal may carry BOTH an apply path and a snippet (deadweight's
-  // mcp_remove does). The strongest available mechanism wins, and the snippet
-  // still renders above the apply controls, so nothing is hidden by the choice.
-  if (item.apply_capable) return MECH_WRITE;
-  if (String(item.suggestion || '').trim()) return MECH_SNIPPET;
-  return MECH_NONE;
+//   inboxHasSnippet(item)  there is an exact change to hand over. COST:
+//                          `suggestion`. RELEARN: `advise_snippet_offered`,
+//                          stamped server-side
+//                          (`relearn_proposals.advise_snippet_offered`), true
+//                          when `proposed_fix` is a real derived recommendation
+//                          rather than the "no fix template matched"
+//                          placeholder.
+//                          Drives: whether the copy box renders. The snippet IS
+//                          the deliverable where there is no writer, so it gets
+//                          a labelled box on the row, never a hover or a
+//                          footnote.
+//
+// "Nothing actionable yet" is DERIVED from both being false, not a third peer
+// value: `summarize` (its fix lives in its own curate/diff/apply lifecycle) and
+// the clusters no fix template matched (the real next step is the example
+// sessions). Stated in words; such a row must never be a blank space the reader
+// is expected to interpret.
+//
+// Both predicates read the SAME flags their fix blocks gate on, so a tag can
+// never advertise an action the card then refuses. Neither is keyed on analyzer
+// identity: the day a `downsize` proposal becomes apply-capable its rows gain
+// the apply control with no edit here.
+function inboxCanApply(item) {
+  if (!item) return false;
+  if (item.kind === 'relearn') return !item.advise_only && item.write_offered !== false;
+  return !!item.apply_capable;
 }
 
-// The badge, in the reader's vocabulary rather than ours. Says what happens
-// next, not which internal flag was set — "advise_only" and "apply_capable"
-// are our words for our plumbing.
-const MECHANISM_BADGE = {
-  [MECH_WRITE]: {
+function inboxHasSnippet(item) {
+  if (!item) return false;
+  if (item.kind === 'relearn') {
+    return !!item.advise_snippet_offered && String(item.proposed_fix || '').trim() !== '';
+  }
+  return String(item.suggestion || '').trim() !== '';
+}
+
+function inboxNothingActionable(item) {
+  return !inboxCanApply(item) && !inboxHasSnippet(item);
+}
+
+// A stable string for the row's `data-mechanism` attribute: debuggable from the
+// console and greppable from a test, and it reports the OVERLAP ("apply
+// snippet") rather than collapsing it, so the attribute cannot drift from what
+// the two predicates decided.
+function inboxMechanismTag(item) {
+  const parts = [];
+  if (inboxCanApply(item)) parts.push('apply');
+  if (inboxHasSnippet(item)) parts.push('snippet');
+  return parts.length ? parts.join(' ') : 'none';
+}
+
+// The tags, in the reader's vocabulary rather than ours: what happens next, not
+// which internal flag was set ("advise_only" and "apply_capable" are our words
+// for our plumbing). Up to TWO render, because up to two are true.
+const MECHANISM_TAG_COPY = {
+  apply: {
     label: 'TJ CAN APPLY',
     title: 'tokenjam can make this change for you; you confirm the target first.',
   },
-  [MECH_SNIPPET]: {
+  snippet: {
     label: 'COPY THE FIX',
-    title: 'tokenjam has the exact change but no file it owns to write it into. Copy it, apply it, then mark it done.',
+    title: 'The exact change is on the row. Copy it and apply it where it belongs.',
   },
-  [MECH_NONE]: {
+  none: {
     label: 'NO FIX YET',
     title: 'tokenjam has no ready-made change for this one. The row says what the next step is instead.',
   },
 };
 
-function MechanismBadge({ mechanism }) {
-  const copy = MECHANISM_BADGE[mechanism] || MECHANISM_BADGE[MECH_NONE];
+function MechanismTags({ item }) {
+  const canApply = inboxCanApply(item);
+  const hasSnippet = inboxHasSnippet(item);
   // Neutral badge class on purpose: the mechanism is a routing fact, not a
-  // severity. The money figure is what ranks a row, and the accent on this
-  // page belongs to figures and to typeable actions.
-  return html`<span class="badge" title=${copy.title}>${copy.label}</span>`;
+  // severity. The money figure is what ranks a row, and the accent on this page
+  // belongs to figures and to typeable actions.
+  const tag = k => html`<span class="badge" title=${MECHANISM_TAG_COPY[k].title}>${MECHANISM_TAG_COPY[k].label}</span>`;
+  if (!canApply && !hasSnippet) return tag('none');
+  return html`${canApply ? tag('apply') : null}${hasSnippet ? tag('snippet') : null}`;
 }
 
 // --- Ordering: observed money, and nothing that merely resembles it --------
@@ -8110,35 +8131,16 @@ function relearnObservedFigure(cluster) {
   return null;
 }
 
-// The write-economics verdict in one reader-facing line, or null when a
-// permanent fix is actually on offer.
+// A `writeGateNote(cluster)` helper used to live here, rendering the write
+// budget's verdict as a one-line "No permanent fix offered: <short label>". It
+// is GONE, not misplaced: `RecurringMistakeRow` now renders the budget's FULL
+// sentence (`advise_only_reason`) plus the payback arithmetic in its fix block,
+// because the compressed label named the gate without telling the reader what to
+// do instead. The short label itself is not dead: `write_blocked_short` is still
+// stamped server-side and still rendered by `tj optimize`'s relearn list
+// (`cmd_optimize._render_relearn`), where a dense terminal list genuinely needs
+// the compressed form.
 //
-// `write_blocked_reason` is the budget's OWN sentence — `write_budget.py`
-// owns that wording so the CLI, the API payload and this row cannot drift
-// into three different explanations of one flag. The payback arithmetic is
-// appended only when the budget actually computed one: a rung-3 hook is never
-// sent as prompt text, so it has no standing cost and no ratio, and printing
-// "payback null" there would invent a verdict the model never reached.
-//
-// Hedged deliberately ("on the quantities we can count"): the net-negative
-// verdict does not count what a rule saves by PREVENTING a failure, and the
-// measurement that would settle it returned null. See write_budget.py's
-// module docstring.
-function writeGateNote(cluster) {
-  if (cluster.write_offered !== false) return null;
-  // The SHORT label, stamped server-side by `write_budget.short_reason` — a
-  // real corpus gates ~50 of 55 clusters, so the full sentence would turn the
-  // list into a wall of text. The long form still renders on the expanded
-  // card, where there is room for it.
-  const short = cluster.write_blocked_short;
-  if (!short) return null;
-  const perSession = cluster.standing_cost_tokens_per_session;
-  const ratio = cluster.payback_ratio;
-  if (!perSession || ratio == null) return 'No permanent fix offered: ' + short + '.';
-  return 'No permanent fix offered: ' + short + ' (~' + fmtTokens(perSession) +
-    ' tok/session forever, modelled payback ' + ratio.toFixed(2) + '×).';
-}
-
 // --- Past overspend: the number this product LEADS with -------------------
 //
 // Every figure below is PAST TENSE and window-OBSERVED: what the flagged
@@ -8383,7 +8385,7 @@ function relearnBadge(cluster) {
 // the bulk review queue can drive (see `bulkRelearn` in ReviewInboxView) — an
 // unselectable-looking row that a bulk action can still reach is the ambiguity
 // the scoping rule exists to remove.
-function RecurringMistakeRow({ cluster, mechanism, spans, checked, onToggle, onExpand, onDismiss, suppressed }) {
+function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDismiss, suppressed }) {
   // Observed first, projection second (see `relearnObservedFigure`). `observed`
   // is null only for a pre-observed-fields cache, in which case the forward
   // figure renders instead — under its own "est. / mo" caption, never
@@ -8403,23 +8405,41 @@ function RecurringMistakeRow({ cluster, mechanism, spans, checked, onToggle, onE
   const forwardTokens = cluster.estimated_monthly_tokens;
   const showForward = observed && cluster.write_offered !== false
     && ((forwardUsd != null && forwardUsd > 0) || (forwardUsd == null && forwardTokens > 0));
-  const gate = writeGateNote(cluster);
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
-  const mech = mechanism || inboxMechanism(cluster);
+  const canApply = inboxCanApply(cluster);
+  const hasSnippet = inboxHasSnippet(cluster);
   const span = inboxSpan(cluster, spans);
   const fixText = String(cluster.proposed_fix || '').trim();
+  // The FULL reason tokenjam will not write this one, not the compressed label.
+  // The short form (`writeGateNote`, still used nowhere else) existed because
+  // ~50 of 55 clusters are gated and the long sentence turned a dedicated tab
+  // into a wall of text. On the merged list the sub-$5 floor leaves one or two
+  // of these above the fold, so there is room for the real sentence, and the
+  // reader needs it: "no permanent fix offered" does not tell them what to do,
+  // whereas the budget's own wording explains that the recommendation is theirs
+  // to apply and why. `advise_only_reason` is stamped server-side by
+  // `relearn_proposals.advise_only_reason`, which is also the CLI's source, so
+  // the two cannot drift.
+  const cannotApplyReason = canApply ? null : String(cluster.advise_only_reason || '').trim();
+  // The payback arithmetic, appended only where the budget actually computed
+  // one: a rung-3 hook is executed rather than sent as prompt text, so it has no
+  // standing cost and no ratio, and printing one there would invent a verdict
+  // the model never reached.
+  const payback = (!canApply && cluster.standing_cost_tokens_per_session && cluster.payback_ratio != null)
+    ? '~' + fmtTokens(cluster.standing_cost_tokens_per_session) + ' tokens would ride into every future session, forever; modelled payback ' + cluster.payback_ratio.toFixed(2) + '×.'
+    : null;
   return html`
-    <div class="opt-section" data-mechanism=${mech} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
+    <div class="opt-section" data-mechanism=${inboxMechanismTag(cluster)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${/* Only where a bulk action can genuinely reach this row. */ ''}
-        ${mech === MECH_WRITE ? html`<input type="checkbox" checked=${checked} onChange=${onToggle} />` : null}
+        ${canApply ? html`<input type="checkbox" checked=${checked} onChange=${onToggle} />` : null}
         ${/* Still clickable (cursor + hover underline come from sz-link), but
               rendered in body text: the row already names its action in the
               fix block below, so blue on every title made the list read as a
               wall of links. */ ''}
         <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
         <span class="badge badge-warning" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
-        <${MechanismBadge} mechanism=${mech} />
+        <${MechanismTags} item=${cluster} />
         <span style="margin-left:auto;text-align:right">
           ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
                 asserted "estimated", stacking four lines in this column. Matches
@@ -8432,55 +8452,63 @@ function RecurringMistakeRow({ cluster, mechanism, spans, checked, onToggle, onE
         </span>
       </div>
       <div class="dim" style="font-size:12px;margin-top:8px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
-      ${/* Why no permanent fix is offered, stated on the row rather than
-            left to a $0.00 the reader has to interpret. Carries the payback
-            arithmetic where the budget computed one, so the counterintuitive
-            part, that codifying a lesson usually costs more than it saves, is
-            legible instead of living only in a JSON field. */ ''}
-      ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
       ${showForward ? html`<div class="dim" style="font-size:11px;margin-top:4px">~${est.big} / mo if fixed</div>` : null}
 
-      ${/* The fix block, one branch per mechanism. Each branch ends in a real
-            next step: tj writes it, you copy it, or, where there honestly is
-            neither, the evidence that is all we have. */ ''}
-      ${mech === MECH_WRITE ? html`
-        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
-          ${/* Plain ampersand, not `&amp;`: htm assigns text content rather than
-                parsing HTML entities, so an entity here renders literally. */ ''}
-          <button class="cur-btn primary" onClick=${onExpand} title="Opens the write: you confirm scope and target before anything is written to disk">Approve & write →</button>
-          <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
-        </div>
-      ` : mech === MECH_SNIPPET ? html`
-        ${/* THE bucket that must never read as a dead end. tokenjam derived a
-              real recommendation and simply has no file it owns to write it
-              into, so the recommendation itself is the deliverable and gets the
-              same labelled copy box a cost card's snippet gets. */ ''}
+      ${/* The two fix facts are rendered INDEPENDENTLY, mirroring how the cost
+            card has always rendered its own two. A relearn cluster happens never
+            to be both today (the write budget offers a rule OR declines it), but
+            writing them as one if/else would bake the coincidence into the
+            structure and break the day it stops holding. */ ''}
+      ${hasSnippet ? html`
+        ${/* THE case that must never read as a dead end, and the common one: 21
+              of 55 clusters have a real derived recommendation that tokenjam has
+              no file it owns to write. The recommendation itself is then the
+              deliverable, so it gets the same labelled copy box a cost card's
+              snippet gets. */ ''}
         <div style="margin-top:10px">
           <div class="opt-title" style="font-size:12.5px">
             <span>Fix</span>
             <${CopySnippetButton} text=${fixText} />
           </div>
           <div class="sz-copybox" style="margin-top:4px">${fixText}</div>
-          <div class="dim" style="font-size:11px;margin-top:6px">Apply this yourself, then confirm it with <code>tj relearn verify --otel</code>.</div>
-          <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-            <span class="sz-link" onClick=${onExpand}>See the evidence →</span>
-            <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
-          </div>
         </div>
-      ` : html`
-        ${/* No writer and no derived recommendation. Said plainly: an empty
-              action area reads as a bug, and a "Mark applied" button here would
-              ask the reader to confirm having done something we never told them
-              to do. The example sessions are the real next step and this is the
-              only thing we have to offer, so it is named as such. */ ''}
-        <div style="margin-top:10px">
-          <div class="sz-note" style="font-size:12px">No fix template matched this failure yet, so there is nothing for tokenjam to write and nothing to hand you. The example sessions are what we have.</div>
-          <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-            <span class="sz-link" onClick=${onExpand}>See the example sessions →</span>
-            <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
-          </div>
+      ` : null}
+
+      ${/* WHY tokenjam will not write it, and what the reader does instead. The
+            budget's own sentence, never a locally invented paraphrase. This
+            replaced a compressed "no permanent fix offered: <label>" line: the
+            label named the gate without telling anyone what to do next. */ ''}
+      ${cannotApplyReason || payback ? html`
+        <div class="sz-note" style="font-size:12px;margin-top:10px">
+          ${cannotApplyReason || ''}
+          ${payback ? html`<div class="dim" style="margin-top:4px">${payback} This is a modelled comparison, not an observed one; it does not count what the rule might save by preventing the failure.</div>` : null}
         </div>
-      `}
+      ` : null}
+
+      ${!canApply && !hasSnippet && !cannotApplyReason ? html`
+        ${/* Neither fact is true AND the server had no sentence of its own, so
+              this is the last line of defence against a blank action area, which
+              reads as a bug. Gated on the reason being absent because when it is
+              present it already says what to do, and printing both put "the
+              example sessions" on screen twice (seen live with the noise floor
+              off, not reasoned about).
+
+              There is deliberately NO "Mark applied" in this component at all:
+              an advise-only cluster has no apply path (`RelearnApplyModal` itself
+              says "nothing to approve"), so a marker button would ask the reader
+              to confirm having done something we never told them to do, and would
+              write a ledger entry for a fix that does not exist. */ ''}
+        <div class="sz-note" style="font-size:12px;margin-top:10px">There is nothing to apply here yet. The example sessions are what we have.</div>
+      ` : null}
+
+      <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+        ${canApply ? html`
+          ${/* Plain ampersand, not `&amp;`: htm assigns text content rather than
+                parsing HTML entities, so an entity here renders literally. */ ''}
+          <button class="cur-btn primary" onClick=${onExpand} title="Opens the write: you confirm scope and target before anything is written to disk">Approve & write →</button>
+        ` : html`<span class="sz-link" onClick=${onExpand}>${hasSnippet ? 'See the evidence →' : 'See the example sessions →'}</span>`}
+        <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
+      </div>
     </div>`;
 }
 
@@ -8910,10 +8938,14 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
 
   const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
 
-  // Which of the three mechanisms this card is, on the same axis a relearn row
-  // uses (see `inboxMechanism`). Computed by the caller so the list and the card
-  // cannot disagree; recomputed here only as a fallback for a direct render.
-  const mech = mechanism || inboxMechanism(prop);
+  // The two independent fix facts, on the same axis a relearn row uses (see
+  // `inboxCanApply` / `inboxHasSnippet`). `canApply` is `prop.apply_capable` and
+  // `hasSnippet` is `prop.suggestion`, i.e. exactly the two conditionals this
+  // card has always gated its two blocks on. Reading them through the shared
+  // predicates rather than inline is what keeps the row's TAGS honest about a
+  // card that renders both, which `deadweight`'s mcp_remove proposal does.
+  const canApply = inboxCanApply(prop);
+  const hasSnippet = inboxHasSnippet(prop);
   const span = inboxSpan(prop, spans);
 
   // The card deliberately carries only: title + badge, one description
@@ -8921,11 +8953,11 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
   return html`
-    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${mech} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
-        <${MechanismBadge} mechanism=${mech} />
+        <${MechanismTags} item=${prop} />
         ${/* Body-coloured, never accent-blue: the accent on this page belongs
               to figures a fix returns, and this one is money already gone.
               The caption names the SPAN, and its hover states that the spans on
@@ -8962,7 +8994,7 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
         </div>
       ` : null}
 
-      ${prop.apply_capable ? (hasApplyKind ? html`
+      ${canApply ? (hasApplyKind ? html`
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px">${akCopy.title} <span class="dim" style="font-weight:400">· ${akCopy.hint}</span></div>
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -9014,7 +9046,7 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
           <a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || '#/optimize/summarize'}>Review in Summarize →</a>
           <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
         </div>
-      ` : mech === MECH_SNIPPET ? html`
+      ` : hasSnippet ? html`
         ${/* The snippet block above IS this card's fix; "Mark applied" is the
               follow-up that records having done it, not the fix itself. */ ''}
         <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
@@ -9037,7 +9069,7 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
           </div>
         </div>
       `}
-      ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
+      ${canApply ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
     </div>`;
 }
 
@@ -9414,7 +9446,7 @@ function ReviewInboxView({ params }) {
   // select-all and the bulk bar are not rendered rather than sitting there
   // governing nothing.
   const bulkRelearn = shownItems.filter(
-    i => i.kind === 'relearn' && inboxMechanism(i) === MECH_WRITE);
+    i => i.kind === 'relearn' && inboxCanApply(i));
   const selectedVisible = bulkRelearn.filter(c => checked.has(c.signature));
   const selectedCount = selectedVisible.length;
   // Clicking a fully-selected box clears it; anything else selects the lot.
@@ -9432,13 +9464,11 @@ function ReviewInboxView({ params }) {
   // the top rows, the collapsed tail and the unobserved group cannot drift into
   // three slightly different row treatments.
   const renderRow = (i) => (i.kind === 'relearn'
-    ? html`<${RecurringMistakeRow} key=${'r:' + i.signature} cluster=${i}
-        mechanism=${inboxMechanism(i)} spans=${spans}
+    ? html`<${RecurringMistakeRow} key=${'r:' + i.signature} cluster=${i} spans=${spans}
         checked=${checked.has(i.signature)} onToggle=${() => toggle(i.signature)}
         onExpand=${() => startReview([i.signature])}
         onDismiss=${() => dismissOne(i.signature)} suppressed=${suppressed} />`
-    : html`<${CostProposalCard} key=${'c:' + i.signature} prop=${i}
-        mechanism=${inboxMechanism(i)} spans=${spans}
+    : html`<${CostProposalCard} key=${'c:' + i.signature} prop=${i} spans=${spans}
         busy=${marking === i.signature} focused=${i.analyzer === analyzerFocus}
         onMark=${markCostApplied} onDismiss=${dismissOne}
         onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`);

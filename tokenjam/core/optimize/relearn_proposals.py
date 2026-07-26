@@ -126,15 +126,20 @@ def advise_snippet_offered(proposal: dict[str, Any]) -> bool:
     owns the wording of, which is the drift the ``short_reason`` map exists to
     prevent.
 
-    True is the answer for a cluster whose write WAS offered too: the fix text is
-    real either way, and the inbox picks the stronger mechanism itself.
+    False when the write WAS offered, and that is the load-bearing half. Unlike a
+    cost proposal, where ``suggestion`` and the apply path are separate fields
+    describing separate things (``deadweight``'s mcp_remove legitimately carries
+    both), a relearn cluster's ``proposed_fix`` is the SAME content the write
+    would write. Handing it over is only a distinct offer when tokenjam will not
+    write it, so a cluster tokenjam is about to write must not also advertise
+    "copy this" and duplicate its own fix on the row. Hence "advise" in the name.
     """
     from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER
 
     if not str(proposal.get("proposed_fix") or "").strip():
         return False
     if proposal.get("write_offered"):
-        return True
+        return False
     return str(proposal.get("write_blocked_reason") or "").strip() != REASON_PLACEHOLDER
 
 

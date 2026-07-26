@@ -634,12 +634,15 @@ def test_advise_snippet_offered_separates_a_real_fix_from_the_placeholder():
         stamp_proposal_ids,
     )
 
-    # A write was offered: the fix text is real either way, and the inbox picks
-    # the stronger mechanism ('tj can apply') for itself.
+    # A write WAS offered, so there is nothing to hand over: a cluster's
+    # `proposed_fix` is the same content the write would write, unlike a cost
+    # proposal where `suggestion` and the apply path are separate things. A row
+    # tokenjam is about to write must not also advertise "copy this" and print its
+    # own fix twice.
     assert advise_snippet_offered({
         "proposed_fix": "PreToolUse hook: block a busy-wait sleep chain.",
         "write_offered": True,
-    }) is True
+    }) is False
     # Blocked because a permanent rule is uneconomic, or because this window's
     # rule budget is spent. The RECOMMENDATION is still real and the user can
     # apply it themselves, which is exactly what advise_only_reason tells them.

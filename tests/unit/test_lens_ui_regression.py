@@ -2696,7 +2696,7 @@ def test_select_all_applies_only_to_the_rendered_rows(html):
     end = html.index("const renderRow =", start)
     block = html[start:end]
     assert "shownItems.filter(" in block
-    assert "inboxMechanism(i) === MECH_WRITE" in block
+    assert "inboxCanApply(i)" in block
     assert "bulkRelearn.filter(c => checked.has(c.signature))" in block
     assert "bulkRelearn.map(c => c.signature)" in block
     assert "d.clusters" not in block
@@ -2808,59 +2808,130 @@ def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
 # rendered as an ugly "11062.0M" instead of "11.3B".
 
 # --- Single-list inbox: the mechanism axis --------------------------------- #
-def test_inbox_mechanism_is_three_valued_and_never_keyed_on_the_analyzer(html):
+def test_the_mechanism_axis_is_two_orthogonal_facts_not_one_enum(html):
     # The open list is no longer split by which analyzer produced a row. The axis
-    # that replaced the tabs is what tj can DO about a row, and it has to be
-    # three-valued: "can tj apply this, yes or no" collapses the middle case, and
-    # the middle case (tj has the exact change but no file it owns to write it
-    # into) is the largest bucket on a real corpus.
-    start = html.index("function inboxMechanism(item)")
-    end = html.index("const MECHANISM_BADGE", start)
-    fn = html[start:end]
-    assert "MECH_WRITE" in fn and "MECH_SNIPPET" in fn and "MECH_NONE" in fn
-    # Gated on the SAME flags the fix blocks are, so a badge can never advertise
-    # an action the card then refuses.
-    assert "!item.advise_only && item.write_offered !== false" in fn
-    assert "item.advise_snippet_offered" in fn
-    assert "item.apply_capable" in fn
-    assert "item.suggestion" in fn
-    # Never on analyzer identity: the day a downsize proposal becomes
-    # apply-capable its rows change bucket with no edit here.
+    # that replaced the tabs is what tj can DO about a row.
+    #
+    # It must NOT be an enum. `CostProposalCard` has always rendered
+    # `${prop.suggestion ? ...}` and `${prop.apply_capable ? ...}` as two
+    # INDEPENDENT conditionals, and deadweight's mcp_remove proposal is the
+    # overlap case: it shows a copyable snippet AND a confirm-target apply
+    # control together. An enum has to pick one of those to report, so it
+    # necessarily misreports that row. Two booleans cannot.
+    can_start = html.index("function inboxCanApply(item)")
+    snip_start = html.index("function inboxHasSnippet(item)")
+    none_start = html.index("function inboxNothingActionable(item)")
+    can_fn = html[can_start:snip_start]
+    snip_fn = html[snip_start:none_start]
+
+    # Each predicate reads exactly the flags its own fix block is gated on.
+    assert "!item.advise_only && item.write_offered !== false" in can_fn
+    assert "item.apply_capable" in can_fn
+    assert "item.advise_snippet_offered" in snip_fn
+    assert "item.suggestion" in snip_fn
+    # They must not consult each other: orthogonal means neither can suppress
+    # the other, which is what made the enum lie about the overlap row.
+    assert "inboxHasSnippet" not in can_fn
+    assert "inboxCanApply" not in snip_fn
+
+    # "Nothing actionable" is DERIVED from both being false, not a peer value.
+    derived = html[none_start:html.index("function inboxMechanismTag", none_start)]
+    assert "!inboxCanApply(item) && !inboxHasSnippet(item)" in derived
+
+    # The retired enum must not come back.
+    for dead in ("MECH_WRITE", "MECH_SNIPPET", "MECH_NONE", "MechanismBadge", "inboxMechanism("):
+        assert dead not in html, f"the three-valued enum must not return: {dead}"
+
+    # Never keyed on analyzer identity: the day a downsize proposal becomes
+    # apply-capable its rows gain the apply control with no edit here.
     for analyzer in ("'downsize'", "'deadweight'", "'resend'", "'subagent'"):
-        assert analyzer not in fn, f"mechanism must not be keyed on {analyzer}"
+        assert analyzer not in can_fn + snip_fn, f"must not be keyed on {analyzer}"
 
 
-def test_snippet_bucket_renders_the_snippet_as_the_deliverable(html):
+def test_a_row_that_is_both_apply_capable_and_snippet_bearing_reports_both(html):
+    # deadweight's mcp_remove proposal is exactly this row. The tag component
+    # renders up to TWO badges rather than choosing one, and the `data-mechanism`
+    # attribute reports the overlap as "apply snippet" rather than collapsing it,
+    # so the attribute cannot drift from what the predicates decided.
+    tag_start = html.index("function inboxMechanismTag(item)")
+    tag_fn = html[tag_start:html.index("\n}", tag_start)]
+    assert "if (inboxCanApply(item)) parts.push('apply')" in tag_fn
+    assert "if (inboxHasSnippet(item)) parts.push('snippet')" in tag_fn
+    assert "parts.join(' ')" in tag_fn
+    # No early return that would make the two mutually exclusive.
+    assert "else" not in tag_fn
+
+    comp_start = html.index("function MechanismTags({ item })")
+    comp = html[comp_start:html.index("\n}", comp_start)]
+    assert "${canApply ? tag('apply') : null}${hasSnippet ? tag('snippet') : null}" in comp
+    # Only the neither-case short-circuits to a single tag.
+    assert "if (!canApply && !hasSnippet) return tag('none')" in comp
+
+    # And the cost card's two blocks stay independent conditionals, not a chain.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "${prop.suggestion ? html`" in card
+    assert "${canApply ? (hasApplyKind ? html`" in card
+
+
+def test_snippet_rows_render_the_snippet_as_the_deliverable(html):
     # THE failure this redesign exists to fix: a row whose fix is a copyable
     # change must show that change, not a bare "Mark applied" with nothing above
-    # it. Both ledgers' snippet branches put the fix in a labelled copy box with
-    # a Copy button.
+    # it. Both ledgers put the fix in a labelled copy box with a Copy button,
+    # gated on the snippet fact alone so an apply control never suppresses it.
     row_start = html.index("function RecurringMistakeRow")
     row_end = html.index("function RelearnApplyModal", row_start)
     row = html[row_start:row_end]
-    assert "mech === MECH_SNIPPET ? html`" in row
+    assert "${hasSnippet ? html`" in row
     assert "<${CopySnippetButton} text=${fixText} />" in row
     assert '<div class="sz-copybox" style="margin-top:4px">${fixText}</div>' in row
-    # And it names the follow-up rather than leaving the reader there.
-    assert "tj relearn verify --otel" in row
 
-    card_start = html.index("function CostProposalCard")
-    card_end = html.index("function InboxStatTiles", card_start)
-    card = html[card_start:card_end]
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
     assert "${prop.suggestion} />" in card
     assert "${prop.suggestion}</div>" in card
-    # The cost card's "Mark applied" is now reachable ONLY as the snippet
-    # bucket's follow-up. It used to be the catch-all `else`, which asked a
-    # reader with no fix on screen to confirm having applied one.
-    assert "` : mech === MECH_SNIPPET ? html`" in card
+    # The cost card's "Mark applied" is reachable only as the snippet follow-up.
+    # It used to be the catch-all `else`, which asked a reader with no fix on
+    # screen to confirm having applied one.
+    assert "` : hasSnippet ? html`" in card
 
 
-def test_no_bucket_renders_a_dead_end(html):
-    # Where there genuinely is no fix, say so. An empty action area reads as a
-    # bug, and a "Mark applied" button there asks the reader to confirm doing
-    # something the card never told them to do.
+def test_relearn_rows_never_offer_mark_applied(html):
+    # There is no apply path for an advise-only cluster at all: the modal itself
+    # says "Nothing to approve". A Mark-applied button there is a false promise
+    # and would write a ledger entry for a fix that does not exist. This is 50 of
+    # 55 clusters, the common case rather than an edge case.
     row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
-    assert "No fix template matched this failure yet" in row
+    # Asserted on the AFFORDANCE, not on the phrase: the row's comments explain
+    # at length why there is deliberately no marker button here, so a bare
+    # substring check on "Mark applied" matches the explanation and fails on
+    # correct code. What must be absent is a control that fires one.
+    assert ">Mark applied<" not in row
+    assert "'Mark applied'" not in row
+    assert "onMark" not in row
+    assert "/apply'" not in row and "cost-proposals/apply" not in row
+    # The modal's own gate, which the can-apply predicate mirrors, still stands.
+    assert "Nothing to approve: this recommendation is yours to apply." in html
+    # A non-applyable row states the budget's REAL reason, not a compressed label,
+    # so the reader learns what to do instead of just that a gate fired.
+    assert "cluster.advise_only_reason" in row
+    assert "${cannotApplyReason || ''}" in row
+    # The compressed one-liner is gone from the UI. Asserted on the DEFINITION
+    # and the string it produced, not on the bare name: a tombstone comment
+    # deliberately still names the removed helper and points at its surviving
+    # server-side field, which is documentation rather than a leftover.
+    assert "function writeGateNote" not in html
+    assert "'No permanent fix offered: '" not in html
+    # `write_blocked_short` itself is not dead: the CLI's dense relearn list
+    # still renders it, so the UI must not read it any more but the field stays.
+    assert "cluster.write_blocked_short" not in html
+
+
+def test_no_row_renders_a_dead_end(html):
+    # Where there genuinely is no fix, say so. An empty action area reads as a
+    # bug, and a marker button there asks the reader to confirm doing something
+    # the card never told them to do.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "${!canApply && !hasSnippet && !cannotApplyReason ? html`" in row
+    assert "There is nothing to apply here yet" in row
     assert "See the example sessions" in row
 
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
@@ -2883,7 +2954,7 @@ def test_bulk_controls_vanish_when_nothing_is_apply_capable(html):
     # The per-row checkbox is gated on the same predicate, so a row that no bulk
     # action can reach never shows one.
     row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
-    assert "${mech === MECH_WRITE ? html`<input type=\"checkbox\"" in row
+    assert '${canApply ? html`<input type="checkbox"' in row
     # The bulk button still names its count.
     assert "${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}" in html
     assert "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}" in html
