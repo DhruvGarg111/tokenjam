@@ -1205,8 +1205,18 @@ def test_resend_persona_flows_through_the_report_dispatch():
     # resend adapter (it was the one adapter that didn't take persona).
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
+    from dataclasses import replace
+
     rep = _report()
-    rep.findings["resend"] = _resend_finding()
+    # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): the
+    # report dispatch runs the write budget, which declines a permanent block
+    # for a 50-cent return, and this test is about persona threading rather
+    # than about whether a rule is worth writing. Tokens move with the dollars
+    # so the implied rate stays inside a real price band (CLAUDE.md rule 28).
+    rep.findings["resend"] = replace(
+        _resend_finding(),
+        past_overspend_usd=60.0, past_overspend_tokens=20_000_000,
+    )
     rep.persona = "claude-code"
     prop = {p.analyzer: p for p in cost_proposals_from_report(rep)}["resend"]
     assert prop.suggestion == "", "report persona must reach the resend adapter"

@@ -88,6 +88,7 @@ from tokenjam.core.context_diagnostic import (
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.analyzers.resend_tail import (
     MIN_SESSION_CONTEXT_TOKENS,
+    RELEARN_RESEND_BOUNDARY,
     introduced_tokens,
     main_thread_turns,
     premium_driver_role,
@@ -188,7 +189,9 @@ RESEND_ESTIMATE_BASIS = (
     "Right-sizing stacks on top: the same offloaded volume priced at the "
     "cheaper same-family model's input rate instead of the premium one. "
     "Computed over main-thread spans only, so it never overlaps the subagent "
-    "analyzer's own claim."
+    "analyzer's own claim. Boundary against the relearn analyzer, which prices "
+    "failed-call recovery over some of the same turns: "
+    + RELEARN_RESEND_BOUNDARY + "."
 )
 
 @dataclass(frozen=True)

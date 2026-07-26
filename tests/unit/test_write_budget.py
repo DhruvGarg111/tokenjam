@@ -584,3 +584,85 @@ def test_a_non_write_cost_card_is_left_completely_untouched():
     assert p.past_overspend_tokens == 90_000
     assert p.standing_cost_tokens == 0
     assert p.gross_recoverable_tokens is None       # never entered the pass
+
+
+# --- The value floor (MIN_NET_WRITE_USD) --------------------------------------
+# Netting alone only asks "does this break even". These pin the stronger
+# question the floor asks: "is this worth one of five permanent blocks in a
+# file the user re-sends forever".
+
+def test_a_rule_returning_less_than_the_floor_is_not_offered():
+    # Arrange: comfortably net-POSITIVE in tokens, but worth only $2.
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=2.0)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+
+    assert decision.net_negative is False          # it DID clear its own cost
+    assert decision.offered is False               # ...and still isn't worth a block
+    assert decision.reason == wb.REASON_BELOW_VALUE_FLOOR
+
+
+def test_the_floor_defers_the_write_but_never_suppresses_the_claim():
+    """The floor is a decision about OUR remedy, not about the user's money.
+
+    Repo CLAUDE.md rule 32: a gate on action-availability may never make an
+    incurred cost read as zero. So a below-floor family keeps its net claim and
+    its copyable snippet, exactly like a budget-deferred one — the only thing
+    it loses is the permanent write.
+    """
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=2.0)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+
+    assert decision.claim_suppressed is False
+    assert decision.claimed_tokens > 0
+    assert decision.claimed_usd is not None and decision.claimed_usd > 0
+
+
+def test_a_rule_at_or_above_the_floor_is_offered():
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=wb.MIN_NET_WRITE_USD * 3)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+    assert decision.offered is True
+    assert decision.reason == ""
+
+
+def test_an_unpriced_family_is_never_held_to_a_dollar_floor():
+    """No dollar figure means no comparison, and inventing a rate to make one
+    would kill real fixes for the sin of being unquantified — the same reason
+    `BASIS_NOT_PRICEABLE` exists."""
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=None)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+    assert decision.offered is True
+    assert decision.reason == ""
+
+
+def test_a_below_floor_family_does_not_consume_a_write_slot():
+    """The floor exists to protect the scarce slots, so it has to be applied
+    BEFORE the budget — otherwise a $2 family could crowd out a $50 one."""
+    candidates = [
+        _candidate("small", family="f1", tokens=1_000_000, usd=1.0),
+        _candidate("big", family="f2", tokens=1_000_000, usd=50.0),
+    ]
+    decisions = wb.allocate_writes(
+        candidates,
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=1),
+        _basis(sessions=100),
+    )
+    assert decisions["small"].offered is False
+    assert decisions["small"].reason == wb.REASON_BELOW_VALUE_FLOOR
+    assert decisions["big"].offered is True        # the slot went to the big one
+
+
+def test_the_floor_has_a_short_label_so_it_never_renders_generic():
+    assert wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR) != "no permanent fix offered"
+    assert "5" in wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR)
