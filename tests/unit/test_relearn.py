@@ -601,32 +601,32 @@ _REAL_THIN_SAMPLES: dict[str, list[str]] = {
     # leftover `ls -la` stdout from an EARLIER, successful chain step, not an
     # error description of why the chain's last command failed.
     "bash_output_buffer_limit": [
-        "Exit code 1\ntotal 240\ndrwxr-xr-x@ 21 anshs  staff    672 Jun 28 14:44 .\n"
-        "drwxr-xr-x@ 16 anshs  staff    512 Jun 28 14:44 ..\n"
-        "-rw-r--r--@  1 anshs  staff     75 Jun 28 14:44 .git",
-        "Exit code 1\ntotal 280\ndrwxr-xr-x@ 25 anshs  staff    800 Jun 25 17:52 .\n"
-        "drwxr-xr-x@ 33 anshs  staff   1056 Jun 25 17:53 ..",
+        "Exit code 1\ntotal 240\ndrwxr-xr-x@ 21 user  staff    672 Jun 28 14:44 .\n"
+        "drwxr-xr-x@ 16 user  staff    512 Jun 28 14:44 ..\n"
+        "-rw-r--r--@  1 user  staff     75 Jun 28 14:44 .git",
+        "Exit code 1\ntotal 280\ndrwxr-xr-x@ 25 user  staff    800 Jun 25 17:52 .\n"
+        "drwxr-xr-x@ 33 user  staff   1056 Jun 25 17:53 ..",
     ],
     # -> was confabulated as "bash_output_truncation"
     "bash_output_truncation": [
-        "Exit code 1\ntotal 288\ndrwxr-xr-x@ 24 anshs  staff    768 Jul  3 12:56 .\n"
-        "drwxr-xr-x@ 16 anshs  staff    512 Jul  3 12:56 ..\n"
-        "-rw-r--r--@  1 anshs  staff    553 Jul  3 12:56 .dockerignore",
-        "Exit code 1\ntotal 400\ndrwxr-xr-x@ 32 anshs  staff   1024 Jul  3 00:37 .",
+        "Exit code 1\ntotal 288\ndrwxr-xr-x@ 24 user  staff    768 Jul  3 12:56 .\n"
+        "drwxr-xr-x@ 16 user  staff    512 Jul  3 12:56 ..\n"
+        "-rw-r--r--@  1 user  staff    553 Jul  3 12:56 .dockerignore",
+        "Exit code 1\ntotal 400\ndrwxr-xr-x@ 32 user  staff   1024 Jul  3 00:37 .",
     ],
 }
 
 _REAL_LEGIT_SAMPLES: dict[str, list[str]] = {
     "branch_already_exists": [
-        "Exit code 128\nfatal: a branch named 'ticket-28' already exists",
-        "Exit code 128\nfatal: a branch named 'ticket-322' already exists",
-        "Exit code 128\nfatal: a branch named 'ticket-22' already exists",
+        "Exit code 128\nfatal: a branch named 'feature-28' already exists",
+        "Exit code 128\nfatal: a branch named 'feature-322' already exists",
+        "Exit code 128\nfatal: a branch named 'feature-22' already exists",
     ],
     "read_tool_dir_not_file": [
         "EISDIR: illegal operation on a directory, read "
-        "'/Users/anshs/Folder/code/shiploop.wt/ticket-5/shiploop/templates'",
+        "'/Users/user/Folder/code/myproject.wt/task-5/myproject/templates'",
         "EISDIR: illegal operation on a directory, read "
-        "'/Users/anshs/Folder/code/vibelab.wt/ticket-5'",
+        "'/Users/user/Folder/code/otherproject.wt/task-5'",
     ],
 }
 
@@ -831,11 +831,11 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
 # --- The one canonical dollar field, no relearn carve-out ---------------------
 # A relearn cluster used to carry its own forward `estimated_recoverable_*` /
 # `estimated_monthly_*` claim, extrapolated from the corpus's own observed
-# timespan to 30 days (`_corpus_window_days`). The founder decision that
-# retired this: a relearn cluster shows its PAST figure only, like every other
-# analyzer's card — the forward "you could recover $X" claim is deleted from
-# the card entirely, not merely renamed. These tests assert the retired names
-# stay gone rather than deleting the coverage outright.
+# timespan to 30 days (`_corpus_window_days`). That claim is retired: a
+# relearn cluster shows its PAST figure only, like every other analyzer's
+# card — the forward "you could recover $X" claim is deleted from the card
+# entirely, not merely renamed. These tests assert the retired names stay
+# gone rather than deleting the coverage outright.
 
 def _cwd_confusion_session_at(root: Path, project: str, session_id: str, ts: str) -> None:
     """Same fixture as `_cwd_confusion_session`, with a controllable
