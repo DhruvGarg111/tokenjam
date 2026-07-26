@@ -28,9 +28,9 @@ _TAGLINE = "a cost-saving utility for AI agents · local-first, OTel-native · n
 
 def print_welcome_banner() -> None:
     """Print the wordmark + ``TokenJam vX.Y.Z`` + one-line value prop."""
-    console.print(f"[bold cyan]{_WORDMARK.strip(chr(10))}[/bold cyan]")
+    console.print(f"[brand]{_WORDMARK.strip(chr(10))}[/brand]")
     console.print(
-        f"  [bold]TokenJam[/bold] [dim]v{__version__}[/dim]"
+        f"  [label]TokenJam[/label] [muted]v{__version__}[/muted]"
     )
-    console.print(f"  [dim]{_TAGLINE}[/dim]")
+    console.print(f"  [muted]{_TAGLINE}[/muted]")
     console.print()

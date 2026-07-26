@@ -59,25 +59,52 @@ def test_nudge_with_data_but_unknown_days_avoids_bogus_count(capsys):
     assert "last None days" not in out
 
 
-def test_nudge_claude_code_persona_leads_with_quota_diagnosis(capsys):
-    """CC users get the quota-diagnosis commands; tjb is an SDK workflow and
-    must not appear on the Claude Code list."""
+def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
+    """The CC list is the web dashboard plus tokenmaxx, in that order. The
+    per-command diagnosis rows (`tj context`, `tj quota-audit`) are gone: the
+    dashboard is where that diagnosis is read. tjb is an SDK workflow and must
+    not appear here either."""
     _print_next_steps_nudge(
         has_data=True, days=30, persona="claude_code", daemon_running=True,
     )
     out = capsys.readouterr().out
-    assert "tj context" in out
-    assert "tj quota-audit" in out
+    assert "web dashboard" in out
     assert "tj tokenmaxx" in out
+    assert out.index("web dashboard") < out.index("tj tokenmaxx")
+    assert "tj context" not in out
+    assert "tj quota-audit" not in out
     assert "tjb" not in out
     assert "tokenjam-bench" not in out
-    # Lead with the diagnosis pair.
-    assert out.index("tj context") < out.index("tj quota-audit") < out.index("tj tokenmaxx")
+    # Exactly two command rows: the indented block that follows the
+    # "Next steps" header, up to the blank line that closes it. (Anything
+    # after that blank line is a separate advisory, e.g. the PATH warning.)
+    lines = out.splitlines()
+    start = next(i for i, ln in enumerate(lines) if "Next steps" in ln) + 1
+    rows = []
+    for ln in lines[start:]:
+        if not ln.strip():
+            if rows:
+                break
+            continue
+        rows.append(ln)
+    assert len(rows) == 2, rows
+
+
+def test_nudge_claude_code_never_says_lens(capsys):
+    """The web UI entry is named "web dashboard" on this list, not "Lens"."""
+    _print_next_steps_nudge(
+        has_data=True, days=30, persona="claude_code", daemon_running=True,
+    )
+    assert "Lens" not in capsys.readouterr().out
+    _print_next_steps_nudge(
+        has_data=True, days=30, persona="claude_code", daemon_running=False,
+    )
+    assert "Lens" not in capsys.readouterr().out
 
 
 def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
-    """Onboarding just installed the daemon — Lens is already up; suggesting
-    `tj serve` invites a port conflict."""
+    """Onboarding just installed the daemon — the dashboard is already up;
+    suggesting `tj serve` invites a port conflict."""
     _print_next_steps_nudge(
         has_data=True, days=30, persona="claude_code", daemon_running=True,
     )
