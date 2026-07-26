@@ -264,6 +264,20 @@ COMPACTION_FIX = (
     "it as immediate relief for an already-full session, not the durable fix."
 )
 
+# The SDK-persona fallback when no priced `cache_control` example exists
+# (``fix_cache_control`` == ""). `/compact` is a Claude Code interactive
+# command an SDK caller has no access to, so it must never be shown here —
+# unlike COMPACTION_FIX above, this stays scoped to what any SDK caller
+# controls directly: the content it assembles into the next request, not a
+# harness-specific command.
+RESEND_SDK_TRIM_FIX = (
+    "Trim or summarize the accumulated context before including it in the "
+    "next request instead of resending it unchanged turn over turn. This is "
+    "the same repeated volume this finding measures; cutting it at the call "
+    "site directly reduces future prompt size, independent of whether "
+    "caching is enabled."
+)
+
 # The durable claude-code lever: a rung-1 CLAUDE.md rule (same write machinery
 # `script`/`reuse`/`verbosity` use via `cost_proposals._persona_gated_write_fields`)
 # so the context that would otherwise get re-sent every turn never accumulates
