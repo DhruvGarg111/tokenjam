@@ -2255,7 +2255,13 @@ def test_cost_proposals_wired_into_review_inbox(html):
     assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
-    assert "Cost advisories" in html
+    # INVERTED (was `assert "Cost advisories" in html`). The inbox no longer
+    # splits its open rows by which analyzer produced them: the cost proposals
+    # and the relearn clusters are one list ranked by money, so a "Cost
+    # advisories" tab existing again would be the regression, not its absence.
+    assert "Cost advisories" not in html
+    assert "Recurring mistakes (" not in html
+    assert ">Open (${shownItems.length})<" in html
 
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
@@ -2640,14 +2646,18 @@ def test_old_pending_relearn_stat_line_replaced_by_the_combined_stat_tiles(html)
 def test_select_all_checkbox_sits_beside_the_bulk_dismiss_button(html):
     # Inbox redesign: the Recurring-mistakes tab dropped its <table> for flat
     # rows (RecurringMistakeRow, matching the mockup's card-style layout), so
-    # the select-all box now sits in the tab's listhead beside "Dismiss
-    # checked" rather than inside a <thead><th>.
+    # the select-all box now sits in the listhead beside "Dismiss checked"
+    # rather than inside a <thead><th>.
     assert "function SelectAllCheckbox" in html
+    # It governs `bulkRelearn` (the rows tj can apply AND the review queue can
+    # drive), not every listed row: the single-list redesign put rows with no
+    # apply path on the same list, and a select-all spanning them would hand the
+    # bulk buttons a scope they cannot act on.
     assert (
-        "<${SelectAllCheckbox} total=${shownRelearn.length} "
+        "<${SelectAllCheckbox} total=${bulkRelearn.length} "
         "selected=${selectedCount} onToggle=${toggleAll} />"
     ) in html
-    # The per-row checkbox is still present, just inside a flat row now.
+    # The per-row checkbox is still present, just inside a card now.
     assert 'checked=${checked} onChange=${onToggle} />' in html
 
 
@@ -2670,22 +2680,25 @@ def test_select_all_toggles_off_when_everything_is_selected(html):
     fn = html[start:end]
     assert "if (all) next.delete(sig)" in fn
     assert "else next.add(sig)" in fn
-    # The component delegates to it over the RENDERED row set.
+    # The component delegates to it over the SELECTABLE row set.
     assert (
-        "nextSelectAllSelection(shownRelearn.map(c => c.signature), prev)"
+        "nextSelectAllSelection(bulkRelearn.map(c => c.signature), prev)"
     ) in html
 
 
 def test_select_all_applies_only_to_the_rendered_rows(html):
     # THE load-bearing one. The list filters out locally-dismissed rows and rows
     # already applied (in this session OR any earlier one), so select-all must
-    # iterate `visible`, never the unfiltered d.clusters, or it would dismiss
-    # rows the user never saw.
-    start = html.index("const selectedVisible =")
-    end = html.index("const modalCluster =", start)
+    # iterate the rendered set, never the unfiltered d.clusters, or it would
+    # dismiss rows the user never saw. On the single list that rendered set is
+    # narrowed once more, to the rows a bulk action can actually reach.
+    start = html.index("const bulkRelearn = shownItems.filter(")
+    end = html.index("const renderRow =", start)
     block = html[start:end]
-    assert "shownRelearn.filter(c => checked.has(c.signature))" in block
-    assert "shownRelearn.map(c => c.signature)" in block
+    assert "shownItems.filter(" in block
+    assert "inboxMechanism(i) === MECH_WRITE" in block
+    assert "bulkRelearn.filter(c => checked.has(c.signature))" in block
+    assert "bulkRelearn.map(c => c.signature)" in block
     assert "d.clusters" not in block
     # The filter that makes `visible` a strict subset is still in place. This
     # previously pinned the `!appliedSigs.has(...)` form verbatim, which meant
@@ -2727,9 +2740,9 @@ def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
     # `checked` is not pruned when a row leaves the list, so dismissing the raw
     # set would sweep along a signature that is no longer on screen.
     start = html.index("const dismissChecked =")
-    end = html.index("const modalCluster =", start)
+    end = html.index("const renderRow =", start)
     fn = html[start:end]
-    assert "shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "bulkRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
     assert "...checked]" not in fn
 
 
@@ -2758,13 +2771,13 @@ def test_select_all_adds_no_bulk_approve(html):
     # writes anything. The invariant this pin defends is that no bulk control
     # can APPROVE; it is not a cap on the number of buttons, so a third
     # non-writing control may be added, but a writing one may not.
-    # Scoped to the whole Recurring-mistakes tab block, not just its listhead:
-    # the two bulk buttons now sit BELOW the scroll box (they used to be in the
-    # head, beside select-all), so a head-only slice would miss them entirely
-    # and pass vacuously.
+    # Scoped to the whole open-list tab block, not just its listhead: the two
+    # bulk buttons sit BELOW the list (they used to be in the head, beside
+    # select-all), so a head-only slice would miss them entirely and pass
+    # vacuously.
     view = html[html.index("function ReviewInboxView"):]
-    start = view.index("tab === 'mistakes' ? html`")
-    end = view.index("tab === 'advisories' ? html`", start)
+    start = view.index("tab === 'open' ? html`")
+    end = view.index("tab === 'applied' ? html`", start)
     head = view[start:end]
     assert "dismissChecked" in head
     assert "startReview(selectedVisible.map(c => c.signature))" in head
@@ -2794,21 +2807,191 @@ def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
 # item's headline still showed tokens, and a token count at billion scale
 # rendered as an ugly "11062.0M" instead of "11.3B".
 
-def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
-    # The old bug: ranking flipped to dollars the moment ANY item in the list
-    # had a dollar figure, leaving every other (tokens-only) item tied at
-    # rank 0 and rendered in whatever order the API happened to return them
-    # (adapter-insertion order) — exactly the founder's observed bug. Tokens
-    # are the one figure every item carries, priced or not, so the fix ranks
-    # by tokens uniformly; dollars stay a per-item DISPLAY choice
-    # (estMonthlyLine), decoupled from ranking.
-    start = html.index("function sortByEstMonthly")
+# --- Single-list inbox: the mechanism axis --------------------------------- #
+def test_inbox_mechanism_is_three_valued_and_never_keyed_on_the_analyzer(html):
+    # The open list is no longer split by which analyzer produced a row. The axis
+    # that replaced the tabs is what tj can DO about a row, and it has to be
+    # three-valued: "can tj apply this, yes or no" collapses the middle case, and
+    # the middle case (tj has the exact change but no file it owns to write it
+    # into) is the largest bucket on a real corpus.
+    start = html.index("function inboxMechanism(item)")
+    end = html.index("const MECHANISM_BADGE", start)
+    fn = html[start:end]
+    assert "MECH_WRITE" in fn and "MECH_SNIPPET" in fn and "MECH_NONE" in fn
+    # Gated on the SAME flags the fix blocks are, so a badge can never advertise
+    # an action the card then refuses.
+    assert "!item.advise_only && item.write_offered !== false" in fn
+    assert "item.advise_snippet_offered" in fn
+    assert "item.apply_capable" in fn
+    assert "item.suggestion" in fn
+    # Never on analyzer identity: the day a downsize proposal becomes
+    # apply-capable its rows change bucket with no edit here.
+    for analyzer in ("'downsize'", "'deadweight'", "'resend'", "'subagent'"):
+        assert analyzer not in fn, f"mechanism must not be keyed on {analyzer}"
+
+
+def test_snippet_bucket_renders_the_snippet_as_the_deliverable(html):
+    # THE failure this redesign exists to fix: a row whose fix is a copyable
+    # change must show that change, not a bare "Mark applied" with nothing above
+    # it. Both ledgers' snippet branches put the fix in a labelled copy box with
+    # a Copy button.
+    row_start = html.index("function RecurringMistakeRow")
+    row_end = html.index("function RelearnApplyModal", row_start)
+    row = html[row_start:row_end]
+    assert "mech === MECH_SNIPPET ? html`" in row
+    assert "<${CopySnippetButton} text=${fixText} />" in row
+    assert '<div class="sz-copybox" style="margin-top:4px">${fixText}</div>' in row
+    # And it names the follow-up rather than leaving the reader there.
+    assert "tj relearn verify --otel" in row
+
+    card_start = html.index("function CostProposalCard")
+    card_end = html.index("function InboxStatTiles", card_start)
+    card = html[card_start:card_end]
+    assert "${prop.suggestion} />" in card
+    assert "${prop.suggestion}</div>" in card
+    # The cost card's "Mark applied" is now reachable ONLY as the snippet
+    # bucket's follow-up. It used to be the catch-all `else`, which asked a
+    # reader with no fix on screen to confirm having applied one.
+    assert "` : mech === MECH_SNIPPET ? html`" in card
+
+
+def test_no_bucket_renders_a_dead_end(html):
+    # Where there genuinely is no fix, say so. An empty action area reads as a
+    # bug, and a "Mark applied" button there asks the reader to confirm doing
+    # something the card never told them to do.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "No fix template matched this failure yet" in row
+    assert "See the example sessions" in row
+
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    # summarize keeps its own hop into the curate/diff/apply flow.
+    assert "Review in Summarize" in card
+    # Everything else with no apply path and no snippet gets a plain statement
+    # plus the analyzer's own detail card, never the marker button.
+    assert "There is no ready-made change to apply here yet" in card
+    assert "optimizeFindingHref(prop.analyzer)" in card
+
+
+def test_bulk_controls_vanish_when_nothing_is_apply_capable(html):
+    # For the SDK persona relearn offers no write at all
+    # (`write_offered = persona in {claude-code, mixed}`), so the selectable set
+    # can be empty. A select-all governing nothing is worse than no select-all:
+    # it implies the list is selectable when it is not. Both the checkbox and the
+    # bulk bar are gated on the set being non-empty.
+    view = html[html.index("function ReviewInboxView"):]
+    assert view.count("${bulkRelearn.length > 0 ? html`") == 2
+    # The per-row checkbox is gated on the same predicate, so a row that no bulk
+    # action can reach never shows one.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "${mech === MECH_WRITE ? html`<input type=\"checkbox\"" in row
+    # The bulk button still names its count.
+    assert "${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}" in html
+    assert "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}" in html
+
+
+def test_bulk_mark_applied_can_never_post_a_relearn_row_to_the_cost_ledger(html):
+    # The collapsed tail is now mixed, and the bulk marker only speaks the cost
+    # ledger's endpoint. Filtered inside markManyApplied rather than at the call
+    # site, so a future caller cannot hand it a mixed list and quietly POST the
+    # wrong ledger.
+    start = html.index("const markManyApplied = async (props)")
+    end = html.index("const modalCluster =", start)
+    fn = html[start:end]
+    assert "props.filter(x => x.kind !== 'relearn' && !x.apply_capable)" in fn
+
+
+def test_every_row_discloses_the_span_its_figure_was_observed_over(html):
+    # The two ledgers do NOT observe the same period and both report under the
+    # name `past_overspend`: a cost proposal sees a bounded window, a relearn
+    # cluster sees all retained history. While they had separate tabs each tab
+    # could state its span once. Ranked together, an undisclosed span means the
+    # order is quietly comparing a 30-day figure against an all-time one.
+    start = html.index("function inboxSpan(item, spans)")
+    end = html.index("\n}", start)
+    fn = html[start:end]
+    # Relearn reads the server's own corpus sentence, never a locally invented
+    # description of the scan.
+    assert "spans.corpusBasis" in fn
+    assert "days of scanned history" in fn
+    # Cost reads its bounded window through the shared label helper.
+    assert "pastWindowLabel(spans && spans.costWindowDays)" in fn
+    # The spans come off the finding / the past-overspend block, in one place.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "corpusWindowDays: d.windowDays" in view
+    assert "corpusBasis: d.corpusBasis" in view
+    assert "costWindowDays: costPastOverspend && costPastOverspend.window_days" in view
+    assert "windowDays: f.window_days" in view
+    assert "corpusBasis: f.corpus_basis" in view
+    # Both row shapes render it in the figure's own caption.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "'already cost ' + span.text" in row
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "'avoidable ' + span.text" in card
+    # The per-card `windowDays` prop is gone: two props carrying the same fact
+    # from two sources is the drift this consolidation removes.
+    assert "windowDays=${costPastOverspend" not in html
+
+
+def test_the_ordering_key_cannot_reach_a_projection(html):
+    # Two bugs, one key. The FIRST was ranking flipping to dollars the moment
+    # any item had a dollar figure, leaving tokens-only items tied at rank 0 in
+    # adapter-insertion order. The SECOND, fixed by the single-list redesign, was
+    # the key's fallback: `past_overspend_tokens ?? estimated_monthly_tokens`
+    # let a forward 30-day PROJECTION compete for position against past
+    # OBSERVATIONS inside one sort. Latent (every real row carries the observed
+    # figure) but structural, and unfixable by inspection once shipped, because
+    # nothing on screen says which kind of number placed a row.
+    #
+    # The key now reads ONE field and has no fallback at all; a row without it
+    # cannot enter the ranked list.
+    start = html.index("function observedRankTokens")
     end = html.index("function splitTopAndTail", start)
     fn = html[start:end]
-    assert "i.estimated_monthly_tokens || 0" in fn
-    # The old dollars-if-any gate must not survive a regression re-adding it.
-    assert "anyUsd" not in fn
+    assert "item.past_overspend_tokens" in fn
+    # No projection, no dollars, no second field of any kind may appear in the
+    # ranking block.
+    assert "estimated_monthly_tokens" not in fn
     assert "estimated_monthly_usd" not in fn
+    assert "estimated_recoverable" not in fn
+    assert "anyUsd" not in fn
+    # The unranked rows are PARTITIONED OUT rather than sorted to the bottom, so
+    # no comparator change can ever interleave them.
+    assert "function partitionByObservedOverspend" in fn
+    assert "ranked: items.filter(i => observedRankTokens(i) != null)" in fn
+    assert "unobserved: items.filter(i => observedRankTokens(i) == null)" in fn
+    # And the view splits before it sorts.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "const { ranked, unobserved } = partitionByObservedOverspend(shownItems)" in view
+    assert "const sortedOpen = sortByObservedOverspend(ranked)" in view
+    # The retired key must not come back under its old name.
+    assert "sortByEstMonthly" not in html
+
+
+def test_ordering_key_rejects_a_projection_only_row(html):
+    # A behavioural contract for the guard above, reimplemented in Python from
+    # the pinned JS so a divergence fails loudly rather than only when the
+    # string changes. A row carrying ONLY a forward projection is unrankable;
+    # it must land in `unobserved`, never at the top of the ranked list.
+    def observed_rank_tokens(item):
+        t = item.get("past_overspend_tokens")
+        return t if isinstance(t, (int, float)) and not isinstance(t, bool) else None
+
+    def partition(items):
+        return (
+            [i for i in items if observed_rank_tokens(i) is not None],
+            [i for i in items if observed_rank_tokens(i) is None],
+        )
+
+    projection_only = {"title": "forward only", "estimated_monthly_tokens": 10**12}
+    observed_small = {"title": "small but real", "past_overspend_tokens": 5_000}
+    observed_big = {"title": "big and real", "past_overspend_tokens": 9_000_000}
+
+    ranked, unobserved = partition([projection_only, observed_small, observed_big])
+    assert unobserved == [projection_only]
+    ranked.sort(key=lambda i: i["past_overspend_tokens"], reverse=True)
+    assert [i["title"] for i in ranked] == ["big and real", "small but real"]
+    # The old fallback would have put the trillion-token projection first.
+    assert ranked[0] is not projection_only
 
 
 def test_collapsed_tail_combined_figure_uses_the_priceable_majority_rule(html):
@@ -2889,17 +3072,19 @@ def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
 def test_split_top_and_tail_slices_an_already_sorted_list(html):
     # The long-tail collapse (requirement #3) must absorb the BOTTOM of the
     # sorted list, not an arbitrary suffix of the unsorted API order — it
-    # slices whatever sortByEstMonthly already produced, never re-sorts or
-    # re-orders on its own.
+    # slices whatever the ranking already produced, never re-sorts or re-orders
+    # on its own.
     start = html.index("function splitTopAndTail")
     end = html.index("function estMonthlyLine", start)
     fn = html[start:end]
     assert "sorted.slice(0, max)" in fn
     assert "sorted.slice(max)" in fn
     assert "sort(" not in fn   # no independent re-sort inside the split itself
+    # ONE call, over the one merged open list — there is no longer a per-tab
+    # collapse, because there is no longer a per-analyzer tab.
     view = html[html.index("function ReviewInboxView"):]
-    assert "splitTopAndTail(sortedRelearn)" in view
-    assert "splitTopAndTail(sortedCost)" in view
+    assert "splitTopAndTail(sortedOpen)" in view
+    assert view.count("splitTopAndTail(") == 1
 
 
 def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():

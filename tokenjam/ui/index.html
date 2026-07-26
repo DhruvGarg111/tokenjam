@@ -7907,22 +7907,128 @@ function monthlyUsdForDisplay(item) {
   return NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer) ? null : item.estimated_monthly_usd;
 }
 
-// Rank by tokens — the one figure every item on this page carries, priced or
-// not (a resend/deadweight/subagent/verbosity advisory has real recoverable
-// tokens but no dollar rate at all). Dollars stay a per-item DISPLAY
-// preference (requirement #2, estMonthlyLine below) decoupled from ranking:
-// comparing a $-priced item against a tokens-only one would mean inventing a
-// $/token conversion rate to make them comparable, which the spec forbids
-// (never invent a rate silently). Sorting by tokens uniformly means the
-// rendered order is always monotonic even though some rows DISPLAY dollars —
-// the sort key and a token-only row's display value are the same number.
-// Ranks on the observed past-overspend token figure where the item carries
-// one (every cost proposal does), falling back to the monthly token figure
-// for a relearn cluster, which has no window to observe one over. Ranking on
-// the same quantity the row DISPLAYS keeps the rendered order monotonic.
-function sortByEstMonthly(items) {
-  const rank = i => (i.past_overspend_tokens != null ? i.past_overspend_tokens : (i.estimated_monthly_tokens || 0));
-  return [...items].sort((a, b) => rank(b) - rank(a));
+// --- The mechanism axis: what tj can actually DO about a row ---------------
+//
+// This page used to be two tabs cut on WHICH ANALYZER produced a row: one fed
+// by `relearn` alone, one by the other sixteen. That is a fact about our own
+// module layout, not a decision the reader makes, and it put the largest
+// figures the product computes on the second tab. One list ranked by money
+// replaces both, so the axis that genuinely changes what the reader does next
+// has to travel ON the row instead of being the tab they picked.
+//
+// THREE values, never two. "Can tj apply this, yes or no" collapses the middle
+// case, and the middle case is the biggest one: most rows carry the exact
+// change to make but no writer to make it. Rendering those as a no-op is the
+// dead end this axis exists to prevent.
+//
+// Computed from the SAME flags the fix block itself gates on, so a badge can
+// never advertise an action the card then refuses:
+//   * 'write'   tj makes the change. RELEARN: the write budget offered a rule
+//               (`write_offered`) and the cluster is not advise-only — which
+//               is exactly `RelearnApplyModal`'s own gate, so a row badged
+//               this way can never open a modal saying "nothing to approve".
+//               COST: `apply_capable`, the same flag the apply controls below
+//               are gated on.
+//   * 'snippet' tj hands over the exact change and the user applies it. COST:
+//               `suggestion`. RELEARN: `advise_snippet_offered`, stamped
+//               server-side (`relearn_proposals.advise_snippet_offered`) and
+//               true when `proposed_fix` is a real derived recommendation
+//               rather than the "no fix template matched" placeholder. The
+//               snippet IS the deliverable for this bucket, so it renders in a
+//               labelled copy box on the row, never behind a hover or a
+//               footnote.
+//   * 'none'    no writer and no snippet. `summarize` (its fix lives in its own
+//               curate/diff/apply lifecycle, so the row is a hop into it) and
+//               the clusters no fix template matched (the real next step is the
+//               example sessions). Stated in words; a row here must never be a
+//               blank space the reader is expected to interpret.
+//
+// Never keyed on analyzer identity. The day a `downsize` proposal becomes
+// apply-capable its rows change bucket with no edit here, and an analyzer we
+// have not written yet is classified correctly on arrival.
+const MECH_WRITE = 'write';
+const MECH_SNIPPET = 'snippet';
+const MECH_NONE = 'none';
+
+function inboxMechanism(item) {
+  if (!item) return MECH_NONE;
+  if (item.kind === 'relearn') {
+    // Mirror of RelearnApplyModal's gate, deliberately in that order: a
+    // budget-gated cluster is stamped `advise_only` by the detector too, so
+    // this cannot promise a write the modal will decline.
+    if (!item.advise_only && item.write_offered !== false) return MECH_WRITE;
+    if (item.advise_snippet_offered && String(item.proposed_fix || '').trim()) return MECH_SNIPPET;
+    return MECH_NONE;
+  }
+  // A cost proposal may carry BOTH an apply path and a snippet (deadweight's
+  // mcp_remove does). The strongest available mechanism wins, and the snippet
+  // still renders above the apply controls, so nothing is hidden by the choice.
+  if (item.apply_capable) return MECH_WRITE;
+  if (String(item.suggestion || '').trim()) return MECH_SNIPPET;
+  return MECH_NONE;
+}
+
+// The badge, in the reader's vocabulary rather than ours. Says what happens
+// next, not which internal flag was set — "advise_only" and "apply_capable"
+// are our words for our plumbing.
+const MECHANISM_BADGE = {
+  [MECH_WRITE]: {
+    label: 'TJ CAN APPLY',
+    title: 'tokenjam can make this change for you; you confirm the target first.',
+  },
+  [MECH_SNIPPET]: {
+    label: 'COPY THE FIX',
+    title: 'tokenjam has the exact change but no file it owns to write it into. Copy it, apply it, then mark it done.',
+  },
+  [MECH_NONE]: {
+    label: 'NO FIX YET',
+    title: 'tokenjam has no ready-made change for this one. The row says what the next step is instead.',
+  },
+};
+
+function MechanismBadge({ mechanism }) {
+  const copy = MECHANISM_BADGE[mechanism] || MECHANISM_BADGE[MECH_NONE];
+  // Neutral badge class on purpose: the mechanism is a routing fact, not a
+  // severity. The money figure is what ranks a row, and the accent on this
+  // page belongs to figures and to typeable actions.
+  return html`<span class="badge" title=${copy.title}>${copy.label}</span>`;
+}
+
+// --- Ordering: observed money, and nothing that merely resembles it --------
+//
+// Rank on the OBSERVED past-overspend token figure, full stop. The previous
+// key fell back to `estimated_monthly_tokens` when the observed figure was
+// absent, which let a forward 30-day PROJECTION compete for position against
+// past observations inside one sort: two different quantities, two different
+// tenses, silently interleaved, and the reader has no way to tell which kind
+// of number put a row where it is.
+//
+// This is a LATENT bug, not one anyone has seen: every cluster and proposal in
+// the real payload carries `past_overspend_tokens`, so the fallback has never
+// fired. It is fixed as a structural guard rather than as a repair — a row with
+// no observed figure is now unable to enter the ranked list at all, because it
+// goes to `unobserved` and renders in its own group below the fold.
+//
+// Tokens, not dollars: some rows have no dollar rate at all, and ordering them
+// against priced rows would mean inventing a $/token rate to make the two
+// comparable. The product forbids that, so the ranking runs on the one figure
+// every row carries and dollars stay a per-row DISPLAY choice.
+function observedRankTokens(item) {
+  const t = item && item.past_overspend_tokens;
+  return typeof t === 'number' && isFinite(t) ? t : null;
+}
+
+function sortByObservedOverspend(items) {
+  return [...items].sort((a, b) => (observedRankTokens(b) || 0) - (observedRankTokens(a) || 0));
+}
+
+// Split BEFORE the sort, so an unranked row is structurally incapable of
+// interleaving with ranked ones rather than merely sorting to the bottom.
+function partitionByObservedOverspend(items) {
+  return {
+    ranked: items.filter(i => observedRankTokens(i) != null),
+    unobserved: items.filter(i => observedRankTokens(i) == null),
+  };
 }
 
 // What the noise floor removed, stated rather than silently dropped. Renders
@@ -7950,12 +8056,21 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
+// The collapse/floor labels used to be fixed plurals ("cost advisories"), which
+// was safe while each tab had its own noun and its own always-plural phrasing.
+// On the merged list the noun is generic and a group of one is common, so
+// "1 smaller items" is now reachable. Agreed here rather than at each of the
+// three call sites.
+function pluralItems(n) {
+  return n === 1 ? 'item' : 'items';
+}
+
 // A relearn tail item's headline est./mo figure — dollars first when a rate
 // exists and the plan tier doesn't suppress dollars, tokens as fallback
 // (requirement #2). RELEARN CLUSTERS ONLY (see `monthlyUsdForDisplay`); the
 // cost tab passes its own past-tense `summary` to CollapsedTailRow instead.
 // `suppressed` is always `false` on this page (the founder-approved
-// always-dollars carve-out above `sortByEstMonthly`); the parameter survives
+// always-dollars carve-out in ReviewInboxView); the parameter survives
 // so this function still degrades correctly if that ever changes.
 function estMonthlyLine(item, suppressed) {
   const usd = monthlyUsdForDisplay(item);
@@ -8074,6 +8189,41 @@ function pastWindowLabel(days) {
   return 'the last ' + (Number.isInteger(n) ? n : n.toFixed(0)) + ' days';
 }
 
+// --- Span disclosure: the asymmetry a merged ranking would otherwise hide --
+//
+// The two ledgers on this list do NOT observe the same period, and both report
+// their figure under the name `past_overspend`. A cost proposal observes a
+// BOUNDED window (`window_days`, 30 today). A relearn cluster scans every
+// session tokenjam still retains, which is a different and usually longer span
+// (`corpus_basis` on the finding says exactly what it read, and `window_days`
+// there is the measured occurrence span, not a setting).
+//
+// While those two lived on separate tabs, each tab could state its own span
+// once and be done. Ranking them together makes the reader compare an all-time
+// figure against a 30-day one, so the span has to travel with every row or the
+// ordering is quietly comparing different periods. It is disclosed QUIETLY, in
+// the figure's own caption, because it qualifies the number rather than
+// competing with it.
+//
+// This deliberately does NOT unify the spans. Putting every analyzer on one
+// observed corpus span is real work with its own correctness questions and is
+// tracked separately; pretending they already agree by hiding the difference is
+// the one option that is not honest.
+function inboxSpan(item, spans) {
+  if (item && item.kind === 'relearn') {
+    const days = Number((spans && spans.corpusWindowDays) || 0);
+    return {
+      text: days ? 'over ' + days.toFixed(0) + ' days of scanned history' : 'over the scanned history',
+      title: (spans && spans.corpusBasis)
+        || 'Scanned across every session tokenjam still retains, not a fixed window.',
+    };
+  }
+  return {
+    text: 'over ' + pastWindowLabel(spans && spans.costWindowDays),
+    title: 'Observed over this bounded analysis window. A recurring-mistake row on this list is measured over all retained history instead, so the two spans differ.',
+  };
+}
+
 // The SECOND past-tense sentence, rendered ONLY where the total observed COST
 // and the avoidable figure are genuinely different quantities — today `resend`
 // alone. For every other analyzer the two are one quantity and this returns
@@ -8159,9 +8309,10 @@ function combinedEstMonthly(items, suppressed) {
   return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
 }
 
-// The relearn tail's summary on the SAME basis its expanded rows now use
-// (`relearnObservedFigure`). Without this the collapsed row advertised a
-// combined forward est./mo while every row inside it led with observed cost —
+// The collapsed tail's summary on the SAME basis its expanded rows use
+// (`past_overspend_*`, which every row on the merged list carries). Without this
+// the collapsed row advertised a combined forward est./mo while every row inside
+// it led with observed cost:
 // and since the write budget zeroes the forward figure for a suppressed
 // cluster, a tail of 40 gated clusters summarised itself as "$0.00 combined"
 // while containing tens of dollars of real, already-billed spend.
@@ -8182,11 +8333,13 @@ function combinedObservedCost(items) {
 // The collapsed long-tail row: count + combined est./mo, an expand toggle,
 // and the bulk Dismiss all / (optional) Mark all applied actions (requirement
 // #3). `renderItem` renders one expanded tail row in the caller's own shape
-// (a RecurringMistakeRow or a CostProposalCard).
-// `summary` overrides the default "combined est./mo" line for a tab whose
-// items are stated in the past tense (the cost advisories) — the recurring-
-// mistakes tab has no observed window to report one over, so it keeps the
-// projected figure. Each tab therefore says what its own rows say.
+// (a RecurringMistakeRow or a CostProposalCard, dispatched by ReviewInboxView's
+// single `renderRow`).
+// `summary` overrides the default "combined est./mo" line, and every caller on
+// the merged list now passes one: the rows are stated in the past tense, so a
+// projected summary above them would put two time bases in one group. The
+// `combinedEstMonthly` fallback survives for the case where no row in the group
+// carries an observed figure at all.
 function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, onMarkAllApplied, renderItem }) {
   const [open, setOpen] = useState(false);
   if (tail.length === 0) return null;
@@ -8217,11 +8370,20 @@ function relearnBadge(cluster) {
   return RELEARN_BADGE_BY_RUNG[cluster.rung] || 'FIX';
 }
 
-// Flat row for the Recurring-mistakes tab (mockup: title + amber fix-type
-// badge, a muted recurrence/last-seen line, savings at right). The checkbox
-// preserves the existing bulk-dismiss flow (requirement #9) — not in the
-// mockup's own sketch, but the bulk action it drives is explicitly required.
-function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed }) {
+// One relearn cluster, as a card on the single open list.
+//
+// It was a flat table-like row while it had a tab to itself. On a merged list
+// it sits between cost cards, so it takes the SAME card chrome (bordered box,
+// title + badges, figure top-right, fix block at the bottom): a list that
+// alternates flat rows and bordered cards reads as two lists that failed to
+// merge, and the whole point of the merge is that the reader stops caring which
+// analyzer produced a row.
+//
+// The checkbox appears ONLY on a row tj can apply, which is also the only row
+// the bulk review queue can drive (see `bulkRelearn` in ReviewInboxView) — an
+// unselectable-looking row that a bulk action can still reach is the ambiguity
+// the scoping rule exists to remove.
+function RecurringMistakeRow({ cluster, mechanism, spans, checked, onToggle, onExpand, onDismiss, suppressed }) {
   // Observed first, projection second (see `relearnObservedFigure`). `observed`
   // is null only for a pre-observed-fields cache, in which case the forward
   // figure renders instead — under its own "est. / mo" caption, never
@@ -8243,37 +8405,82 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
     && ((forwardUsd != null && forwardUsd > 0) || (forwardUsd == null && forwardTokens > 0));
   const gate = writeGateNote(cluster);
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
+  const mech = mechanism || inboxMechanism(cluster);
+  const span = inboxSpan(cluster, spans);
+  const fixText = String(cluster.proposed_fix || '').trim();
   return html`
-    <div class="cur-row" style="display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border)" key=${cluster.signature}>
-      <input type="checkbox" style="margin-top:3px" checked=${checked} onChange=${onToggle} />
-      <div style="flex:1;min-width:0">
+    <div class="opt-section" data-mechanism=${mech} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${/* Only where a bulk action can genuinely reach this row. */ ''}
+        ${mech === MECH_WRITE ? html`<input type="checkbox" checked=${checked} onChange=${onToggle} />` : null}
         ${/* Still clickable (cursor + hover underline come from sz-link), but
               rendered in body text: the row already names its action in the
-              "Review →" link, so blue on every title made the list read as a
+              fix block below, so blue on every title made the list read as a
               wall of links. */ ''}
         <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
-        <span class="badge badge-warning" style="margin-left:6px" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
-        <div class="dim" style="font-size:12px;margin-top:3px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
-        ${/* Why no permanent fix is offered, stated on the row rather than
-              left to a $0.00 the reader has to interpret. Carries the payback
-              arithmetic where the budget computed one, so the counterintuitive
-              part — that codifying a lesson usually costs more than it saves —
-              is legible instead of living only in a JSON field. */ ''}
-        ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
+        <span class="badge badge-warning" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
+        <${MechanismBadge} mechanism=${mech} />
+        <span style="margin-left:auto;text-align:right">
+          ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
+                asserted "estimated", stacking four lines in this column. Matches
+                the cost cards' single caption so every row on the list reads
+                alike. The basis stays on hover, and the SPAN the figure was
+                observed over is named in the caption (see `inboxSpan`) because
+                this row's span is not the cost rows' span. */ ''}
+          <span class="po-amount" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate; review before applying'}>${headline.big}</span>
+          <div class="dim" style="font-size:10px" title=${span.title}>${observed ? 'already cost ' + span.text : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
+        </span>
       </div>
-      <div style="text-align:right;flex-shrink:0">
-        ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
-              asserted "estimated", stacking four lines in this column. Matches
-              the cost cards' single caption so both tabs read alike. The basis
-              stays on hover. */ ''}
-        <div class="mono" style="color:var(--accent);font-weight:600" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${headline.big}</div>
-        <div class="dim" style="font-size:11px">${observed ? 'already cost' : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
-        ${showForward ? html`<div class="dim" style="font-size:11px">~${est.big} / mo if fixed</div>` : null}
-        ${/* The row's only affordance used to be the title styled as a link,
-              so the constructive action was invisible next to a prominent
-              bulk Dismiss. Name the verb. */ ''}
-        <div class="sz-link" style="font-size:12px;margin-top:6px" onClick=${onExpand}>Review →</div>
-      </div>
+      <div class="dim" style="font-size:12px;margin-top:8px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
+      ${/* Why no permanent fix is offered, stated on the row rather than
+            left to a $0.00 the reader has to interpret. Carries the payback
+            arithmetic where the budget computed one, so the counterintuitive
+            part, that codifying a lesson usually costs more than it saves, is
+            legible instead of living only in a JSON field. */ ''}
+      ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
+      ${showForward ? html`<div class="dim" style="font-size:11px;margin-top:4px">~${est.big} / mo if fixed</div>` : null}
+
+      ${/* The fix block, one branch per mechanism. Each branch ends in a real
+            next step: tj writes it, you copy it, or, where there honestly is
+            neither, the evidence that is all we have. */ ''}
+      ${mech === MECH_WRITE ? html`
+        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+          ${/* Plain ampersand, not `&amp;`: htm assigns text content rather than
+                parsing HTML entities, so an entity here renders literally. */ ''}
+          <button class="cur-btn primary" onClick=${onExpand} title="Opens the write: you confirm scope and target before anything is written to disk">Approve & write →</button>
+          <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
+        </div>
+      ` : mech === MECH_SNIPPET ? html`
+        ${/* THE bucket that must never read as a dead end. tokenjam derived a
+              real recommendation and simply has no file it owns to write it
+              into, so the recommendation itself is the deliverable and gets the
+              same labelled copy box a cost card's snippet gets. */ ''}
+        <div style="margin-top:10px">
+          <div class="opt-title" style="font-size:12.5px">
+            <span>Fix</span>
+            <${CopySnippetButton} text=${fixText} />
+          </div>
+          <div class="sz-copybox" style="margin-top:4px">${fixText}</div>
+          <div class="dim" style="font-size:11px;margin-top:6px">Apply this yourself, then confirm it with <code>tj relearn verify --otel</code>.</div>
+          <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+            <span class="sz-link" onClick=${onExpand}>See the evidence →</span>
+            <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
+          </div>
+        </div>
+      ` : html`
+        ${/* No writer and no derived recommendation. Said plainly: an empty
+              action area reads as a bug, and a "Mark applied" button here would
+              ask the reader to confirm having done something we never told them
+              to do. The example sessions are the real next step and this is the
+              only thing we have to offer, so it is named as such. */ ''}
+        <div style="margin-top:10px">
+          <div class="sz-note" style="font-size:12px">No fix template matched this failure yet, so there is nothing for tokenjam to write and nothing to hand you. The example sessions are what we have.</div>
+          <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+            <span class="sz-link" onClick=${onExpand}>See the example sessions →</span>
+            <span class="sz-link" style="color:var(--text)" onClick=${onDismiss}>Dismiss</span>
+          </div>
+        </div>
+      `}
     </div>`;
 }
 
@@ -8614,7 +8821,13 @@ const APPLY_KIND_COPY = {
   mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
 };
 
-function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, suppressed, windowDays }) {
+// `spans` carries BOTH ledgers' spans (see `inboxSpan`) and replaced a
+// `windowDays` prop that carried only this card's own: while the two ledgers had
+// separate tabs, a cost card only ever needed its own window. On one list the
+// row has to be able to say how its span differs from its neighbour's, so the
+// span is threaded as one object from one source rather than as a per-card
+// scalar each caller re-reads.
+function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
   // Headline figure is the card's own PAST OVERSPEND: what this behaviour
   // already cost over the analyzed window, read straight off the payload
   // (`past_overspend_usd`/`_tokens`, stamped server-side by
@@ -8697,20 +8910,29 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 
   const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
 
+  // Which of the three mechanisms this card is, on the same axis a relearn row
+  // uses (see `inboxMechanism`). Computed by the caller so the list and the card
+  // cannot disagree; recomputed here only as a fallback for a direct render.
+  const mech = mechanism || inboxMechanism(prop);
+  const span = inboxSpan(prop, spans);
+
   // The card deliberately carries only: title + badge, one description
   // paragraph, the fix (snippet or apply control), the estimate, and the
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
   return html`
-    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${mech} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
+        <${MechanismBadge} mechanism=${mech} />
         ${/* Body-coloured, never accent-blue: the accent on this page belongs
-              to figures a fix returns, and this one is money already gone. */ ''}
+              to figures a fix returns, and this one is money already gone.
+              The caption names the SPAN, and its hover states that the spans on
+              this list are not all the same (see `inboxSpan`). */ ''}
         <span style="margin-left:auto;text-align:right">
           <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
-          <div class="dim" style="font-size:10px">${est.noAvoidable ? 'no avoidable figure on this card' : ('avoidable over ' + pastWindowLabel(windowDays) + (est.sub ? ' · ' + est.sub : ''))}</div>
+          <div class="dim" style="font-size:10px" title=${span.title}>${est.noAvoidable ? 'no avoidable figure on this card' : ('avoidable ' + span.text + (est.sub ? ' · ' + est.sub : ''))}</div>
         </span>
       </div>
       ${/* One description paragraph: what we saw, what to do, and the honesty
@@ -8792,12 +9014,27 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
           <a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || '#/optimize/summarize'}>Review in Summarize →</a>
           <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
         </div>
-      ` : html`
+      ` : mech === MECH_SNIPPET ? html`
+        ${/* The snippet block above IS this card's fix; "Mark applied" is the
+              follow-up that records having done it, not the fix itself. */ ''}
         <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>
-          ${/* Dismiss is the secondary, discarding action — plain text, so the
+          ${/* Dismiss is the secondary, discarding action: plain text, so the
                 blue belongs to the one action the card is asking for. */ ''}
           <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+        </div>
+      ` : html`
+        ${/* No apply path, no snippet, and not summarize's own review flow. This
+              branch used to fall through to "Mark applied", which asked the
+              reader to confirm having applied a fix the card never showed them.
+              Say what is actually true instead, and point at the one surface
+              that has more: the analyzer's own detail card. */ ''}
+        <div style="margin-top:12px">
+          <div class="sz-note" style="font-size:12px">There is no ready-made change to apply here yet. What this cost is measured; the fix is not something tokenjam can hand over.</div>
+          <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+            <a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>
+            <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+          </div>
         </div>
       `}
       ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
@@ -8915,10 +9152,17 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
 }
 
 function ReviewInboxView({ params }) {
-  // Deep-link from an Optimize detail card's "review it" link (reviewProposalHref)
-  // — switches to the Cost-advisories tab and highlights the matching card(s).
+  // Deep-link from an Optimize detail card's "review it" link
+  // (reviewProposalHref): lands on the open list and highlights the matching
+  // card(s). It used to land on a separate Cost-advisories tab, which no longer
+  // exists; the destination is now the one open list, so the hop needs no tab
+  // vocabulary of its own and cannot rot the next time the tabs change.
   const analyzerFocus = readParam(params, 'analyzer', '');
-  const [tab, setTab] = useState('mistakes');   // 'mistakes' | 'advisories' | 'applied'
+  // TWO tabs. The open list is no longer split by which analyzer produced a
+  // row (see `inboxMechanism`): one list ranked by money, with the mechanism on
+  // the row. 'Applied' stays its own tab because it answers a different
+  // question, about work already done.
+  const [tab, setTab] = useState('open');   // 'open' | 'applied'
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
   // Fetched but no longer used to decide dollar-vs-tokens on this page — the
   // founder-approved always-dollars carve-out (see `suppressed` below) means
@@ -8953,6 +9197,14 @@ function ReviewInboxView({ params }) {
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
         clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
         failuresExamined: f.failures_examined,
+        // The relearn SPAN, for the per-row disclosure (`inboxSpan`). Both come
+        // off the finding, not off a cluster: the corpus is a property of the
+        // run. `window_days` here is the measured occurrence span, not a
+        // configured window, and `corpus_basis` is the server's own sentence
+        // naming what was actually read, so this surface cannot invent a
+        // second description of the scan.
+        windowDays: f.window_days,
+        corpusBasis: f.corpus_basis,
       });
       setRelearnFraming(r.framing || null);
     } catch (e) {
@@ -8994,12 +9246,12 @@ function ReviewInboxView({ params }) {
     return () => clearInterval(timer);
   }, [load, loadApplied, loadCost]);
 
-  // Land on the Cost-advisories tab and scroll the matching card(s) into view
-  // once they've loaded (deep-link from an Optimize detail card). Highlighting
-  // every match for this analyzer is handled per-card below (rev-focus).
+  // Land on the open list and scroll the matching card(s) into view once
+  // they've loaded (deep-link from an Optimize detail card). Highlighting every
+  // match for this analyzer is handled per-card below (rev-focus).
   useEffect(() => {
     if (!analyzerFocus) return;
-    setTab('advisories');
+    setTab('open');
     const el = document.querySelector(`[data-analyzer="${CSS.escape(analyzerFocus)}"]`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [analyzerFocus, costProps]);
@@ -9037,47 +9289,25 @@ function ReviewInboxView({ params }) {
   ]);
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigsAll.has(c.signature));
 
-  // The sub-$5 noise floor for this tab (see INBOX_MIN_USD). Declared here,
-  // immediately after `visible` and ABOVE every selection helper, so the tab
-  // count, "select all" and "dismiss checked" all operate on exactly the rows
-  // a reader can see. A bulk action that can reach a row nobody was shown is
-  // the failure mode this ordering exists to prevent.
-  const floorRelearn = visible.filter(belowInboxFloor);
-  const shownRelearn = visible.filter(c => !belowInboxFloor(c));
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
-  const dismissChecked = () => {
-    // Only the selected rows that are actually listed: a stale signature left in
-    // `checked` after its row was approved must not be swept along silently.
-    const next = new Set([...dismissed, ...shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)]);
-    setDismissed(next); saveDismissedRelearns(next);
-    setChecked(new Set());
-  };
   const dismissMany = (sigs) => {
     const next = new Set([...dismissed, ...sigs]);
     setDismissed(next); saveDismissedRelearns(next);
     setChecked(s => { const n = new Set(s); sigs.forEach(sig => n.delete(sig)); return n; });
   };
-  // Bulk-mark-applied for a collapsed tail (requirement #3) only ever covers
-  // the plain "mark applied" cards (no apply_kind / not workspace apply_capable)
-  // — a proposal that needs its own target-path confirmation keeps that
-  // per-item human-gated step (requirement #9), so bulk never skips it.
+  // Bulk-mark-applied for a collapsed tail (requirement 3) only ever covers
+  // the plain "mark applied" cards: a proposal tj can apply keeps its own
+  // target-path confirmation (requirement 9), so bulk never skips it, and a
+  // relearn cluster is excluded outright because the cost-apply marker endpoint
+  // cannot record one. Filtered here rather than at the call site so a future
+  // caller cannot hand this a mixed list and quietly POST the wrong ledger.
   const markManyApplied = async (props) => {
-    for (const p of props.filter(x => !x.apply_capable)) {
+    for (const p of props.filter(x => x.kind !== 'relearn' && !x.apply_capable)) {
       try { await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: p.proposal_id }); }
       catch (e) { /* keep going; surfaced on next refresh */ }
     }
     await loadCost();
   };
-  // Selection is scoped to `visible` — the rows actually rendered — never to
-  // d.clusters. The list filters out locally-dismissed rows and rows approved
-  // in this session, and `checked` is not pruned when a row leaves the list, so
-  // counting raw `checked` would both overstate the button's blast radius and
-  // let select-all reach a row the user cannot see.
-  const selectedVisible = shownRelearn.filter(c => checked.has(c.signature));
-  const selectedCount = selectedVisible.length;
-  // Clicking a fully-selected box clears it; anything else selects the lot.
-  const toggleAll = () => setChecked(
-    prev => nextSelectAllSelection(shownRelearn.map(c => c.signature), prev));
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
   // Review queue: the signatures still to visit AFTER the open one. Opening a
   // single row leaves it empty, so the modal shows no queue chrome.
@@ -9108,20 +9338,15 @@ function ReviewInboxView({ params }) {
   const visibleCost = (costProps || []).filter(p =>
     p.analyzer !== 'relearn' && !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
 
-  // Cost side of the sub-$5 noise floor (see INBOX_MIN_USD; the relearn side
-  // is declared with `visible` above, where the selection helpers can reach
-  // it). A deep link must still resolve to its card even when that card is
-  // small: an analyzer-focused view skips the floor, or an Optimize page's
-  // "review it →" would land on a tab that looks empty.
-  const floorCost = analyzerFocus ? [] : visibleCost.filter(belowInboxFloor);
-  const shownCost = analyzerFocus ? visibleCost : visibleCost.filter(p => !belowInboxFloor(p));
-
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
     loadApplied();
   };
 
-  const dismissCost = (sig) => {
+  // One local dismiss for both ledgers: the dismissed-signature set was always
+  // shared (a cost card and a relearn cluster have distinct signatures), and on
+  // one list the two halves must not diverge in what "Dismiss" means.
+  const dismissOne = (sig) => {
     const next = new Set([...dismissed, sig]);
     setDismissed(next); saveDismissedRelearns(next);
   };
@@ -9139,16 +9364,85 @@ function ReviewInboxView({ params }) {
   // that, it never invents a dollar figure where none exists.
   const suppressed = false;
 
-  // Sort + long-tail collapse (requirement #3), independently per tab. Deep-
-  // linking to a specific analyzer skips the collapse on the advisories tab —
-  // a highlighted card must never be hidden inside a folded tail.
-  const sortedRelearn = sortByEstMonthly(shownRelearn);
-  const { top: topRelearn, tail: tailRelearn } = splitTopAndTail(sortedRelearn);
-  const sortedCost = sortByEstMonthly(shownCost);
-  const { top: topCost, tail: tailCost } = analyzerFocus
-    ? { top: sortedCost, tail: [] } : splitTopAndTail(sortedCost);
+  // The SPANS the two ledgers observed, threaded to every row (`inboxSpan`).
+  // One object from one source, so a row cannot state a span the page's own
+  // headline disagrees with.
+  const spans = {
+    corpusWindowDays: d.windowDays,
+    corpusBasis: d.corpusBasis,
+    costWindowDays: costPastOverspend && costPastOverspend.window_days,
+  };
 
-  const openItems = [...visible, ...visibleCost];
+  // --- ONE open list -------------------------------------------------------
+  //
+  // The two ledgers are merged here and then treated identically. Rows are
+  // stamped with the `kind` discriminator the Applied tab already uses, because
+  // the two carry different field names and different spans; nothing else about
+  // the render branches on which ledger a row came from, and the ORDER never
+  // does.
+  const openItems = [
+    ...visible.map(c => ({ ...c, kind: 'relearn' })),
+    ...visibleCost,                                   // already carry kind: 'cost'
+  ];
+
+  // The sub-$5 noise floor (see INBOX_MIN_USD), now once over the whole list
+  // instead of once per tab. A deep-linked card is exempt so an Optimize page's
+  // "review it →" always resolves to something, even when that card is small;
+  // exempting only the FOCUSED analyzer, rather than switching the floor off
+  // wholesale while a focus is set, keeps the rest of the list filtered.
+  const isFocused = i => !!analyzerFocus && i.analyzer === analyzerFocus;
+  const floorItems = openItems.filter(i => belowInboxFloor(i) && !isFocused(i));
+  const shownItems = openItems.filter(i => !belowInboxFloor(i) || isFocused(i));
+
+  // Observed figures rank; everything else is structurally unable to (see
+  // `partitionByObservedOverspend`). The split happens BEFORE the sort, so an
+  // unranked row cannot land between two ranked ones under any comparator.
+  const { ranked, unobserved } = partitionByObservedOverspend(shownItems);
+  const sortedOpen = sortByObservedOverspend(ranked);
+  // Deep-linking to a specific analyzer skips the collapse: a highlighted card
+  // must never be hidden inside a folded tail.
+  const { top: topOpen, tail: tailOpen } = analyzerFocus
+    ? { top: sortedOpen, tail: [] } : splitTopAndTail(sortedOpen);
+
+  // Bulk scope: exactly the rows tj can apply AND the review queue can actually
+  // drive, which is the write-capable relearn clusters. Two reasons it is not
+  // simply "every write-capable row": the queue opens `RelearnApplyModal`, which
+  // resolves a cluster out of `d.clusters`, and a write-capable COST card needs
+  // its own per-card target confirmation that no bulk action may skip. So the
+  // checkbox appears on precisely the rows a bulk action can reach, and when
+  // that set is empty (the SDK persona offers no relearn write at all) the
+  // select-all and the bulk bar are not rendered rather than sitting there
+  // governing nothing.
+  const bulkRelearn = shownItems.filter(
+    i => i.kind === 'relearn' && inboxMechanism(i) === MECH_WRITE);
+  const selectedVisible = bulkRelearn.filter(c => checked.has(c.signature));
+  const selectedCount = selectedVisible.length;
+  // Clicking a fully-selected box clears it; anything else selects the lot.
+  const toggleAll = () => setChecked(
+    prev => nextSelectAllSelection(bulkRelearn.map(c => c.signature), prev));
+  const dismissChecked = () => {
+    // Only the selected rows that are actually listed: a stale signature left in
+    // `checked` after its row was approved must not be swept along silently.
+    const next = new Set([...dismissed, ...bulkRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)]);
+    setDismissed(next); saveDismissedRelearns(next);
+    setChecked(new Set());
+  };
+
+  // One renderer for the list, dispatching on `kind` in exactly one place so
+  // the top rows, the collapsed tail and the unobserved group cannot drift into
+  // three slightly different row treatments.
+  const renderRow = (i) => (i.kind === 'relearn'
+    ? html`<${RecurringMistakeRow} key=${'r:' + i.signature} cluster=${i}
+        mechanism=${inboxMechanism(i)} spans=${spans}
+        checked=${checked.has(i.signature)} onToggle=${() => toggle(i.signature)}
+        onExpand=${() => startReview([i.signature])}
+        onDismiss=${() => dismissOne(i.signature)} suppressed=${suppressed} />`
+    : html`<${CostProposalCard} key=${'c:' + i.signature} prop=${i}
+        mechanism=${inboxMechanism(i)} spans=${spans}
+        busy=${marking === i.signature} focused=${i.analyzer === analyzerFocus}
+        onMark=${markCostApplied} onDismiss=${dismissOne}
+        onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`);
+
   const combinedApplied = [
     ...(applied || []).map(r => ({ ...r, kind: 'relearn' })),
     ...(costApplied || []).map(r => ({ ...r, kind: 'cost' })),
@@ -9176,74 +9470,97 @@ function ReviewInboxView({ params }) {
 
     <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} pastOverspend=${costPastOverspend} />
 
+    ${/* TWO tabs. The open list is one list; "Applied" answers a different
+          question and keeps its own. */ ''}
     <div class="tab-bar" role="tablist">
-      <button class="tab ${tab === 'mistakes' ? 'active' : ''}" role="tab" aria-selected=${tab === 'mistakes'} onClick=${() => setTab('mistakes')}>Recurring mistakes (${shownRelearn.length})</button>
-      <button class="tab ${tab === 'advisories' ? 'active' : ''}" role="tab" aria-selected=${tab === 'advisories'} onClick=${() => setTab('advisories')}>Cost advisories (${shownCost.length})</button>
+      <button class="tab ${tab === 'open' ? 'active' : ''}" role="tab" aria-selected=${tab === 'open'} onClick=${() => setTab('open')}>Open (${shownItems.length})</button>
       <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>Applied (${appliedOpenCount})</button>
     </div>
 
-    ${tab === 'mistakes' ? html`
-      ${/* Kept to one line. The rows name their own action ("Review →") and the
-            modal shows scope + target before anything is written, so the only
-            non-inferable facts are the two consequences: Approve writes to
-            disk, Dismiss is local. The detail that was here (rung, git-commit
-            vs backup) lives on the Approve step itself, where it applies. */ ''}
-      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to disk. <b>Dismiss</b> only hides a row in this browser.</div>
-      ${/* Select-all sits directly above the list it governs, labelled — an
-            unlabelled checkbox floating in the metadata line read as chrome.
-            The two bulk actions sit BELOW the scroll box, where you land after
-            reading the rows you are acting on. */ ''}
-      <label style="display:flex;align-items:center;gap:8px;margin:0 2px 6px;font-size:12.5px;cursor:pointer;width:fit-content">
-        <${SelectAllCheckbox} total=${shownRelearn.length} selected=${selectedCount} onToggle=${toggleAll} />
-        <span class="dim">Select all${selectedCount ? ` · ${selectedCount} selected` : ''}</span>
-      </label>
-      <div class="cur-listbox">
-        ${d.error ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>` : null}
-        ${!d.error && d.loading ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>` : null}
-        ${!d.error && !d.loading && d.status === 'never_run' ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
-        ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
-        ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`) : null}
-        <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
-          summary=${combinedObservedCost(tailRelearn)}
-          onDismissAll=${() => dismissMany(tailRelearn.map(c => c.signature))}
-          renderItem=${c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`} />
-        <${BelowFloorNote} items=${floorRelearn} label="recurring mistakes" />
-      </div>
-      <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
-        <button class="cur-btn primary" disabled=${selectedCount === 0}
-          onClick=${() => startReview(selectedVisible.map(c => c.signature))}
-          title="Open each checked row in turn; you still approve them one at a time">${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}</button>
-        <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}
-          title="Hides these rows locally: this browser only; it is not sent to the server, so clearing site data brings them back">${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
-      </div>
-    ` : null}
-
-    ${tab === 'advisories' ? html`
-      ${/* No "scanning…" here: the header's Rescan link already reports that
-            state for the whole inbox, and it read as two separate scans. The
-            degraded warning stays, being the one thing that link cannot say:
-            the last refresh FAILED and these rows are the last good result. */ ''}
+    ${tab === 'open' ? html`
+      ${/* Kept to one line, and it now has to cover BOTH mechanisms rather than
+            just the write, since the write is a minority of rows. Each row still
+            names its own action; these are the two consequences a row cannot
+            state for itself. */ ''}
+      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes a fix to disk; a copyable fix is yours to apply. <b>Dismiss</b> only hides a row in this browser.</div>
+      ${/* The degraded warning is the one thing the header's Rescan link cannot
+            say: the last cost refresh FAILED and these rows are the last good
+            result. */ ''}
       ${costDegraded ? html`
         <div class="dim" style="font-size:12px;margin-bottom:8px">
           <span style="color:var(--warn)" title=${costLastError || ''}>⚠ the last refresh failed; showing the last good result</span>
         </div>` : null}
+      ${/* A relearn fetch failure is a BANNER, not a replacement, whenever the
+            list has rows from the other ledger. It used to replace the whole
+            tab, which was correct while that tab held relearn clusters and
+            nothing else: the failure took out everything the tab could show. On
+            one merged list the same gate would blank the cost cards too, so a
+            failure in one half would hide the other half's data for no reason.
+            The two fetches degrade independently, exactly as the cost half
+            already did (`costDegraded`). */ ''}
+      ${d.error && openItems.length > 0 ? html`
+        <div class="dim" style="font-size:12px;margin-bottom:8px">
+          <span style="color:var(--warn)" title=${d.error}>⚠ couldn't load recurring mistakes; the rows below are the cost proposals only</span>
+        </div>` : null}
+      ${/* Select-all and the bulk bar render ONLY when there is something they
+            can act on (see `bulkRelearn`). On a persona with no relearn write on
+            offer that set is empty, and an always-present select-all governing
+            nothing is worse than no select-all: it implies the list is
+            selectable when it is not. */ ''}
+      ${bulkRelearn.length > 0 ? html`
+        <label style="display:flex;align-items:center;gap:8px;margin:0 2px 6px;font-size:12.5px;cursor:pointer;width:fit-content">
+          <${SelectAllCheckbox} total=${bulkRelearn.length} selected=${selectedCount} onToggle=${toggleAll} />
+          <span class="dim">Select all ${bulkRelearn.length} tokenjam can apply${selectedCount ? ` · ${selectedCount} selected` : ''}</span>
+        </label>` : null}
       <div>
-        ${costStatus === 'never_run' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
-        ${costStatus === 'error' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>` : null}
-        ${costStatus === 'ready' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No open cost advisories right now.</div>` : null}
-        ${topCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} windowDays=${costPastOverspend && costPastOverspend.window_days} />`)}
+        ${/* The empty states are reached only when the list is ACTUALLY empty,
+              so a partial failure never hides rows that did load. Ordered
+              most-specific first: a hard error, then never-scanned, then a
+              genuinely empty result. */ ''}
+        ${openItems.length === 0 ? (
+          d.error && costStatus === 'error'
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load the inbox: ${d.error}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
+          : d.error
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>`
+          : d.loading
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>`
+          : costStatus === 'error'
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
+          : d.status === 'never_run' && costStatus === 'never_run'
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>`
+            : html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing open. The last scan found nothing worth a row (or you've dismissed or applied everything).</div>`
+        ) : null}
+        ${topOpen.map(renderRow)}
         ${/* The tail's own line is stated in the same tense as the rows it
               hides. It adds up the payload figures of the items in THIS
               collapse group (a subset only the client knows about, since the
               split point is a rendering decision); it never re-derives a
               figure, and the page's headline still comes from the server. */ ''}
-        <${CollapsedTailRow} tail=${tailCost} suppressed=${suppressed} itemLabel="cost advisories"
-          summary=${fmtUsd(tailCost.reduce((s, p) => s + (p.past_overspend_usd || 0), 0)) + ' avoidable, combined'}
-          onDismissAll=${() => dismissMany(tailCost.map(p => p.signature))}
-          onMarkAllApplied=${() => markManyApplied(tailCost)}
-          renderItem=${p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} windowDays=${costPastOverspend && costPastOverspend.window_days} />`} />
-        <${BelowFloorNote} items=${floorCost} label="cost advisories" />
+        <${CollapsedTailRow} tail=${tailOpen} suppressed=${suppressed} itemLabel=${pluralItems(tailOpen.length)}
+          summary=${combinedObservedCost(tailOpen)}
+          onDismissAll=${() => dismissMany(tailOpen.map(i => i.signature))}
+          onMarkAllApplied=${tailOpen.some(i => i.kind !== 'relearn' && !i.apply_capable) ? () => markManyApplied(tailOpen) : null}
+          renderItem=${renderRow} />
+        ${/* Below the fold, and structurally unable to interleave with the
+              ranked list above: a row with no OBSERVED figure has nothing to be
+              ranked by, and letting it sort to position zero on a `|| 0`
+              fallback would put an unmeasured row above a measured one. Empty on
+              every payload seen so far, which is why it renders nothing rather
+              than an empty heading. */ ''}
+        <${CollapsedTailRow} tail=${unobserved} suppressed=${suppressed} itemLabel=${pluralItems(unobserved.length) + " with nothing measured yet"}
+          summary="not ranked: no observed figure to rank them by"
+          onDismissAll=${() => dismissMany(unobserved.map(i => i.signature))}
+          renderItem=${renderRow} />
+        <${BelowFloorNote} items=${floorItems} label=${pluralItems(floorItems.length)} />
       </div>
+      ${bulkRelearn.length > 0 ? html`
+        <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+          <button class="cur-btn primary" disabled=${selectedCount === 0}
+            onClick=${() => startReview(selectedVisible.map(c => c.signature))}
+            title="Open each checked row in turn; you still approve them one at a time">${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}</button>
+          <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}
+            title="Hides these rows locally: this browser only; it is not sent to the server, so clearing site data brings them back">${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
+        </div>` : null}
     ` : null}
 
     ${tab === 'applied' ? html`

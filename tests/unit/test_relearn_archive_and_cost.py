@@ -616,6 +616,64 @@ def test_short_label_is_derived_on_read_for_an_older_cache():
     assert "write_blocked_short" not in legacy["clusters"][0]
 
 
+def test_advise_snippet_offered_separates_a_real_fix_from_the_placeholder():
+    """The Review inbox routes every row onto a three-valued mechanism axis: tj
+    applies it, tj hands over the exact change, or there is honestly nothing to
+    hand over. The middle bucket is the biggest one on a real corpus, and it must
+    never render as a dead end, so the UI needs to be able to tell a cluster
+    whose `proposed_fix` is a genuine derived recommendation from one whose fix
+    text is the "no fix template matched" placeholder.
+
+    That distinction is `build_proposals`' own `has_real_fix`, and the only trace
+    of it on the payload is which reason blocked the write. Deriving it here
+    keeps the UI from keying on a sentence this package owns the wording of.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+    from tokenjam.core.optimize.relearn_proposals import (
+        advise_snippet_offered,
+        stamp_proposal_ids,
+    )
+
+    # A write was offered: the fix text is real either way, and the inbox picks
+    # the stronger mechanism ('tj can apply') for itself.
+    assert advise_snippet_offered({
+        "proposed_fix": "PreToolUse hook: block a busy-wait sleep chain.",
+        "write_offered": True,
+    }) is True
+    # Blocked because a permanent rule is uneconomic, or because this window's
+    # rule budget is spent. The RECOMMENDATION is still real and the user can
+    # apply it themselves, which is exactly what advise_only_reason tells them.
+    for blocked in (wb.REASON_NET_NEGATIVE, wb.REASON_BUDGET_FULL):
+        assert advise_snippet_offered({
+            "proposed_fix": "Use absolute paths in parallel Bash calls.",
+            "write_offered": False, "write_blocked_reason": blocked,
+        }) is True, blocked
+    # Blocked because nothing was derived at all. There is no snippet to copy,
+    # and offering the placeholder as one would be the dead end the axis exists
+    # to prevent.
+    assert advise_snippet_offered({
+        "proposed_fix": "Review examples, no known fix template matched.",
+        "write_offered": False, "write_blocked_reason": wb.REASON_PLACEHOLDER,
+    }) is False
+    # No fix text at all is never a snippet, whatever gated the write.
+    assert advise_snippet_offered({"proposed_fix": "", "write_offered": True}) is False
+    assert advise_snippet_offered({"write_offered": False}) is False
+
+    # Stamped on read, like proposal_id / advise_only_reason, so a cache written
+    # before the field existed classifies correctly on the first read with no
+    # recompute — and without mutating the caller's dict.
+    legacy = {"clusters": [
+        {"signature": "a", "proposed_fix": "do the thing",
+         "write_offered": False, "write_blocked_reason": wb.REASON_NET_NEGATIVE},
+        {"signature": "b", "proposed_fix": "placeholder",
+         "write_offered": False, "write_blocked_reason": wb.REASON_PLACEHOLDER},
+    ]}
+    out = stamp_proposal_ids(legacy)["clusters"]
+    assert out[0]["advise_snippet_offered"] is True
+    assert out[1]["advise_snippet_offered"] is False
+    assert "advise_snippet_offered" not in legacy["clusters"][0]
+
+
 def test_relearn_finding_round_trips_its_observed_dollar_figure():
     """`report_to_dict` / `report_from_dict` must preserve relearn's observed
     figure. relearn's reader was the one in `runner.py` restoring the token
