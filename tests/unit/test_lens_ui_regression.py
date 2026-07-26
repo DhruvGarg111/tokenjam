@@ -2449,27 +2449,22 @@ def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html
     # The resend/TRIM card is the one documented exception to "always
     # dollars": its own evidence text discloses the figure is a structural
     # token-share measurement, not a savings claim (RESEND_HONESTY_CAVEAT,
-    # analyzers/context_resend.py) — it stays tokens-only even though its
-    # estimated_monthly_usd is a real, non-null number in the real payload.
+    # analyzers/context_resend.py). A resend CostProposal renders through
+    # `pastOverspendFigure` like every other cost card — the exclusion set
+    # only has one live consumer left, `appliedEstimate` (the Applied tab,
+    # which merges relearn + cost records and needs to know which analyzer's
+    # figure to treat as unpriced there too).
     assert "const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);" in html
-    assert "function monthlyUsdForDisplay(item)" in html
-    fn_start = html.index("function monthlyUsdForDisplay(item)")
-    fn_end = html.index("\n}", fn_start) + 2
-    fn = html[fn_start:fn_end]
-    assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer)" in fn
-    # Every dollar-first decision point on the page routes through it (or the
-    # equivalent inline check in appliedEstimate) rather than reading
-    # estimated_monthly_usd directly, so the exclusion can't be bypassed at
-    # one of the several call sites.
-    est_line_start = html.index("function estMonthlyLine(item, suppressed)")
-    est_line_end = html.index("\n}", est_line_start)
-    assert "monthlyUsdForDisplay(item)" in html[est_line_start:est_line_end]
-    combined_start = html.index("function combinedEstMonthly(items, suppressed)")
-    combined_end = html.index("\n}", combined_start)
-    assert "monthlyUsdForDisplay(i)" in html[combined_start:combined_end]
     applied_est_start = html.index("function appliedEstimate(rec)")
     applied_est_end = html.index("\n}", applied_est_start)
     assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer)" in html[applied_est_start:applied_est_end]
+    # The relearn-cluster-only forward-figure machinery this exclusion used to
+    # gate is retired entirely — a relearn cluster shows its past figure only,
+    # rendered via `relearnObservedFigure`/`pastOverspendFigure`, so there is
+    # no separate monthly-basis display path left to exclude an analyzer from.
+    assert "function monthlyUsdForDisplay(item)" not in html
+    assert "function estMonthlyLine(item, suppressed)" not in html
+    assert "function combinedEstMonthly(items, suppressed)" not in html
 
 
 def test_fixes_applied_tile_never_claims_verification(html):
@@ -2831,25 +2826,38 @@ def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
     # rank 0 and rendered in whatever order the API happened to return them
     # (adapter-insertion order) — exactly the founder's observed bug. Tokens
     # are the one figure every item carries, priced or not, so the fix ranks
-    # by tokens uniformly; dollars stay a per-item DISPLAY choice
-    # (estMonthlyLine), decoupled from ranking.
-    start = html.index("function sortByEstMonthly")
+    # by tokens uniformly; dollars stay a per-item DISPLAY choice.
+    #
+    # `sortByEstMonthly` was renamed to `sortByPastOverspend` when relearn's
+    # forward claim was retired: a relearn cluster's `past_overspend_tokens`
+    # is now on the SAME basis a cost proposal's is, so one ranking function
+    # serves both tabs — there is no more `estimated_monthly_tokens` fallback
+    # to rank by.
+    assert "function sortByEstMonthly" not in html
+    start = html.index("function sortByPastOverspend")
     end = html.index("function splitTopAndTail", start)
     fn = html[start:end]
-    assert "i.estimated_monthly_tokens || 0" in fn
+    assert "i.past_overspend_tokens || 0" in fn
     # The old dollars-if-any gate must not survive a regression re-adding it.
     assert "anyUsd" not in fn
     assert "estimated_monthly_usd" not in fn
+    assert "estimated_monthly_tokens" not in fn
 
 
-def test_collapsed_tail_combined_figure_uses_the_priceable_majority_rule(html):
+def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
     # combinedEstMonthly used to lead with dollars the moment ANY tail item had
     # one (summing the rest as $0), understating a mostly-tokens-only tail as
-    # a tiny dollar figure. It now matches InboxStatTiles's own majority rule.
-    start = html.index("function combinedEstMonthly")
+    # a tiny dollar figure. It's retired along with the forward claim it
+    # summarised: both tabs now state their combined tail figure via
+    # `combinedObservedCost`, on the same `past_overspend_*` basis their
+    # expanded rows use, so there is no separate priceable-majority rule left
+    # to pin.
+    assert "function combinedEstMonthly" not in html
+    start = html.index("function combinedObservedCost")
     end = html.index("function CollapsedTailRow", start)
     fn = html[start:end]
-    assert "priceable.length * 2 >= items.length" in fn
+    assert "past_overspend_usd" in fn
+    assert "already spent, combined" in fn
 
 
 def test_fmt_tokens_renders_billion_scale_human_readable(html):
@@ -2920,10 +2928,10 @@ def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
 def test_split_top_and_tail_slices_an_already_sorted_list(html):
     # The long-tail collapse (requirement #3) must absorb the BOTTOM of the
     # sorted list, not an arbitrary suffix of the unsorted API order — it
-    # slices whatever sortByEstMonthly already produced, never re-sorts or
+    # slices whatever sortByPastOverspend already produced, never re-sorts or
     # re-orders on its own.
     start = html.index("function splitTopAndTail")
-    end = html.index("function estMonthlyLine", start)
+    end = html.index("function relearnObservedFigure", start)
     fn = html[start:end]
     assert "sorted.slice(0, max)" in fn
     assert "sorted.slice(max)" in fn

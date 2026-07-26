@@ -261,6 +261,6 @@ def to_eval_case(cluster: RelearnCluster) -> dict:
         "proposed_fix": cluster.proposed_fix,
         "suggested_recommendation": cluster.proposed_fix,
         "advise_only": cluster.advise_only,
-        "estimated_recoverable_tokens": cluster.estimated_recoverable_tokens,
+        "past_overspend_tokens": cluster.past_overspend_tokens,
         "note": HONESTY_CAVEAT,
     }

@@ -279,9 +279,13 @@ def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     assert cluster.rung == 3
     # Spread across 3 distinct repos -> user-global scope (§7).
     assert cluster.scope == "user-global"
-    assert cluster.estimated_recoverable_tokens > 0
+    # The one canonical dollar field, no carve-out: a relearn cluster shows
+    # its PAST figure only, like every other analyzer's card.
+    assert not hasattr(cluster, "estimated_recoverable_tokens")
+    assert not hasattr(finding, "estimated_recoverable_tokens")
+    assert cluster.past_overspend_tokens > 0
     assert len(cluster.examples) <= 3
-    assert finding.estimated_recoverable_tokens == cluster.estimated_recoverable_tokens
+    assert finding.past_overspend_tokens == cluster.past_overspend_tokens
 
 
 def test_command_not_found_proposal_is_rung_one_note(tmp_path):
@@ -537,7 +541,9 @@ def test_clean_sessions_produce_no_proposals(tmp_path):
 
     assert finding.clusters == []
     assert finding.failures_examined == 0
-    assert finding.estimated_recoverable_tokens is None
+    assert not hasattr(finding, "estimated_recoverable_tokens")
+    assert finding.past_overspend_tokens == 0
+    assert finding.past_overspend_usd is None
 
 
 # --- Novelty filter -------------------------------------------------------------
@@ -800,7 +806,7 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
     sessions = [(f"huge-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
     assert finding.clusters
-    assert finding.estimated_recoverable_tokens  # a positive, rank-able estimate
+    assert finding.past_overspend_tokens  # a positive, rank-able figure
 
     now = utcnow()
     report = OptimizeReport(
@@ -822,14 +828,14 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
     assert "No candidates flagged" not in out
 
 
-# --- Review inbox monthly-basis fields (§1/§2) --------------------------------
-# Relearn scans unbounded on-disk history, so there's no "the window IS a
-# month" shortcut the way a fixed-window cost analyzer has. These fields
-# extrapolate the corpus's OWN observed timespan to 30 days instead — see
-# `_corpus_window_days`/`_monthly_scale` and the "Recoverable-savings
-# contract" note in model_downgrade.py. The window-basis
-# `estimated_recoverable_tokens` field (asserted elsewhere in this file) is
-# UNCHANGED by any of this — Overview/Optimize keep reading that field.
+# --- The one canonical dollar field, no relearn carve-out ---------------------
+# A relearn cluster used to carry its own forward `estimated_recoverable_*` /
+# `estimated_monthly_*` claim, extrapolated from the corpus's own observed
+# timespan to 30 days (`_corpus_window_days`). The founder decision that
+# retired this: a relearn cluster shows its PAST figure only, like every other
+# analyzer's card — the forward "you could recover $X" claim is deleted from
+# the card entirely, not merely renamed. These tests assert the retired names
+# stay gone rather than deleting the coverage outright.
 
 def _cwd_confusion_session_at(root: Path, project: str, session_id: str, ts: str) -> None:
     """Same fixture as `_cwd_confusion_session`, with a controllable
@@ -849,9 +855,11 @@ def _cwd_confusion_session_at(root: Path, project: str, session_id: str, ts: str
     _write_transcript(root, project, session_id, records)
 
 
-def test_monthly_fields_extrapolate_from_the_corpus_own_observed_window(tmp_path):
-    # Three occurrences spread across exactly 10 observed days -> a 3x
-    # (30/10) extrapolation to the monthly figure, not a raw multiply-by-30.
+def test_retired_forward_fields_stay_gone(tmp_path):
+    # Three occurrences spread across observed days used to drive a 30-day
+    # extrapolation onto `estimated_monthly_*`; that field, and its window-
+    # basis twin `estimated_recoverable_*`, are gone from both the cluster and
+    # the finding — a relearn cluster carries only `past_overspend_*` now.
     days = [0, 5, 10]
     for i, day in enumerate(days):
         ts = (datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(days=day)).isoformat().replace("+00:00", "Z")
@@ -860,16 +868,18 @@ def test_monthly_fields_extrapolate_from_the_corpus_own_observed_window(tmp_path
 
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
+    # window_days itself survives (descriptive corpus metadata), only the
+    # dollar figures derived from it are retired.
     assert finding.window_days == pytest.approx(10.0)
     cluster = finding.clusters[0]
-    assert cluster.estimated_monthly_tokens == round(cluster.estimated_recoverable_tokens * 3.0)
-    # The window-basis field is untouched — Overview/Optimize still read it.
-    assert cluster.estimated_recoverable_tokens == cluster.occurrences * 1_500
-    assert finding.estimated_monthly_tokens == cluster.estimated_monthly_tokens
-    # No DB connection was given, so there's no blended rate to derive a
-    # dollar figure from — tokens-only, exactly the mockup's fallback.
-    assert cluster.estimated_monthly_usd is None
-    assert cluster.monthly_rate_basis == ""
+    for retired in (
+        "estimated_recoverable_tokens", "estimated_recoverable_usd",
+        "estimated_monthly_tokens", "estimated_monthly_usd", "monthly_rate_basis",
+    ):
+        assert not hasattr(cluster, retired)
+        assert not hasattr(finding, retired)
+    assert cluster.past_overspend_tokens == cluster.occurrences * 1_500
+    assert finding.past_overspend_tokens == cluster.past_overspend_tokens
 
 
 def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
@@ -885,7 +895,7 @@ def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
 
     assert finding.window_days == 1.0
     cluster = finding.clusters[0]
-    assert cluster.estimated_monthly_tokens == cluster.estimated_recoverable_tokens * 30
+    assert cluster.past_overspend_tokens == cluster.occurrences * 1_500
 
 
 class _FakeSpanConn:
@@ -941,10 +951,11 @@ def test_blended_rate_profile_degrades_on_query_failure_never_raises():
     assert blended_rate_profile(_RaisingConn(), session_ids={"s1"}) is None
 
 
-def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
+def test_past_overspend_usd_derived_when_conn_has_priced_spans(tmp_path):
     # End-to-end: analyze_relearns(conn=...) stamps a cluster's
-    # estimated_monthly_usd from the input rate observed across its own
-    # sessions, not a hardcoded or invented one.
+    # past_overspend_usd from the input rate observed across its own
+    # sessions, not a hardcoded or invented one. This used to also stamp a
+    # forward `estimated_monthly_usd` — that field no longer exists.
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-usd{i}", f"usd-{i}")
     sessions = [(f"usd-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
@@ -954,9 +965,11 @@ def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
 
     cluster = finding.clusters[0]
     expected_rate = get_rates("anthropic", "claude-sonnet-5").input_per_mtok / 1_000_000
-    assert cluster.estimated_monthly_usd == round(cluster.estimated_monthly_tokens * expected_rate, 6)
-    assert "claude-sonnet-5" in cluster.monthly_rate_basis
-    assert finding.estimated_monthly_usd == pytest.approx(cluster.estimated_monthly_usd)
+    assert cluster.past_overspend_usd == round(cluster.past_overspend_tokens * expected_rate, 6)
+    assert cluster.past_overspend_basis
+    assert finding.past_overspend_usd == pytest.approx(cluster.past_overspend_usd)
+    assert not hasattr(cluster, "estimated_monthly_usd")
+    assert not hasattr(cluster, "monthly_rate_basis")
 
 
 def test_occurrence_is_worth_its_re_read_tail_not_just_one_turn(tmp_path):
@@ -984,7 +997,7 @@ def test_occurrence_is_worth_its_re_read_tail_not_just_one_turn(tmp_path):
     assert GROUNDED_TOKENS_PER_OCCURRENCE == 1_500
     assert cluster.tail_calls_median == 20
     assert cluster.tail_multiplier > 1.0
-    assert cluster.gross_recoverable_tokens > (
+    assert cluster.past_overspend_tokens > (
         cluster.occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
     )
 

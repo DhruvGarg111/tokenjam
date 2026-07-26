@@ -40,7 +40,7 @@ def _cluster(**overrides) -> RelearnCluster:
         repos=["demo"], rung=1, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
         examples=[RelearnExample(session_id="s1", repo="demo", ts=None, snippet="no such file")],
-        estimated_recoverable_tokens=486_000,
+        past_overspend_tokens=486_000,
     )
     base.update(overrides)
     return RelearnCluster(**base)
@@ -111,8 +111,16 @@ def test_cluster_for_apply_drops_display_only_fields(cfg):
     stored = relearn_proposals.list_proposals(cfg)[0]
     cluster = relearn_proposals.cluster_for_apply(stored)
     assert cluster["signature"] == "cwd_confusion"
+    # Retired forward-claim fields never existed on the dataclass to begin
+    # with, so they cannot leak into the apply-time projection either.
     assert "estimated_recoverable_tokens" not in cluster
+    assert "estimated_monthly_usd" not in cluster
+    # Genuinely display-only fields are dropped...
+    assert "advise_only" not in cluster
     assert "proposal_id" not in cluster
+    # ...while the one canonical dollar field survives to apply time, so the
+    # Applied tab can snapshot what the human actually reviewed.
+    assert cluster["past_overspend_tokens"] == 486_000
 
 
 # --- F1: list ------------------------------------------------------------------
