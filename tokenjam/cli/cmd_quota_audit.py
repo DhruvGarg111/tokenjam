@@ -335,8 +335,6 @@ def _export_snippet(audit: OpusQuotaAudit, framing: Framing, *,
             "plan_tier": framing.plan_tier,
             "pricing_mode": framing.pricing_mode,
             "percent_quota_misallocated": audit.percent_quota_misallocated,
-            # DEPRECATED alias (see audit_to_dict) — kept one release.
-            "percent_quota_reclaimable": audit.percent_quota_misallocated,
         }, default=str))
         return
 

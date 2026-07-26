@@ -217,11 +217,6 @@ class ValidationResult:
         return self.cost_delta_usd / self.baseline_cost_usd * 100.0
 
 
-class ValidationError(Exception):
-    """Raised for an actionable, user-facing validation precondition failure
-    (capture off, no samples, no key). The CLI renders the message verbatim."""
-
-
 # ---------------------------------------------------------------------------
 # Sampling — pull the finding's own recorded calls out of telemetry
 # ---------------------------------------------------------------------------

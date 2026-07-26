@@ -76,5 +76,5 @@ class ProxyRunner:
         if self._task is not None:
             try:
                 await self._task
-            except Exception:  # noqa: BLE001
+            except Exception:  # 1
                 logger.exception("tj proxy server task ended with error")
