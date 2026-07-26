@@ -2467,6 +2467,23 @@ def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html
     assert "function combinedEstMonthly(items, suppressed)" not in html
 
 
+def test_applied_estimate_falls_back_to_legacy_fields_for_pre_upgrade_records(html):
+    # A ledger entry applied BEFORE the past_overspend_* collapse snapshotted
+    # its estimate under the retired forward-savings names
+    # (estimated_monthly_usd/_tokens). appliedEstimate() must still surface a
+    # figure for that record -- read-only, never re-persisting the legacy
+    # name -- rather than the Applied tab silently losing it.
+    fn_start = html.index("function appliedEstimate(rec)")
+    fn_end = html.index("\n}", fn_start)
+    fn = html[fn_start:fn_end]
+    assert "estimated_monthly_usd" in fn
+    assert "estimated_monthly_tokens" in fn
+    # `!= null` (not a truthy check) so a genuine 0 is never mistaken for
+    # "missing" and papered over with the legacy fallback.
+    assert "past_overspend_usd != null" in fn
+    assert "past_overspend_tokens != null" in fn
+
+
 def test_fixes_applied_tile_never_claims_verification(html):
     # Behavioral requirement #7 (REVISED, supersedes an earlier "verified
     # saved" draft): the second tile is "Fixes applied", sums each applied

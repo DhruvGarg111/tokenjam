@@ -8738,13 +8738,26 @@ function daysAgoLabel(iso) {
 //
 // Applies the same NOT_A_SAVINGS_CLAIM_ANALYZERS exclusion a resend/TRIM
 // marker needs here too.
+// Read-only compat for records applied BEFORE the past_overspend_* collapse:
+// a pre-upgrade `applied_fixes.json` entry snapshotted its estimate under the
+// retired forward-savings field names (`estimated_monthly_usd`/`_tokens`) --
+// `verify.*` for relearn, top-level for a cost marker. Falling back to those
+// only when the canonical field is genuinely absent (`!= null`, so a real `0`
+// is never mistaken for "missing") keeps the figure on the Applied tab for an
+// existing ledger entry instead of it silently disappearing the moment this
+// function started reading only the new names. Never a write path: nothing
+// here re-persists the legacy field onto the record.
 function appliedEstimate(rec) {
   const isRelearn = rec.kind === 'relearn';
-  const usd = isRelearn ? (rec.verify && rec.verify.past_overspend_usd) : rec.past_overspend_usd;
+  const source = isRelearn ? (rec.verify || {}) : rec;
+  const usd = source.past_overspend_usd != null
+    ? source.past_overspend_usd : source.estimated_monthly_usd;
+  const tokens = source.past_overspend_tokens != null
+    ? source.past_overspend_tokens : source.estimated_monthly_tokens;
   return {
     isRelearn,
     usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
-    tokens: isRelearn ? (rec.verify && rec.verify.past_overspend_tokens) : rec.past_overspend_tokens,
+    tokens,
   };
 }
 
