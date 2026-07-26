@@ -2891,27 +2891,6 @@ def _restart_tj_server(
     return "restart attempted; verify with `tj status`"
 
 
-def _restart_tj_server_for_secret_rotation(config_path: str, no_daemon: bool) -> str:
-    """Backward-compatible alias for secret-rotation restarts."""
-    return _restart_tj_server(config_path, no_daemon, reason="secret")
-
-
-def _codex_mcp_toml_block() -> str:
-    """Return the legacy [mcp_servers.tj] TOML block for ~/.codex/config.toml.
-
-    Retained only to *recognize* a previously tj-written block so onboard can
-    retire it (see ``_codex_strip_tj_mcp_from_content``). tj no longer registers
-    an MCP server for Codex — an in-loop MCP is a per-turn token burden on
-    subscription users (+36% measured); tj is out-of-band for Codex via OTel.
-    """
-    return (
-        "[mcp_servers.tj]\n"
-        "# Managed by tj — gives Codex access to TokenJam observability tools\n"
-        'command = "tj"\n'
-        'args = ["mcp"]\n'
-    )
-
-
 def _codex_strip_tj_mcp_from_content(content: str) -> tuple[str, bool]:
     """Remove a tj-owned [mcp_servers.tj] section from Codex config *content*.
 

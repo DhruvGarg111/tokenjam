@@ -4209,7 +4209,6 @@ function MapBoardSection({ sessionId }) {
   // does this). Step mode keeps the per-event ticks below.
   const binWidth = mbAutoBinWidth(activeDur);
   const histBins = [];
-  const costBins = [];
   if (mode === 'time') {
     const nb = Math.max(1, Math.ceil(activeDur / binWidth));
     for (let j = 0; j < nb; j++) {
@@ -7504,9 +7503,6 @@ function buildLeaderboard(resp, useTokens) {
 function analyticsCsv(resp) {
   const framing = resp.framing || {};
   const mode = framing.pricing_mode || 'unknown';
-  const monthlyUsd = framing.plan_monthly_usd || 0;
-
-  const hasStack = !!resp.stack_by;
 
   const head = [
     'bucket_epoch',

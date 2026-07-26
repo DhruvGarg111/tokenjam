@@ -420,12 +420,3 @@ def _capture_rows(capture: CaptureConfig) -> list[PolicyRow]:
         f"tool_outputs={str(capture.tool_outputs).lower()}",
     ]
     return [PolicyRow("capture", ", ".join(parts), "[capture]")]
-
-
-def _exposed_for_tests() -> dict[str, Any]:
-    """Expose internals to unit tests without polluting the public surface."""
-    return {
-        "collect_rows": _collect_rows,
-        "PolicyRow": PolicyRow,
-        "PREVIEW_NOTE": PREVIEW_NOTE,
-    }
