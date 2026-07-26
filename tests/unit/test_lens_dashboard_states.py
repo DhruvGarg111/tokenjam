@@ -379,6 +379,27 @@ def test_only_one_analyzer_sweep_runs_at_a_time(html):
     assert "if (optInFlight.current) return;" in html
 
 
+def test_a_tile_placeholder_mirrors_the_tile_it_stands_in_for(html):
+    # The Review inbox's skeleton states the rule these follow: real content must
+    # FILL a placeholder in, not replace a differently-shaped block. So the
+    # recoverable placeholder reuses the real .rec-tile box and mirrors its
+    # internals rather than being one solid rectangle.
+    assert '<div class="rec-tile rec-skel"' in html
+    assert 'class="shimmer rec-skel"' not in html          # the old solid block
+    assert ".rec-skel { pointer-events: none; }" in html
+    # Bar heights track the compact tile's own font sizes (12 / 15 / 10).
+    for h in ("height:12px", "height:15px", "height:10px"):
+        assert h in html
+
+
+def test_placeholder_bars_keep_the_primitive_s_own_corner_radius(html):
+    # .shimmer sets border-radius: 6px; a placeholder that overrides it is how two
+    # screens' skeletons start looking different.
+    assert ".rec-skel { height: 62px; border-radius: 8px; }" not in html
+    # The health value bar tracks .health-value's 24px font-size.
+    assert ".health-value-skel { height: 24px;" in html
+
+
 def test_the_shimmer_primitive_honors_reduced_motion(html):
     block = html[html.index("@media (prefers-reduced-motion: reduce)"):]
     assert ".shimmer { animation: none;" in block[:400]

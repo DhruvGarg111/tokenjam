@@ -941,15 +941,33 @@ a.health-tile.attn { border-color: var(--warn); }
    this band a zero reads as an all-clear ("no unread alerts", "no agents
    drifting"), which is the single most misleading thing an unknown figure could
    claim. The .attn border is withheld too — an unanswered read is no basis for
-   raising an alarm either. */
-.health-value-skel { height: 27px; max-width: 2.4em; margin: 1px 0 2px; }
+   raising an alarm either.
+
+   Geometry follows the Review inbox's skeleton conventions rather than being
+   invented here, so a reader switching pages cannot tell the two were built
+   separately: bar heights track the real element's font-size (the value bar is
+   24px, matching .health-value), bars keep .shimmer's own 6px radius rather than
+   overriding it, spacing is stated inline at the markup, and the only motion is
+   .shimmer. Read off that screen's source, not copied from it: its skeletons are
+   not factored into anything a tile can reuse (InboxSkeletonRow is a list-row
+   shape; its stat-tile placeholder is inline markup inside InboxStatTiles), and
+   extracting one would mean editing a region another worker owns. */
+.health-value-skel { height: 24px; max-width: 2.4em; margin: 3px 0; }
 .health-value.unknown { color: var(--text-faint); }
 /* Recoverable-waste band placeholders. Skeleton tiles hold the band's shape
    while the analyzer sweep runs, so a slow answer reads as pending rather than
    as a page that broke; .band-msg carries the honest sentence for a wait that
    ran out or a read that failed, and is deliberately wordy where the tiles are
-   terse — "we do not know" needs a reason and a next step, a number does not. */
-.rec-skel { height: 62px; border-radius: 8px; }
+   terse — "we do not know" needs a reason and a next step, a number does not.
+
+   A tile placeholder MIRRORS the real tile's internals (name line, amount line,
+   two clamped hint lines) instead of standing in as one solid block, which is the
+   inbox skeleton's own stated rule: real content should FILL a placeholder in
+   rather than replace a differently-shaped thing. It reuses .rec-tile for the box
+   so border, radius and padding cannot drift from the answered state, and its bar
+   heights track the compact tile's own font sizes (.tile-grid.compact sets
+   .rec-name 12px, .rec-amount 15px, .rec-hint 10px). */
+.rec-skel { pointer-events: none; }
 /* The qualifier bar's slot while its text is unknown: the real bar's box, its
    own left accent dropped (there is nothing yet to caveat) and two lines of the
    height the real two-line caveat renders at. The fill is dropped too, because
@@ -10138,7 +10156,17 @@ function DashboardView({ params }) {
                       requires a completed response. */ ''}
                 ${bandState === 'scanning' ? html`
                   <div class="tile-grid compact">
-                    ${REC_SKELETON_TILES.map(i => html`<div class="shimmer rec-skel" key=${i}></div>`)}
+                    ${/* Mirrors the answered tile below: name line, amount line,
+                          two clamped hint lines, inside the real .rec-tile box.
+                          Same bar-height-tracks-font-size convention the Review
+                          inbox's skeletons use, so the two pages read as one. */ ''}
+                    ${REC_SKELETON_TILES.map(i => html`
+                      <div class="rec-tile rec-skel" key=${i} aria-hidden="true">
+                        <div class="shimmer" style="height:12px;width:52%"></div>
+                        <div class="shimmer" style="height:15px;width:64%;margin-top:8px"></div>
+                        <div class="shimmer" style="height:10px;width:100%;margin-top:8px"></div>
+                        <div class="shimmer" style="height:10px;width:78%;margin-top:4px"></div>
+                      </div>`)}
                   </div>
                   <div class="band-note">Scanning your history for recoverable waste. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
                 ${bandState === 'timeout' ? html`
