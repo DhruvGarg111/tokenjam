@@ -379,6 +379,85 @@ async def test_get_trace_by_id_returns_span_waterfall(client):
     assert len(data["spans"]) >= 1
 
 
+# -- Trace cost ranking --
+
+async def test_get_traces_sort_cost_ranks_highest_first(db, client):
+    db.insert_span(make_llm_span(agent_id="a", trace_id="cheap", cost_usd=0.01))
+    db.insert_span(make_llm_span(agent_id="a", trace_id="pricey", cost_usd=9.0))
+
+    resp = await client.get("/api/v1/traces", params={"sort": "cost"})
+    assert resp.status_code == 200
+    ids = [t["trace_id"] for t in resp.json()["traces"]]
+    assert ids.index("pricey") < ids.index("cheap")
+
+
+async def test_get_traces_invalid_sort_falls_back_to_recent(db, client):
+    """An unrecognized sort value degrades gracefully instead of erroring —
+    matches the web UI's own bad-param handling (readParam)."""
+    db.insert_span(make_llm_span(agent_id="a", trace_id="t1", cost_usd=1.0))
+
+    resp = await client.get("/api/v1/traces", params={"sort": "not-a-real-sort"})
+    assert resp.status_code == 200
+
+
+async def test_get_traces_min_cost_usd_filters_rows_and_total_count(db, client):
+    for i, cost in enumerate([0.01, 1.0, 10.0]):
+        db.insert_span(make_llm_span(agent_id="a", trace_id=f"t{i}", cost_usd=cost))
+
+    resp = await client.get("/api/v1/traces", params={"min_cost_usd": 1.0})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert {t["trace_id"] for t in data["traces"]} == {"t1", "t2"}
+    assert data["total_count"] == 2
+
+
+async def test_get_traces_marks_outlier_and_states_rule_in_plain_language(db, client):
+    for i in range(7):
+        db.insert_span(make_llm_span(agent_id="a", trace_id=f"cheap-{i}", cost_usd=1.0))
+    db.insert_span(make_llm_span(agent_id="a", trace_id="spike", cost_usd=50.0))
+
+    resp = await client.get("/api/v1/traces")
+    assert resp.status_code == 200
+    data = resp.json()
+    by_id = {t["trace_id"]: t for t in data["traces"]}
+    assert by_id["spike"]["is_outlier"] is True
+    assert all(not t["is_outlier"] for tid, t in by_id.items() if tid != "spike")
+
+    # The response ships the numbers behind the flag, not just a bare badge,
+    # so the UI can render the rule in plain language without guessing.
+    rule = data["outlier_rule"]
+    assert rule["method"] == "iqr_1.5x"
+    assert rule["sample_size"] == 8
+    assert rule["threshold_usd"] is not None
+    assert rule["q1_usd"] is not None and rule["q3_usd"] is not None
+
+
+async def test_get_traces_outlier_rule_reports_insufficient_sample(db, client):
+    db.insert_span(make_llm_span(agent_id="a", trace_id="a1", cost_usd=1.0))
+    db.insert_span(make_llm_span(agent_id="a", trace_id="a2", cost_usd=100.0))
+
+    resp = await client.get("/api/v1/traces")
+    data = resp.json()
+    assert all(not t["is_outlier"] for t in data["traces"])
+    assert data["outlier_rule"]["threshold_usd"] is None
+
+
+async def test_get_trace_ranks_top_cost_spans_within_trace(db, client):
+    """A single trace with a cheap span and an expensive span surfaces the
+    expensive one in top_cost_span_ids: rank spans within a trace by cost,
+    not just traces within a window."""
+    trace_id = "cccccccc" * 4
+    cheap = make_llm_span(agent_id="a", trace_id=trace_id, cost_usd=0.001)
+    pricey = make_llm_span(agent_id="a", trace_id=trace_id, cost_usd=3.5)
+    db.insert_span(cheap)
+    db.insert_span(pricey)
+
+    resp = await client.get(f"/api/v1/traces/{trace_id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["top_cost_span_ids"][0] == pricey.span_id
+
+
 async def test_get_cost_returns_aggregated_rows(client):
     await _ingest_sample_span(client)
     resp = await client.get("/api/v1/cost")
