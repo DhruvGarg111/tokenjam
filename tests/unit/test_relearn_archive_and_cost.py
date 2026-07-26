@@ -602,3 +602,39 @@ def test_short_label_is_derived_on_read_for_an_older_cache():
     # Pure: the input dict is never mutated (the stamper runs inside a cache
     # write and must never surprise its caller).
     assert "write_blocked_short" not in legacy["clusters"][0]
+
+
+def test_relearn_finding_round_trips_its_observed_dollar_figure():
+    """`report_to_dict` / `report_from_dict` must preserve relearn's observed
+    figure. relearn's reader was the one in `runner.py` restoring the token
+    field but not its USD twin, so a rehydrated report kept ~16.7M tokens and
+    silently lost the $46 that went with them -- and the dollar field is what
+    every leading surface renders.
+    """
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+
+    finding = RelearnFinding(
+        clusters=[], sessions_scanned=3,
+        past_overspend_tokens=1_234_567,
+        past_overspend_usd=46.62,
+        past_overspend_basis="observed over the scanned corpus",
+    )
+    # Round-trip through the report envelope the cache actually stores.
+    from tokenjam.core.optimize.runner import OptimizeReport, WindowSummary
+
+    window = WindowSummary(
+        since=BASE - timedelta(days=30), until=BASE, days=30, sessions=3,
+        spans=10, total_tokens=1, total_cost_usd=1.0, thin_data=False,
+        active_days=28,
+    )
+    report = OptimizeReport(window=window, downgrade=None)
+    report.findings["relearn"] = finding
+    back = report_from_dict(report_to_dict(report)).findings["relearn"]
+
+    assert back.past_overspend_tokens == 1_234_567
+    assert back.past_overspend_usd == 46.62
+    assert back.past_overspend_basis == "observed over the scanned corpus"
+    # A payload written before the fields existed rehydrates to the declared
+    # defaults, never to None on a non-optional int.
+    legacy = report_from_dict({"findings": {"relearn": {"sessions_scanned": 1}}})
+    assert legacy.findings["relearn"].past_overspend_tokens == 0

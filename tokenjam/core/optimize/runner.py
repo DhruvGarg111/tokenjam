@@ -639,7 +639,14 @@ def _build_finding_constructors() -> dict:
             failures_examined=int(d.get("failures_examined", 0)),
             distilled_clusters=int(d.get("distilled_clusters", 0)),
             dropped_codified=int(d.get("dropped_codified", 0)),
-            past_overspend_tokens=d.get("past_overspend_tokens"),
+            # `int(... or 0)` like every other count above: the field is a
+            # non-optional int, and a dict written before it existed returns
+            # None. Also restore the USD twin -- relearn was the one reader in
+            # this module dropping it, so a rehydrated report silently lost
+            # relearn's observed dollar figure while keeping its token figure.
+            past_overspend_tokens=int(d.get("past_overspend_tokens") or 0),
+            past_overspend_usd=d.get("past_overspend_usd"),
+            past_overspend_basis=d.get("past_overspend_basis", ""),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
             caveat=d.get("caveat", ""),
