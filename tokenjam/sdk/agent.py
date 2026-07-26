@@ -59,10 +59,12 @@ def watch(
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            from tokenjam.sdk.attribution import attribution
             from tokenjam.sdk.bootstrap import ensure_initialised
             ensure_initialised()
             try:
+                # AgentSession itself establishes the ambient attribution
+                # context (see AgentSession.__enter__) -- no separate
+                # `attribution(...)` block needed here.
                 with AgentSession(
                     agent_id=agent_id,
                     agent_name=agent_name,
@@ -70,7 +72,7 @@ def watch(
                     conversation_id=conversation_id,
                     tenant_id=tenant_id,
                     feature=feature,
-                ), attribution(tenant_id=tenant_id, feature=feature):
+                ):
                     return func(*args, **kwargs)
             except Exception:
                 # Re-raise application exceptions, but if AgentSession
@@ -87,8 +89,18 @@ class AgentSession:
     used directly for more control.
 
     Usage:
-        with AgentSession(agent_id="my-agent") as session:
+        with AgentSession(agent_id="my-agent", tenant_id="acme-corp") as session:
             result = run_my_agent()
+
+    `tenant_id`/`feature` are stamped on THIS session's own span AND pushed
+    into the ambient `sdk.attribution` context for the duration of the
+    `with` block (see `tokenjam.sdk.attribution.attribution`) -- direct
+    `AgentSession` use is a first-class entry point, not just something
+    `@watch()` wraps, so a provider-patch span created inside the block
+    (`patch_anthropic()`, `patch_openai()`, ...) must inherit the same
+    attribution the session itself carries. Without this, the session span
+    would show the tenant/feature but the billable LLM call spans it wraps
+    would not.
     """
 
     def __init__(
@@ -108,9 +120,10 @@ class AgentSession:
         self.feature = feature
         self._span: trace.Span | None = None
         self._ctx: AbstractContextManager[trace.Span] | None = None
+        self._attribution_cm: AbstractContextManager[None] | None = None
 
     def __enter__(self) -> AgentSession:
-        from tokenjam.sdk.attribution import stamp_span_attribution
+        from tokenjam.sdk.attribution import attribution, stamp_span_attribution
 
         self._span = _tracer.start_span(GenAIAttributes.SPAN_INVOKE_AGENT)
         self._span.set_attribute(GenAIAttributes.AGENT_ID, self.agent_id)
@@ -124,9 +137,13 @@ class AgentSession:
         stamp_span_attribution(self._span, tenant_id=self.tenant_id, feature=self.feature)
         self._ctx = trace.use_span(self._span, end_on_exit=False)
         self._ctx.__enter__()
+        self._attribution_cm = attribution(tenant_id=self.tenant_id, feature=self.feature)
+        self._attribution_cm.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._attribution_cm is not None:
+            self._attribution_cm.__exit__(exc_type, exc_val, exc_tb)
         if self._span is None:
             return False
         if exc_type is not None:
