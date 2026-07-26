@@ -91,9 +91,6 @@ class OpenInferenceAttributes:
     CACHE_READ_TOKENS   = "llm.token_count.prompt_details.cache_read"
     CACHE_WRITE_TOKENS  = "llm.token_count.prompt_details.cache_write"
 
-    # Span-kind values
-    KIND_LLM  = "LLM"
-    KIND_TOOL = "TOOL"
 
 
 class ClaudeCodeEvents:
@@ -148,9 +145,7 @@ class CodexEvents:
 
     # Standard context attributes on all events
     CONVERSATION_ID = "conversation.id"
-    APP_VERSION     = "app.version"
     MODEL           = "model"
-    SLUG            = "slug"
     EVENT_TIMESTAMP = "event.timestamp"  # ISO-8601 UTC; Codex sets timeUnixNano=0
 
     # api_request attributes
@@ -185,7 +180,6 @@ class CodexEvents:
 
 class ResourceAttributes:
     """OTel standard resource attributes (set per process / service)."""
-    SERVICE_NAME      = "service.name"
     # Logical grouping above service.name. tj uses it as the "project" a
     # service belongs to, so the dashboard can roll up every repo under one
     # project tile (e.g. all `Aquanodeio/*` repos -> namespace "aquanode").

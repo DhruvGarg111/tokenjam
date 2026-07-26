@@ -121,7 +121,7 @@ def _fetch_proxy_json(config: TjConfig, path: str) -> dict | None:
         resp = httpx.get(url, timeout=2.0)
         if resp.status_code == 200:
             return resp.json()
-    except Exception:  # noqa: BLE001 — proxy may simply be down
+    except Exception:  # proxy may simply be down
         return None
     return None
 
@@ -137,7 +137,7 @@ def _read_decisions_from_db(config: TjConfig, since, limit: int):
     from tokenjam.proxy.audit import decision_to_display_dict, reconcile_savings
     try:
         db = open_db(config.storage)
-    except Exception:  # noqa: BLE001 — locked / missing → caller falls back
+    except Exception:  # locked / missing → caller falls back
         return None
     try:
         recs = db.get_policy_decisions(PolicyDecisionFilters(since=since, limit=limit))

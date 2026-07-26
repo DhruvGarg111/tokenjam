@@ -558,8 +558,7 @@ def test_cli_json_output_has_segment_fields(db, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["percent_quota_misallocated"] > 0
-    # DEPRECATED alias still mirrors the headline (0.5.4 compat).
-    assert payload["percent_quota_reclaimable"] == payload["percent_quota_misallocated"]
+    assert "percent_quota_reclaimable" not in payload
     assert payload["candidate_sessions"] >= 1
     assert payload["segment_count"] >= 1
     assert payload["segment_estimate_confidence"] == "estimate"

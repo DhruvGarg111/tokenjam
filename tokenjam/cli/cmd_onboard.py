@@ -848,7 +848,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
 
     try:
         config = load_config(str(config_path.resolve()))
-    except Exception as exc:  # noqa: BLE001 — surface a clean message, no traceback
+    except Exception as exc:  # surface a clean message, no traceback
         console.print(f"[red]Could not load config[/red] at {display_path(config_path)}: {exc}")
         ctx.exit(1)
         return

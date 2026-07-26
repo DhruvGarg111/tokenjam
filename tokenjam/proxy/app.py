@@ -60,7 +60,7 @@ def _policy_request(request: Request, body: bytes) -> PolicyRequest:
         loaded = json.loads(body or b"{}")
         if isinstance(loaded, dict):
             parsed = loaded
-    except Exception:  # noqa: BLE001 — body parsing never breaks the request
+    except Exception:  # body parsing never breaks the request
         parsed = None
     return PolicyRequest(
         provider=_provider_for(request.url.path),
@@ -143,7 +143,7 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
             decision = classify(
                 config, provider, killswitch=bool(config.proxy.killswitch),
             )
-        except Exception:  # noqa: BLE001 — never let our logic break traffic
+        except Exception:  # never let our logic break traffic
             logger.exception("proxy gate classification failed; forwarding unmodified")
 
         # Read the body once — needed both for forwarding and for policy context.
@@ -157,7 +157,7 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
         if decision is not None and decision.path == POLICY:
             try:
                 envelope = engine.evaluate(decision, _policy_request(request, body))
-            except Exception:  # noqa: BLE001 — engine never breaks traffic
+            except Exception:  # engine never breaks traffic
                 logger.exception("policy engine failed; forwarding unmodified")
 
         # No upstream known (unrecognised path) → nothing to forward to.
@@ -239,5 +239,5 @@ def _safe_record(observer: ProxyObserver, request: Request, decision: Any,
             method=request.method, path=request.url.path,
             decision=decision, forwarded=forwarded, envelope=envelope,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # 1
         logger.exception("proxy observation recording failed (ignored)")

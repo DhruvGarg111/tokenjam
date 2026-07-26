@@ -117,7 +117,7 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json_flag: bool) -> None:
     if hasattr(provider, "force_flush"):
         try:
             provider.force_flush()
-        except Exception:  # noqa: BLE001 — best-effort delivery
+        except Exception:  # best-effort delivery
             pass
 
     mode = bootstrap.get_mode()
@@ -217,7 +217,7 @@ def _confirm_delivery(
         if callable(close):
             try:
                 close()
-            except Exception:  # noqa: BLE001 — best-effort cleanup
+            except Exception:  # best-effort cleanup
                 pass
 
     if result.error:
