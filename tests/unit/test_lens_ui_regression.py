@@ -2973,6 +2973,57 @@ def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
     assert "inbox-row" not in modal
 
 
+def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
+    # Founder feedback: description lengths were wildly uneven (resend concatenated
+    # evidence + advise_text + caveat into ~15 lines while a downsize row had one),
+    # so the list was ragged and could not be scanned.
+    #
+    # Clamped on LINES, so the collapsed height does not depend on how the text
+    # happens to wrap at the current width.
+    assert "-webkit-line-clamp: 3" in html
+    assert ".inbox-desc.is-open" in html
+    assert "-webkit-line-clamp: unset" in html
+    # min-height matches the clamp, which is the half that stops the raggedness
+    # simply MOVING to the short rows: a row with little or no prose has to occupy
+    # the same space as one with a wall of it.
+    assert "min-height: calc(3 * 1.55 * 13px)" in html
+    assert ".inbox-desc.is-open" in html and "min-height: 0" in html
+
+    # The expander is measured from the DOM, never guessed from a character count:
+    # the same string clips at one card width and not another.
+    fn_start = html.index("function ClampedDescription({ children })")
+    fn = html[fn_start:html.index("// The collapse/floor labels", fn_start)]
+    assert "el.scrollHeight - el.clientHeight > 1" in fn
+    # Measuring while open would clear the flag and remove the "Show less" link.
+    assert "if (!el || open) return;" in fn
+    # Per row, local, not persisted, not expanded by default.
+    assert "useState(false)" in fn
+    assert "localStorage" not in fn and "sessionStorage" not in fn
+    assert "'Show less' : 'Show more'" in fn
+
+    # Both row shapes wrap their prose in it, so the collapsed tail and the
+    # below-the-fold group inherit the rhythm through the same components.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "<${ClampedDescription}>" in row
+    assert "<${ClampedDescription}>" in card
+
+    # A relearn cluster has no analyzer prose, so its block leads with the facts it
+    # does have (requirement: give every row a first line worth reading).
+    assert "Recurred ${cluster.occurrences} time" in row
+    assert "across ${cluster.sessions} session" in row
+
+    # The operative facts stay OUTSIDE the clamp: a reader must not expand anything
+    # to learn why a row has no Apply button, and a <details> is already collapsed.
+    # Matched on the RENDERED markup, not the phrase: a comment above the
+    # component explains the same rule in prose and would match first, making the
+    # ordering check compare a comment against the clamp.
+    blocked_at = card.index(">tokenjam cannot apply this one: ${blockedReason}<")
+    clamp_close = card.index("<//>")
+    assert blocked_at > clamp_close, "the blocker reason must not be inside the clamp"
+    assert card.index("<summary>How this number was derived</summary>") > clamp_close
+
+
 def test_a_row_tj_cannot_apply_states_the_servers_own_blocker_reason(html):
     # A row tokenjam cannot apply must say WHY, and must say it in the words the
     # refusing adapter used. `apply_blocked_reason` carries e.g. "no local source

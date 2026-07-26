@@ -1469,6 +1469,24 @@ code.md-code {
    MODAL is deliberately not covered: it renders outside the card and is a reading
    surface, so 74ch is still correct there. */
 .inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }
+/* Uniform collapsed height for a row's prose, so the LIST can be scanned rather
+   than read. Row descriptions come straight from the analyzers and their lengths
+   are wildly uneven: `resend` concatenates evidence + advise_text + caveat into
+   fifteen-odd lines while a downsize row has one, which made the list ragged and
+   unscannable even at full width.
+     * The clamp is on LINES, not characters, so the collapsed height is identical
+       regardless of how the text happens to wrap at the current width.
+     * `min-height` matches the clamp, so a row with LITTLE or NO prose occupies
+       the same space as one with a wall of it. Without this, shortening the long
+       rows would just move the raggedness to the short ones.
+     * Nothing is destroyed: `.is-open` lifts the clamp in place.
+   `-webkit-line-clamp` is the load-bearing property (Chromium + WebKit + Firefox
+   all honour it); the unprefixed `line-clamp` is listed after it for the future. */
+.inbox-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-height: calc(3 * 1.55 * 13px); }
+.inbox-desc.is-open { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; min-height: 0; }
+/* The expander. A link rather than a button: it reveals text in place, it is not
+   an action on the proposal, and the row's real actions are the buttons below. */
+.inbox-more { font-size: 11.5px; margin-top: 4px; }
 
 /* Engine gate */
 .sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; }
@@ -8089,6 +8107,44 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
+// --- The row's description block: the same height on every row --------------
+//
+// Wraps whatever prose a row has in a fixed-line clamp with an in-place
+// expander, so the collapsed list has one vertical rhythm top to bottom. Both
+// row components use it, and the collapsed tail and the below-the-fold group
+// render through those, so the rhythm holds inside them too.
+//
+// THREE lines, not two. Two was the starting point and reads as too tight now the
+// block is full card width (the width fix landed first): a cost row's first
+// sentence is its evidence and its second is what to do about it, and two lines
+// cut the second one mid-clause on most rows. Three lands the whole "what we saw
+// plus what to do" pair on the majority of rows, which is what makes the
+// collapsed state useful rather than merely tidy.
+//
+// The expander renders ONLY when the text is actually clipped, MEASURED from the
+// DOM rather than guessed from a character count: the same string clips at one
+// card width and not another, so a guess leaves dead "Show more" links on short
+// rows and hides real overflow on long ones.
+function ClampedDescription({ children }) {
+  const ref = useRef(null);
+  const [open, setOpen] = useState(false);      // per row, local, never persisted
+  const [clipped, setClipped] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    // While open the element cannot overflow, so measuring here would clear the
+    // flag and take the "Show less" link away with it. The value measured before
+    // opening is the one that stays true.
+    if (!el || open) return;
+    setClipped(el.scrollHeight - el.clientHeight > 1);
+  });
+  return html`
+    <div>
+      <div class=${'inbox-desc' + (open ? ' is-open' : '')} ref=${ref}>${children}</div>
+      ${clipped ? html`
+        <div class="sz-link inbox-more" onClick=${() => setOpen(o => !o)}>${open ? 'Show less' : 'Show more'}</div>` : null}
+    </div>`;
+}
+
 // The collapse/floor labels used to be fixed plurals ("cost advisories"), which
 // was safe while each tab had its own noun and its own always-plural phrasing.
 // On the merged list the noun is generic and a group of one is common, so
@@ -8463,8 +8519,33 @@ function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDi
           <div class="dim" style="font-size:10px" title=${span.title}>${observed ? 'already cost ' + span.text : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
         </span>
       </div>
-      <div class="dim" style="font-size:12px;margin-top:8px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
-      ${showForward ? html`<div class="dim" style="font-size:11px;margin-top:4px">~${est.big} / mo if fixed</div>` : null}
+      ${/* THE DESCRIPTION BLOCK, the same clamp the cost card uses, so the two
+            row shapes share one skeleton and one vertical rhythm.
+
+            A relearn cluster carries no analyzer prose, which is exactly the case
+            the founder called out: shortening the long rows would only move the
+            raggedness onto the short ones. So this block leads with the facts the
+            row actually has — how often it recurred, across how many sessions,
+            when it was last seen — and `min-height` on the clamp keeps it the
+            same height as a cost row's wall of text. Nothing is invented: every
+            figure here is on the cluster.
+
+            The write-gate reason sits INSIDE the clamp on this row, unlike the
+            cost card's `blockedReason`. It is a paragraph of budget economics
+            rather than a one-line refusal, the mechanism tag already says the row
+            has no writer, and the fix block below carries the recommendation the
+            reader acts on. */ ''}
+      <div style="margin-top:8px">
+        <${ClampedDescription}>
+          <div class="dim" style="font-size:12px">Recurred ${cluster.occurrences} time${cluster.occurrences === 1 ? '' : 's'} across ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
+          ${showForward ? html`<div class="dim" style="font-size:11px;margin-top:4px">~${est.big} / mo if fixed</div>` : null}
+          ${cannotApplyReason || payback ? html`
+            <div class="sz-note" style="font-size:12px;margin-top:6px">
+              ${cannotApplyReason || ''}
+              ${payback ? html`<div class="dim" style="margin-top:4px">${payback} This is a modelled comparison, not an observed one; it does not count what the rule might save by preventing the failure.</div>` : null}
+            </div>` : null}
+        <//>
+      </div>
 
       ${/* The two fix facts are rendered INDEPENDENTLY, mirroring how the cost
             card has always rendered its own two. A relearn cluster happens never
@@ -8483,17 +8564,6 @@ function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDi
             <${CopySnippetButton} text=${fixText} />
           </div>
           <div class="sz-copybox" style="margin-top:4px">${fixText}</div>
-        </div>
-      ` : null}
-
-      ${/* WHY tokenjam will not write it, and what the reader does instead. The
-            budget's own sentence, never a locally invented paraphrase. This
-            replaced a compressed "no permanent fix offered: <label>" line: the
-            label named the gate without telling anyone what to do next. */ ''}
-      ${cannotApplyReason || payback ? html`
-        <div class="sz-note" style="font-size:12px;margin-top:10px">
-          ${cannotApplyReason || ''}
-          ${payback ? html`<div class="dim" style="margin-top:4px">${payback} This is a modelled comparison, not an observed one; it does not count what the rule might save by preventing the failure.</div>` : null}
         </div>
       ` : null}
 
@@ -8995,23 +9065,36 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
           <div class="dim" style="font-size:10px" title=${span.title}>${est.noAvoidable ? 'no avoidable figure on this card' : ('avoidable ' + span.text + (est.sub ? ' · ' + est.sub : ''))}</div>
         </span>
       </div>
-      ${/* One description paragraph: what we saw, what to do, and the honesty
-            caveat (Rule 14 — the caveat always renders, never a separate
-            heading-laden block). No section headings, no evidence link. */ ''}
-      <div class="sz-note" style="margin-top:8px">${description}</div>
-      ${/* The refusal, where the paragraph above did not already carry it. This
-            is what makes a non-applyable row honest rather than merely inert:
-            it names what tokenjam cannot do and, in the server's own wording,
-            what the reader can do instead. */ ''}
+      ${/* THE DESCRIPTION BLOCK. Every prose line the card carries lives inside
+            one clamp, so the collapsed row is the same height as every other row
+            and one "Show more" reveals all of it. Clamping only the first
+            paragraph would not have worked: `resend`'s `coverage_note` is itself
+            a five-line block, so the row stayed twice the height of its
+            neighbours until the whole group came inside.
+
+            Contents, in the order they were already in: what we saw plus what to
+            do plus the honesty caveat (Rule 14 — the caveat always travels with
+            the figure), then the second past-tense COST sentence where the total
+            and the avoidable share are genuinely different quantities, then the
+            coverage note that says why the gap is unanalysed rather than
+            unavoidable. */ ''}
+      <div style="margin-top:8px">
+        <${ClampedDescription}>
+          <div class="sz-note">${description}</div>
+          ${observedCost ? html`<div class="sz-note" style="margin-top:4px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
+          ${prop.coverage_note ? html`<div class="dim" style="font-size:11px;margin-top:4px">${prop.coverage_note}</div>` : null}
+        <//>
+      </div>
+      ${/* OUTSIDE the clamp, deliberately. The refusal is not explanatory prose,
+            it is the row's operative fact: it names what tokenjam cannot do and,
+            in the server's own wording, what the reader can do instead. A reader
+            must not have to expand anything to find out why the row has no Apply
+            button. Only renders where the paragraph above did not already carry
+            it. */ ''}
       ${showBlockedReason ? html`
-        <div class="sz-note" style="margin-top:4px">tokenjam cannot apply this one: ${blockedReason}</div>` : null}
-      ${/* The second past-tense sentence, resend only: the FULL cost of the
-            behaviour, stated as cost. It is bigger than the headline because
-            the headline only counts what was shown to be avoidable — and the
-            coverage line immediately after says why the rest wasn't, so the
-            gap is never left to read as "94% of this was unavoidable". */ ''}
-      ${observedCost ? html`<div class="sz-note" style="margin-top:4px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
-      ${prop.coverage_note ? html`<div class="dim" style="font-size:11px;margin-top:4px">${prop.coverage_note}</div>` : null}
+        <div class="sz-note" style="margin-top:6px">tokenjam cannot apply this one: ${blockedReason}</div>` : null}
+      ${/* Also outside: a `<details>` is already collapsed, so it costs one line
+            and clamping it would bury a disclosure behind two clicks. */ ''}
       ${prop.past_overspend_basis ? html`
         <details class="po-basis">
           <summary>How this number was derived</summary>
