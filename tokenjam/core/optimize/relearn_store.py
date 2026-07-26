@@ -123,9 +123,11 @@ def read_cost_proposals(
     (a caller passes them straight to ``compute_projection_ratio``, whose
     guardrails treat ``0`` as "not enough data", never as a fabricated
     ratio). ``cost_excluded`` (#326) is the rollup's cross-reference for
-    waste deliberately NOT summed into it (currently ``summarize`` —  see
-    ``cost_proposals._excluded_summarize_block``); ``{}`` for a cache written
-    before it existed."""
+    waste a caller deliberately did NOT sum in — generic infrastructure with
+    no current occupant (``summarize`` used to be the one entry here until
+    it got a real peer card instead; see ``cost_proposals.
+    COST_ANALYZERS``); ``{}`` for a cache written before it existed, and
+    ``{}`` going forward until a future analyzer needs it again."""
     raw = read_cache(path, config=config)
     if raw is None:
         return None
@@ -200,11 +202,12 @@ def write_cost_proposals(
     previously-stored value untouched, so a caller that doesn't track these
     yet (a legacy call site) doesn't silently zero out a real prior value.
 
-    ``excluded`` (#326) is the rollup's cross-reference block (currently
-    ``{"summarize": {...}}`` when the analyzer found something, else ``{}``)
-    — always written when this call succeeds (unlike the three window
-    fields above, this one has no "leave untouched" case: a fresh recompute
-    always knows the current excluded state, even if it's "nothing")."""
+    ``excluded`` (#326) is the rollup's cross-reference block for waste a
+    caller deliberately did not fold in as a peer card — generic
+    infrastructure with no current occupant (see ``read_cost_proposals``) —
+    always written when this call succeeds (unlike the three window fields
+    above, this one has no "leave untouched" case: a fresh recompute always
+    knows the current excluded state, even if it's "nothing")."""
     from dataclasses import is_dataclass
 
     p = path or default_cache_path(config)
@@ -295,6 +298,9 @@ def recompute_now(
         finding = compute_relearn_finding(
             conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
             persona=persona,
+            # The archive lane's horizon: what tokenjam kept, not what Claude
+            # Code left on disk. See `compute_relearn_finding`.
+            retention_days=getattr(getattr(config, "storage", None), "retention_days", None),
         )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to

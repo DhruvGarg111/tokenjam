@@ -68,28 +68,40 @@ COST_CORRELATIONAL_CAVEAT = (
 #: savings and previously had no adapter here, silently excluding it from the
 #: Review inbox's Cost-advisories tab.
 #:
-#: ``summarize`` (prompt summarization) is deliberately NOT here, and stays out
-#: now that it carries a dollar figure of its own. Three reasons, decided
-#: rather than inherited:
-#:
-#:   1. It has its own dedicated review surface — the curate/diff screen driven
-#:      by ``core/summarize/``'s prepare/check/apply lifecycle, a multi-step
-#:      rewrite-and-verify flow this single-card adapter shape cannot represent.
-#:      An inbox card would either duplicate that surface or link away from the
-#:      inbox to it, and neither is a card.
-#:   2. It is the BUDGET, not a peer. ``write_budget.measured_agent_file_tokens``
-#:      reads the summarize finding to size how much permanent rule-writing every
-#:      OTHER analyzer in this table is allowed to propose. Listing it here would
-#:      make the analyzer that sets the budget also compete for it, and a user who
-#:      dismissed the card would silently be dismissing the counterweight that
-#:      stops the rule-writers from growing the files it wants compressed.
-#:   3. The standing product constraint is to consolidate cards, not add them.
-#:      Its saving is already visible in the Overview waste band (registry-driven
-#:      off the presence of ``estimated_recoverable_usd``), so it is not hidden —
-#:      only absent from this one surface.
+#: ``summarize`` (prompt summarization) IS here (re-filing the
+#: purged #326). It used to be deliberately excluded — own review surface, the
+#: write-budget's denominator, "don't add cards" — and #326 tried to soften the
+#: consequence with a link-only "$X more, not summed here" footnote instead of
+#: a card. The founder decision that revisited this rejects the old reasoning
+#: outright: **the Review inbox is the complete index of everything
+#: actionable, not the list of things whose apply flow happens to live here.**
+#: Where the fix is APPLIED is a routing detail, not a reason to keep a real,
+#: measured figure off the one surface a user reads for "what's outstanding".
+#: So ``summarize`` gets a normal card like every other analyzer here — see
+#: ``_summarize_to_proposals`` — except its card routes to the ``tj summarize``
+#: curate/diff surface instead of offering an inline apply (``advise_only``,
+#: no ``apply_kind``): unlike a model-id swap or an MCP-server removal, the fix
+#: is a reviewed rewrite (structure kept, prose compressed), not a value this
+#: adapter can safely one-click. The write-budget coupling that motivated the
+#: old exclusion is unaffected: ``_apply_write_budget`` reads
+#: ``report.findings["summarize"]`` directly (not this proposal list) to size
+#: every OTHER analyzer's rule-writing budget, and this card is never
+#: ``apply_capable`` so it never enters that netting pass itself.
+#: ``relearn`` (recurring agent failures) IS here, for the same founder
+#: decision that re-admitted ``summarize``: the Review inbox is the complete
+#: index of everything actionable, not the list of things whose apply flow
+#: happens to live here. relearn was the last analyzer whose measured cost
+#: reached NO aggregate surface at all — it produces ``RelearnCluster``s, not
+#: ``CostProposal``s, so ``past_overspend_rollup`` and
+#: ``estimated_recoverable_rollup`` were both structurally blind to it and the
+#: Dashboard hero's "what waste already cost you" omitted the entire
+#: self-improve loop. ``_relearn_to_proposals`` adds exactly one aggregate
+#: card, never one per cluster (relearn's own per-cluster rows in the Review
+#: inbox are richer and stay the detail view), and it is never
+#: ``apply_capable``: the apply path is relearn's own reviewed write flow.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
-    "script", "reuse", "verbosity", "resend",
+    "script", "reuse", "verbosity", "resend", "summarize", "relearn",
 )
 
 
@@ -304,9 +316,11 @@ class CostProposal:
     # what recurs, not the fix. `"one_time"` is reserved for a future
     # analyzer whose estimate is a genuinely single fixed occurrence, which
     # must set it explicitly at its own call site when it's added.
-    # (relearn's `RelearnCluster` estimates are a SEPARATE, unbounded-history
-    # system with no fixed window — not adapted into a `CostProposal` at all,
-    # so it carries no `scaling` field and is out of scope here.)
+    # relearn IS adapted now (`_relearn_to_proposals`), but its card carries no
+    # `estimated_recoverable_*` at all (rule 27 — see that adapter's
+    # docstring), so `_with_rollup_projection` has nothing to project and this
+    # window's ratio never touches a figure derived from relearn's own,
+    # different horizon.
     scaling:               str = "per_session"
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
@@ -887,6 +901,201 @@ def _placement_to_proposals(
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         agent_id=candidates[0].agent_id if len(candidates) == 1 else "",
+    )]
+
+
+#: Where the summarize card's affordance routes to instead of an inline apply
+#: — the ``tj summarize`` curate/diff screen (see ``_summarize_to_proposals``).
+SUMMARIZE_REVIEW_HREF = "#/optimize/summarize"
+
+
+def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
+    """One window-wide card for the ``summarize`` (oversized catalog prompt
+    files) finding — see ``COST_ANALYZERS``'s docstring for why this is now a
+    normal peer card rather than a link-only disclosure.
+
+    One card, never one per file: ``finding.candidates`` can list several
+    files, but the standing don't-fill-the-inbox constraint (#596) means this
+    adds at most a single row regardless of how many files the scan flags.
+
+    Deliberately never ``apply_capable``: the fix is a reviewed rewrite
+    (structure kept, prose compressed, one file at a time) driven by
+    ``core/summarize/``'s prepare/check/apply lifecycle, not a value this
+    adapter can safely one-click. The card's copy and its UI affordance both
+    route to that surface (``SUMMARIZE_REVIEW_HREF``) instead of offering an
+    "Apply" button that would misrepresent a multi-step review as one click.
+    """
+    if finding is None:
+        return []
+    files = int(getattr(finding, "files", 0) or 0)
+    usd = getattr(finding, "estimated_recoverable_usd", None)
+    tokens = getattr(finding, "estimated_recoverable_tokens", None)
+    if files <= 0 or (usd is None and tokens is None):
+        # No candidates, or candidates with no observed load evidence to price
+        # against (see `SummarizeFinding`'s "carries neither figure" case) —
+        # a card with nothing to lead with would misstate "worth nothing" for
+        # "not measured this window".
+        return []
+    candidates = list(getattr(finding, "candidates", []) or [])
+    shown = ", ".join(c.path for c in candidates[:5])
+    if len(candidates) > 5:
+        shown += f", +{len(candidates) - 5} more"
+    reduction = getattr(finding, "avg_reduction_pct", None)
+    evidence = (
+        f"{files} catalog prompt file(s) carry compressible prose"
+        + (f" ({reduction}% average reduction)" if reduction is not None else "")
+        + f": {shown}."
+    )
+    plural = "" if files == 1 else "s"
+    headline = _money(usd) if usd is not None else f"~{tokens:,} tok"
+    advise = (
+        f"Review {files} oversized file{plural} in the summarize curate -> "
+        "diff -> apply surface (`tj summarize list` / `tj summarize check` / "
+        "`tj summarize apply`, or the Summarize screen in the web UI). This "
+        "card links there instead of applying inline: the fix is a reviewed "
+        "rewrite — structure kept verbatim, prose compressed, one file at a "
+        "time — not a one-click removal."
+    )
+    return [CostProposal(
+        kind="cost",
+        analyzer="summarize",
+        signature="cost:summarize",
+        title=f"Review {files} oversized file{plural}, {headline}",
+        target_key={"href": SUMMARIZE_REVIEW_HREF, "files": [c.path for c in candidates]},
+        evidence=evidence,
+        baseline={
+            "files": files,
+            "file_reduction_tokens": getattr(finding, "file_reduction_tokens", None),
+            "sessions_examined": int(getattr(finding, "sessions_examined", 0) or 0),
+            "calls_per_session": getattr(finding, "calls_per_session", None),
+            "avg_reduction_pct": reduction,
+        },
+        advise_text=advise,
+        estimated_recoverable_usd=usd,
+        estimated_recoverable_tokens=tokens,
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
+    )]
+
+
+#: Where a relearn card routes: the Review inbox, which is where relearn's own
+#: per-cluster rows and their apply flow already live.
+RELEARN_REVIEW_HREF = "#/review"
+
+
+def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
+    """One window-wide card for the ``relearn`` (recurring agent failures)
+    finding — see ``COST_ANALYZERS``'s docstring for why relearn is a member.
+
+    ONE card, never one per cluster. relearn already renders every cluster
+    individually in the Review inbox, with a richer treatment than a cost card
+    could give (apply path, rung badge, example sessions). What it lacked was
+    any presence on an AGGREGATE surface: it is a ``RelearnCluster``, not a
+    ``CostProposal``, so ``past_overspend_rollup`` and
+    ``estimated_recoverable_rollup`` could not see a cent of it and the
+    Dashboard hero's "what waste already cost you" total silently omitted the
+    entire self-improve loop. This adapter closes exactly that gap and nothing
+    more.
+
+    ONE number, past tense. ``cost_of_waste_*`` is what the recurrences ALREADY
+    COST, summed across EVERY cluster including the ones with no fix template
+    and the ones whose rule is uneconomic to keep. Ungated and un-netted on
+    purpose: "we have no action for this" is not "this was unavoidable", and a
+    fix's future maintenance cost is not subtracted from money already spent.
+    ``_with_past_overspend`` stamps it as ``past_overspend_*``.
+
+    The forward CLAIM is deliberately left off this card
+    (``estimated_recoverable_*`` stays ``None``, so no ``past_avoidable_*`` is
+    stamped either). relearn prices each occurrence at one re-issued turn TIMES
+    its measured re-read tail, and that tail is re-sent context — the exact
+    quantity ``resend`` already claims in full. Two analyzers claiming the same
+    spans in ``estimated_recoverable_rollup`` is CLAUDE.md rule 27, and the
+    rollup's signature dedup cannot catch it. The claim is not lost: it lives
+    where it always has, on relearn's own per-cluster rows in the Review inbox,
+    counted once. ``baseline`` carries the re-read share so the overlap is
+    inspectable rather than merely asserted.
+
+    Deliberately never ``apply_capable``: relearn's apply path is its own
+    reviewed rung-1/rung-2 write flow (``POST /relearn/apply``), which this
+    adapter must not shadow with a second, thinner one — the same routing
+    choice ``_summarize_to_proposals`` makes.
+    """
+    if finding is None:
+        return []
+    clusters = list(getattr(finding, "clusters", []) or [])
+    past_usd = getattr(finding, "past_overspend_usd", None)
+    past_tokens = int(getattr(finding, "past_overspend_tokens", 0) or 0)
+    if not clusters or (past_usd is None and past_tokens <= 0):
+        # Nothing observed, or nothing priceable — a card with no figure to
+        # lead with would state "worth nothing" for "not measured".
+        return []
+
+    occurrences = sum(int(getattr(c, "occurrences", 0) or 0) for c in clusters)
+    window_days = getattr(finding, "window_days", None)
+    span = f" over {window_days:.0f} days" if window_days else ""
+    shown = ", ".join(str(getattr(c, "title", "") or c.signature) for c in clusters[:3])
+    if len(clusters) > 3:
+        shown += f", +{len(clusters) - 3} more"
+    plural = "" if len(clusters) == 1 else "s"
+    evidence = (
+        f"{len(clusters)} recurring failure cluster{plural} "
+        f"({occurrences} occurrence(s)){span}: {shown}."
+    )
+    headline = _money(past_usd) if past_usd is not None else f"~{past_tokens:,} tok"
+    advise = (
+        f"Review the {len(clusters)} recurring failure cluster{plural} in the "
+        "Review inbox (or `tj optimize relearn --json`). Each carries its own "
+        "example sessions and, where a fix template matched, a reviewable "
+        "rung-1/rung-2 write. Clusters with no fix template still appear here: "
+        "they cost this money whether or not our library has a remedy for "
+        "them yet."
+    )
+    return [CostProposal(
+        kind="cost",
+        analyzer="relearn",
+        signature="cost:relearn",
+        title=f"{len(clusters)} recurring agent failure{plural} already cost {headline}",
+        target_key={
+            "href": RELEARN_REVIEW_HREF,
+            "clusters": [str(getattr(c, "signature", "")) for c in clusters],
+        },
+        evidence=evidence,
+        baseline={
+            "clusters": len(clusters),
+            "occurrences": occurrences,
+            "sessions_scanned": int(getattr(finding, "sessions_scanned", 0) or 0),
+            "transcript_sessions_scanned": int(
+                getattr(finding, "transcript_sessions_scanned", 0) or 0,
+            ),
+            "archived_sessions_scanned": int(
+                getattr(finding, "archived_sessions_scanned", 0) or 0,
+            ),
+            "window_days": window_days,
+            "corpus_basis": str(getattr(finding, "corpus_basis", "") or ""),
+            # Counted, never claimed — see `relearn.BELOW_THRESHOLD_BASIS`.
+            "below_threshold_occurrences": int(
+                getattr(finding, "below_threshold_occurrences", 0) or 0,
+            ),
+            "below_threshold_past_overspend_usd": getattr(
+                finding, "below_threshold_past_overspend_usd", None,
+            ),
+            # The re-read SHARE of the figure above (a component, not an
+            # addend). Carried so the overlap with `resend`'s re-sent-context
+            # figure is inspectable — the reason this card states no forward
+            # claim at all (CLAUDE.md rule 27; see the docstring).
+            "past_reread_tokens": int(getattr(finding, "past_reread_tokens", 0) or 0),
+            "past_reread_usd": getattr(finding, "past_reread_usd", None),
+            # The claim, for reference only. NOT on `estimated_recoverable_*`:
+            # it must not enter `estimated_recoverable_rollup` beside resend's.
+            "relearn_claim_usd": getattr(finding, "estimated_recoverable_usd", None),
+            "relearn_claim_tokens": getattr(finding, "estimated_recoverable_tokens", None),
+        },
+        advise_text=advise,
+        cost_of_waste_usd=past_usd,
+        cost_of_waste_tokens=past_tokens or None,
+        cost_of_waste_basis=str(getattr(finding, "past_overspend_basis", "") or ""),
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
     )]
 
 
@@ -2136,44 +2345,15 @@ def is_computing_cost_proposals() -> bool:
     return _COST_COMPUTING.is_set()
 
 
-#: The Review inbox's cross-reference for waste this rollup deliberately does
-#: NOT sum as a peer card (issue #326) — currently only ``summarize``, whose
-#: own three reasons for staying out of ``COST_ANALYZERS`` live on that
-#: constant's docstring. This dict is what ties those two together: the
-#: reasons stay valid, but the CONSEQUENCE (its dollars invisible from the
-#: Review inbox entirely) is fixed by stating the total and linking to its
-#: own surface, exactly like a "N proposals hidden, see X" footnote.
-EXCLUDED_HREF_SUMMARIZE = "#/optimize/summarize"
-
-
-def _excluded_summarize_block(
-    report: Any, *, ratio: float | None,
-) -> dict[str, Any] | None:
-    """The ``summarize`` finding's own recoverable total, on the SAME 30-day
-    basis every other proposal here is projected onto (issue #326's "keep
-    the time bases identical" requirement) — ``None`` when the analyzer
-    didn't run or found nothing, so an empty/absent finding never renders a
-    fabricated "$0 available" line."""
-    finding = (getattr(report, "findings", None) or {}).get("summarize")
-    usd = getattr(finding, "estimated_recoverable_usd", None) if finding is not None else None
-    tokens = getattr(finding, "estimated_recoverable_tokens", None) if finding is not None else None
-    if usd is None and tokens is None:
-        return None
-    scale = _effective_ratio("per_session", ratio)
-    return {
-        "estimated_recoverable_usd": usd,
-        "estimated_recoverable_tokens": tokens,
-        "estimated_monthly_usd": round(usd * scale, 6) if usd is not None else None,
-        "estimated_monthly_tokens": round(tokens * scale) if tokens is not None else None,
-        "estimate_basis": str(getattr(finding, "estimate_basis", "") or ""),
-        "href": EXCLUDED_HREF_SUMMARIZE,
-        "label": "Summarize",
-        "reason": (
-            "has its own review surface (curate -> diff -> apply) this "
-            "single-card rollup can't represent; not summed in, but not "
-            "hidden either"
-        ),
-    }
+#: The Review inbox's cross-reference for waste a caller has decided NOT to
+#: sum as a peer card. Generic infrastructure (see ``estimated_recoverable_
+#: rollup``'s ``excluded`` parameter and the UI's ``ExcludedWasteNote``) with
+#: no current occupant: ``summarize`` used to be the one entry here (issue
+#: #326) until summarize got a real peer card instead (see
+#: ``_summarize_to_proposals`` and ``COST_ANALYZERS``'s docstring) — kept
+#: rather than deleted because the shape (state the total, link to where it
+#: lives, never silently drop it) is the right move for a FUTURE analyzer
+#: whose fix has no representable inbox card, should one appear.
 
 
 def recompute_cost_proposals(
@@ -2238,17 +2418,11 @@ def recompute_cost_proposals(
             )
             report = build_report(
                 db, config, since, until, agent_id=agent_id,
-                # `summarize` is deliberately NOT a COST_ANALYZER (it owns its
-                # own curate/diff surface and has no adapter here, so it
-                # contributes no card), but it IS built: it is the only
-                # analyzer that measures how much standing context the agent
-                # files already carry, and the write budget spends against
-                # that measurement. Without it the two halves of the loop stay
-                # blind to each other and the inbox can offer new permanent
-                # rules for a file the same report says to compress. It is
-                # appended to the PERSONA-SCOPED cost list, not the raw one:
-                # the skip gate still decides which cost analyzers run.
-                findings=[*cost_analyzers_for_persona(persona), "summarize"],
+                # `summarize` IS a COST_ANALYZER now and would already
+                # be selected by `cost_analyzers_for_persona`; this is the
+                # PERSONA-SCOPED list, not the raw one — the skip gate still
+                # decides which cost analyzers run for this window.
+                findings=list(cost_analyzers_for_persona(persona)),
             )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
@@ -2262,10 +2436,6 @@ def recompute_cost_proposals(
             )
             active_days = int(getattr(report.window, "active_days", 0) or 0)
             n_sessions = int(getattr(report.window, "sessions", 0) or 0)
-            ratio, _label = compute_projection_ratio(
-                float(effective_window_days), active_days, n_sessions,
-            )
-            excluded_summarize = _excluded_summarize_block(report, ratio=ratio)
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -2279,9 +2449,6 @@ def recompute_cost_proposals(
                 window_days=effective_window_days,
                 active_days=active_days,
                 n_sessions=n_sessions,
-                excluded=(
-                    {"summarize": excluded_summarize} if excluded_summarize else {}
-                ),
             )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
@@ -2422,10 +2589,11 @@ def cost_proposals_from_report(
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
     the ``cache`` / ``cache-recommend`` / ``trim`` / ``subagent`` /
-    ``placement`` / ``deadweight`` / ``script`` / ``reuse`` / ``verbosity``
-    findings off ``report.findings``. Missing findings (analyzer not run, no
-    candidates) contribute nothing. Never raises — a malformed finding is
-    skipped so one bad analyzer can't sink the inbox.
+    ``placement`` / ``deadweight`` / ``script`` / ``reuse`` / ``verbosity`` /
+    ``resend`` / ``summarize`` findings off ``report.findings``. Missing
+    findings (analyzer not run, no candidates) contribute nothing. Never
+    raises — a malformed finding is skipped so one bad analyzer can't sink
+    the inbox.
 
     ``config`` is optional and used for one thing: looking up the local source
     path a user registered for an agent, which decides whether the downsize card
@@ -2531,6 +2699,8 @@ def cost_proposals_from_report(
             ),
             _pick("resend"),
         ),
+        (_summarize_to_proposals, _pick("summarize")),
+        (_relearn_to_proposals, _pick("relearn")),
     )
     for adapter, finding in adapters:
         try:
@@ -2714,28 +2884,42 @@ def _with_past_overspend(proposal: CostProposal) -> CostProposal:
     analysed window, so their difference is attributable to avoidability alone
     and never to a time-basis artifact. Never mutates: returns a new proposal.
     """
-    if proposal.estimated_recoverable_usd is None and proposal.estimated_recoverable_tokens is None:
-        return proposal
-    stamped = replace(
-        proposal,
-        past_overspend_usd=proposal.estimated_recoverable_usd,
-        past_overspend_tokens=proposal.estimated_recoverable_tokens,
-        past_overspend_basis=" ".join(
-            x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
-        ),
+    has_avoidable = (
+        proposal.estimated_recoverable_usd is not None
+        or proposal.estimated_recoverable_tokens is not None
     )
     cost_usd = proposal.cost_of_waste_usd
     cost_tokens = proposal.cost_of_waste_tokens
-    if cost_usd is None and not cost_tokens:
-        return stamped
-    return replace(
-        stamped,
-        observed_cost_usd=cost_usd,
-        observed_cost_tokens=cost_tokens or None,
-        observed_cost_basis=" ".join(
-            x for x in (proposal.cost_of_waste_basis, OBSERVED_COST_NOTE) if x
-        ),
-    )
+    has_cost = cost_usd is not None or bool(cost_tokens)
+    if not has_avoidable and not has_cost:
+        # Nothing observed at all — e.g. relearn's window produced no priced
+        # figure of either kind. Neither field would have anything to carry.
+        return proposal
+
+    stamped = proposal
+    if has_avoidable:
+        stamped = replace(
+            stamped,
+            past_overspend_usd=proposal.estimated_recoverable_usd,
+            past_overspend_tokens=proposal.estimated_recoverable_tokens,
+            past_overspend_basis=" ".join(
+                x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
+            ),
+        )
+    if has_cost:
+        # A cost-only card (no avoidable claim at all — e.g. relearn, whose
+        # forward claim is deliberately omitted per CLAUDE.md rule 27) must
+        # still get its observed cost stamped here; it cannot ride along on
+        # the `has_avoidable` branch above, which it never enters.
+        stamped = replace(
+            stamped,
+            observed_cost_usd=cost_usd,
+            observed_cost_tokens=cost_tokens or None,
+            observed_cost_basis=" ".join(
+                x for x in (proposal.cost_of_waste_basis, OBSERVED_COST_NOTE) if x
+            ),
+        )
+    return stamped
 
 
 def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str, Any]:
@@ -2878,15 +3062,15 @@ def estimated_recoverable_rollup(
     recurring fixes: $Y" without re-deriving the split from the combined
     total.
 
-    ``excluded`` (issue #326) is a passthrough for waste this rollup
-    deliberately does NOT sum in — currently ``summarize``, which has its own
-    review surface (see ``COST_ANALYZERS``'s docstring for why) and would
-    double-count the write budget if folded in as a peer card. Never summed
-    into any total here; carried on the result unchanged so the Review inbox
-    can render "$X more available in Summarize -> review it" instead of
-    silently omitting the product's largest recoverable figure. ``None``
-    becomes ``{}`` — "nothing known to be excluded", not "excluded total is
-    zero".
+    ``excluded`` (issue #326) is a passthrough for waste a caller decided NOT
+    to sum in as a peer proposal. Generic, with no current occupant —
+    ``summarize`` was the one entry here until it got a real peer card
+    instead (see ``COST_ANALYZERS``'s docstring); kept for a FUTURE analyzer
+    whose fix has no representable inbox card. Never summed into any total
+    here; carried on the result unchanged so a caller can render "$X more
+    available in <analyzer> -> review it" instead of silently omitting a
+    real figure. ``None`` becomes ``{}`` — "nothing known to be excluded",
+    not "excluded total is zero".
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:

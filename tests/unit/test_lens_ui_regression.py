@@ -2270,6 +2270,20 @@ def test_subagent_cost_card_has_workspace_apply_flow(html):
     assert "subagent: 'SUBAGENT'" in html
 
 
+def test_summarize_cost_card_links_to_curate_diff_instead_of_a_bare_apply(html):
+    # summarize is a real peer card now, but its fix is a reviewed
+    # rewrite (structure kept, prose compressed) driven by its own curate ->
+    # diff -> apply lifecycle, which already tracks staged/applied state.
+    # The card's ONE affordance must route there instead of offering the
+    # generic advise-only "Mark applied" marker or an inline Apply button.
+    start = html.index("function CostProposalCard")
+    end = html.index("function InboxStatTiles", start)
+    card = html[start:end]
+    assert "prop.analyzer === 'summarize'" in card
+    assert "Review in Summarize" in card
+    assert "summarize:  { title: 'Summarize'" in html
+
+
 def test_relearn_example_session_links_only_when_resolvable(html):
     # Relearn examples are sourced from transcript files on disk, so many name a
     # session that was never ingested and 404s on the detail route. The inbox
