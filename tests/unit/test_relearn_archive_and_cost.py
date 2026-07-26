@@ -64,14 +64,24 @@ def _episode(
     )
 
 
-def _priced_session(db, session_id: str, *, agent_id: str = CODING_AGENT, at=BASE):
-    """A session row plus one priced LLM span, so a rate profile can be blended."""
+def _priced_session(
+    db, session_id: str, *, agent_id: str = CODING_AGENT, at=BASE,
+    input_tokens: int = 2_000,
+):
+    """A session row plus one priced LLM span, so a rate profile can be blended.
+
+    ``input_tokens`` is a knob because a test asserting on the WRITE OFFER (as
+    opposed to the clustering) has to fund it: `write_budget.MIN_NET_WRITE_USD`
+    declines to spend a permanent block on a rule returning under $5, so a
+    cent-scale fixture is correctly refused a write and cannot exercise the
+    offered path.
+    """
     db.upsert_session(make_session(
         agent_id=agent_id, session_id=session_id, started_at=at, ended_at=at,
     ))
     db.insert_span(make_llm_span(
         agent_id=agent_id, session_id=session_id, model="claude-sonnet-4-5",
-        input_tokens=2_000, output_tokens=200, start_time=at,
+        input_tokens=input_tokens, output_tokens=200, start_time=at,
     ))
 
 
@@ -721,15 +731,20 @@ def test_relearn_claims_the_retry_turn_and_never_the_reread_tail(db):
     """
     from tokenjam.core.optimize.analyzers.relearn import cluster_failures
 
+    # Sized to clear `write_budget.MIN_NET_WRITE_USD`, since this test asserts
+    # on the OFFERED path: 5 sessions of ~100k-token turns hitting the same
+    # pothole 4 times each, which is an ordinary shape on a real coding corpus.
     failures = []
     for i in range(MIN_RECURRING_SESSIONS + 2):
         session_id = f"d{i}"
-        _priced_session(db, session_id)
-        failures.append(_episode(
-            session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
-        ))
+        _priced_session(db, session_id, input_tokens=100_000)
+        for occurrence in range(4):
+            failures.append(_episode(
+                session_id,
+                "File has not been read yet. Read it first before writing to it.",
+                ts=(BASE + timedelta(days=i, minutes=occurrence)).isoformat(),
+                tool="Edit",
+            ))
     clusters = list(cluster_failures(failures).values())
     proposals, _ = build_proposals(
         clusters, conn=db.conn, window_days=30.0, persona="claude-code",

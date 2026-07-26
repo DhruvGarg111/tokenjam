@@ -68,6 +68,7 @@ from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.projection import build_projection_basis
+from tokenjam.core.optimize.analyzers.resend_tail import RELEARN_RESEND_BOUNDARY
 from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
@@ -122,16 +123,20 @@ DISTILL_MODEL = "haiku"
 COMPACTION_PROMPT_DROP_RATIO = 0.5
 
 ESTIMATE_BASIS = (
-    "occurrences x the MEASURED cost of one extra assistant turn in the "
-    "sessions the cluster actually occurred in (median billed cost per call, "
-    "divided back through those sessions' own input rate) — never the inflated "
-    "whole-session footprint, and never a fixed guess: a failed tool call "
-    "forces the model to emit a recovery turn a successful call would not have "
-    "needed, and in a coding session a turn re-sends the whole context. That "
-    "forced turn is the CLAIM, and it is the part no other analyzer prices: "
-    "the context re-send analyzer measures redundant context inside calls that "
-    "had to happen, whereas this measures a call that should not have happened "
-    "at all. Observed here but NOT claimed here: the error text's own re-read "
+    "the MEASURED length of each failure's RECOVERY ARC — the assistant turns "
+    "between hitting the pothole and getting the same tool to work again, "
+    "walked from the session's own step order — priced at the MEASURED cost of "
+    "one turn in the sessions the cluster occurred in (median billed cost per "
+    "call, divided back through those sessions' own input rate). Not one turn "
+    "per failure: on a real corpus the median failure costs 2 turns and some "
+    "families over 4, so a flat one-turn charge halves the figure. Turns shared "
+    "by two overlapping failures are split between them, so a burst of potholes "
+    "never bills the same turn twice. Never the inflated whole-session "
+    "footprint, and never a fixed guess: a failed tool call forces the model to "
+    "emit recovery turns a successful call would not have needed, and in a "
+    "coding session a turn re-sends the whole context. That "
+    "forced turn is the CLAIM, and it is the part no other analyzer prices — "
+    + RELEARN_RESEND_BOUNDARY + ". Observed here but NOT claimed here: the error text's own re-read "
     "tail, priced at ~1,500 tokens (the size of a block of error text) x the "
     "occurrence's tail, billed at the cache-read rate. Those are re-sent "
     "context tokens the context re-send analyzer already prices in full, so "
@@ -149,9 +154,12 @@ ESTIMATE_BASIS = (
 #: `ESTIMATE_BASIS` above and must never be described with it: that one is a
 #: forward, netted, gated CLAIM; this is a backward, ungated OBSERVATION.
 PAST_OVERSPEND_BASIS = (
-    "observed occurrences x the MEASURED cost of one extra assistant turn in "
-    "the sessions the cluster occurred in (the recovery turn a failed call "
-    "forces and a successful one does not), PLUS the error text's own measured "
+    "each observed failure's MEASURED recovery arc (the assistant turns between "
+    "hitting the pothole and the same tool succeeding again, median 2 on a real "
+    "corpus rather than the 1 a flat charge assumes, with turns shared by "
+    "overlapping failures split between them) x the MEASURED cost of one "
+    "assistant turn in the sessions the cluster occurred in, PLUS the error "
+    "text's own measured "
     "re-read tail, priced at the rate the contributing sessions actually "
     "billed at. "
     "Accumulated over the scanned corpus, NOT paced to 30 days. Deliberately "
@@ -199,6 +207,43 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             "a short directory listing as additionalContext, so the agent "
             "recovers in one shot instead of a PreToolUse guess-and-block on "
             "every relative path (which would misfire on normal usage)."
+        ),
+    },
+    {
+        # BY FAR the largest family on a real coding corpus (measured
+        # 2026-07-26: 916 distinct sessions, 964 occurrences — more sessions
+        # than every other family combined), and until it was named here it
+        # fell into the generic bucket, got the "Review examples" placeholder,
+        # and therefore claimed exactly $0 despite being the single most
+        # recurrent blocker in the corpus.
+        #
+        # It is also the family that sits closest to `context_resend`, so the
+        # boundary is worth stating at the definition: `resend` prices the
+        # re-sent context inside calls that HAPPENED; this prices the call that
+        # got REJECTED outright — an API-level 400 that returned no completion
+        # at all, forcing the session to compact and re-issue. That rejected
+        # call is a call that should not have happened, which is this
+        # analyzer's whole population (see THE LINE BETWEEN THE TWO ANALYZERS
+        # in `build_proposals`).
+        "key": "context_overflow",
+        "title": "context window overflowed (prompt rejected)",
+        "tools": None,
+        "pattern": re.compile(
+            r"prompt is too long|"
+            r"input length and .max_tokens. exceed context limit|"
+            r"exceeds? the (?:maximum )?context (?:window|length|limit)",
+            re.IGNORECASE,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md note: this session hit the model's context ceiling and "
+            "the request was rejected outright — the tokens were spent and no "
+            "completion came back. The durable fix is to keep bulk content off "
+            "the main thread: delegate whole-file reads, log sweeps and "
+            "multi-file investigations to a subagent (its tool output lives in "
+            "its own context and is never re-sent on a later parent turn), and "
+            "prefer Grep plus a targeted Read offset/limit over reading a "
+            "large file end to end."
         ),
     },
     {
@@ -275,6 +320,58 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
     },
     {
+        # MUST stay ordered before "edit_string_not_found" above would have
+        # been a hazard had that family's pattern been any looser: this is the
+        # OPPOSITE failure (too many matches, not zero) and takes the opposite
+        # fix, so the two must never share a bucket.
+        "key": "edit_ambiguous_match",
+        "title": "Edit matched multiple times (replace_all not set)",
+        "tools": {"Edit", "MultiEdit"},
+        "pattern": re.compile(
+            r"found \d+ matches of the string to replace|"
+            r"replace_all is false",
+            re.IGNORECASE,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
+            "than once, include enough surrounding lines to make it unique "
+            "rather than retrying the same short string — or pass "
+            "`replace_all: true` when every occurrence really should change."
+        ),
+    },
+    {
+        "key": "read_too_large",
+        "title": "Read exceeded the max-tokens ceiling",
+        "tools": {"Read"},
+        "pattern": re.compile(
+            r"exceeds maximum allowed tokens|"
+            r"file content \(\d+ tokens\) exceeds",
+            re.IGNORECASE,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md/skill note: this file is too large to read whole. Grep "
+            "for the symbol first and Read only the region around the hit "
+            "(`offset`/`limit`), or delegate the sweep to a subagent so the "
+            "bulk never lands in this thread's context."
+        ),
+    },
+    {
+        "key": "read_directory",
+        "title": "Read pointed at a directory, not a file",
+        "tools": {"Read"},
+        "pattern": re.compile(
+            r"eisdir|illegal operation on a directory", re.IGNORECASE,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
+            "directory use Glob (or `ls` via Bash), then Read the file you "
+            "actually want."
+        ),
+    },
+    {
         # MUST stay ordered before "deferred_tool_cold" below: that family's
         # pattern (`inputvalidationerror`, tools=None -> matches ANY tool)
         # also fires on the real wording of THIS family's evidence --
@@ -301,7 +398,11 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "deferred tool called cold (no ToolSearch first)",
         "tools": None,
         "pattern": re.compile(
-            r"inputvalidationerror|the following issues|required parameter.{0,20}is missing",
+            r"inputvalidationerror|the following issues|"
+            r"required parameter.{0,20}is missing|"
+            # Same root cause, different harness wording: the tool exists but
+            # was never brought into the context, so the call cannot resolve.
+            r"no such tool available|is not enabled in this context",
             re.IGNORECASE,
         ),
         "rung": 2,
@@ -320,7 +421,17 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "key": "command_not_found",
         "title": "command not found (bashisms under zsh, bare interpreter)",
         "tools": {"Bash"},
-        "pattern": re.compile(r"command not found", re.IGNORECASE),
+        # The second alternative catches the shell's OTHER phrasing for the
+        # same fault — `uv not found` / `pnpm not found`, emitted by a wrapper
+        # or a version manager rather than by the shell's own `command not
+        # found` handler. Measured 2026-07-26: 39 sessions across two generic
+        # clusters that never reached this family. Anchored to a line start
+        # and a bare word so it cannot swallow prose like "string to replace
+        # not found" (a different family, and Edit-only anyway).
+        "pattern": re.compile(
+            r"command not found|^\s*[\w.\-/]+:? not found\s*$",
+            re.IGNORECASE | re.MULTILINE,
+        ),
         "rung": 1,
         "fix": (
             "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
@@ -331,15 +442,80 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
     },
     {
+        "key": "bash_timeout",
+        "title": "Bash command timed out (blocking wait in the foreground)",
+        "tools": {"Bash"},
+        # Ordered AFTER sleep_chain deliberately: a `sleep N && check` chain
+        # that times out is the sleep-chain pothole and keeps that family's
+        # more specific fix. What lands here is the general case — a build, a
+        # test run, a dev server — held in the foreground until the harness
+        # killed it (exit 143 is SIGTERM).
+        "pattern": re.compile(
+            r"command timed out after|"
+            r"exit code 143\b.{0,80}tim(?:ed )?out",
+            re.IGNORECASE | re.DOTALL,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md/skill note: this command outlived the tool's timeout "
+            "and was killed, so its work was lost and the tokens spent "
+            "waiting bought nothing. Run long jobs in the background "
+            "(`run_in_background`) and poll for completion, or raise the "
+            "call's own timeout when the wait is genuinely expected."
+        ),
+    },
+    {
+        "key": "bash_chained_approval",
+        "title": "chained Bash command tripped the approval prompt",
+        "tools": {"Bash"},
+        # Distinct from the bare "requires approval" case, which is the user's
+        # own allowlist and is filtered out as a non-relearn at extraction
+        # (see `_USER_DECLINE_RE`). THIS one is agent-avoidable: the chaining
+        # is what forced the prompt, and un-chaining removes it.
+        "pattern": re.compile(
+            r"bash command contains multiple operations", re.IGNORECASE,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
+            "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
+            "the entire chain. Issue the parts as separate Bash calls, and "
+            "prefer an absolute path over a leading `cd`."
+        ),
+    },
+    {
+        "key": "git_branch_exists",
+        "title": "git branch already exists",
+        "tools": {"Bash"},
+        "pattern": re.compile(
+            r"a branch named .+ already exists|"
+            r"already exists and is not a valid branch name",
+            re.IGNORECASE,
+        ),
+        "rung": 1,
+        "fix": (
+            "CLAUDE.md/skill note: check out the existing branch "
+            "(`git checkout <name>`) instead of re-creating it, or pick a "
+            "fresh name — `git checkout -b` on an existing branch always "
+            "fails."
+        ),
+    },
+    {
         "key": "webfetch_domain_blocked",
         "title": "WebFetch domain-blocked",
-        "tools": {"WebFetch"},
+        # NOT WebFetch-only: the same block surfaces on the model call itself
+        # ("The following domains are not accessible to our user agent"), under
+        # the `gen_ai.llm.call` name, when the fetch is attempted server-side.
+        # Gating on the tool name hid that variant in the generic bucket; the
+        # pattern is specific enough to stand without the tool filter.
+        "tools": None,
         # Real wording (validated against the local corpus): "Claude Code is
         # unable to fetch from <domain>" — not "not allowed"/"blocked" as the
         # phrasing might suggest.
         "pattern": re.compile(
             r"unable to fetch from|domain.{0,30}(not allowed|block)|"
-            r"not allowed to fetch|blocked domain",
+            r"not allowed to fetch|blocked domain|"
+            r"following domains are not accessible",
             re.IGNORECASE,
         ),
         "rung": 1,
@@ -390,15 +566,46 @@ def _generic_signature(tool_name: str, error_text: str) -> str:
 #: extraction time so they never enter a cluster at all.
 _USER_DECLINE_RE = re.compile(
     r"doesn.t want to proceed with this tool use|"
+    r"the user (?:rejected|canceled|cancelled|interrupted)|"
+    r"tool use was rejected|"
+    # A bare permission prompt is the user's own allowlist configuration, not
+    # a pothole the agent can route around: the SAME command succeeds once the
+    # user approves it, and no rule written into any of the seven surfaces
+    # changes that. NOT to be confused with the "multiple operations" variant,
+    # which IS agent-avoidable (don't chain `cd X && cmd`) and has its own
+    # family below — hence the negative lookahead rather than a bare match.
+    r"^(?!.*multiple operations).*this command requires approval|"
     r"^exit plan mode\?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+#: NOT an independent failure: Claude Code cancels the SIBLINGS of a parallel
+#: tool block when one member of the block errors, and stamps each cancelled
+#: sibling with its own ``is_error`` result. The sibling never ran, so it
+#: taught the agent nothing and forced no recovery turn of its own — the ONE
+#: recovery turn belongs to the member that actually failed, which is already
+#: counted. Clustering these as failures therefore both invents a pothole that
+#: does not exist ("Bash: Cancelled: parallel tool call Bash(cd …)" was the
+#: 4th-largest cluster on the local corpus, 127 sessions) and double-counts the
+#: real one. Measured 2026-07-26: 385 occurrences, ~11% of the whole clustered
+#: figure. Excluded at extraction time, alongside the human-decline case, so
+#: they never enter a cluster at all.
+_CASCADE_RE = re.compile(
+    r"cancelled:\s*parallel tool call|canceled:\s*parallel tool call",
     re.IGNORECASE,
 )
 
 
 def is_user_decline(error_text: str) -> bool:
-    """True if this 'failure' is really a human declining an action, not a
-    relearn — see ``_USER_DECLINE_RE``."""
-    return bool(error_text) and bool(_USER_DECLINE_RE.search(error_text.strip()))
+    """True if this 'failure' is not a relearn: a human declining an action
+    (``_USER_DECLINE_RE``), or a sibling cancelled by another call's failure
+    (``_CASCADE_RE``). Named for its original case; both are the same
+    "observed as an error, but nothing an agent could have learned" class, and
+    both are excluded at the same single extraction-time gate."""
+    if not error_text:
+        return False
+    stripped = error_text.strip()
+    return bool(_USER_DECLINE_RE.search(stripped)) or bool(_CASCADE_RE.search(stripped))
 
 
 def classify_known_family(tool_name: str, error_text: str, label: str = "") -> str | None:
@@ -440,6 +647,104 @@ class FailureEpisode:
     kind:        str            # method_spine move kind: delegate/dead_end/verify/act
     is_retry:    bool
     depth:       int            # 0 = main thread, >0 = nested subagent
+    #: How many assistant turns this failure actually cost, MEASURED by walking
+    #: forward to the turn where the same tool finally succeeded (see
+    #: `_stamp_detour_turns`). ``None`` when it could not be measured — the
+    #: archive and OTel lanes have spans, not an ordered step list, so they
+    #: carry no detour and fall back to 1.0 (the conservative floor, and the
+    #: value the whole analyzer assumed before this was measured).
+    detour_turns: float | None = None
+
+
+#: Stop looking for the recovery turn after this many steps. Past it the agent
+#: has abandoned the approach rather than retried it, and whatever it went on to
+#: do is no longer attributable to this failure. Measured on the local corpus,
+#: 95.4% of failures recover well inside this bound.
+MAX_RECOVERY_SCAN_STEPS = 40
+
+
+def _stamp_detour_turns(ordered: list[tuple[int, str, Any]], total_steps: int) -> None:
+    """Measure what each failure actually cost, in assistant turns, and stamp it.
+
+    THE ASSUMPTION THIS REPLACES. Every figure in this module used to price one
+    occurrence as exactly ONE forced turn: a failed call makes the model emit a
+    recovery turn a successful call would not have needed. That is the right
+    SHAPE and the wrong SIZE. A failure is rarely one turn — the agent reads the
+    error, tries something, often fails again, and only then recovers. Measured
+    over 914 failure-bearing sessions on the local corpus (2026-07-26): the
+    median failure costs 2 turns and the mean 2.47, so the old basis understated
+    every relearn figure by about half. Per-family it ranges from 0.97x
+    (a git branch that already exists — one clean retry) to 4.62x (a stale-read
+    race, where the agent re-reads, re-edits and races the linter again).
+
+    WHY THE UNION, AND NOT THE SUM. Two failures a step apart have OVERLAPPING
+    recovery windows, and billing each one its own full detour charges the same
+    assistant turn twice. That is the CLAUDE.md rule 27 double-count, just
+    inside one analyzer instead of between two, and it is not small: on the
+    corpus the naive sum is 2.45x per occurrence against a true union of 2.07x,
+    so 15.3% of it is the same turns counted repeatedly. A turn claimed by k
+    overlapping failures is therefore split 1/k between them — every detour turn
+    in a session is billed exactly once, however many potholes were in flight.
+
+    ``ordered`` is ``[(step_index, tool_name, episode), ...]`` in walk order for
+    ONE session, already filtered to real failures. Mutates the episodes in
+    place. Never raises: an unmeasurable session just leaves ``detour_turns``
+    at ``None``, which prices at the old 1.0.
+    """
+    if not ordered:
+        return
+
+    # Where does each tool next SUCCEED? Built once per session rather than
+    # rescanned per failure, so a long session stays linear.
+    succeeded_at: dict[str, list[int]] = {}
+    for index, tool_name, episode in ordered:
+        if episode is None:                       # a success marker, not a failure
+            succeeded_at.setdefault(tool_name, []).append(index)
+
+    failures = [(i, t, e) for i, t, e in ordered if e is not None]
+    windows: list[tuple[Any, set[int]]] = []
+    measured: list[int] = []
+    for index, tool_name, episode in failures:
+        recovery = next(
+            (
+                s for s in succeeded_at.get(tool_name, [])
+                if index < s <= index + MAX_RECOVERY_SCAN_STEPS
+            ),
+            None,
+        )
+        if recovery is None:
+            windows.append((episode, set()))      # resolved below, once a median exists
+            continue
+        span = recovery - index
+        measured.append(span)
+        windows.append((episode, set(range(index + 1, index + 1 + span))))
+
+    # A failure that never recovered inside the scan window DID cost something —
+    # the agent abandoned the approach, which is not cheaper than retrying it.
+    # Its length is genuinely unmeasurable though, so it is charged this
+    # session's OWN median detour rather than the scan cap (which would let the
+    # unknown case dominate) or a global constant (which would not be measured
+    # from this user's data at all). No median to borrow => the 1.0 floor.
+    import statistics
+
+    fallback = max(int(statistics.median(measured)) if measured else 1, 1)
+    resolved: list[tuple[Any, set[int]]] = []
+    for (index, _tool, episode), (_e, window) in zip(failures, windows):
+        if window:
+            resolved.append((episode, window))
+            continue
+        end = min(index + 1 + fallback, total_steps + 1)
+        resolved.append((episode, set(range(index + 1, end))))
+
+    # Split every shared turn evenly across the failures claiming it.
+    claims: dict[int, int] = {}
+    for _episode, window in resolved:
+        for step in window:
+            claims[step] = claims.get(step, 0) + 1
+    for episode, window in resolved:
+        episode.detour_turns = round(
+            sum(1.0 / claims[step] for step in window), 4,
+        ) if window else 1.0
 
 
 def _walk_moves(
@@ -494,13 +799,26 @@ def extract_failures_for_session(
     spine = build_method_spine(story)
 
     failures: list[FailureEpisode] = []
-    for step, move, depth in _walk_moves(real_steps, spine, 0):
+    # `(step_index, tool_name, episode_or_None)` in walk order. SUCCESSES are
+    # recorded too, with a None episode, because the recovery measurement needs
+    # to know where each tool started working again — see `_stamp_detour_turns`.
+    # The index is the position in the flattened walk, subagent steps included,
+    # which is the sequence the model actually emitted turns for.
+    ordered: list[tuple[int, str, Any]] = []
+    for step_index, (step, move, depth) in enumerate(_walk_moves(real_steps, spine, 0)):
         for tool in step.get("tools") or []:
+            tool_name = tool.get("name") or "unknown"
             if tool.get("status") != "error":
+                ordered.append((step_index, tool_name, None))
                 continue
             error_text = tool.get("error") or ""
             if is_user_decline(error_text):
-                continue  # a human's own choice, not a relearn — see is_user_decline
+                # A human's own choice, not a relearn (see is_user_decline). It
+                # is not a RECOVERY either, so it is dropped from `ordered`
+                # entirely rather than recorded as a success — counting a
+                # declined call as the moment the tool started working would
+                # end a detour that never actually ended.
+                continue
             failures.append(FailureEpisode(
                 session_id=session_id,
                 repo=repo,
@@ -512,6 +830,8 @@ def extract_failures_for_session(
                 is_retry=bool(move.get("is_retry")),
                 depth=depth,
             ))
+            ordered.append((step_index, tool_name, failures[-1]))
+    _stamp_detour_turns(ordered, len(real_steps))
     return failures
 
 
@@ -601,7 +921,12 @@ def _below_threshold_residue(
         _measured_turn_tokens(conn, sessions, profile)
         or GROUNDED_TOKENS_PER_OCCURRENCE
     )
-    tokens = occurrences * turn_tokens
+    # Same recovery-arc basis the kept clusters use (see `build_proposals`) —
+    # this has to move whenever the head term moves, or the docstring's "same
+    # head-term basis" promise silently becomes false.
+    tokens = round(sum(
+        f.detour_turns or 1.0 for c in dropped for f in c.failures
+    ) * turn_tokens)
     return {
         "clusters": len(dropped),
         "occurrences": occurrences,
@@ -1462,7 +1787,20 @@ def build_proposals(
         #
         # Conflating them priced the retry as though it were the text.
         turn_tokens = _measured_turn_tokens(conn, sessions, profile)
-        head_tokens = occurrences * (turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE)
+        # NOT `occurrences x one turn`. A failure costs the whole recovery ARC —
+        # the turns between hitting the pothole and getting the same tool to
+        # work again — which is measured per occurrence at extraction time and
+        # medians 2 turns on a real corpus, not 1. Overlapping arcs are already
+        # de-duplicated there (a turn shared by two failures is split between
+        # them), so summing per-occurrence detours here cannot double-count.
+        # An occurrence with no measurable arc (the archive and OTel lanes have
+        # spans, not ordered steps) falls back to 1.0: the old assumption, kept
+        # as the conservative floor rather than back-filled with a corpus
+        # average measured on a different lane.
+        detour_turns = sum(f.detour_turns or 1.0 for f in cluster.failures)
+        head_tokens = round(
+            detour_turns * (turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE)
+        )
         # `multiplier - 1` is the tail's own share (`cache_read_ratio x tail`),
         # kept on the TEXT basis rather than rescaled by the head.
         text_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
@@ -1489,16 +1827,14 @@ def build_proposals(
         # The CLAIM, as distinct from the observation above -- and deliberately
         # the HEAD ONLY, which is what makes it disjoint from `resend`.
         #
-        # THE LINE BETWEEN THE TWO ANALYZERS:
-        #   `resend` targets context re-sent across calls that HAD to happen.
-        #     Its fix makes each necessary call carry less.
-        #   `relearn` targets calls that should never have happened at all.
-        #     Its fix stops the failure, so the retry turn never occurs.
-        #
-        # The head is a turn that would not exist if the pothole were fixed, so
-        # eliminating it takes its whole cost with it and no other analyzer is
-        # claiming that. The tail is re-sent context inside calls that happen
-        # regardless -- that is `resend`'s population by definition, and
+        # THE LINE BETWEEN THE TWO ANALYZERS is defined once, in
+        # `resend_tail.RELEARN_RESEND_BOUNDARY`, and quoted verbatim by both
+        # sides' basis strings. Read it there rather than restating it here:
+        # the short form is that relearn owns whether a call EXISTS (its fix
+        # deletes the turn, so the turn's whole cost goes, cache reads
+        # included) and `resend` owns how BIG a call is. The head is that
+        # deleted turn. The tail -- the error text re-read by LATER calls that
+        # happen regardless -- is `resend`'s population by definition, and
         # claiming it here would price the same tokens on two cards
         # (CLAUDE.md rule 27). So the tail stays in the OBSERVED figure, broken
         # out as `past_reread_*`, and is claimed by `resend` alone.
@@ -1633,6 +1969,13 @@ def _apply_write_budget(
             rung=p.rung,
             artifact_text=artifact or p.proposed_fix,
             gross_tokens=p.gross_recoverable_tokens,
+            # Same quantity as `gross_tokens`, priced at the cluster's own
+            # rate (`past_overspend_usd` IS `gross_tokens x rate`), so the two
+            # divide back to a real price band (repo CLAUDE.md rule 28) and
+            # `write_budget`'s value floor has a dollar figure to compare
+            # against. Without this the budget netted tokens-only and the
+            # floor could never fire.
+            gross_usd=p.past_overspend_usd,
             exposure_sessions=_write_exposure_sessions(
                 p, sessions_by_repo, basis.sessions,
             ),
