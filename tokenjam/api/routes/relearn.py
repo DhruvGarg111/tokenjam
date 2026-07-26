@@ -466,19 +466,24 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     ratio, so a surface could render any of three near-identical dollar
     figures. Both are gone.
 
-    The block also carries ``observed_cost_usd`` — the full observed COST of
-    the same behaviours, including the part never shown to be avoidable — as
-    its own key, never summed into the headline and never labelled waste; and
-    ``excluded`` (e.g. ``{"summarize": {...}}`` when that analyzer found
-    something), waste this headline deliberately does NOT sum in because it has
-    its own review surface, stated instead of silently dropped.
+    An ``observed_cost_usd`` key used to sit here too — a second total, summed
+    over whichever proposals carried a full-cost figure — under a disclosure
+    saying the headline was a subset of it. It was not: on live data the headline
+    summed 13 proposals and that total covered 2, so most of the headline sat
+    outside the figure it was described as part of. Key and disclosure are both
+    deleted. **Every figure this block publishes now covers the same set of
+    proposals**, which is the invariant that failure exposed.
+
+    The block still carries ``excluded`` (e.g. ``{"summarize": {...}}`` when that
+    analyzer found something), waste this headline deliberately does NOT sum in
+    because it has its own review surface, stated instead of silently dropped.
 
     Each proposal carries the same figures per-card
-    (``past_overspend_usd``/``_tokens``/``_basis``, plus ``observed_cost_*``
-    and ``coverage_note`` where the total cost is a genuinely different
-    quantity) so a card never re-derives its own headline. relearn's clusters
-    are NOT folded in here: relearn reaches this aggregate through its own
-    ``cost:relearn`` proposal like any other analyzer, counted once."""
+    (``past_overspend_usd``/``_tokens``/``_basis``, plus ``coverage_note`` where
+    the avoidable figure was computed over a subset) so a card never re-derives
+    its own headline. relearn contributes NO proposal: its one aggregate card
+    carried only the deleted total, and its per-cluster rows in the Review inbox
+    are where its claim has always lived, counted once."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()

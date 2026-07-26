@@ -8326,14 +8326,16 @@ function relearnObservedFigure(cluster) {
 // reader to trust a model of their next month, an observation asks them to
 // check a bill they already paid.
 //
-// The headline is the AVOIDABLE amount, never the total cost. Waste is only
-// ever what could have been avoided; unavoidable spend is cost. This band once
-// led with `resend`'s full cost-of-re-sending figure, which was ~16x its
-// avoidable figure — implicitly asserting that 94% of it had been shown to be
+// The headline is the AVOIDABLE amount, and it is now the ONLY per-card figure.
+// This band once led with `resend`'s full cost-of-re-sending figure, ~16x its
+// avoidable figure, implicitly asserting that 94% of it had been shown to be
 // unavoidable. It had not: that money was analysed on the model-role card,
-// filtered out below the context floor, or outside the re-read tail
-// definition. The total still renders, below the headline, with COST wording
-// and never as waste or overspend (`observedCostSentence`).
+// filtered out below the context floor, or outside the re-read tail definition.
+// That was corrected first by demoting the total to a COST-worded second line,
+// and then by deleting the total outright (founder decision) — two analyzers of
+// twelve emitted it, one rendered it, and the aggregate it fed published a
+// subset claim that was false. What the figure does not cover is stated in words
+// by `coverage_note`, which is the part that was load-bearing.
 //
 // Read straight off the payload, never derived here (the single-compute-path
 // rule): `past_overspend_usd`/`_tokens`/`_basis` per card, and the headline
@@ -8347,13 +8349,10 @@ function pastOverspendFigure(item) {
   const toks = item.past_overspend_tokens;
   if (usd != null) return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
   if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
-  if (item.observed_cost_usd != null || item.observed_cost_tokens != null) {
-    // A cost-only card (relearn): no avoidable figure was computed at all, on
-    // purpose (its own coverage_note says why). A bare dash beside the cost
-    // line above would read as "nothing recoverable" rather than "not
-    // priced", so state the absence in words instead.
-    return { big: 'Not priced', sub: '', noAvoidable: true };
-  }
+  // No cost-only branch. The one card that ever took it was relearn's aggregate,
+  // whose only figure was the retired total; that card is deleted server-side, so
+  // a branch here would be reachable by nothing. Every remaining card carries the
+  // canonical figure or is not built at all.
   return { big: '—', sub: '' };
 }
 
@@ -8379,24 +8378,17 @@ function pastWindowLabel(days) {
 // headline tile still names its own window. Putting every analyzer on one observed
 // corpus span remains separate, tracked work.
 
-// The SECOND past-tense sentence, rendered ONLY where the total observed COST
-// and the avoidable figure are genuinely different quantities — today `resend`
-// alone. For every other analyzer the two are one quantity and this returns
-// null, so the card shows one number instead of saying the same thing twice.
+// An `observedCostSentence(item)` helper used to live here, rendering "In total,
+// this behaviour cost $X over the same window." on the one card that carried a
+// total-observed-cost figure. Both the helper and the field are GONE, not
+// misplaced: the figure is deleted from the contract (founder decision), so
+// there is nothing for a second sentence to report.
 //
-// Cost wording only, never waste/overspend: this total includes spend nobody
-// established was avoidable. It is also deliberately NOT a ratio framing
-// ("only 6% of it was recoverable"): a ratio between two figures computed over
-// DIFFERENT POPULATIONS means nothing, which is exactly the reading
-// `coverage_note` exists to prevent. Two plain past-tense sentences, nothing
-// joining them arithmetically.
-function observedCostSentence(item) {
-  const usd = item.observed_cost_usd;
-  const toks = item.observed_cost_tokens;
-  if (usd == null && toks == null) return null;
-  if (usd != null) return 'In total, this behaviour cost ' + fmtUsd(usd) + ' over the same window.';
-  return 'In total, this behaviour cost ~' + fmtTokens(toks) + ' tokens over the same window.';
-}
+// The reader does not lose the coverage question it was there to answer. What
+// the avoidable figure does and does not cover is still stated, in words, by the
+// `coverage_note` disclosure the card renders directly below its description —
+// and words were always the honest form of that answer, since a ratio between
+// two figures computed over different populations means nothing.
 
 // The observed-overspend figure as a TILE, sized and shaped to sit in the
 // stat row beside "Fixes applied" — not as a full-width hero band.
@@ -8424,13 +8416,12 @@ function PastOverspendTile({ block }) {
   const causes = block.proposal_count || 0;
   if (!causes && !toks) return null;
   const win = pastWindowLabel(block.window_days);
-  // The derivation the figure carries on hover. `observed_cost_usd` is NOT part of
-  // it any more: the rollup's total covers 2 of its 13 proposals, so printing it
-  // beside a 13-proposal avoidable figure attached a two-proposal denominator to
-  // "13 causes" and invited a part-of-whole reading the numbers do not support
-  // (summarize alone contributes ~4,811 of avoidable from a proposal with no
-  // observed cost at all). Removed rather than reworded, on founder call. The
-  // field's removal from the rollup itself is separate, tracked work.
+  // The derivation the figure carries on hover. It is `basis` + `disclosure`, both
+  // computed over the SAME proposals as the figure. The rollup used to publish a
+  // second total covering 2 of its 13 proposals, and printing it here attached a
+  // two-proposal denominator to "13 causes"; it was dropped from this tile first
+  // and has since been deleted from the rollup itself, so there is no longer a
+  // second-population key available to put back.
   const derivation = [block.basis, block.disclosure].filter(Boolean).join('\n\n');
   return html`
     <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
@@ -9057,9 +9048,6 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   // already paid costs them no trust to accept, and a forward figure depends
   // on how many sessions they run next month, which nothing here can know.
   const est = pastOverspendFigure(prop);
-  // Rendered only where the total observed cost and the avoidable figure are
-  // genuinely different quantities (resend); null everywhere else.
-  const observedCost = observedCostSentence(prop);
   // Two apply-capable shapes, routed through two different endpoints:
   //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
   //    is a workspace surface an orchestrator reads, not a value tokenjam can
@@ -9193,9 +9181,6 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
       <div style="margin-top:8px">
         <${TrimmedDescription} text=${description} />
       </div>
-      ${/* The second past-tense COST sentence: short, and true of THIS row, so it
-            stays visible rather than going behind Read more. */ ''}
-      ${observedCost ? html`<div class="sz-note" style="margin-top:6px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
       ${/* COVERAGE keeps its own disclosure rather than being folded into the
             description's Read more: it answers a different question (what was NOT
             analysed, never what was unavoidable) and that sentence is the whole
@@ -9221,7 +9206,6 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <details class="po-basis">
           <summary>How this number was derived</summary>
           <p>${prop.past_overspend_basis}</p>
-          ${prop.observed_cost_basis ? html`<p>${prop.observed_cost_basis}</p>` : null}
         </details>` : null}
       ${/* THE SNIPPET. Primary where the reader is the one who has to make the
             edit; a SECONDARY, collapsed exit where tokenjam offers to make it

@@ -209,7 +209,31 @@ def test_past_overspend_tokens_uses_avoidable_fraction(db):
     assert finding.past_overspend_tokens < finding.repeat_tokens
 
 
-def test_cost_of_waste_is_observed_and_never_the_recoverable_figure(db):
+
+def _partitioned_cost(finding):
+    """The observed cost of the re-sent volume, re-summed from the coverage
+    partition the finding still publishes.
+
+    The single `cost_of_waste_usd` total these tests used to read is deleted from
+    the contract (founder decision — see the dollar-field contract in CLAUDE.md).
+    The PRICING MATH behind it is not: it still runs, per turn and per token
+    class, and lands on the three coverage buckets. So these tests keep asserting
+    the arithmetic through the fields that ship, rather than being deleted along
+    with the field that does not. The buckets partition the same population the
+    total covered, which is why re-summing them is equivalent and not a fresh
+    derivation.
+    """
+    parts = (
+        finding.cost_in_scope_usd,
+        finding.cost_driver_role_usd,
+        finding.cost_no_lever_usd,
+    )
+    if all(p is None for p in parts):
+        return None
+    return sum(p or 0.0 for p in parts)
+
+
+def test_observed_cost_is_priced_per_token_class_and_never_the_avoidable_figure(db):
     """The gross cost of re-sent context is an OBSERVATION on its own field.
 
     It used to be absent entirely while `past_overspend_usd` carried the
@@ -229,16 +253,17 @@ def test_cost_of_waste_is_observed_and_never_the_recoverable_figure(db):
     # there are no cache reads to add.
     heavy_repeat_tokens = 3000  # sum=4000, max=1000
     expected_gross = round(heavy_repeat_tokens / 1_000_000 * rates.input_per_mtok, 6)
-    assert finding.cost_of_waste_usd == pytest.approx(expected_gross)
-    assert finding.cost_of_waste_basis
+    assert _partitioned_cost(finding) == pytest.approx(expected_gross)
     # No subagent anywhere in the window, so nothing measures the offloadable
     # share and no recoverable dollar figure is claimed at all.
     assert finding.offloadable_share is None
     assert finding.past_overspend_usd is None
-    assert finding.cost_of_waste_usd != finding.past_overspend_usd
+    # And no retired total came back on the finding under any name.
+    for retired in ("cost_of_waste_usd", "cost_of_waste_tokens", "cost_of_waste_basis"):
+        assert not hasattr(finding, retired)
 
 
-def test_cost_of_waste_prices_cache_reads_at_the_cache_read_rate(db):
+def test_observed_cost_prices_cache_reads_at_the_cache_read_rate(db):
     """A fully-cached session still cost real money to re-send — just a tenth
     of the uncached rate. A zero here would read as "re-reading is free"."""
     _seed_session(db, "cached", [1000, 1000, 1000, 1000], cache_ratio=1.0,
@@ -248,7 +273,7 @@ def test_cost_of_waste_prices_cache_reads_at_the_cache_read_rate(db):
     finding = _run(db, _config())
     rates = get_rates("anthropic", "claude-haiku-4-5")
     # Every cache read IS re-sent context: 4 turns x 1000 cached tokens.
-    assert finding.cost_of_waste_usd == pytest.approx(
+    assert _partitioned_cost(finding) == pytest.approx(
         round(4000 / 1_000_000 * rates.cache_read_per_mtok, 6)
     )
     assert finding.past_overspend_tokens > 0
@@ -261,7 +286,7 @@ def test_recoverable_usd_none_when_no_priced_model(db):
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
     assert finding.past_overspend_usd is None
-    assert finding.cost_of_waste_usd is None
+    assert _partitioned_cost(finding) is None
     assert finding.past_overspend_tokens is not None
 
 
@@ -280,7 +305,7 @@ def _seed_mixed_model_session(db, session_id, sizes, models, *, cache_ratio=0.0,
         ))
 
 
-def test_cost_of_waste_prices_each_turn_at_its_own_model_not_the_dominant_one(db):
+def test_observed_cost_prices_each_turn_at_its_own_model_not_the_dominant_one(db):
     """A session that mixes models must price EACH turn's re-sent volume at
     THAT turn's own model's rate, not at whichever model dominated the turn
     count. Two opus turns ($5/MTok) and two haiku turns ($1/MTok), tied on
@@ -311,10 +336,11 @@ def test_cost_of_waste_prices_each_turn_at_its_own_model_not_the_dominant_one(db
     all_opus_estimate = 3000 / 1_000_000 * opus.input_per_mtok
     all_haiku_estimate = 3000 / 1_000_000 * haiku.input_per_mtok
 
-    assert finding.cost_of_waste_usd == pytest.approx(round(expected, 6))
-    assert finding.cost_of_waste_usd != pytest.approx(round(all_opus_estimate, 6))
-    assert finding.cost_of_waste_usd != pytest.approx(round(all_haiku_estimate, 6))
-    assert all_haiku_estimate < finding.cost_of_waste_usd < all_opus_estimate
+    observed = _partitioned_cost(finding)
+    assert observed == pytest.approx(round(expected, 6))
+    assert observed != pytest.approx(round(all_opus_estimate, 6))
+    assert observed != pytest.approx(round(all_haiku_estimate, 6))
+    assert all_haiku_estimate < observed < all_opus_estimate
 
 
 # --------------------------------------------------------------------------
@@ -369,9 +395,9 @@ def test_recoverable_usd_is_offload_plus_rightsize_and_excludes_gross(db):
     assert finding.past_overspend_usd == pytest.approx(
         round(finding.offload_recoverable_usd + finding.rightsize_recoverable_usd, 6)
     )
-    # The whole point of the split: the recoverable claim is a small fraction
-    # of what re-sending actually cost, and the gross never leaks into it.
-    assert finding.cost_of_waste_usd > finding.past_overspend_usd
+    # The whole point of the split: the avoidable claim is a small fraction of
+    # what re-sending actually cost, and the observed cost never leaks into it.
+    assert _partitioned_cost(finding) > finding.past_overspend_usd
 
 
 def _seed_recoverable_corpus(db, first_turn_model):
@@ -440,27 +466,29 @@ def test_cost_is_partitioned_by_the_same_predicate_the_avoidable_figure_uses(db)
     """
     _seed_offload_corpus(db)
     finding = _run(db, _config())
-    assert finding.cost_of_waste_usd is not None
     parts = (
         finding.cost_in_scope_usd,
         finding.cost_driver_role_usd,
         finding.cost_no_lever_usd,
     )
     assert all(p is not None for p in parts)
-    assert sum(parts) == pytest.approx(finding.cost_of_waste_usd, abs=1e-5)
+    # The partition IS the published statement now: there is no single total left
+    # to check it against, which is the point. What has to hold is that each
+    # bucket is priced and that they bound the avoidable figure from above — a
+    # bucket silently left at None would drop real money out of the note.
+    assert sum(parts) >= finding.past_overspend_usd
     # And the session counts partition the priced sessions the same way.
     assert finding.sessions_in_scope >= 1
     assert (finding.sessions_in_scope + finding.sessions_no_lever
             + finding.driver_role_sessions) <= finding.sessions_examined
 
 
-def test_a_cost_figure_never_ships_without_a_coverage_note(db):
+def test_a_subset_avoidable_figure_never_ships_without_a_coverage_note(db):
     """The invariant behind the card copy: any window that produces a cost
     figure produces the prose that stops its gap to the avoidable figure being
     read as a measurement of what was unavoidable."""
     _seed_offload_corpus(db)
     finding = _run(db, _config())
-    assert finding.cost_of_waste_usd is not None
     assert finding.coverage_note
     assert "COVERAGE" in finding.coverage_note
     # The load-bearing sentence: the gap is un-analysed, not established.
@@ -480,8 +508,8 @@ def test_sessions_below_the_context_floor_are_counted_as_cost_but_not_analysed(d
     assert finding.sessions_no_lever >= 1
     assert finding.cost_no_lever_usd is not None and finding.cost_no_lever_usd > 0
     assert "never accumulate" in finding.coverage_note
-    # It is genuinely in the cost total and genuinely out of the avoidable one.
-    assert finding.cost_of_waste_usd > finding.cost_in_scope_usd
+    # It is genuinely priced and genuinely outside the analysed bucket.
+    assert _partitioned_cost(finding) > finding.cost_in_scope_usd
 
 
 def test_the_tail_definition_gap_is_stated_not_left_implicit(db):

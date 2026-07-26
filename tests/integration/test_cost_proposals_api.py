@@ -406,9 +406,13 @@ async def test_cost_proposals_payload_carries_the_past_overspend_block(app, clie
     assert block["basis"]
     assert block["disclosure"]
 
-    # The observed COST total ships as its own key and is never the headline:
-    # the avoidable figure is a subset of it, so they may not be summed.
-    assert "observed_cost_usd" in block
+    # ONE dollar total on the block. A second key, `observed_cost_usd`, used to
+    # ship here under a disclosure calling the headline a subset of it; on live
+    # data it covered 2 of the headline's 13 proposals, so the claim was false as
+    # published. Key and disclosure are deleted — every figure this block
+    # publishes now covers the same set of proposals.
+    assert {k for k in block if k.endswith("_usd")} == {"past_overspend_usd"}
+    assert "cost_disclosure" not in block
     # No retired per-analyzer dollar field, and no pace to project at.
     assert "projection_ratio" not in block
     assert not [k for k in block if "monthly" in k or "projected" in k]

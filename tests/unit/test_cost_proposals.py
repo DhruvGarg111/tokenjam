@@ -950,15 +950,21 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     assert "floor, not a total" not in rollup["basis"]
 
 
-# --- relearn reaches the rollup as an ordinary card; excluded is carried --- #
+# --- the rollup has one entry point; excluded is carried -------------------- #
 
-def test_relearn_reaches_the_rollup_through_its_own_card_not_a_side_channel():
+def test_the_rollup_has_no_per_analyzer_side_channel():
     """relearn used to be folded into the aggregate by a dedicated
     ``relearn_clusters=`` parameter, on its OWN 30-day basis, landing in a
     ``projected_usd_30d`` key that no other analyzer's window figure shared.
-    Two time bases in one aggregate is exactly the ambiguity the field
-    collapse removed: relearn now contributes through the ``cost:relearn``
-    proposal like every other analyzer, on the one canonical field.
+    Two time bases in one aggregate is exactly the ambiguity the field collapse
+    removed: every contribution now arrives as an ordinary proposal on the one
+    canonical field, or not at all.
+
+    relearn is the "or not at all" case today. Its one aggregate card carried
+    only the retired total-observed-cost field, so the card is deleted; its
+    per-cluster rows in the Review inbox are where its claim has always lived.
+    A proposal with no canonical figure therefore contributes nothing here, and
+    does not even earn a `by_analyzer` entry.
     """
     with pytest.raises(TypeError):
         past_overspend_rollup([], relearn_clusters=[{"signature": "relearn:a"}])  # type: ignore[call-arg]
@@ -966,13 +972,15 @@ def test_relearn_reaches_the_rollup_through_its_own_card_not_a_side_channel():
     rollup = past_overspend_rollup([
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
          "past_overspend_usd": 3.0},
-        {"signature": "cost:relearn", "analyzer": "relearn", "title": "t2",
-         "past_overspend_usd": None, "observed_cost_usd": 46.30},
+        {"signature": "cost:nothing", "analyzer": "hypothetical", "title": "t2",
+         "past_overspend_usd": None, "past_overspend_tokens": None},
     ])
     assert rollup["past_overspend_usd"] == 3.0
-    assert rollup["observed_cost_usd"] == 46.30
-    # No paced key survives anywhere on the block.
+    assert rollup["proposal_count"] == 1
+    assert [e["analyzer"] for e in rollup["by_analyzer"]] == ["downsize"]
+    # No paced key survives anywhere on the block, and no second total either.
     assert not [k for k in rollup if "monthly" in k or "projected" in k]
+    assert not [k for k in rollup if "observed_cost" in k or k == "cost_disclosure"]
 
 
 def test_rollup_excluded_is_carried_through_never_summed():
@@ -1124,22 +1132,26 @@ def test_resend_claude_code_offers_apply_capable_compound_write():
     assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
 
 
-def test_resend_cost_of_waste_is_carried_but_never_the_recoverable_figure():
-    # The gross observation rides its own fields and must never be confused
-    # with — or summed into — what the fix returns.
+def test_resend_carries_one_dollar_figure_and_the_headline_reads_it():
+    # resend was the one analyzer that shipped a SECOND, larger dollar figure
+    # (the full observed cost of the re-sent volume). It is deleted from the
+    # contract, so the card carries exactly one, and the field it rode on cannot
+    # be set at all — an adapter that tried would now raise rather than quietly
+    # attach an untracked number.
+    import dataclasses
+
     from tokenjam.core.optimize.cost_proposals import (
         _resend_to_proposals,
         past_overspend_rollup,
     )
 
     finding = _resend_finding()
-    finding.cost_of_waste_usd = 4_200.0
-    finding.cost_of_waste_tokens = 9_800_000_000
     prop = _resend_to_proposals(finding, persona="claude-code")[0]
 
-    assert prop.cost_of_waste_usd == 4_200.0
+    fields = {f.name for f in dataclasses.fields(prop)}
+    assert not [f for f in fields if "cost_of_waste" in f or "observed_cost" in f]
     assert prop.past_overspend_usd == 0.5
-    # The Review inbox headline reads only the recoverable fields.
+    # The Review inbox headline reads that one field.
     rollup = past_overspend_rollup([prop])
     assert rollup["past_overspend_usd"] == 0.5
     assert rollup["past_overspend_tokens"] == 6_830
