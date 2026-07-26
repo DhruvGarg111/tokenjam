@@ -843,3 +843,16 @@ def validate_budget_value(value: float, field_name: str) -> float | None:
     if value < 0:
         raise ValueError(f"Budget {field_name} must be non-negative, got {value}")
     return value if value > 0 else None
+
+
+def validate_cycle_start_day(value: int) -> int:
+    """
+    Validate a `[budget.<provider>] cycle_start_day` value from user input.
+
+    Must be 1..28 (see `core.cycle.cycle_bounds` — clamped there too, but this
+    surfaces a clear error at the API boundary instead of silently clamping a
+    typo'd value the user never intended).
+    """
+    if value < 1 or value > 28:
+        raise ValueError(f"cycle_start_day must be between 1 and 28, got {value}")
+    return value
