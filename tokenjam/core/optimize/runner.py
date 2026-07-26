@@ -129,6 +129,24 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # deliberately left ungated.
         "reuse",
     }),
+    # An SDK/API window has no on-disk Claude Code transcript and never
+    # populates `sub_agent_id` (no Task-tool subagent-dispatch concept in
+    # generic SDK telemetry) — both analyzers below are gated on a DATA
+    # SOURCE that structurally does not exist for this persona, not on a
+    # missing lever, so every dispatch would run a real query and still
+    # return nothing to act on.
+    "sdk": frozenset({
+        # Reads project `.mcp.json` / `.claude/settings*.json` / on-disk
+        # Claude Code `.jsonl` transcripts (see deadweight.py's module
+        # docstring, "Claude Code transcripts lane only") — an SDK window has
+        # none of these, so this always renders a permanently-empty card.
+        "deadweight",
+        # Scopes to `sub_agent_id IS NOT NULL`, which is NULL for every SDK
+        # span (see subagent_rightsizing.py's `_compute_rows`) — an SDK
+        # window can never have a row here, so this always renders a
+        # permanently-empty card.
+        "subagent",
+    }),
 }
 
 
