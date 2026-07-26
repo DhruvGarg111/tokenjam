@@ -66,6 +66,40 @@ def _resend_finding():
     )
 
 
+def _report():
+    """A minimal report carrying downsize/cache/trim findings — mirrors
+    test_cost_proposals.py's own ``_report()`` (kept local rather than
+    imported so this file's fixtures stay self-contained)."""
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        CacheEfficacyFinding,
+        CacheEfficacyRow,
+    )
+    from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
+
+    dg = DowngradeFinding(
+        candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
+        alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
+        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        estimate_basis="downsize basis",
+    )
+    cache = CacheEfficacyFinding(
+        flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
+                                  0.05, "full", True)],
+        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+    )
+    trim = PromptBloatFinding(
+        enabled=True,
+        per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
+                                significant_chars=3000, bloat_chars=5000,
+                                estimated_token_reduction=1250)],
+        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+    )
+    window = WindowSummary(since=NOW - timedelta(days=5), until=NOW, days=5, sessions=10,
+                           spans=100, total_tokens=1, total_cost_usd=5.0, thin_data=False)
+    return OptimizeReport(window=window, downgrade=dg, findings={"cache": cache, "trim": trim})
+
+
 # --- 1. never summed into a recoverable total ------------------------------ #
 
 def test_past_overspend_is_never_summed_into_the_recoverable_rollup():
@@ -240,6 +274,222 @@ def test_legacy_cached_proposal_backfills_the_same_derivation_on_read():
     # Never overwrites a current entry.
     current = {"past_overspend_usd": 1.0, "estimated_recoverable_usd": 99.0}
     assert backfill_legacy_past_overspend_fields(current)["past_overspend_usd"] == 1.0
+
+
+# --- summarize is a real peer card, not a link-only disclosure ------------- #
+#
+# #326 tried to soften "summarize's dollars never reach the headline" with an
+# `excluded` footnote ("$X more, not summed above -> review it"). That got
+# revisited and rejected: the Review inbox is the complete index of
+# everything actionable, so
+# summarize gets a normal card like every other analyzer — its window figure
+# reaches `past_overspend_rollup` exactly the way downsize/cache/trim/etc.'s
+# do. Only its AFFORDANCE differs (links to the curate/diff surface instead
+# of an inline apply), not its presence in the headline.
+
+def _summarize_finding(**overrides):
+    from tokenjam.core.optimize.analyzers.summarize import (
+        SummarizeCandidate,
+        SummarizeFinding,
+    )
+    candidates = overrides.pop("candidates", None) or [
+        SummarizeCandidate(
+            path="/repo/CLAUDE.md", kind="prompt", scope="project",
+            est_tokens_saved=4_000, total_chars=32_000, reduction_pct=40,
+            sessions_loading=120, est_usd_saved=3_969.74,
+            est_tokens_saved_window=6_986_110_266,
+        ),
+    ]
+    fields = dict(
+        candidates=candidates, files=len(candidates),
+        estimated_recoverable_usd=3_969.74,
+        estimated_recoverable_tokens=6_986_110_266,
+        estimate_basis="summarize basis", avg_reduction_pct=40,
+        sessions_examined=120,
+    )
+    fields.update(overrides)
+    return SummarizeFinding(**fields)
+
+
+def test_summarize_is_a_cost_analyzer_producing_a_real_peer_card():
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS, _summarize_to_proposals
+
+    assert "summarize" in COST_ANALYZERS
+
+    props = _summarize_to_proposals(_summarize_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "summarize"
+    assert p.signature == "cost:summarize"
+    assert p.estimated_recoverable_usd == 3_969.74
+    assert p.estimated_recoverable_tokens == 6_986_110_266
+    # Copy names the review flow, not a claimable "Apply" — the founder
+    # decision's exact phrasing ("Review N oversized files, $X reads
+    # correctly; a bare Apply button would misrepresent the flow").
+    assert p.title == "Review 1 oversized file, $3,969.74"
+    assert p.advise_only is True
+    assert p.apply_capable is False
+    assert p.apply_kind == ""
+    assert p.rung == 0
+
+
+def test_summarize_card_empty_with_no_candidates_or_no_priced_evidence():
+    from tokenjam.core.optimize.cost_proposals import _summarize_to_proposals
+
+    assert _summarize_to_proposals(None) == []
+    from tokenjam.core.optimize.analyzers.summarize import SummarizeFinding
+
+    assert _summarize_to_proposals(SummarizeFinding()) == []          # dead window
+    assert _summarize_to_proposals(_summarize_finding(
+        estimated_recoverable_usd=None, estimated_recoverable_tokens=None,
+    )) == []   # candidates found, but no session observed loading them
+
+
+def test_summarize_card_reaches_the_same_headline_every_other_analyzer_does():
+    rep = _report()
+    rep.findings["summarize"] = _summarize_finding()
+    props = cost_proposals_from_report(rep)
+    summarize_prop = next(p for p in props if p.analyzer == "summarize")
+    assert summarize_prop.past_overspend_usd == pytest.approx(3_969.74)
+
+    block = past_overspend_rollup(props)
+    by_analyzer = {a["analyzer"]: a for a in block["by_analyzer"]}
+    assert "summarize" in by_analyzer
+    assert by_analyzer["summarize"]["usd"] == pytest.approx(3_969.74)
+    assert block["past_overspend_usd"] >= 3_969.74
+
+
+def test_past_overspend_headline_accounts_for_every_cost_analyzer():
+    """Regression guard: the headline total must account for every analyzer
+    that produces a figure, whether by inclusion or by
+    explicit disclosure. Builds a report where (nearly) every COST_ANALYZERS
+    member produces a priced finding, and asserts every one of them shows up
+    in the past-overspend headline's `by_analyzer` breakdown — the exact
+    regression this guards against is a future analyzer silently going
+    invisible from the headline the way `summarize` did between #326 and
+    #328. `cache-recommend` is the one COST_ANALYZERS member without a ready
+    fixture here; it is covered by its own dedicated tests elsewhere
+    (test_cache_root_cause_proposals.py) and by the generic, per-analyzer
+    contract this test pins for everyone else.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow, DeadweightFinding, ServerDeadweight
+    from tokenjam.core.optimize.analyzers.output_verbosity import VerbosityFinding
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+        SubagentRow,
+    )
+    from tokenjam.core.optimize.analyzers.workflow_restructure import (
+        WorkflowCluster,
+        WorkflowRestructureFinding,
+    )
+    from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
+
+    dg = DowngradeFinding(
+        candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
+        alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
+        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        estimate_basis="downsize basis",
+    )
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        CacheEfficacyFinding,
+        CacheEfficacyRow,
+    )
+    cache = CacheEfficacyFinding(
+        flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
+                                  0.05, "full", True)],
+        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+    )
+    from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
+    trim = PromptBloatFinding(
+        enabled=True,
+        per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
+                                significant_chars=3000, bloat_chars=5000,
+                                estimated_token_reduction=1250)],
+        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+    )
+    subagent = SubagentRightsizingFinding(
+        flagged=[SubagentRow(session_id="s1", sub_agent_id="sa0", model="claude-opus-4-8",
+                             llm_calls=2, tool_calls=1, input_tokens=60000, output_tokens=500,
+                             cache_tokens=0, cache_write_tokens=0, cost_usd=1.2,
+                             provider="anthropic", flags=["over_powered"])],
+        percent_of_cost=0.66, flagged_cost_usd=1.2, subagent_cost_usd=1.5,
+        estimated_recoverable_usd=0.4, estimated_recoverable_tokens=60500,
+    )
+    dead_server = ServerDeadweight(
+        name="apollo", scope="project", source="/repo/.mcp.json",
+        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
+        tax_construction="25,000 tok/session, cited estimate.",
+        fix="Remove or project-scope apollo.", example_sessions=["s0"],
+    )
+    deadweight = DeadweightFinding(
+        sessions_scanned=10, configured_servers=1,
+        servers=[dead_server], dead_servers=[dead_server],
+        tax_table=[ContextTaxRow(source="MCP schema: apollo", sessions=10,
+                                 avg_tokens_per_session=25_000, total_tokens_window=250_000)],
+        estimated_recoverable_tokens=225_000,
+        estimate_basis="sum of each dead server's schema-injection tax observed over this window",
+    )
+    script_cluster = WorkflowCluster(
+        signature=[{"tool": "bash", "args": ["command_string"]}], instances=25,
+        avg_cost_usd=0.02, avg_duration_seconds=1.5, example_session_id="det-0",
+        avg_tokens=500, total_cost_usd=0.5, total_tokens=12_500,
+        example_session_ids=["det-0", "det-1", "det-2"],
+    )
+    script = WorkflowRestructureFinding(
+        clusters=[script_cluster], sessions_examined=25, degraded=False,
+        estimated_recoverable_usd=0.5, estimated_recoverable_tokens=12_500,
+        estimate_basis="script basis",
+    )
+    reuse_cluster = ReuseCluster(
+        cluster_id="abc123456789", tool_signature=("bash", "read"),
+        prompt_prefix_hash=None, repetitions=4, avg_planning_tokens=300,
+        avg_planning_cost_usd=0.01, cache_reuse_recoverable_usd=0.03,
+        script_replacement_recoverable_usd=0.04, cache_reuse_recoverable_tokens=900,
+        script_replacement_recoverable_tokens=1_200,
+        example_session_ids=["s1", "s2", "s3"], skeleton_session_id="s1",
+    )
+    reuse = ReuseFinding(
+        clusters=[reuse_cluster], estimated_recoverable_usd=0.03,
+        estimated_recoverable_tokens=900, estimate_basis="reuse basis",
+    )
+    verbosity = VerbosityFinding(
+        total_candidates=6, sessions_examined=40, cohorts_examined=3,
+        estimated_recoverable_usd=0.9, estimated_recoverable_tokens=9_000,
+        estimate_basis="verbosity basis", suggested_max_tokens=800,
+    )
+    resend = _resend_finding()
+    summarize = _summarize_finding()
+
+    window = WindowSummary(
+        since=NOW - timedelta(days=5), until=NOW, days=5, sessions=10, spans=100,
+        total_tokens=1, total_cost_usd=5.0, thin_data=False,
+    )
+    rep = OptimizeReport(
+        window=window, downgrade=dg,
+        findings={
+            "cache": cache, "trim": trim, "subagent": subagent,
+            "deadweight": deadweight, "script": script, "reuse": reuse,
+            "verbosity": verbosity, "resend": resend, "summarize": summarize,
+        },
+    )
+    props = cost_proposals_from_report(rep)
+    block = past_overspend_rollup(props)
+    by_analyzer = {a["analyzer"] for a in block["by_analyzer"]}
+
+    priced_analyzers = {
+        p.analyzer for p in props
+        if p.estimated_recoverable_usd is not None or p.cost_of_waste_usd is not None
+    }
+    assert priced_analyzers  # sanity: the fixture actually produced priced cards
+    assert priced_analyzers <= by_analyzer, (
+        f"analyzer(s) produced a priced card but never reached the headline: "
+        f"{priced_analyzers - by_analyzer}"
+    )
+    assert "summarize" in by_analyzer
+    assert "downsize" in by_analyzer
 
 
 # --- 3. the UI reads the payload, it does not recompute -------------------- #

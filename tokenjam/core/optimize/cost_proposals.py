@@ -68,28 +68,28 @@ COST_CORRELATIONAL_CAVEAT = (
 #: savings and previously had no adapter here, silently excluding it from the
 #: Review inbox's Cost-advisories tab.
 #:
-#: ``summarize`` (prompt summarization) is deliberately NOT here, and stays out
-#: now that it carries a dollar figure of its own. Three reasons, decided
-#: rather than inherited:
-#:
-#:   1. It has its own dedicated review surface — the curate/diff screen driven
-#:      by ``core/summarize/``'s prepare/check/apply lifecycle, a multi-step
-#:      rewrite-and-verify flow this single-card adapter shape cannot represent.
-#:      An inbox card would either duplicate that surface or link away from the
-#:      inbox to it, and neither is a card.
-#:   2. It is the BUDGET, not a peer. ``write_budget.measured_agent_file_tokens``
-#:      reads the summarize finding to size how much permanent rule-writing every
-#:      OTHER analyzer in this table is allowed to propose. Listing it here would
-#:      make the analyzer that sets the budget also compete for it, and a user who
-#:      dismissed the card would silently be dismissing the counterweight that
-#:      stops the rule-writers from growing the files it wants compressed.
-#:   3. The standing product constraint is to consolidate cards, not add them.
-#:      Its saving is already visible in the Overview waste band (registry-driven
-#:      off the presence of ``estimated_recoverable_usd``), so it is not hidden —
-#:      only absent from this one surface.
+#: ``summarize`` (prompt summarization) IS here (re-filing the
+#: purged #326). It used to be deliberately excluded — own review surface, the
+#: write-budget's denominator, "don't add cards" — and #326 tried to soften the
+#: consequence with a link-only "$X more, not summed here" footnote instead of
+#: a card. The founder decision that revisited this rejects the old reasoning
+#: outright: **the Review inbox is the complete index of everything
+#: actionable, not the list of things whose apply flow happens to live here.**
+#: Where the fix is APPLIED is a routing detail, not a reason to keep a real,
+#: measured figure off the one surface a user reads for "what's outstanding".
+#: So ``summarize`` gets a normal card like every other analyzer here — see
+#: ``_summarize_to_proposals`` — except its card routes to the ``tj summarize``
+#: curate/diff surface instead of offering an inline apply (``advise_only``,
+#: no ``apply_kind``): unlike a model-id swap or an MCP-server removal, the fix
+#: is a reviewed rewrite (structure kept, prose compressed), not a value this
+#: adapter can safely one-click. The write-budget coupling that motivated the
+#: old exclusion is unaffected: ``_apply_write_budget`` reads
+#: ``report.findings["summarize"]`` directly (not this proposal list) to size
+#: every OTHER analyzer's rule-writing budget, and this card is never
+#: ``apply_capable`` so it never enters that netting pass itself.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
-    "script", "reuse", "verbosity", "resend",
+    "script", "reuse", "verbosity", "resend", "summarize",
 )
 
 
@@ -866,6 +866,80 @@ def _placement_to_proposals(
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         agent_id=candidates[0].agent_id if len(candidates) == 1 else "",
+    )]
+
+
+#: Where the summarize card's affordance routes to instead of an inline apply
+#: — the ``tj summarize`` curate/diff screen (see ``_summarize_to_proposals``).
+SUMMARIZE_REVIEW_HREF = "#/optimize/summarize"
+
+
+def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
+    """One window-wide card for the ``summarize`` (oversized catalog prompt
+    files) finding — see ``COST_ANALYZERS``'s docstring for why this is now a
+    normal peer card rather than a link-only disclosure.
+
+    One card, never one per file: ``finding.candidates`` can list several
+    files, but the standing don't-fill-the-inbox constraint (#596) means this
+    adds at most a single row regardless of how many files the scan flags.
+
+    Deliberately never ``apply_capable``: the fix is a reviewed rewrite
+    (structure kept, prose compressed, one file at a time) driven by
+    ``core/summarize/``'s prepare/check/apply lifecycle, not a value this
+    adapter can safely one-click. The card's copy and its UI affordance both
+    route to that surface (``SUMMARIZE_REVIEW_HREF``) instead of offering an
+    "Apply" button that would misrepresent a multi-step review as one click.
+    """
+    if finding is None:
+        return []
+    files = int(getattr(finding, "files", 0) or 0)
+    usd = getattr(finding, "estimated_recoverable_usd", None)
+    tokens = getattr(finding, "estimated_recoverable_tokens", None)
+    if files <= 0 or (usd is None and tokens is None):
+        # No candidates, or candidates with no observed load evidence to price
+        # against (see `SummarizeFinding`'s "carries neither figure" case) —
+        # a card with nothing to lead with would misstate "worth nothing" for
+        # "not measured this window".
+        return []
+    candidates = list(getattr(finding, "candidates", []) or [])
+    shown = ", ".join(c.path for c in candidates[:5])
+    if len(candidates) > 5:
+        shown += f", +{len(candidates) - 5} more"
+    reduction = getattr(finding, "avg_reduction_pct", None)
+    evidence = (
+        f"{files} catalog prompt file(s) carry compressible prose"
+        + (f" ({reduction}% average reduction)" if reduction is not None else "")
+        + f": {shown}."
+    )
+    plural = "" if files == 1 else "s"
+    headline = _money(usd) if usd is not None else f"~{tokens:,} tok"
+    advise = (
+        f"Review {files} oversized file{plural} in the summarize curate -> "
+        "diff -> apply surface (`tj summarize list` / `tj summarize check` / "
+        "`tj summarize apply`, or the Summarize screen in the web UI). This "
+        "card links there instead of applying inline: the fix is a reviewed "
+        "rewrite — structure kept verbatim, prose compressed, one file at a "
+        "time — not a one-click removal."
+    )
+    return [CostProposal(
+        kind="cost",
+        analyzer="summarize",
+        signature="cost:summarize",
+        title=f"Review {files} oversized file{plural}, {headline}",
+        target_key={"href": SUMMARIZE_REVIEW_HREF, "files": [c.path for c in candidates]},
+        evidence=evidence,
+        baseline={
+            "files": files,
+            "file_reduction_tokens": getattr(finding, "file_reduction_tokens", None),
+            "sessions_examined": int(getattr(finding, "sessions_examined", 0) or 0),
+            "calls_per_session": getattr(finding, "calls_per_session", None),
+            "avg_reduction_pct": reduction,
+        },
+        advise_text=advise,
+        estimated_recoverable_usd=usd,
+        estimated_recoverable_tokens=tokens,
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
     )]
 
 
@@ -2096,44 +2170,15 @@ def is_computing_cost_proposals() -> bool:
     return _COST_COMPUTING.is_set()
 
 
-#: The Review inbox's cross-reference for waste this rollup deliberately does
-#: NOT sum as a peer card (issue #326) — currently only ``summarize``, whose
-#: own three reasons for staying out of ``COST_ANALYZERS`` live on that
-#: constant's docstring. This dict is what ties those two together: the
-#: reasons stay valid, but the CONSEQUENCE (its dollars invisible from the
-#: Review inbox entirely) is fixed by stating the total and linking to its
-#: own surface, exactly like a "N proposals hidden, see X" footnote.
-EXCLUDED_HREF_SUMMARIZE = "#/optimize/summarize"
-
-
-def _excluded_summarize_block(
-    report: Any, *, ratio: float | None,
-) -> dict[str, Any] | None:
-    """The ``summarize`` finding's own recoverable total, on the SAME 30-day
-    basis every other proposal here is projected onto (issue #326's "keep
-    the time bases identical" requirement) — ``None`` when the analyzer
-    didn't run or found nothing, so an empty/absent finding never renders a
-    fabricated "$0 available" line."""
-    finding = (getattr(report, "findings", None) or {}).get("summarize")
-    usd = getattr(finding, "estimated_recoverable_usd", None) if finding is not None else None
-    tokens = getattr(finding, "estimated_recoverable_tokens", None) if finding is not None else None
-    if usd is None and tokens is None:
-        return None
-    scale = _effective_ratio("per_session", ratio)
-    return {
-        "estimated_recoverable_usd": usd,
-        "estimated_recoverable_tokens": tokens,
-        "estimated_monthly_usd": round(usd * scale, 6) if usd is not None else None,
-        "estimated_monthly_tokens": round(tokens * scale) if tokens is not None else None,
-        "estimate_basis": str(getattr(finding, "estimate_basis", "") or ""),
-        "href": EXCLUDED_HREF_SUMMARIZE,
-        "label": "Summarize",
-        "reason": (
-            "has its own review surface (curate -> diff -> apply) this "
-            "single-card rollup can't represent; not summed in, but not "
-            "hidden either"
-        ),
-    }
+#: The Review inbox's cross-reference for waste a caller has decided NOT to
+#: sum as a peer card. Generic infrastructure (see ``estimated_recoverable_
+#: rollup``'s ``excluded`` parameter and the UI's ``ExcludedWasteNote``) with
+#: no current occupant: ``summarize`` used to be the one entry here (issue
+#: #326) until summarize got a real peer card instead (see
+#: ``_summarize_to_proposals`` and ``COST_ANALYZERS``'s docstring) — kept
+#: rather than deleted because the shape (state the total, link to where it
+#: lives, never silently drop it) is the right move for a FUTURE analyzer
+#: whose fix has no representable inbox card, should one appear.
 
 
 def recompute_cost_proposals(
@@ -2198,17 +2243,11 @@ def recompute_cost_proposals(
             )
             report = build_report(
                 db, config, since, until, agent_id=agent_id,
-                # `summarize` is deliberately NOT a COST_ANALYZER (it owns its
-                # own curate/diff surface and has no adapter here, so it
-                # contributes no card), but it IS built: it is the only
-                # analyzer that measures how much standing context the agent
-                # files already carry, and the write budget spends against
-                # that measurement. Without it the two halves of the loop stay
-                # blind to each other and the inbox can offer new permanent
-                # rules for a file the same report says to compress. It is
-                # appended to the PERSONA-SCOPED cost list, not the raw one:
-                # the skip gate still decides which cost analyzers run.
-                findings=[*cost_analyzers_for_persona(persona), "summarize"],
+                # `summarize` IS a COST_ANALYZER now and would already
+                # be selected by `cost_analyzers_for_persona`; this is the
+                # PERSONA-SCOPED list, not the raw one — the skip gate still
+                # decides which cost analyzers run for this window.
+                findings=list(cost_analyzers_for_persona(persona)),
             )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
@@ -2222,10 +2261,6 @@ def recompute_cost_proposals(
             )
             active_days = int(getattr(report.window, "active_days", 0) or 0)
             n_sessions = int(getattr(report.window, "sessions", 0) or 0)
-            ratio, _label = compute_projection_ratio(
-                float(effective_window_days), active_days, n_sessions,
-            )
-            excluded_summarize = _excluded_summarize_block(report, ratio=ratio)
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -2239,9 +2274,6 @@ def recompute_cost_proposals(
                 window_days=effective_window_days,
                 active_days=active_days,
                 n_sessions=n_sessions,
-                excluded=(
-                    {"summarize": excluded_summarize} if excluded_summarize else {}
-                ),
             )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
@@ -2382,10 +2414,11 @@ def cost_proposals_from_report(
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
     the ``cache`` / ``cache-recommend`` / ``trim`` / ``subagent`` /
-    ``placement`` / ``deadweight`` / ``script`` / ``reuse`` / ``verbosity``
-    findings off ``report.findings``. Missing findings (analyzer not run, no
-    candidates) contribute nothing. Never raises — a malformed finding is
-    skipped so one bad analyzer can't sink the inbox.
+    ``placement`` / ``deadweight`` / ``script`` / ``reuse`` / ``verbosity`` /
+    ``resend`` / ``summarize`` findings off ``report.findings``. Missing
+    findings (analyzer not run, no candidates) contribute nothing. Never
+    raises — a malformed finding is skipped so one bad analyzer can't sink
+    the inbox.
 
     ``config`` is optional and used for one thing: looking up the local source
     path a user registered for an agent, which decides whether the downsize card
@@ -2491,6 +2524,7 @@ def cost_proposals_from_report(
             ),
             _pick("resend"),
         ),
+        (_summarize_to_proposals, _pick("summarize")),
     )
     for adapter, finding in adapters:
         try:
@@ -2842,15 +2876,15 @@ def estimated_recoverable_rollup(
     recurring fixes: $Y" without re-deriving the split from the combined
     total.
 
-    ``excluded`` (issue #326) is a passthrough for waste this rollup
-    deliberately does NOT sum in — currently ``summarize``, which has its own
-    review surface (see ``COST_ANALYZERS``'s docstring for why) and would
-    double-count the write budget if folded in as a peer card. Never summed
-    into any total here; carried on the result unchanged so the Review inbox
-    can render "$X more available in Summarize -> review it" instead of
-    silently omitting the product's largest recoverable figure. ``None``
-    becomes ``{}`` — "nothing known to be excluded", not "excluded total is
-    zero".
+    ``excluded`` (issue #326) is a passthrough for waste a caller decided NOT
+    to sum in as a peer proposal. Generic, with no current occupant —
+    ``summarize`` was the one entry here until it got a real peer card
+    instead (see ``COST_ANALYZERS``'s docstring); kept for a FUTURE analyzer
+    whose fix has no representable inbox card. Never summed into any total
+    here; carried on the result unchanged so a caller can render "$X more
+    available in <analyzer> -> review it" instead of silently omitting a
+    real figure. ``None`` becomes ``{}`` — "nothing known to be excluded",
+    not "excluded total is zero".
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:
