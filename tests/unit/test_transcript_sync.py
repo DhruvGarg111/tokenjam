@@ -56,8 +56,19 @@ def _write_transcript(root: Path, project: str, filename: str,
     return path
 
 
+# The default "recent" timestamp is a time bomb if pinned to an absolute
+# literal: `run_catch_up`'s lookback window is computed from wall-clock
+# now(), so a fixed literal eventually falls outside any lookback window and
+# every test relying on the default starts failing with no code change
+# involved (see the `test_onboard_backfill_scope.py` fix for the same class
+# of bug). Anchor it relative to test-execution time instead.
+_DEFAULT_RECENT_TS = (
+    datetime.now(tz=timezone.utc) - timedelta(hours=2)
+).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def _write_session(root: Path, session_id: str, project: str = "-tmp-proj",
-                   ts: str = "2026-07-25T10:00:00.000Z",
+                   ts: str = _DEFAULT_RECENT_TS,
                    filename: str | None = None) -> Path:
     return _write_transcript(
         root, project, filename or session_id,

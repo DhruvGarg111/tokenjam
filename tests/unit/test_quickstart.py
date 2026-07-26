@@ -8,6 +8,7 @@ a transient in-memory backend and must never call `open_db`).
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -17,6 +18,33 @@ from tokenjam.core.session_timeline import (
     compute_session_timeline,
     timeline_to_dict,
 )
+
+_NOW = datetime.now(timezone.utc)
+
+
+def _date(month: int, day: int) -> str:
+    """A `YYYY-MM-DD` fixture date anchored to test-execution time, not a
+    hardcoded absolute literal.
+
+    Every fixture below represents "recent" Claude Code history filtered
+    through `--since 90d` (computed from real wall-clock `now()` inside the
+    CLI). A fixed literal is a time bomb: once wall time passes
+    `literal + 90d`, every assertion here starts failing with no code change
+    involved -- the same class of bug fixed in
+    `test_onboard_backfill_scope.py` and `test_transcript_sync.py`. The
+    `(month, day)` pair only encodes the ORIGINAL relative spacing between
+    fixture dates (e.g. `_date(6, 10)` is always ~20 days older than
+    `_date(6, 30)`, `_date(6, 28)` ~2 days older); the actual calendar date
+    floats with "now" so the gap to the `--since` cutoff never closes.
+    """
+    offset_days = (date(2026, 6, 30) - date(2026, month, day)).days
+    return (_NOW - timedelta(days=offset_days)).strftime("%Y-%m-%d")
+
+
+def _ts(month: int, day: int, time_of_day: str) -> str:
+    """Full `...Z` timestamp for `_date(month, day)` at a given time-of-day
+    (e.g. `"10:05:00.000"`)."""
+    return f"{_date(month, day)}T{time_of_day}Z"
 
 
 def _make_session_file(root: Path, session_id: str, cwd: str,
@@ -54,11 +82,11 @@ def _fixture_root(tmp_path: Path) -> Path:
     root = tmp_path / "projects"
     # Two sessions across two projects, recent timestamps.
     _make_session_file(root, "sess-a", "/Users/me/projA", [
-        _assistant("a1", "sess-a", "/Users/me/projA", "2026-06-20T10:00:00.000Z"),
-        _assistant("a2", "sess-a", "/Users/me/projA", "2026-06-20T10:05:00.000Z"),
+        _assistant("a1", "sess-a", "/Users/me/projA", _ts(6, 20, "10:00:00.000")),
+        _assistant("a2", "sess-a", "/Users/me/projA", _ts(6, 20, "10:05:00.000")),
     ])
     _make_session_file(root, "sess-b", "/Users/me/projB", [
-        _assistant("b1", "sess-b", "/Users/me/projB", "2026-06-21T11:00:00.000Z",
+        _assistant("b1", "sess-b", "/Users/me/projB", _ts(6, 21, "11:00:00.000"),
                    cache_read=50000),
     ])
     return root
@@ -214,7 +242,7 @@ def _heavy_reread_fixture_root(tmp_path: Path) -> Path:
     root = tmp_path / "projects"
     _make_session_file(root, "sess-heavy", "/Users/me/projHeavy", [
         _assistant("h1", "sess-heavy", "/Users/me/projHeavy",
-                   "2026-06-20T10:00:00.000Z",
+                   _ts(6, 20, "10:00:00.000"),
                    input_tokens=500, output_tokens=200, cache_read=300_000),
     ])
     return root
@@ -352,8 +380,8 @@ def _large_fixture_root(tmp_path: Path, n_sessions: int) -> Path:
         sid = f"sess-{i:05d}"
         cwd = f"/Users/me/proj{i % 5}"
         path = _make_session_file(root, sid, cwd, [
-            _assistant(f"{sid}-a", sid, cwd, "2026-06-20T10:00:00.000Z"),
-            _assistant(f"{sid}-b", sid, cwd, "2026-06-20T10:05:00.000Z"),
+            _assistant(f"{sid}-a", sid, cwd, _ts(6, 20, "10:00:00.000")),
+            _assistant(f"{sid}-b", sid, cwd, _ts(6, 20, "10:05:00.000")),
         ])
         # Newer index => newer mtime, so the cap keeps the highest indices.
         os.utime(path, (base_ts + i, base_ts + i))
@@ -509,12 +537,12 @@ def test_quickstart_preview_shows_most_recent_substantial_crossing_session(
     root = tmp_path / "projects"
     # Older, more turns, but NOT more recent -> must lose to the recent one.
     _session_with_crossing(
-        root, "sess-old", "/Users/me/projA", "2026-06-10",
+        root, "sess-old", "/Users/me/projA", _date(6, 10),
         n_turns=10, crossing_turn=2,
     )
     # Recent AND substantial (5 >= PREVIEW_MIN_TURNS=3) -> wins on recency.
     recent_path = _session_with_crossing(
-        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        root, "sess-recent", "/Users/me/projB", _date(6, 25),
         n_turns=5, crossing_turn=3,
     )
 
@@ -561,12 +589,12 @@ def test_quickstart_preview_stops_walking_after_first_substantial_candidate(
     # Most-recent session is ALREADY substantial + crossing -> must win
     # without inspecting any of the five older sessions below it.
     _session_with_crossing(
-        root, "sess-newest", "/Users/me/projZ", "2026-06-28",
+        root, "sess-newest", "/Users/me/projZ", _date(6, 28),
         n_turns=5, crossing_turn=2,
     )
     for i in range(5):
         _session_with_crossing(
-            root, f"sess-old-{i}", f"/Users/me/proj{i}", f"2026-06-{10 + i:02d}",
+            root, f"sess-old-{i}", f"/Users/me/proj{i}", _date(6, 10 + i),
             n_turns=5, crossing_turn=2,
         )
 
@@ -595,11 +623,11 @@ def test_quickstart_preview_falls_back_to_largest_when_none_substantial(
     monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 50)  # neither session qualifies
     root = tmp_path / "projects"
     _session_with_crossing(
-        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        root, "sess-recent", "/Users/me/projB", _date(6, 25),
         n_turns=5, crossing_turn=3,
     )
     _session_with_crossing(
-        root, "sess-old", "/Users/me/projA", "2026-06-10",
+        root, "sess-old", "/Users/me/projA", _date(6, 10),
         n_turns=8, crossing_turn=5,
     )
 
@@ -616,7 +644,7 @@ def test_quickstart_preview_omitted_when_no_session_crosses_threshold(tmp_path):
     # Healthy sessions: tiny cache reads relative to input/output, never near
     # the 70% nudge threshold.
     _make_session_file(root, "sess-a", "/Users/me/projA", [
-        _assistant("a1", "sess-a", "/Users/me/projA", "2026-06-20T10:00:00.000Z",
+        _assistant("a1", "sess-a", "/Users/me/projA", _ts(6, 20, "10:00:00.000"),
                    input_tokens=1000, output_tokens=200, cache_read=10),
     ])
 
@@ -645,7 +673,7 @@ def test_quickstart_session_story_teaser_appears_for_qualifying_session(
     monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
     root = tmp_path / "projects"
     _session_with_crossing(
-        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        root, "sess-recent", "/Users/me/projB", _date(6, 25),
         n_turns=5, crossing_turn=3,
     )
 
@@ -664,7 +692,7 @@ def test_quickstart_session_story_teaser_omitted_when_no_preview_candidate(tmp_p
     Session Story teaser either (nothing to reuse the selection from)."""
     root = tmp_path / "projects"
     _make_session_file(root, "sess-a", "/Users/me/projA", [
-        _assistant("a1", "sess-a", "/Users/me/projA", "2026-06-20T10:00:00.000Z",
+        _assistant("a1", "sess-a", "/Users/me/projA", _ts(6, 20, "10:00:00.000"),
                    input_tokens=1000, output_tokens=200, cache_read=10),
     ])
 
