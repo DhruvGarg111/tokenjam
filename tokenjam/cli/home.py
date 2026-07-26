@@ -106,9 +106,9 @@ def print_home() -> None:
     print_welcome_banner()
 
     if not _is_set_up():
-        console.print("[bold]Not set up yet.[/bold] Get started:")
+        console.print("[heading]Not set up yet.[/heading] Get started:")
         console.print()
-        console.print("  [bold]tj onboard[/bold]   "
+        console.print("  [accent]tj onboard[/accent]   "
                       "[dim]interactive setup: asks how you use AI agents "
                       "and wires the right path[/dim]")
         console.print()
@@ -122,21 +122,21 @@ def print_home() -> None:
         )
         return
 
-    console.print("[bold]You're set up.[/bold] Next best actions:")
+    console.print("[ok]\u2713 You're set up.[/ok] Next best actions:")
     console.print()
-    console.print("  [bold]tj status[/bold]      "
-                  "[dim]agent overview — what's running, recent cost[/dim]")
-    console.print("  [bold]tj tokenmaxx[/bold]   "
+    console.print("  [accent]tj status[/accent]      "
+                  "[muted]agent overview: what's running, recent cost[/muted]")
+    console.print("  [accent]tj tokenmaxx[/accent]   "
                   "[dim]your shareable efficiency tier[/dim]")
-    console.print("  [bold]tj optimize[/bold]    "
+    console.print("  [accent]tj optimize[/accent]    "
                   "[dim]cost-saving candidates from your usage[/dim]")
-    console.print("  [bold]tj serve[/bold]       "
-                  "[dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
+    console.print("  [accent]tj serve[/accent]       "
+                  "[muted]open Lens (web UI) at[/muted] [url]http://127.0.0.1:7391/[/url]")
     console.print()
     if _current_repo_unregistered():
         console.print(
-            "[dim]New repo? [/dim][bold]tj onboard --add-project[/bold]"
+            "[dim]New repo? [/dim][accent]tj onboard --add-project[/accent]"
             "[dim]   registers this one without repeating full setup[/dim]"
         )
         console.print()
-    console.print("[dim]Full command list:[/dim]  tj --help")
+    console.print("[muted]Full command list:[/muted]  [accent]tj --help[/accent]")
