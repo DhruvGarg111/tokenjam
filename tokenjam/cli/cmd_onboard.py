@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import click
 from rich.markup import escape
@@ -18,9 +18,6 @@ from tokenjam.core.config import find_config_file
 from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
-
-if TYPE_CHECKING:
-    from tokenjam.core.config import TjConfig
 
 # --- Claude Code backfill scope (#443) ---------------------------------------
 # `tj onboard --claude-code` used to backfill the ENTIRE on-disk history with
@@ -986,178 +983,38 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     return msg, True, total
 
 
-def _lens_review_url(port: int, *, want_daemon: bool) -> str:
-    """One-click-revert pointer for the relearn activation tail below — the
-    Lens Review inbox (`#/review`, the Improve lens's home) already renders a
-    single-click Revert next to every applied fix, so onboarding never needs
-    its own revert UI. When the daemon isn't running yet (``--no-daemon``),
-    say so instead of printing a URL that won't answer."""
+def _review_inbox_url(port: int, *, want_daemon: bool) -> str:
+    """Pointer to the web dashboard's review inbox (``#/review``), where every
+    detected fix is reviewed, applied, and one-click reverted. When the daemon
+    isn't running yet (``--no-daemon``), say so instead of printing a URL that
+    won't answer."""
     if want_daemon:
         return f"http://127.0.0.1:{port}/#/review"
     return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
 
 
-def _run_relearn_first_fix(config: TjConfig, *, port: int, want_daemon: bool) -> None:
-    """Onboarding tail (#179): the backfill's payoff is a fix, not just a
-    chart. Scans the freshly-backfilled Claude Code history for recurring
-    relearns (``core.optimize.analyzers.relearn``) and, for a high-confidence
-    hook-quality finding, drives the user through approve+enable of their
-    first fix — human-gated at every step, never auto-armed.
+def _print_review_inbox_pointer(*, port: int, want_daemon: bool) -> None:
+    """Onboarding tail: point at the web dashboard's review inbox instead of
+    re-deriving and rendering findings in the terminal.
 
-    Thin history (the detector found no recurring cluster — it needs
-    ``MIN_RECURRING_SESSIONS`` repeats of the same failure before it will
-    ever propose anything) gets a "still watching" note instead of a fix CTA.
-    Non-interactive runs (CI, a piped ``tj onboard``) only ever print the
-    summary — the enable ask requires a human at a terminal to confirm.
-
-    Never raises: any failure here is best-effort and must not sink the rest
-    of onboarding, which has already written config/statusline/daemon state
-    by the time this runs.
+    Onboard used to run the full relearn scan inline (tens of seconds over a
+    real corpus), dump the recurring-mistake list plus a #1-fix evidence
+    block, and ask an interactive "enable this fix now?" question. That scan
+    was purely compute-for-display: it called ``compute_relearn_finding``
+    directly, bypassing ``core.optimize.relearn_store``, so nothing it
+    produced was persisted or read by any other surface. The daemon's own
+    background job computes and caches the findings the review inbox renders,
+    on its own schedule, so onboarding just sends the user there. Removing
+    the ask also means onboard has one fewer blocking question.
     """
-    from dataclasses import asdict
-
-    from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT
-    from tokenjam.core.optimize import relearn_apply
-    from tokenjam.core.optimize.analyzers.relearn import compute_relearn_finding
-
-    console.print()
-    console.print("[dim]Scanning your history for recurring mistakes…[/dim]")
-    try:
-        # projects_root=CLAUDE_CODE_PROJECTS_ROOT: scan the exact directory
-        # the backfill above just read, not `compute_relearn_finding`'s own
-        # default (a module-level constant baked in at import time from
-        # ``Path.home()`` — it won't follow a test's ``Path.home`` patch the
-        # way this already-monkeypatchable module attribute does).
-        #
-        # distill_enabled=False: onboarding stays fast and dependency-free —
-        # the LLM-distill pass shells out to a real `claude` CLI per residual
-        # cluster (slow, and not guaranteed to be configured yet at this
-        # point in setup). Every distilled cluster is hardcoded to rung 1
-        # anyway (never enforcement-eligible), so it can never be the day-1
-        # candidate below — the daemon's periodic background recompute
-        # (`tj serve`'s relearn job) already runs the full distill-enabled
-        # scan and will surface those in the Lens Review inbox on its own
-        # schedule.
-        # persona="claude-code": `tj onboard` scanning the Claude Code
-        # transcript root is itself the claude-code persona's own onboarding
-        # flow (there is no window/conn here to classify from), so the write
-        # gate (see `build_proposals`) should stay open the way it always
-        # has for this call site.
-        finding = compute_relearn_finding(
-            projects_root=CLAUDE_CODE_PROJECTS_ROOT, distill_enabled=False,
-            persona="claude-code",
-        )
-    except Exception:
-        return
-
-    if not finding.clusters:
-        console.print(
-            "[bold]Recurring mistakes:[/bold] still watching — check back "
-            "after a few more sessions."
-        )
-        return
-
     console.print()
     console.print(
-        f"[bold]The mistakes your agent keeps making[/bold]  "
-        f"[dim]({finding.sessions_scanned} sessions scanned)[/dim]"
-    )
-    for cluster in finding.clusters[:5]:
-        distilled = (
-            " [dim](distilled — needs a closer look)[/dim]"
-            if (cluster.family_key or "").startswith("distilled:") else ""
-        )
-        console.print(
-            f"  [yellow]{cluster.occurrences:>4}x[/yellow]  {cluster.title}"
-            f"{distilled}  [dim]· {cluster.sessions} sessions · "
-            f"rung {cluster.rung}[/dim]"
-        )
-    total_tokens = finding.estimated_recoverable_tokens or 0
-    if total_tokens:
-        console.print(
-            f"  [dim]~{total_tokens:,} estimated recoverable tokens across "
-            f"{len(finding.clusters)} pattern"
-            f"{'s' if len(finding.clusters) != 1 else ''} — {finding.caveat}[/dim]"
-        )
-    lens_hint = _lens_review_url(port, want_daemon=want_daemon)
-
-    # High-confidence, hook-quality only (Hard constraint #2): rung 3-5 is the
-    # intervention ladder's enforcement tier (ENFORCEMENT_RUNGS), and every
-    # distilled (LLM-guessed) cluster is hardcoded to rung 1 by the detector
-    # itself — so filtering on rung already excludes distilled clusters. The
-    # explicit family_key check stays as defense-in-depth against a future
-    # detector change quietly handing a distilled cluster a higher rung. A
-    # cluster with no resolved write target can't be applied non-interactively
-    # (it would need a human to pick one), so it's excluded too.
-    candidate = next(
-        (
-            c for c in finding.clusters
-            if c.rung in relearn_apply.ENFORCEMENT_RUNGS
-            and not (c.family_key or "").startswith("distilled:")
-            and c.suggested_target
-        ),
-        None,
-    )
-    if candidate is None:
-        console.print()
-        console.print(
-            f"[dim]No day-1 hook-quality fix yet — review the rest anytime "
-            f"in the Lens Review inbox ({lens_hint}).[/dim]"
-        )
-        return
-
-    if not _is_interactive():
-        console.print()
-        console.print(
-            f"[dim]Re-run `tj onboard --claude-code` from a terminal, or "
-            f"open the Lens Review inbox ({lens_hint}), to approve + enable "
-            f"your first fix.[/dim]"
-        )
-        return
-
-    console.print()
-    console.print(f"[bold]Your #1 fix:[/bold] {candidate.title}")
-    console.print(
-        f"  [dim]Evidence — {candidate.occurrences} occurrences across "
-        f"{candidate.sessions} sessions:[/dim]"
-    )
-    for ex in candidate.examples[:3]:
-        console.print(f"    [dim]· session {ex.session_id} ({ex.repo}): {ex.snippet}[/dim]")
-    console.print(f"  Proposed fix: {candidate.proposed_fix}")
-    console.print(
-        "  [dim]What enabling does: Claude Code calls tj automatically right "
-        "after a matching tool failure. It never blocks or edits your code — "
-        "it only injects a short recovery note into context. The hook ships "
-        "disabled and stays that way unless you confirm below; you can "
-        "disable or revert it at any time.[/dim]"
-    )
-    if not click.confirm("  Enable this fix now?", default=False):
-        console.print(
-            f"[dim]  Skipped — enable anytime from the Lens Review inbox "
-            f"({lens_hint}) or by re-running tj onboard.[/dim]"
-        )
-        return
-
-    try:
-        result = relearn_apply.apply_relearn_fix(
-            config, asdict(candidate),
-            target_path=candidate.suggested_target, scope=candidate.scope,
-            go=True, force=False,
-        )
-        fix_id = result["record"]["id"]
-        relearn_apply.enable_enforcement(config, fix_id, confirm=True)
-    except relearn_apply.RelearnApplyRefused as exc:
-        console.print(f"[yellow]  Could not enable yet: {exc}[/yellow]")
-        console.print(f"[dim]  Retry from the Lens Review inbox ({lens_hint}).[/dim]")
-        return
-
-    console.print(
-        f"[green]✓[/green] Enabled: {candidate.title} "
-        f"[dim](wired at {candidate.suggested_target})[/dim]"
+        "[bold]Recurring mistakes:[/bold] tj keeps watching your sessions "
+        "in the background."
     )
     console.print(
-        f"  [dim]One-click revert any time: open {lens_hint} and click "
-        f"Revert next to this fix (fix id {fix_id}).[/dim]"
+        f"[dim]  Review and apply fixes in the web dashboard: "
+        f"{_review_inbox_url(port, want_daemon=want_daemon)}[/dim]"
     )
 
 
@@ -1312,14 +1169,17 @@ def _print_next_steps_nudge(
     """Curated post-onboard nudge (#240), persona-aware.
 
     Commands that work on the just-backfilled data *immediately* — no Claude
-    Code restart required. Claude Code users lead with the quota-diagnosis
-    commands (the reason tj is on their machine); ``tjb`` is an SDK-persona
-    workflow (re-run your own agent on a cheaper model) so it only appears on
-    the generic list. When onboarding just installed the daemon, Lens is
-    already serving — suggesting ``tj serve`` there invites a port conflict, so
-    the Lens line says "already running" instead. Curated to ~4 high-wow
-    commands rather than a `--help` wall; copy stays honest (no promised
-    savings — Critical Rule 14).
+    Code restart required. The Claude Code list is deliberately down to TWO
+    entries: the web dashboard (where the diagnosis actually lives, rendered
+    rather than re-derived per CLI invocation) and ``tj tokenmaxx`` (the
+    shareable card). ``tj context`` / ``tj quota-audit`` still exist as
+    commands; they are just not what a fresh user should be sent to first.
+    ``tjb`` is an SDK-persona workflow (re-run your own agent on a cheaper
+    model) so it only appears on the generic list. When onboarding just
+    installed the daemon, the dashboard is already serving — suggesting
+    ``tj serve`` there invites a port conflict, so that line says "already
+    running" instead. Copy stays honest (no promised savings — Critical
+    Rule 14).
     """
     console.print()
     if has_data:
@@ -1336,15 +1196,13 @@ def _print_next_steps_nudge(
     lens_url = f"http://127.0.0.1:{port}/"
     if daemon_running:
         lens_line = (
-            f"  [bold]Lens (web UI)[/bold]  [dim]already running → {lens_url}[/dim]"
+            f"  [bold]web dashboard[/bold]  [dim]already running → {lens_url}[/dim]"
         )
     else:
         lens_line = (
-            f"  [bold]tj serve[/bold]       [dim]open Lens (web UI) at {lens_url}[/dim]"
+            f"  [bold]tj serve[/bold]       [dim]open the web dashboard at {lens_url}[/dim]"
         )
     if persona == "claude_code":
-        console.print("  [bold]tj context[/bold]     [dim]where your quota goes — re-read vs real work[/dim]")
-        console.print("  [bold]tj quota-audit[/bold] [dim]how much Opus/Fable went to Sonnet-shaped sessions[/dim]")
         console.print(lens_line)
         console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable efficiency tier[/dim]")
     else:
@@ -2134,7 +1992,7 @@ def _onboard_claude_code(
     # `_onboard_combination` so the banner prints exactly once (#432).
     if standalone:
         if backfill_has_data:
-            _run_relearn_first_fix(config, port=port, want_daemon=want_daemon)
+            _print_review_inbox_pointer(port=port, want_daemon=want_daemon)
         _print_setup_complete_home(
             sessions_backfilled=backfill_sessions_total,
             has_data=backfill_has_data,
