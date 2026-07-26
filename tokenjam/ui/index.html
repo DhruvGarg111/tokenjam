@@ -8948,6 +8948,22 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
   const hasSnippet = inboxHasSnippet(prop);
   const span = inboxSpan(prop, spans);
 
+  // WHY tokenjam cannot apply this one, in the server's own words. Never
+  // paraphrased here: `apply_blocked_reason` is stamped by the adapter that
+  // refused (e.g. "no local source path is registered for this agent, so there
+  // is nothing to edit. Register one with source_path under the agent in your tj
+  // config, or paste the change yourself"), and a locally invented sentence
+  // would drift from both the CLI and the actual refusal.
+  const description = [prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ');
+  const blockedReason = String(prop.apply_blocked_reason || '').trim();
+  // Deduped against the description paragraph, because SOME adapters already
+  // append the reason into `advise_text` server-side ("Applying it here is not on
+  // offer: ...") and others only set the field. Checking the rendered text rather
+  // than guessing which adapter produced this row means the reason is always
+  // shown exactly once, whichever path it came from. Printing it twice is the
+  // same redundancy the relearn row had to have removed.
+  const showBlockedReason = !canApply && !!blockedReason && !description.includes(blockedReason);
+
   // The card deliberately carries only: title + badge, one description
   // paragraph, the fix (snippet or apply control), the estimate, and the
   // Mark applied / Dismiss actions. The fix modality is legible from the
@@ -8970,7 +8986,13 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
       ${/* One description paragraph: what we saw, what to do, and the honesty
             caveat (Rule 14 — the caveat always renders, never a separate
             heading-laden block). No section headings, no evidence link. */ ''}
-      <div class="sz-note" style="margin-top:8px">${[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')}</div>
+      <div class="sz-note" style="margin-top:8px">${description}</div>
+      ${/* The refusal, where the paragraph above did not already carry it. This
+            is what makes a non-applyable row honest rather than merely inert:
+            it names what tokenjam cannot do and, in the server's own wording,
+            what the reader can do instead. */ ''}
+      ${showBlockedReason ? html`
+        <div class="sz-note" style="margin-top:4px">tokenjam cannot apply this one: ${blockedReason}</div>` : null}
       ${/* The second past-tense sentence, resend only: the FULL cost of the
             behaviour, stated as cost. It is bigger than the headline because
             the headline only counts what was shown to be avoidable — and the
@@ -9059,11 +9081,18 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
         ${/* No apply path, no snippet, and not summarize's own review flow. This
               branch used to fall through to "Mark applied", which asked the
               reader to confirm having applied a fix the card never showed them.
-              Say what is actually true instead, and point at the one surface
-              that has more: the analyzer's own detail card. */ ''}
+              Point at the one surface that has more: the analyzer's own detail
+              card.
+
+              No invented "there is no fix" sentence here. The refusal, where
+              there is one, is already stated above in the server's own words
+              (`blockedReason`), and a generic restatement underneath it would
+              say less while sounding like more. The generic line survives only
+              for a row that carries no reason at all, where silence would leave
+              a blank action area reading as a bug. */ ''}
         <div style="margin-top:12px">
-          <div class="sz-note" style="font-size:12px">There is no ready-made change to apply here yet. What this cost is measured; the fix is not something tokenjam can hand over.</div>
-          <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+          ${!blockedReason && !description ? html`<div class="sz-note" style="font-size:12px">There is no ready-made change to apply here yet. What this cost is measured; the fix is not something tokenjam can hand over.</div>` : null}
+          <div style="display:flex;gap:12px;align-items:center">
             <a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>
             <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>

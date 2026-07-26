@@ -2935,12 +2935,42 @@ def test_no_row_renders_a_dead_end(html):
     assert "See the example sessions" in row
 
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
-    # summarize keeps its own hop into the curate/diff/apply flow.
+    # summarize keeps its own hop into the curate/diff/apply flow. That punt is
+    # deliberate and code-documented (`_summarize_to_proposals`: "Deliberately
+    # never `apply_capable`"), because an LLM call sits mid-pipeline between
+    # prepare() and a staged rewrite, so no single button can span it.
     assert "Review in Summarize" in card
-    # Everything else with no apply path and no snippet gets a plain statement
-    # plus the analyzer's own detail card, never the marker button.
-    assert "There is no ready-made change to apply here yet" in card
+    # Everything else with no apply path and no snippet points at the analyzer's
+    # own detail card, never the marker button. The generic sentence is a
+    # last-resort fallback, gated on the row carrying no reason AND no
+    # description, so it can never talk over the server's own wording.
+    assert "${!blockedReason && !description ? html`" in card
     assert "optimizeFindingHref(prop.analyzer)" in card
+
+
+def test_a_row_tj_cannot_apply_states_the_servers_own_blocker_reason(html):
+    # A row tokenjam cannot apply must say WHY, and must say it in the words the
+    # refusing adapter used. `apply_blocked_reason` carries e.g. "no local source
+    # path is registered for this agent, so there is nothing to edit. Register one
+    # with source_path under the agent in your tj config, or paste the change
+    # yourself" — which names the blocker AND the two exits. A paraphrase here
+    # would drift from both the CLI and the actual refusal.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "prop.apply_blocked_reason" in card
+    assert "tokenjam cannot apply this one: ${blockedReason}" in card
+    # Shown exactly once. Some adapters already append the reason into
+    # `advise_text` server-side ("Applying it here is not on offer: ..."), others
+    # only set the field, so the guard checks the RENDERED description rather
+    # than guessing which adapter produced the row.
+    assert "!description.includes(blockedReason)" in card
+    assert "const showBlockedReason = !canApply" in card
+    # And the model-swap honesty caveat travels in `advise_text`/`caveat`, both of
+    # which the description paragraph renders unconditionally (Critical Rule 14).
+    assert "[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')" in card
+
+    # The relearn half has the same obligation and its own field for it.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "cluster.advise_only_reason" in row
 
 
 def test_bulk_controls_vanish_when_nothing_is_apply_capable(html):
