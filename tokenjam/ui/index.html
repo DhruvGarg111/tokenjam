@@ -1457,6 +1457,18 @@ code.md-code {
 .sz-sub { font-size: 13.5px; color: var(--text-dim); font-weight: 400; }
 /* Neutral helper/caption text — calm (not warn-yellow), readable, capped width. */
 .sz-note { font-size: 13px; color: var(--text-dim); line-height: 1.55; max-width: 74ch; margin: 0; }
+/* The 74ch measure above is right for a standalone explanatory paragraph (a page
+   intro, an Optimize section note) and wrong inside a Review-inbox row, where the
+   text sits in a bordered card whose width the reader has already accepted: the
+   cap left a wide empty gutter with the amount stranded in the far corner.
+   Scoped to `.inbox-row` rather than lifted globally, and applied to the row's own
+   `.sz-note`/`.sz-copybox` children only, so every other surface keeps its
+   measure. `.inbox-row` is set by exactly the two row components, and the
+   collapsed tail plus the below-the-fold group render through those same
+   components, so they inherit this without a second rule. The relearn Approve
+   MODAL is deliberately not covered: it renders outside the card and is a reading
+   surface, so 74ch is still correct there. */
+.inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }
 
 /* Engine gate */
 .sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; }
@@ -8429,7 +8441,7 @@ function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDi
     ? '~' + fmtTokens(cluster.standing_cost_tokens_per_session) + ' tokens would ride into every future session, forever; modelled payback ' + cluster.payback_ratio.toFixed(2) + '×.'
     : null;
   return html`
-    <div class="opt-section" data-mechanism=${inboxMechanismTag(cluster)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
+    <div class="opt-section inbox-row" data-mechanism=${inboxMechanismTag(cluster)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${/* Only where a bulk action can genuinely reach this row. */ ''}
         ${canApply ? html`<input type="checkbox" checked=${checked} onChange=${onToggle} />` : null}
@@ -8969,7 +8981,7 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
   return html`
-    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>

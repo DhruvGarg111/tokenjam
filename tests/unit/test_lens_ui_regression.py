@@ -2948,6 +2948,31 @@ def test_no_row_renders_a_dead_end(html):
     assert "optimizeFindingHref(prop.analyzer)" in card
 
 
+def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
+    # Founder feedback on the running page: a row's description stopped well short
+    # of the card edge, leaving a wide empty gutter with the amount stranded in the
+    # far corner. Cause was the global `.sz-note { max-width: 74ch }`.
+    #
+    # That cap must SURVIVE: `.sz-note` is the whole app's standalone-paragraph
+    # class (page intros, Optimize section notes) and 74ch is the right measure for
+    # reading. Only the inbox row overrides it, because there the text sits in a
+    # bordered card whose width the reader has already accepted.
+    assert ".sz-note { font-size: 13px; color: var(--text-dim); line-height: 1.55; max-width: 74ch; margin: 0; }" in html
+    assert ".inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }" in html
+    # Scoped by a class the row components set, NOT by lifting the cap or by
+    # overloading `data-mechanism` (which is a state/debug attribute, not a
+    # styling hook).
+    assert "[data-mechanism] .sz-note" not in html
+    # Both row components carry the class, so the collapsed tail and the
+    # below-the-fold group inherit it: they render through these same components.
+    assert 'class="opt-section inbox-row" data-mechanism=' in html
+    assert "'opt-section inbox-row' + (focused ? ' rev-focus' : '')" in html
+    # The relearn Approve MODAL renders outside the row and keeps its measure: it
+    # is a reading surface, not a dense card.
+    modal = html[html.index("function RelearnApplyModal"):html.index("function daysAgoLabel")]
+    assert "inbox-row" not in modal
+
+
 def test_a_row_tj_cannot_apply_states_the_servers_own_blocker_reason(html):
     # A row tokenjam cannot apply must say WHY, and must say it in the words the
     # refusing adapter used. `apply_blocked_reason` carries e.g. "no local source
