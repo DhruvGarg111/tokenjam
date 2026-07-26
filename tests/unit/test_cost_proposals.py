@@ -1345,7 +1345,7 @@ def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
 # --- Real-data validation follow-ups: dollar-first headline, sort, formatting -
 
 def test_downsize_agent_row_carries_the_window_delta_never_the_row_projection():
-    # Reproduces the founder's real "Model over-sizing in claude-code
+    # Reproduces a real "Model over-sizing in claude-code
     # (claude-opus-4-7 to claude-haiku-4-5)" card: a per-agent price row is
     # the path that produced it (_downsize_agent_proposals, not the window-
     # wide aggregate _report() fixture above exercises). The card's one dollar

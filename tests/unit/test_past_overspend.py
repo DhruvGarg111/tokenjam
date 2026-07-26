@@ -526,9 +526,9 @@ def test_summarize_is_a_cost_analyzer_producing_a_real_peer_card():
     assert p.signature == "cost:summarize"
     assert p.past_overspend_usd == 3_969.74
     assert p.past_overspend_tokens == 6_986_110_266
-    # Copy names the review flow, not a claimable "Apply" — the founder
-    # decision's exact phrasing ("Review N oversized files, $X reads
-    # correctly; a bare Apply button would misrepresent the flow").
+    # Copy names the review flow, not a claimable "Apply" — the exact
+    # phrasing behind that decision: "Review N oversized files, $X reads
+    # correctly; a bare Apply button would misrepresent the flow".
     assert p.title == "Review 1 oversized file, $3,969.74"
     assert p.advise_only is True
     assert p.apply_capable is False
@@ -722,8 +722,8 @@ def test_ui_never_derives_a_past_overspend_figure_client_side(ui):
 
 
 def test_the_observed_figure_renders_from_the_server_block_only(ui):
-    # 2026-07-26 founder call: the Dashboard hero band was removed and the
-    # inbox band became a compact tile, so this figure now has exactly ONE
+    # The Dashboard hero band was removed and the inbox band became a compact
+    # tile, so this figure now has exactly ONE
     # render site. The guarantee that survives is the one that mattered: it is
     # read from the server's `past_overspend` block, never reduced client-side,
     # so what renders cannot drift from what the endpoint computed.

@@ -320,9 +320,9 @@ def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_pat
 def test_claude_code_asks_project_name_after_agent_questions(
     _isolated_claude_code, tmp_path,
 ):
-    """Prompt order: usage/plan questions first, THEN project name (founder
-    direction 2026-07 — the project-name question wedged between the two
-    agent questions broke their grouping)."""
+    """Prompt order: usage/plan questions first, THEN project name (2026-07
+    direction — the project-name question wedged between the two agent
+    questions broke their grouping)."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         # plan(3=max_5x, no ceiling/budget prompts) → project name (default).

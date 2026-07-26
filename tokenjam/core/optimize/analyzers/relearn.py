@@ -3,11 +3,11 @@ Cross-session relearn aggregator (self-improve loop, Phase 1: detect + surface).
 
 A "relearn" is a blocker a Claude Code agent silently re-hits across many
 unwatched sessions — a wrong-cwd Read, an Edit before a Read, a blocked
-sleep-chain, a stale-read race, a domain-blocked WebFetch, and so on. shiploop
-only codifies what a human noticed; this module catches what nobody watched.
+sleep-chain, a stale-read race, a domain-blocked WebFetch, and so on. Writing
+a durable fix (a CLAUDE.md rule, a hook) into the project only codifies what
+a human happened to notice; this module catches what nobody watched.
 
-Pipeline (validated 2026-07-12 against the full local corpus, see
-``.claude/self-improve-loop/SPEC.md`` §2/§9):
+Pipeline (validated 2026-07-12 against the full local corpus):
 
   1. EXTRACT  — for each session, build the Story (``core.transcript.
      build_session_story``) and fold it through ``core.method_spine.
@@ -30,7 +30,7 @@ Pipeline (validated 2026-07-12 against the full local corpus, see
      multiple generic signatures that share one root cause.
   4. NOVELTY  — clusters already codified in a reachable CLAUDE.md/
      learnings.md (walking up from each contributing session's cwd) are
-     dropped — the shiploop-miss check.
+     dropped — the already-documented check.
   5. PROPOSE  — surviving, recurring (>=3 distinct sessions) clusters get a
      conservative token estimate (occurrences x grounded per-turn cost, never
      the inflated afflicted-session footprint), a target rung (§6 of the
@@ -1179,8 +1179,8 @@ _FAMILY_NOVELTY_PHRASES: dict[str, str] = {
 
 
 def is_already_codified(cluster: _RawCluster, doc_text: str) -> bool:
-    """Heuristic novelty check (the shiploop-miss check): does a reachable
-    CLAUDE.md/learnings.md already name this exact gotcha?
+    """Heuristic novelty check (the already-documented check): does a
+    reachable CLAUDE.md/learnings.md already name this exact gotcha?
 
     Deliberately narrow — a single distinctive phrase per KNOWN family (see
     ``_FAMILY_NOVELTY_PHRASES``). Residual/distilled clusters (no known

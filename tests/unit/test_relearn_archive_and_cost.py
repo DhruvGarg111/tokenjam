@@ -407,9 +407,9 @@ def test_relearn_card_survives_a_finding_whose_clusters_all_lack_a_fix(db):
 def test_relearn_coverage_note_breaks_down_gated_clusters_by_reason(db):
     """The durable half of the fix: `_relearn_to_proposals` must name WHY the
     gated clusters carry no fix, not just that the card has a `coverage_note`
-    at all. Mirrors the founder's own measurement (55 clusters, 50 gated: 29
-    with no fix template, 17 net-negative, 4 budget-deferred) with a smaller
-    fixture of the same three reasons.
+    at all. Mirrors a real measurement (55 clusters, 50 gated: 29 with no fix
+    template, 17 net-negative, 4 budget-deferred) with a smaller fixture of
+    the same three reasons.
     """
     from tokenjam.core.optimize.cost_proposals import _relearn_to_proposals
     from tokenjam.core.optimize.write_budget import (

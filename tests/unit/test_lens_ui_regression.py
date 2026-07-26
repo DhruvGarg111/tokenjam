@@ -2402,7 +2402,7 @@ def test_no_duplicate_status_nav_entry(html):
 # AppliedItemRow (the same `est.`-labeled snapshot per row).
 def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
     # NOTE: ReviewInboxView always calls InboxStatTiles with suppressed=false
-    # on this page now (the founder-approved always-dollars carve-out — see
+    # on this page now (the always-dollars carve-out — see
     # test_review_inbox_ignores_dollar_suppression below). This only pins that
     # the component itself still HONORS a truthy `suppressed` if ever passed
     # one, i.e. the parameter isn't dead weight removed from the function.
@@ -2418,17 +2418,16 @@ def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
     assert "fmtUsd(appliedUsdSum)" in tile
 
 
-# --- Founder-approved carve-out: Review inbox ignores dollar suppression --- #
+# --- Approved carve-out: Review inbox ignores dollar suppression ---------- #
 def test_review_inbox_ignores_dollar_suppression(html):
-    # Founder decision: on the Review inbox ONLY, dollar figures render
-    # unconditionally — the subscription-share suppression rule
-    # (dollarsSuppressed(), core/framing.py's suppress_dollars_for_
-    # subscription_share) does not apply here, even though it still gates
-    # every other dollar figure in the app unchanged. Verified against the
-    # founder's real account (87% subscription-billed, Max 20x plan): the API
-    # payload correctly carries estimated_monthly_usd for every priced item,
-    # so once this page stops gating on dollarsSuppressed() those figures
-    # render regardless of plan tier.
+    # On the Review inbox ONLY, dollar figures render unconditionally — the
+    # subscription-share suppression rule (dollarsSuppressed(),
+    # core/framing.py's suppress_dollars_for_subscription_share) does not
+    # apply here, even though it still gates every other dollar figure in the
+    # app unchanged. Verified against a real account (87% subscription-billed,
+    # Max 20x plan): the API payload correctly carries estimated_monthly_usd
+    # for every priced item, so once this page stops gating on
+    # dollarsSuppressed() those figures render regardless of plan tier.
     view = html[html.index("function ReviewInboxView"):]
     start = view.index("const suppressed = ")
     end = view.index(";", start)
@@ -2543,16 +2542,16 @@ def test_dollars_suppressed_reads_the_server_display_rule(html):
 
 
 # --- the headline is the server's past-overspend band, not a JS sum -------- #
-# SUPERSEDES the old "ESTIMATED RECOVERABLE / mo" tile tests. The founder
-# decision this replaces them under: the product leads with what the flagged
-# behaviours ALREADY cost (past tense, window-observed), not with what a fix
-# might return. A past figure is checkable against a bill the user already
-# paid; a forward one asks them to trust a projection of a month that has not
-# happened, and trust is the scarce resource.
+# SUPERSEDES the old "ESTIMATED RECOVERABLE / mo" tile tests. What replaces
+# them: the product leads with what the flagged behaviours ALREADY cost (past
+# tense, window-observed), not with what a fix might return. A past figure is
+# checkable against a bill the user already paid; a forward one asks them to
+# trust a projection of a month that has not happened, and trust is the
+# scarce resource.
 def test_inbox_headline_is_the_past_overspend_tile(html):
-    # 2026-07-26 founder call: the full-width band was removed and this figure
-    # now occupies the compact tile slot beside "Fixes applied". The TENSE
-    # decision above is unchanged -- only the shape moved.
+    # The full-width band was removed and this figure now occupies the
+    # compact tile slot beside "Fixes applied". The TENSE decision above is
+    # unchanged -- only the shape moved.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
@@ -2637,10 +2636,10 @@ def test_estimated_tile_still_renders_with_only_excluded_waste_and_no_open_items
 
 
 # --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
-def test_review_inbox_intro_matches_the_founder_approved_mockup(html):
-    # Inbox redesign: the page title and subtitle are the founder-approved
-    # mockup's own copy verbatim (colon in place of the mockup transcription's
-    # em dash — house style forbids em dashes in tokenjam copy).
+def test_review_inbox_intro_matches_the_approved_mockup(html):
+    # Inbox redesign: the page title and subtitle are the approved mockup's
+    # own copy verbatim (colon in place of the mockup transcription's em dash
+    # — house style forbids em dashes in tokenjam copy).
     assert "<div class=\"page-title\"" in html
     assert ">Inbox<" in html
     intro = (
@@ -2841,7 +2840,7 @@ def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
     # The old bug: ranking flipped to dollars the moment ANY item in the list
     # had a dollar figure, leaving every other (tokens-only) item tied at
     # rank 0 and rendered in whatever order the API happened to return them
-    # (adapter-insertion order) — exactly the founder's observed bug. Tokens
+    # (adapter-insertion order) — a real observed bug. Tokens
     # are the one figure every item carries, priced or not, so the fix ranks
     # by tokens uniformly; dollars stay a per-item DISPLAY choice.
     #
@@ -2878,8 +2877,8 @@ def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
 
 
 def test_fmt_tokens_renders_billion_scale_human_readable(html):
-    # "~11268.0M tok" (the founder's actual rendered figure) must become
-    # "~11.3B tok" — fmtTokens needs a billion-scale branch above the
+    # "~11268.0M tok" (an actual rendered figure from a real corpus) must
+    # become "~11.3B tok" — fmtTokens needs a billion-scale branch above the
     # existing million/thousand ones.
     start = html.index("function fmtTokens(n)")
     end = html.index("\n}", start) + 2
@@ -2892,11 +2891,11 @@ def test_fmt_tokens_renders_billion_scale_human_readable(html):
     assert fn.index("1e9") < fn.index("1e6")
 
 
-def test_fmt_tokens_billion_scale_matches_the_founders_real_figure():
+def test_fmt_tokens_billion_scale_matches_a_real_reported_figure():
     # A Python-side reimplementation of the exact fmtTokens algorithm pinned
-    # above, run against the founder's own reported number, so this test
-    # fails loudly if the JS and this contract ever diverge in behavior, not
-    # just in the presence of the string "1e9".
+    # above, run against a real reported number, so this test fails loudly if
+    # the JS and this contract ever diverge in behavior, not just in the
+    # presence of the string "1e9".
     def fmt_tokens(n):
         if n is None:
             return "-"
@@ -2918,10 +2917,10 @@ def test_fmt_tokens_billion_scale_matches_the_founders_real_figure():
 def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
     # A Python-side contract test pinning the SAME "rank by
     # estimated_monthly_tokens descending" algorithm the JS now implements
-    # (sortByEstMonthly, pinned above), run against the founder's own real
-    # numbers from the bug report — the exact dataset that exposed the
-    # original "adapter insertion order" bug. Proves the fixed algorithm
-    # produces a genuinely monotonic order for real, not synthetic, data.
+    # (sortByEstMonthly, pinned above), run against real numbers from the bug
+    # report — the exact dataset that exposed the original "adapter insertion
+    # order" bug. Proves the fixed algorithm produces a genuinely monotonic
+    # order for real, not synthetic, data.
     items = [
         {"analyzer": "deadweight", "estimated_monthly_tokens": 80_800_000},
         {"analyzer": "trim",       "estimated_monthly_tokens": 11_062_000_000},
@@ -2935,7 +2934,7 @@ def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
     ranked = sorted(items, key=lambda i: i["estimated_monthly_tokens"], reverse=True)
     values = [i["estimated_monthly_tokens"] for i in ranked]
     assert values == sorted(values, reverse=True)   # monotonically non-increasing
-    # Pins the founder's own explicit ordering constraints from the bug report.
+    # Pins the explicit ordering constraints from the bug report.
     assert ranked[0]["analyzer"] == "trim"
     reuse_values = [i["estimated_monthly_tokens"] for i in ranked if i["analyzer"] == "reuse"]
     assert reuse_values == sorted(reuse_values, reverse=True)
@@ -2959,15 +2958,15 @@ def test_split_top_and_tail_slices_an_already_sorted_list(html):
 
 
 def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
-    # End-to-end contract test for the founder's real scenario: an account
-    # whose framing says suppress_dollars_for_subscription_share (87%
-    # subscription-billed, verified against the founder's own live store)
-    # still gets dollar headlines on the Review inbox for every priced item,
-    # tokens for the one documented exception (resend/TRIM), and tokens for
-    # a genuinely unpriced item (no computable rate at all). A Python
-    # reimplementation of estMonthlyLine's decision, pinned so a future
-    # divergence between this contract and the shipped JS fails loudly.
-    founder_framing = {
+    # End-to-end contract test for a real scenario: an account whose framing
+    # says suppress_dollars_for_subscription_share (87% subscription-billed,
+    # verified against a real live store) still gets dollar headlines on the
+    # Review inbox for every priced item, tokens for the one documented
+    # exception (resend/TRIM), and tokens for a genuinely unpriced item (no
+    # computable rate at all). A Python reimplementation of estMonthlyLine's
+    # decision, pinned so a future divergence between this contract and the
+    # shipped JS fails loudly.
+    real_framing = {
         "pricing_mode": "subscription", "plan_tier": "max_20x",
         "subscription_share_pct": 87.0,
         "display_rule": "suppress_dollars_for_subscription_share",
@@ -2988,10 +2987,10 @@ def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
     resend_structural = {"analyzer": "resend", "estimated_monthly_usd": 186.357458, "estimated_monthly_tokens": 11_061_129_491}
     unpriced_placement = {"analyzer": "placement", "estimated_monthly_usd": None, "estimated_monthly_tokens": 78_812_584}
 
-    assert headline_unit(priced_downsize, founder_framing) == "dollars"
-    assert headline_unit(priced_deadweight, founder_framing) == "dollars"
-    assert headline_unit(resend_structural, founder_framing) == "tokens"
-    assert headline_unit(unpriced_placement, founder_framing) == "tokens"
+    assert headline_unit(priced_downsize, real_framing) == "dollars"
+    assert headline_unit(priced_deadweight, real_framing) == "dollars"
+    assert headline_unit(resend_structural, real_framing) == "tokens"
+    assert headline_unit(unpriced_placement, real_framing) == "tokens"
 
 
 # --- Recoverable-waste band drops no-lever analyzers for claude-code -------- #
