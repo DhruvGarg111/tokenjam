@@ -1479,8 +1479,10 @@ code.md-code {
 /* A snippet is the row's payload and stays visible, but it must not decide the
    row's height: a six-line downsize fix made that row 2.5x a relearn row. Capped
    with its own scroll rather than collapsed, so the fix is still readable in place
-   and `CopySnippetButton` still copies the full text either way. */
-.inbox-row .sz-copybox { max-height: 104px; }
+   and `CopySnippetButton` still copies the full text either way. Three lines
+   (12px x 1.5 plus the box's own 14px padding): four still left the one row whose
+   only fix is a long snippet as the tallest on the list. */
+.inbox-row .sz-copybox { max-height: 82px; }
 /* Uniform collapsed height for a row's prose, so the LIST can be scanned rather
    than read. Row descriptions come straight from the analyzers and their lengths
    are wildly uneven: `resend` concatenates evidence + advise_text + caveat into
@@ -8191,20 +8193,46 @@ const INBOX_LEAD_CHARS = 200;
 function splitLead(text, budget = INBOX_LEAD_CHARS) {
   const full = String(text || '').replace(/\s+/g, ' ').trim();
   if (full.length <= budget) return { lead: full, full, more: false };
-  const re = /[^.!?]+[.!?]+(?:\s+|$)/g;
-  let lead = '';
-  let m;
-  while ((m = re.exec(full)) !== null) {
-    if (lead && (lead + m[0]).trim().length > budget) break;
-    lead += m[0];
-    if (lead.trim().length >= budget) break;
+  // The lead is built from OFFSETS into `full`, so it is a prefix of `full` by
+  // construction and cannot begin anywhere but the start.
+  //
+  // The first version accumulated `/[^.!?]+[.!?]+(?:\s+|$)/g` matches instead,
+  // which silently DROPPED whatever preceded the first matchable sentence. A
+  // sentence containing a period that is not a boundary has no match starting at
+  // index 0 — "MCP server posthog (configured in .mcp.json) made 0 tool calls."
+  // fails because the only period is followed by a letter — so `exec` advanced
+  // and matched from mid-string, and the row rendered "json) made 0 tool calls"
+  // as its opening words. Two of eight live rows read that way. Collecting
+  // boundaries rather than matches removes the whole failure mode; there is no
+  // starting position left for the scan to skip past.
+  const ends = [];
+  for (let i = 0; i < full.length; i++) {
+    if (full[i] !== '.' && full[i] !== '!' && full[i] !== '?') continue;
+    let j = i;
+    while (j + 1 < full.length && '.!?'.indexOf(full[j + 1]) >= 0) j++;   // "?!", "..."
+    // A boundary is terminal punctuation FOLLOWED BY whitespace (or the end of
+    // the text). That is what keeps "$1,842.56", "claude-4.7" and ".mcp.json"
+    // whole: the period there is followed by a digit or a letter.
+    if (j + 1 >= full.length || /\s/.test(full[j + 1])) ends.push(j + 1);
+    i = j;
   }
-  lead = lead.trim();
-  if (!lead) {
-    const cut = full.lastIndexOf(' ', budget);
-    lead = (cut > 0 ? full.slice(0, cut) : full.slice(0, budget)).trim() + '…';
+  // Take whole sentences while they fit; if even the FIRST one overruns the
+  // budget, take it anyway rather than cutting a sentence in half.
+  let cut = 0;
+  for (const end of ends) {
+    if (cut && end > budget) break;
+    cut = end;
+    if (end >= budget) break;
   }
-  return { lead, full, more: lead !== full };
+  if (cut) {
+    const lead = full.slice(0, cut).trim();
+    return { lead, full, more: lead !== full };
+  }
+  // No sentence boundary anywhere (a raw error dump off a relearn example). A
+  // word-boundary cut is the only honest option left.
+  const sp = full.lastIndexOf(' ', budget);
+  const lead = (sp > 0 ? full.slice(0, sp) : full.slice(0, budget)).trim() + '…';
+  return { lead, full, more: true };
 }
 
 // The description block: a short lead, and "Read more" only where there is
@@ -8496,10 +8524,22 @@ function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, 
 // Falls back through `proposed_fix` to `title` so the block is never empty, and
 // derives nothing it cannot read off the cluster. `splitLead` handles the fact
 // that an error dump has no sentence boundaries.
+// A snippet has to read as WORDS to be a description. Some clusters' captured
+// snippet is a bare identifier — one live row's was `gen_ai.tool.call` — which
+// answers "what is this" for nobody, and the requirement is a sentence, not
+// merely a non-empty string. Two words is the whole test: anything that clears it
+// is the failure as the agent actually saw it, which is the most honest sentence
+// available; anything that does not falls through to the derived fix or the title
+// rather than being dressed up here.
+function isProse(s) {
+  return String(s || '').trim().split(/\s+/).filter(Boolean).length >= 2;
+}
+
 function relearnDescription(cluster) {
   if (!cluster) return '';
-  const firstSnippet = ((cluster.examples || []).find(e => e && e.snippet) || {}).snippet;
-  return String(firstSnippet || cluster.proposed_fix || cluster.title || '').trim();
+  const snippet = ((cluster.examples || []).find(e => e && isProse(e.snippet)) || {}).snippet;
+  const candidates = [snippet, cluster.proposed_fix, cluster.title];
+  return String(candidates.find(isProse) || cluster.title || '').trim();
 }
 
 const RELEARN_BADGE_BY_RUNG = { 1: 'PROMPT TWEAK', 2: 'SNIPPET', 3: 'GUARDRAIL', 4: 'GUARDRAIL', 5: 'GUARDRAIL' };
@@ -9183,7 +9223,27 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
           <p>${prop.past_overspend_basis}</p>
           ${prop.observed_cost_basis ? html`<p>${prop.observed_cost_basis}</p>` : null}
         </details>` : null}
-      ${prop.suggestion ? html`
+      ${/* THE SNIPPET. Primary where the reader is the one who has to make the
+            edit; a SECONDARY, collapsed exit where tokenjam offers to make it
+            for them.
+
+            `deadweight`'s mcp_remove row carries both, and rendering both open
+            said the same thing twice at full height — the copy box and the
+            Remove-entry control were 173px of the row's 349px, making it the
+            tallest on the list while its neighbours offered strictly less. The
+            manual command is not dropped (a reader who would rather run it
+            themselves must still be able to, and some will not trust a write),
+            it just stops competing with the button for the row's height. */ ''}
+      ${prop.suggestion ? (canApply ? html`
+        <details class="po-basis">
+          <summary>Or copy the command and run it yourself</summary>
+          <div class="opt-title" style="font-size:12.5px">
+            <span>Fix</span>
+            <${CopySnippetButton} text=${prop.suggestion} />
+          </div>
+          <div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>
+        </details>
+      ` : html`
         <div style="margin-top:10px">
           <div class="opt-title" style="font-size:12.5px">
             <span>Fix</span>
@@ -9191,7 +9251,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
           </div>
           <div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>
         </div>
-      ` : null}
+      `) : null}
 
       ${canApply ? (hasApplyKind ? html`
         <div class="opt-section" style="margin:10px 0 0">

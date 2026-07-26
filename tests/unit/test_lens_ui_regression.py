@@ -2905,8 +2905,20 @@ def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html)
     # The card's two blocks are independent conditionals, not a chain, which is what
     # lets one row show a copy box AND a confirm-target apply control together.
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
-    assert "${prop.suggestion ? html`" in card
+    assert "${prop.suggestion ? (canApply ? html`" in card
     assert "${canApply ? (hasApplyKind ? html`" in card
+    # The snippet block is gated on `prop.suggestion` ALONE — `canApply` only picks
+    # which of the two shapes it takes, so an apply control can never suppress it.
+    # Asserted structurally rather than on the outer conditional's exact text,
+    # because that text is what changed when the second shape was added.
+    snippet_block = card[card.index("${prop.suggestion ? (canApply"):card.index("${canApply ? (hasApplyKind")]
+    assert snippet_block.count("<${CopySnippetButton} text=${prop.suggestion} />") == 2
+    assert snippet_block.count('<div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>') == 2
+    # On a row that offers BOTH, the manual command is the secondary exit and sits
+    # in a collapsed disclosure: rendering both open made deadweight's row the
+    # tallest on the list while offering strictly less than its neighbours. Still
+    # present, still copyable, no longer competing for the row's height.
+    assert "<summary>Or copy the command and run it yourself</summary>" in snippet_block
 
 
 def test_snippet_rows_render_the_snippet_as_the_deliverable(html):
@@ -3104,10 +3116,24 @@ def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
     split = split[:split.index("\n// The description block")]
     # Boundary is punctuation FOLLOWED BY whitespace, which is what keeps
     # "$1,842.56 of that cost" and "claude-4.7" from being treated as sentence ends.
-    assert "/[^.!?]+[.!?]+(?:\\s+|$)/g" in split
+    assert "if (j + 1 >= full.length || /\\s/.test(full[j + 1])) ends.push(j + 1)" in split
     # Never mid-word either: text with no sentence boundary at all (a raw error
     # dump) falls back to a word-boundary cut.
     assert "full.lastIndexOf(' ', budget)" in split
+    # THE lead must be a PREFIX of the text, sliced at a collected boundary offset.
+    # Accumulating `/[^.!?]+[.!?]+(?:\s+|$)/g` matches instead silently dropped
+    # everything before the first MATCHABLE sentence: a description opening
+    # "`posthog` MCP server (configured at .../.mcp.json) made 0 tool calls." has
+    # its only period followed by a letter, so `exec` found nothing at index 0,
+    # advanced, and the row rendered "json) made 0 tool calls" as its opening
+    # words. Two of eight live rows read that way. The banned construct is the
+    # assertion, because a prefix-slice implementation cannot reproduce the bug.
+    # Banned on the MECHANISM, not on the old regex literal: the source comment
+    # quotes that literal while explaining the bug, so a text ban on it would match
+    # the explanation. `exec` in a `g`-flagged scan is the part that skips.
+    assert "re.exec(full)" not in split, \
+        "a match-accumulating scan skips text before the first matchable sentence"
+    assert "full.slice(0, cut)" in split
     # The expanded state renders the WHOLE text, never lead + rest concatenated,
     # because the fallback lead carries a trailing ellipsis.
     assert "return { lead, full, more: lead !== full }" in split
@@ -3136,6 +3162,17 @@ def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
     # does have (requirement: give every row a first line worth reading).
     assert "Recurred ${cluster.occurrences} time" in row
     assert "across ${cluster.sessions} session" in row
+
+    # A DESCRIPTION has to be WORDS. One live cluster's captured snippet was the
+    # bare identifier `gen_ai.tool.call`, which answers "what is this" for nobody,
+    # and a non-empty check accepted it. Two words is the gate, and a snippet that
+    # fails it falls through to the derived fix rather than being dressed up.
+    prose = html[html.index("function isProse(s)"):html.index("\n}", html.index("function isProse(s)"))]
+    assert "split(/\\s+/).filter(Boolean).length >= 2" in prose
+    desc_fn = html[html.index("function relearnDescription(cluster)"):]
+    desc_fn = desc_fn[:desc_fn.index("\n}")]
+    assert "isProse(e.snippet)" in desc_fn
+    assert "candidates.find(isProse)" in desc_fn
 
     # The operative facts stay OUTSIDE the clamp: a reader must not expand anything
     # to learn why a row has no Apply button, and a <details> is already collapsed.
