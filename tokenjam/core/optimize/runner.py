@@ -113,6 +113,21 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # retired; re-enable if the signature is redesigned to a subsequence
         # or prefix match that tolerates heterogeneous coding work.
         "script",
+        # Reuse asserts something no telemetry can establish for an
+        # interactive coding agent: that two planning calls were semantically
+        # interchangeable. Measured against a real corpus, the clustering that
+        # backs the claim has no content signal (every member's prompt-prefix
+        # hash is null, so clustering falls back to bare tool-name sequence),
+        # no time window, no prior-failure exclusion, and the large majority
+        # of its dollar figure comes from a null-tool-signature catch-all
+        # bucket ("nothing followed the plan") rather than any actual
+        # repeated plan. DECISION: disabled for this persona; the concept
+        # stays worth rebuilding behind a real content signal, a recency
+        # window, and a prior-failure exclusion. This gate applies to
+        # `claude-code` only — the defects measured above are specific to
+        # this corpus; the SDK case is a separate, unmeasured question and is
+        # deliberately left ungated.
+        "reuse",
     }),
 }
 

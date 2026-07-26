@@ -46,7 +46,7 @@ NO_LEVER = set(PERSONA_DISABLED_ANALYZERS["claude-code"])
 # The pin: what the product decision names explicitly. Any change to the gate
 # is a product decision and must be made here deliberately.
 assert NO_LEVER == {
-    "cache", "cache-recommend", "placement", "trim", "verbosity", "script",
+    "cache", "cache-recommend", "placement", "trim", "verbosity", "script", "reuse",
 }
 
 # `placement` is the odd one out: it is not an ANALYZER_REGISTRY name at all
