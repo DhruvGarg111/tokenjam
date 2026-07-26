@@ -118,11 +118,6 @@ def resend_tail_tokens_per_turn(main_turns: list[TurnComposition]) -> list[int]:
     ]
 
 
-def resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
-    """Session-scoped total of :func:`resend_tail_tokens_per_turn`."""
-    return sum(resend_tail_tokens_per_turn(main_turns))
-
-
 def tool_driven_stretch_mask(
     main_turns: list[TurnComposition],
     *,

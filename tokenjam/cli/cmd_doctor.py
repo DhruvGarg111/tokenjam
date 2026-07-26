@@ -174,7 +174,7 @@ def _check_proxy_wiring(config: object) -> dict:
     from tokenjam.proxy.wiring import find_orphaned_wiring, proxy_base_url
     try:
         orphaned = find_orphaned_wiring(config)
-    except Exception:  # noqa: BLE001 — best-effort; never fail doctor on this
+    except Exception:  # best-effort; never fail doctor on this
         orphaned = []
     if orphaned:
         return {

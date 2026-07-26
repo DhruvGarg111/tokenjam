@@ -777,7 +777,7 @@ table.archive-list .a-id { color: var(--text); }
 a.chart-title { text-decoration: none; cursor: pointer; }
 a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .chart { width: 100%; }
-.u-tooltip, .uplot { font-family: 'Geist Mono', monospace; }
+.uplot { font-family: 'Geist Mono', monospace; }
 .chart-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; gap: 12px; }
 .chart-meta { display: flex; align-items: baseline; gap: 12px; }
 .chart-total { font-family: 'Geist Mono', monospace; font-size: 16px; font-weight: 600; color: var(--accent); }
@@ -886,11 +886,6 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
-.measured-tag {
-  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--success); border: 1px solid var(--success);
-  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
-}
 /* Distinct from .estimated-tag (amber, "estimated recoverable") on purpose —
    budget-projection is a forecast of exposure against a ceiling, never a
    recoverable-waste estimate, and the two must never read as the same kind
@@ -913,30 +908,15 @@ a.rec-tile.ok:hover { border-color: var(--success); }
    what you could get back" surface in this app is accent-blue (.rec-tile,
    .rec-amount, the inbox's blue-bordered tile) or success-green (measured);
    this one is a DIAGNOSIS of money already spent, so it takes neither. The
-   figure renders in body text under a warn-toned left rule, in its own
-   full-width band that never shares a row or a grid with a forward-looking
-   figure. If a reader can mistake this for a claimable number, the feature is
-   net-negative — the colour separation is load-bearing, not decoration. */
-.po-band {
-  background: var(--surface); border: 1px solid var(--border);
-  border-left: 3px solid var(--warn); border-radius: 8px;
-  padding: 14px 16px; margin: 0 0 14px;
-}
-.po-eyebrow {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--text-dim); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-}
-.po-figure {
-  font-family: 'Geist Mono', monospace; font-weight: 700; color: var(--text);
-  font-size: 32px; line-height: 1.15; margin: 6px 0 0;
-}
-.po-band.compact .po-figure { font-size: 24px; }
-.po-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; }
+   figure renders in plain body text (var(--text)), never in an opportunity
+   colour, and carries its own "observed" tag and derivation. If a reader can
+   mistake this for a claimable number, the feature is net-negative — the
+   colour separation is load-bearing, not decoration. */
 .po-amount { font-family: 'Geist Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text); }
-/* "Observed", never "estimated": distinct from .estimated-tag (amber) and
-   .measured-tag (green, the removed verify layer's vocabulary — do not reuse
-   it here, this is not a realized-savings claim). Neutral on purpose: an
-   observation makes no claim that needs a colour. */
+/* "Observed", never "estimated": distinct from .estimated-tag (amber), and
+   deliberately not success-green either — green was the removed verify
+   layer's vocabulary and this is not a realized-savings claim. Neutral on
+   purpose: an observation makes no claim that needs a colour. */
 .po-observed-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--text-dim); border: 1px solid var(--border);
@@ -1073,14 +1053,6 @@ a.health-tile.attn { border-color: var(--warn); }
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
-}
-.story-expand {
-  font-size: 11px;
-  color: var(--brand);
-  cursor: pointer;
-  font-family: 'Geist Mono', monospace;
-  margin-top: 4px;
-  display: inline-block;
 }
 .story-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .story-chip {
@@ -1289,10 +1261,8 @@ a.health-tile.attn { border-color: var(--warn); }
 .ap-deleg { margin-top: 7px; border: 1px solid var(--chart-5); border-radius: 8px; background: var(--surface3); padding: 8px 10px; display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
 .ap-caret { color: var(--chart-5); font-size: 10px; width: 12px; transition: transform .15s; display: inline-block; }
 .ap-deleg.open .ap-caret { transform: rotate(90deg); }
-.ap-deleg-label { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; color: var(--text); }
 /* Nested child method (recursion): indent + a left depth rail. */
 .ap-nested { margin: 2px 0 4px 6px; padding: 10px 0 2px 14px; border-left: 2px solid var(--chart-5); }
-.ap-capped { font-size: 10.5px; color: var(--text-dim); font-style: italic; margin-top: 7px; padding: 6px 10px; border: 1px dashed var(--border); border-radius: 8px; }
 /* Cross-terminal children (M2b): a separate run-linked session, amber not pink,
    spliced under its own divider so the eye reads it apart from in-session subs. */
 .ap-xterm-divider { margin: 16px 0 6px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--warn); font-family: 'Geist Mono', monospace; border-top: 1px solid var(--border); padding-top: 11px; }
@@ -4209,7 +4179,6 @@ function MapBoardSection({ sessionId }) {
   // does this). Step mode keeps the per-event ticks below.
   const binWidth = mbAutoBinWidth(activeDur);
   const histBins = [];
-  const costBins = [];
   if (mode === 'time') {
     const nb = Math.max(1, Math.ceil(activeDur / binWidth));
     for (let j = 0; j < nb; j++) {
@@ -7504,9 +7473,6 @@ function buildLeaderboard(resp, useTokens) {
 function analyticsCsv(resp) {
   const framing = resp.framing || {};
   const mode = framing.pricing_mode || 'unknown';
-  const monthlyUsd = framing.plan_monthly_usd || 0;
-
-  const hasStack = !!resp.stack_by;
 
   const head = [
     'bucket_epoch',

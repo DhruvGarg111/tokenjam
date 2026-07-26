@@ -406,12 +406,6 @@ def audit_to_dict(audit: OpusQuotaAudit) -> dict[str, Any]:
         "candidate_sessions": audit.candidate_sessions,
         "candidate_tokens": audit.candidate_tokens,
         "percent_quota_misallocated": audit.percent_quota_misallocated,
-        # DEPRECATED alias — kept one release (through 0.6.x) because
-        # ``percent_quota_reclaimable`` shipped publicly in 0.5.4. Consumers
-        # should read ``percent_quota_misallocated``; this mirror will be
-        # removed. Emitted on BOTH the direct and serve paths so the parity
-        # contract (byte-identical audit_to_dict output) still holds.
-        "percent_quota_reclaimable": audit.percent_quota_misallocated,
         "percent_sessions": audit.percent_sessions,
         # Segment accounting + confidence (design §5.2 / §6). Every key here must
         # survive the round-trip below, or the data-access parity test fails —
@@ -456,11 +450,8 @@ def audit_from_dict(data: dict[str, Any]) -> OpusQuotaAudit:
         opus_tokens=int(data.get("opus_tokens", 0) or 0),
         candidate_sessions=int(data.get("candidate_sessions", 0) or 0),
         candidate_tokens=int(data.get("candidate_tokens", 0) or 0),
-        # Prefer the new key; fall back to the deprecated alias so a payload
-        # produced by a pre-rename (0.5.4) daemon still reconstructs.
         percent_quota_misallocated=float(
-            data.get("percent_quota_misallocated",
-                     data.get("percent_quota_reclaimable", 0.0)) or 0.0
+            data.get("percent_quota_misallocated", 0.0) or 0.0
         ),
         percent_sessions=float(data.get("percent_sessions", 0.0) or 0.0),
         segment_count=int(data.get("segment_count", 0) or 0),

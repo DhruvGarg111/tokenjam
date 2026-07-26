@@ -90,7 +90,7 @@ class TokenJamClient:
                     "tj serve returned %d on emit_litellm_span",
                     resp.status_code,
                 )
-        except Exception as exc:  # noqa: BLE001 — non-blocking by design
+        except Exception as exc:  # non-blocking by design
             logger.debug("emit_litellm_span failed: %s", exc)
 
 

@@ -130,7 +130,7 @@ def _declared_budget_plans(config: Any) -> list[tuple[str, str]]:
             plan = (budget_block[provider] or {}).get("plan")
             if plan:
                 entries.append((str(provider), str(plan)))
-    except Exception:  # noqa: BLE001
+    except Exception:  # 1
         return []
     return entries
 
@@ -206,7 +206,7 @@ def config_declared_plan(config: Any) -> str | None:
             plan = (budget_block[provider] or {}).get("plan")
             if plan:
                 return str(plan)
-    except Exception:  # noqa: BLE001 — best-effort fallback, never fatal
+    except Exception:  # best-effort fallback, never fatal
         return None
     return None
 
