@@ -5796,10 +5796,23 @@ function CostView({ params }) {
       setTenants({ loading: false, data: null, error: e.message || String(e) });
     }
   }, [since, agentId]);
-  useEffect(() => { loadTenants(); }, [loadTenants]);
+  // Same cadence as `load` below, in ONE effect: Refresh/the 30s poll used to
+  // only re-run `load`, so Cost totals updated while this panel kept showing
+  // whatever it fetched on mount (or on the last `since`/`agentId` change).
+  // Re-running this effect also covers the since/agentId-changed case on its
+  // own (both `load` and `loadTenants` change identity then), so no separate
+  // mount-only effect is needed.
+  const refreshAll = useCallback((opts = {}) => {
+    load(opts);
+    loadTenants(opts);
+  }, [load, loadTenants]);
 
   // Poll bypasses the GET cache so the 30s refresh always hits the network.
-  useEffect(() => { load(); const t = setInterval(() => load({ noCache: true }), 30000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    refreshAll();
+    const t = setInterval(() => refreshAll({ noCache: true }), 30000);
+    return () => clearInterval(t);
+  }, [refreshAll]);
 
   const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
@@ -5847,7 +5860,7 @@ function CostView({ params }) {
         ${COST_ATTRIBUTION_DIMS.map(([v, label]) => html`<option value=${v}>${label}</option>`)}
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
-      <button class="btn" onClick=${load}>Refresh</button>
+      <button class="btn" onClick=${refreshAll}>Refresh</button>
     </div>
 
     ${error ? html`

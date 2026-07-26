@@ -3007,3 +3007,20 @@ def test_optimize_view_and_recoverable_tiles_read_same_payload_field(html):
     # disagree about which analyzers a persona can act on.
     assert html.count("persona_disabled_analyzers") >= 2
     assert "const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);" in html
+
+
+# --- Cost view: top-tenants panel must share Refresh/poll cadence ---------- #
+# `loadTenants` used to have its own mount-only effect, independent of
+# `load`'s 30s poll and the Refresh button -- so Cost totals updated on every
+# refresh/poll while the top-tenants-by-spend panel kept showing whatever it
+# fetched on the last mount or since/agentId change.
+def test_cost_view_tenants_panel_shares_refresh_and_poll_cadence(html):
+    fn_start = html.index("function CostView(")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+
+    assert "const loadTenants = useCallback(" in fn
+    # The Refresh button (and the poll it shares an effect with) must drive a
+    # callback that reaches BOTH load and loadTenants -- never `load` alone.
+    assert "onClick=${load}>Refresh" not in fn
+    assert "load(opts);" in fn and "loadTenants(opts);" in fn
