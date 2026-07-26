@@ -7961,6 +7961,15 @@ function estMonthlyLine(item, suppressed) {
 // reader to trust a model of their next month, an observation asks them to
 // check a bill they already paid.
 //
+// The headline is the AVOIDABLE amount, never the total cost. Waste is only
+// ever what could have been avoided; unavoidable spend is cost. This band once
+// led with `resend`'s full cost-of-re-sending figure, which was ~16x its
+// avoidable figure — implicitly asserting that 94% of it had been shown to be
+// unavoidable. It had not: that money was analysed on the model-role card,
+// filtered out below the context floor, or outside the re-read tail
+// definition. The total still renders, below the headline, with COST wording
+// and never as waste or overspend (`observedCostSentence`).
+//
 // Read straight off the payload, never derived here (the single-compute-path
 // rule): `past_overspend_usd`/`_tokens`/`_basis` per card, and the headline
 // totals off the response's own `past_overspend` block, which the server
@@ -7986,23 +7995,23 @@ function pastWindowLabel(days) {
   return 'the last ' + (Number.isInteger(n) ? n : n.toFixed(0)) + ' days';
 }
 
-// The SECOND past-tense sentence, rendered ONLY where the observed cost and
-// the avoidable share are genuinely different quantities — today `resend`
-// alone, whose avoidable share is gated by a measured offloadable share and
-// comes out roughly 10x smaller. For every other analyzer the two are one
-// quantity and this returns null, so the card shows one number instead of
-// saying the same thing twice.
+// The SECOND past-tense sentence, rendered ONLY where the total observed COST
+// and the avoidable figure are genuinely different quantities — today `resend`
+// alone. For every other analyzer the two are one quantity and this returns
+// null, so the card shows one number instead of saying the same thing twice.
 //
-// Deliberately NOT a ratio framing that ties the small figure to the big one
-// as a share being clawed back: that phrasing reintroduces recovery language
-// onto a surface whose whole premise is that it makes no claim about the
-// future. Two plain past-tense sentences, nothing joining them.
-function pastAvoidableSentence(item) {
-  const usd = item.past_avoidable_usd;
-  const toks = item.past_avoidable_tokens;
+// Cost wording only, never waste/overspend: this total includes spend nobody
+// established was avoidable. It is also deliberately NOT a ratio framing
+// ("only 6% of it was recoverable"): a ratio between two figures computed over
+// DIFFERENT POPULATIONS means nothing, which is exactly the reading
+// `coverage_note` exists to prevent. Two plain past-tense sentences, nothing
+// joining them arithmetically.
+function observedCostSentence(item) {
+  const usd = item.observed_cost_usd;
+  const toks = item.observed_cost_tokens;
   if (usd == null && toks == null) return null;
-  if (usd != null) return 'About ' + fmtUsd(usd) + ' of that was avoidable.';
-  return 'About ' + fmtTokens(toks) + ' tokens of that were avoidable.';
+  if (usd != null) return 'In total, this behaviour cost ' + fmtUsd(usd) + ' over the same window.';
+  return 'In total, this behaviour cost ~' + fmtTokens(toks) + ' tokens over the same window.';
 }
 
 // The one headline renderer, shared by the Dashboard hero and the Review
@@ -8017,26 +8026,36 @@ function PastOverspendBand({ block, compact, note }) {
   const win = pastWindowLabel(block.window_days);
   const top = (block.by_analyzer || []).slice().sort((a, b) => (b.usd || 0) - (a.usd || 0))[0];
   const topTitle = top ? ((ANALYZER_META[top.analyzer] && ANALYZER_META[top.analyzer].title) || capitalize(top.analyzer)) : '';
+  // The total observed cost of the same behaviours, on the same window. Shown
+  // as a separate COST line, never added to the figure above (the avoidable
+  // total is a subset of it) and never labelled waste — a good part of it was
+  // simply never analysed for avoidability.
+  const cost = block.observed_cost_usd;
   return html`
     <div class=${'po-band' + (compact ? ' compact' : '')}>
       <div class="po-eyebrow">
-        What this already cost you · ${win}
+        What you could have avoided · ${win}
         <span class="po-observed-tag" title=${block.disclosure || ''}>observed</span>
       </div>
       ${/* Past tense in the figure's own caption, not only in the eyebrow: a
             screenshot of this band has to carry its own tense. */ ''}
       <div class="po-figure" title=${block.basis || ''}>${usd != null ? fmtUsd(usd) : '—'}</div>
       <div class="po-sub">
-        Flagged behaviours cost you this over ${win}${toks ? ', across ~' + fmtTokens(toks) + ' tokens' : ''}${causes ? ' and ' + causes + ' cause' + (causes === 1 ? '' : 's') : ''}.
+        This much of what you spent over ${win} was avoidable${toks ? ', across ~' + fmtTokens(toks) + ' tokens' : ''}${causes ? ', from ' + causes + ' cause' + (causes === 1 ? '' : 's') : ''}.
         ${topTitle ? 'Biggest single cause: ' + topTitle + '.' : ''}
-        Priced at the rates you were billed at; some of it was unavoidable. This is not a projection and not a claim about what a fix returns.
+        Priced at the rates you were billed at. This is not a projection and not a claim about what a fix returns.
       </div>
+      ${cost != null ? html`
+        <div class="po-sub" title=${block.cost_disclosure || ''}>
+          Those same behaviours cost ${fmtUsd(cost)} in total over ${win}. That is cost, not waste: the rest of it was not shown to be avoidable, so it is reported separately and never added to the figure above.
+        </div>` : null}
       ${note || null}
       ${block.basis ? html`
         <details class="po-basis">
           <summary>How this number was derived</summary>
           <p>${block.basis}</p>
           ${block.disclosure ? html`<p>${block.disclosure}</p>` : null}
+          ${block.cost_disclosure ? html`<p>${block.cost_disclosure}</p>` : null}
         </details>` : null}
     </div>`;
 }
@@ -8433,9 +8452,9 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
   // already paid costs them no trust to accept, and a forward figure depends
   // on how many sessions they run next month, which nothing here can know.
   const est = pastOverspendFigure(prop);
-  // Rendered only where the observed cost and the avoidable share are
+  // Rendered only where the total observed cost and the avoidable figure are
   // genuinely different quantities (resend); null everywhere else.
-  const avoidable = pastAvoidableSentence(prop);
+  const observedCost = observedCostSentence(prop);
   // Two apply-capable shapes, routed through two different endpoints:
   //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
   //    is a workspace surface an orchestrator reads, not a value tokenjam can
@@ -8520,24 +8539,25 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
               to figures a fix returns, and this one is money already gone. */ ''}
         <span style="margin-left:auto;text-align:right">
           <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
-          <div class="dim" style="font-size:10px">cost you this over ${pastWindowLabel(windowDays)}${est.sub ? ' · ' + est.sub : ''}</div>
+          <div class="dim" style="font-size:10px">avoidable over ${pastWindowLabel(windowDays)}${est.sub ? ' · ' + est.sub : ''}</div>
         </span>
       </div>
       ${/* One description paragraph: what we saw, what to do, and the honesty
             caveat (Rule 14 — the caveat always renders, never a separate
             heading-laden block). No section headings, no evidence link. */ ''}
       <div class="sz-note" style="margin-top:8px">${[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')}</div>
-      ${/* The second past-tense sentence, resend only: some of that volume was
-            structurally necessary (multi-turn work re-sends context by
-            construction), so stating the whole figure as avoidable would be a
-            claim a user can disprove. Past tense here too — this is a window
-            observation gated by a measured share, not a forecast. */ ''}
-      ${avoidable ? html`<div class="sz-note" style="margin-top:4px" title=${prop.past_avoidable_basis || ''}>${avoidable}</div>` : null}
+      ${/* The second past-tense sentence, resend only: the FULL cost of the
+            behaviour, stated as cost. It is bigger than the headline because
+            the headline only counts what was shown to be avoidable — and the
+            coverage line immediately after says why the rest wasn't, so the
+            gap is never left to read as "94% of this was unavoidable". */ ''}
+      ${observedCost ? html`<div class="sz-note" style="margin-top:4px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
+      ${prop.coverage_note ? html`<div class="dim" style="font-size:11px;margin-top:4px">${prop.coverage_note}</div>` : null}
       ${prop.past_overspend_basis ? html`
         <details class="po-basis">
           <summary>How this number was derived</summary>
           <p>${prop.past_overspend_basis}</p>
-          ${prop.past_avoidable_basis ? html`<p>${prop.past_avoidable_basis}</p>` : null}
+          ${prop.observed_cost_basis ? html`<p>${prop.observed_cost_basis}</p>` : null}
         </details>` : null}
       ${prop.suggestion ? html`
         <div style="margin-top:10px">
@@ -8689,7 +8709,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
         note=${html`<${ExcludedWasteNote} excluded=${excluded} />`} />
     ` : hasExcluded ? html`
       <div class="po-band compact">
-        <div class="po-eyebrow">What this already cost you</div>
+        <div class="po-eyebrow">What you could have avoided</div>
         <div class="dim" style="font-size:12px;margin-top:4px">No open cost advisory or recurring-mistake fix right now.</div>
         <${ExcludedWasteNote} excluded=${excluded} />
       </div>
@@ -9012,7 +9032,7 @@ function ReviewInboxView({ params }) {
               split point is a rendering decision); it never re-derives a
               figure, and the page's headline still comes from the server. */ ''}
         <${CollapsedTailRow} tail=${tailCost} suppressed=${suppressed} itemLabel="cost advisories"
-          summary=${fmtUsd(tailCost.reduce((s, p) => s + (p.past_overspend_usd || 0), 0)) + ' already spent, combined'}
+          summary=${fmtUsd(tailCost.reduce((s, p) => s + (p.past_overspend_usd || 0), 0)) + ' avoidable, combined'}
           onDismissAll=${() => dismissMany(tailCost.map(p => p.signature))}
           onMarkAllApplied=${() => markManyApplied(tailCost)}
           renderItem=${p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} windowDays=${costPastOverspend && costPastOverspend.window_days} />`} />

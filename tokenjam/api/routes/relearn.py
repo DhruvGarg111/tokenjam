@@ -470,17 +470,20 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     for the full contract.
 
     ``past_overspend`` is a SEPARATE, past-tense block over the same open set
-    (``cost_proposals.past_overspend_rollup``): what the flagged behaviours
-    already cost over the analyzed window, observed rather than projected. It
-    is the figure both the Overview hero and the Review inbox headline render,
-    which is why it is computed here once rather than on each surface. Nothing
-    in it is ever added to anything in ``rollup``: the two are different
-    questions ("what did this cost me" vs "what does a fix return"), and for
-    ``resend`` they are different quantities over the same window, so summing
-    them would double-count. Each proposal also carries the same figures
-    per-card (``past_overspend_usd``/``_tokens``/``_basis``, plus
-    ``past_avoidable_*`` where the avoidable share is genuinely a different
-    quantity) so a card never re-derives its own headline."""
+    (``cost_proposals.past_overspend_rollup``): the AVOIDABLE portion of what
+    the flagged behaviours already cost over the analyzed window, observed
+    rather than projected. It is the figure both the Overview hero and the
+    Review inbox headline render, which is why it is computed here once rather
+    than on each surface. Nothing in it is ever added to anything in
+    ``rollup``: the two are different questions ("what of this could I have
+    avoided" vs "what does a fix return going forward"). The block also carries
+    ``observed_cost_usd`` — the full observed COST of the same behaviours,
+    including the part never shown to be avoidable — as its own key, never
+    summed into the headline and never labelled waste. Each proposal carries
+    the same figures per-card (``past_overspend_usd``/``_tokens``/``_basis``,
+    plus ``observed_cost_*`` and ``coverage_note`` where the total cost is a
+    genuinely different quantity) so a card never re-derives its own
+    headline."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
