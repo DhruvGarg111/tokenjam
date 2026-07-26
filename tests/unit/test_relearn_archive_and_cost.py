@@ -29,6 +29,8 @@ from tokenjam.core.optimize.analyzers.relearn import (
     GROUNDED_TOKENS_PER_OCCURRENCE,
     MIN_RECURRING_SESSIONS,
     FailureEpisode,
+    RelearnCluster,
+    RelearnFinding,
     _corpus_window_days,
     analyze_relearns,
     build_proposals,
@@ -320,6 +322,12 @@ def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
     # from `estimated_recoverable_usd`, which this card deliberately omits).
     assert card.observed_cost_usd == pytest.approx(finding.past_overspend_usd)
     assert card.observed_cost_basis
+    # coverage_note is REQUIRED whenever observed_cost_usd is set (this
+    # module's own stated contract) — this card carries a cost with no
+    # avoidable figure beside it, exactly the shape that must never ship
+    # unexplained.
+    assert card.coverage_note
+    assert "COVERAGE" in card.coverage_note
     assert card.past_overspend_usd is None
     assert not card.apply_capable and card.advise_only
     # No forward claim on this card: relearn's re-read tail is the same re-sent
@@ -365,3 +373,50 @@ def test_relearn_card_survives_a_finding_whose_clusters_all_lack_a_fix(db):
     # The second number (what a fix would return) is correctly zero/absent —
     # they are different quantities and only one of them is gated.
     assert not cards[0].past_overspend_usd
+    # And the card says why there is no avoidable figure at all, rather than
+    # leaving that gap to imply the cost was unavoidable.
+    assert cards[0].coverage_note
+
+
+def test_relearn_coverage_note_breaks_down_gated_clusters_by_reason(db):
+    """The durable half of the fix: `_relearn_to_proposals` must name WHY the
+    gated clusters carry no fix, not just that the card has a `coverage_note`
+    at all. Mirrors the founder's own measurement (55 clusters, 50 gated: 29
+    with no fix template, 17 net-negative, 4 budget-deferred) with a smaller
+    fixture of the same three reasons.
+    """
+    from tokenjam.core.optimize.cost_proposals import _relearn_to_proposals
+    from tokenjam.core.optimize.write_budget import (
+        REASON_BUDGET_FULL,
+        REASON_NET_NEGATIVE,
+        REASON_PLACEHOLDER,
+    )
+
+    def _cluster(sig, reason, offered=False):
+        return RelearnCluster(
+            signature=sig, family_key=None, title=sig, sessions=1,
+            occurrences=1, repos=["demo"], rung=1, scope="project",
+            proposed_fix="fix" if offered else "",
+            write_offered=offered, write_blocked_reason=reason,
+        )
+
+    clusters = (
+        [_cluster(f"nofix{i}", REASON_PLACEHOLDER) for i in range(2)]
+        + [_cluster(f"neg{i}", REASON_NET_NEGATIVE) for i in range(3)]
+        + [_cluster("budget0", REASON_BUDGET_FULL)]
+        + [_cluster("offered0", "", offered=True)]
+    )
+    finding = RelearnFinding(
+        clusters=clusters, past_overspend_usd=46.30, past_overspend_tokens=1_000,
+        past_overspend_basis="observed",
+    )
+    proposals = _relearn_to_proposals(finding)
+    assert len(proposals) == 1
+    note = proposals[0].coverage_note
+    assert note
+    assert "2 have no derived fix template" in note
+    assert "3 are net-negative" in note
+    assert "1 are budget-deferred" in note
+    # The load-bearing closing sentence: absence of a figure is not evidence
+    # of necessity.
+    assert "not a measurement of what was unavoidable" in note

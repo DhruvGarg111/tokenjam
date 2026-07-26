@@ -1015,6 +1015,14 @@ def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
     counted once. ``baseline`` carries the re-read share so the overlap is
     inspectable rather than merely asserted.
 
+    Because ``_with_past_overspend`` stamps ``observed_cost_usd`` from
+    ``cost_of_waste_usd`` for any cost-only card, this card is bound by the
+    same contract ``coverage_note`` states elsewhere on this module: a cost
+    figure with no avoidable figure beside it must say why, not leave the gap
+    to imply the spend was unavoidable. ``_relearn_coverage_note`` supplies
+    it, naming the rule-27 disjointness against ``resend`` and breaking the
+    gated clusters down by why each carries no fix of its own.
+
     Deliberately never ``apply_capable``: relearn's apply path is its own
     reviewed rung-1/rung-2 write flow (``POST /relearn/apply``), which this
     adapter must not shadow with a second, thinner one — the same routing
@@ -1094,9 +1102,84 @@ def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
         cost_of_waste_usd=past_usd,
         cost_of_waste_tokens=past_tokens or None,
         cost_of_waste_basis=str(getattr(finding, "past_overspend_basis", "") or ""),
+        coverage_note=_relearn_coverage_note(clusters),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
     )]
+
+
+#: Short, reader-facing labels for the ``write_budget`` suppression reasons a
+#: gated ``RelearnCluster`` carries, keyed by the exact reason string so a
+#: future reason added there degrades to "for another reason" instead of
+#: silently going unlabelled.
+def _relearn_gate_labels() -> dict[str, str]:
+    from tokenjam.core.optimize import write_budget as wb
+
+    return {
+        wb.REASON_PLACEHOLDER: "have no derived fix template",
+        wb.REASON_NET_NEGATIVE: (
+            "are net-negative to codify (the standing cost of the rule "
+            "would exceed what it recovers)"
+        ),
+        wb.REASON_BUDGET_FULL: (
+            "are budget-deferred (this window's permanent-rule budget is "
+            "already allocated to higher-value fixes)"
+        ),
+        wb.REASON_FAMILY_MERGED: "are covered by another cluster's shared rule",
+        wb.REASON_CEILING_REACHED: "are blocked by the standing-context ceiling",
+    }
+
+
+def _relearn_coverage_note(clusters: list[Any]) -> str:
+    """State, in words, why this card carries no avoidable figure and what the
+    gated clusters' money is doing instead of leaving the gap unexplained.
+
+    The defect this closes: a cost line with a blank where the avoidable
+    figure belongs invites the reader to read the blank as "this was
+    unavoidable" — the exact CLAUDE.md rule 27 failure mode already fixed once
+    for ``resend`` (see ``_coverage_note`` in ``analyzers/context_resend.py``).
+    relearn's case isn't a filtered SUBSET like resend's, though: the forward
+    claim is entirely absent from this card by design (see
+    ``_relearn_to_proposals``'s docstring) because it would price the same
+    re-read tokens ``resend`` already claims in full. Absence of a claim is
+    not evidence the spend was unavoidable — it is what this card does not
+    attempt to price at all, and the second paragraph names exactly which
+    clusters are gated and why, so "no fix yet" is never confused with "no
+    cost".
+    """
+    plural = "" if len(clusters) == 1 else "s"
+    parts = [
+        f"COVERAGE. The cost figure above covers all {len(clusters)} recurring-"
+        f"failure cluster{plural} observed over this window. No avoidable "
+        "figure is reported on this card: relearn's own forward claim would "
+        "price the same re-read tokens the resend card already claims in "
+        "full, and counting them on both cards would double the same spend "
+        "(CLAUDE.md rule 27), so this aggregate deliberately carries none."
+    ]
+    labels = _relearn_gate_labels()
+    counts: dict[str, int] = {}
+    for c in clusters:
+        if getattr(c, "write_offered", True):
+            continue
+        reason = str(getattr(c, "write_blocked_reason", "") or "")
+        label = labels.get(reason, "are gated for another reason")
+        counts[label] = counts.get(label, 0) + 1
+    if counts:
+        gated = sum(counts.values())
+        gated_plural = "" if gated == 1 else "s"
+        breakdown = "; ".join(f"{n} {label}" for label, n in counts.items())
+        parts.append(
+            f"Of those, {gated} cluster{gated_plural} carry no permanent fix "
+            f"of their own: {breakdown}. Each still cost real money; the gate "
+            "is a gap in what we could act on, not a finding that the failure "
+            "was harmless."
+        )
+    parts.append(
+        "The absence of an avoidable figure here is not a measurement of what "
+        "was unavoidable. It is what this analyzer did not, or could not, "
+        "price."
+    )
+    return " ".join(parts)
 
 
 # --------------------------------------------------------------------------- #

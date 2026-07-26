@@ -37,6 +37,7 @@ from tokenjam.core.optimize.cost_proposals import (
     estimated_recoverable_rollup,
     past_overspend_rollup,
 )
+from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
 from tokenjam.core.optimize.types import (
     DowngradeFinding,
     OptimizeReport,
@@ -79,6 +80,40 @@ def _resend_finding():
     )
 
 
+def _relearn_finding():
+    """A relearn finding shaped like a real gated run: some clusters have no
+    fix template, some are net-negative to codify — both still cost real
+    money, which lands on this finding's ``past_overspend_*`` (a cost-only
+    figure; relearn never carries an avoidable one, see
+    ``cost_proposals._relearn_to_proposals``). Used to catch exactly the
+    defect this ticket exists for: `_relearn_to_proposals` shipped this
+    finding's cost figure with no `coverage_note` for every relearn card ever
+    rendered, because nothing enforced the module's own stated contract.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster
+    from tokenjam.core.optimize.write_budget import REASON_NET_NEGATIVE, REASON_PLACEHOLDER
+
+    clusters = [
+        RelearnCluster(
+            signature="no-fix", family_key=None, title="No fix template",
+            sessions=3, occurrences=5, repos=["demo"], rung=1, scope="project",
+            proposed_fix="", write_offered=False,
+            write_blocked_reason=REASON_PLACEHOLDER,
+        ),
+        RelearnCluster(
+            signature="net-neg", family_key=None, title="Net-negative rule",
+            sessions=4, occurrences=6, repos=["demo"], rung=1, scope="project",
+            proposed_fix="Add a rule.", write_offered=False,
+            write_blocked_reason=REASON_NET_NEGATIVE,
+        ),
+    ]
+    return RelearnFinding(
+        clusters=clusters, past_overspend_usd=46.30,
+        past_overspend_tokens=100_000,
+        past_overspend_basis="occurrences x measured re-read tail, observed",
+    )
+
+
 # --- 0. the waste-labelled figure is the AVOIDABLE one --------------------- #
 
 def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
@@ -113,6 +148,7 @@ def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
     )
     report = OptimizeReport(window=window, downgrade=dg)
     report.findings["resend"] = _resend_finding()
+    report.findings["relearn"] = _relearn_finding()
 
     props = cost_proposals_from_report(report)
     assert props, "fixture produced no proposals — the guard would be vacuous"
@@ -135,6 +171,42 @@ def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
 
     block = past_overspend_rollup(props)
     assert block["past_overspend_usd"] <= block["observed_cost_usd"]
+
+
+def test_every_proposal_carrying_observed_cost_has_a_coverage_note():
+    """The module's own contract, enforced rather than merely stated: every
+    ``CostProposal`` with ``observed_cost_usd`` set must carry a non-empty
+    ``coverage_note`` (``cost_proposals.py``'s module docstring, on the
+    ``coverage_note`` field: "Required whenever `observed_cost_usd` is set").
+
+    This is deliberately its OWN test rather than folded into the guard above:
+    that guard's loop only reaches its `coverage_note` check for a proposal
+    that ALSO carries `past_overspend_usd` (an avoidable figure) — `continue`s
+    past a cost-ONLY card first. relearn is exactly such a card (it never sets
+    an avoidable figure at all, see `_relearn_to_proposals`), so that guard
+    could pass with a whole report full of relearn cards that shipped
+    `observed_cost_usd` and a blank `coverage_note` — precisely how this
+    defect reached production undetected. This test checks every
+    `observed_cost_usd`-bearing proposal directly, with no such gate.
+    """
+    window = WindowSummary(
+        since=NOW - timedelta(days=30), until=NOW, days=30, sessions=200,
+        spans=1_000, total_tokens=1, total_cost_usd=50.0, thin_data=False,
+        active_days=28,
+    )
+    report = OptimizeReport(window=window, downgrade=None)
+    report.findings["resend"] = _resend_finding()
+    report.findings["relearn"] = _relearn_finding()
+
+    props = cost_proposals_from_report(report)
+    priced_cost_only = [p for p in props if p.observed_cost_usd is not None]
+    assert priced_cost_only, "fixture produced no observed-cost card — the guard would be vacuous"
+    assert {p.analyzer for p in priced_cost_only} >= {"resend", "relearn"}
+    for p in priced_cost_only:
+        assert p.coverage_note, (
+            f"{p.analyzer} ships observed_cost_usd={p.observed_cost_usd} with "
+            "no coverage_note, violating cost_proposals.py's own stated contract"
+        )
 
 
 def test_the_rollup_headline_is_avoidable_and_the_cost_total_stays_separate():

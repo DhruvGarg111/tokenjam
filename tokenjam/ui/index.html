@@ -7983,6 +7983,13 @@ function pastOverspendFigure(item) {
   const toks = item.past_overspend_tokens;
   if (usd != null) return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
   if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
+  if (item.observed_cost_usd != null || item.observed_cost_tokens != null) {
+    // A cost-only card (relearn): no avoidable figure was computed at all, on
+    // purpose (its own coverage_note says why). A bare dash beside the cost
+    // line above would read as "nothing recoverable" rather than "not
+    // priced", so state the absence in words instead.
+    return { big: 'Not priced', sub: '', noAvoidable: true };
+  }
   return { big: '—', sub: '' };
 }
 
@@ -8540,7 +8547,7 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
               to figures a fix returns, and this one is money already gone. */ ''}
         <span style="margin-left:auto;text-align:right">
           <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
-          <div class="dim" style="font-size:10px">avoidable over ${pastWindowLabel(windowDays)}${est.sub ? ' · ' + est.sub : ''}</div>
+          <div class="dim" style="font-size:10px">${est.noAvoidable ? 'no avoidable figure on this card' : ('avoidable over ' + pastWindowLabel(windowDays) + (est.sub ? ' · ' + est.sub : ''))}</div>
         </span>
       </div>
       ${/* One description paragraph: what we saw, what to do, and the honesty
