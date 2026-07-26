@@ -15,8 +15,9 @@ npx tokenjam
 Bare `npx tokenjam` reads your existing Claude Code sessions from
 `~/.claude/projects/*.jsonl` (the same files [ccusage](https://github.com/ryoppippi/ccusage)
 reads) into a throwaway in-memory database and prints your quota composition
-(re-reading context vs. net-new work) plus a session timeline. Nothing is
-written to disk and no background process starts.
+(re-reading context vs. net-new work) plus the largest single thing that
+history already overspent on, and the fix for it. Nothing is written to disk
+and no background process starts.
 
 **How the launcher resolves:** `npx tokenjam` runs the
 [`tokenjam` npm wrapper](https://www.npmjs.com/package/tokenjam); a thin launcher
