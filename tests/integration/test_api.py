@@ -444,8 +444,8 @@ async def test_get_traces_outlier_rule_reports_insufficient_sample(db, client):
 
 async def test_get_trace_ranks_top_cost_spans_within_trace(db, client):
     """A single trace with a cheap span and an expensive span surfaces the
-    expensive one in top_cost_span_ids (#1 of the trace-cost-ranking brief:
-    rank spans within a trace by cost, not just traces within a window)."""
+    expensive one in top_cost_span_ids: rank spans within a trace by cost,
+    not just traces within a window."""
     trace_id = "cccccccc" * 4
     cheap = make_llm_span(agent_id="a", trace_id=trace_id, cost_usd=0.001)
     pricey = make_llm_span(agent_id="a", trace_id=trace_id, cost_usd=3.5)
