@@ -809,10 +809,11 @@ def test_the_basis_is_reachable_from_the_card_not_only_on_hover(ui):
 
 
 def test_the_observed_figure_is_visually_separated_from_recoverable_tiles(ui):
-    # Not the same colour treatment, not the same row: every "what you could
-    # get back" surface is accent-blue (.rec-amount) or success-green; this
-    # one renders in body text in its own full-width band.
-    css = ui[ui.index(".po-band {"):ui.index(".po-basis {")]
+    # Not the same colour treatment: every "what you could get back" surface is
+    # accent-blue (.rec-amount) or success-green; this one renders in plain body
+    # text. Asserted over the rules that actually render — .po-amount carries
+    # the figure and .po-observed-tag its label.
+    css = ui[ui.index(".po-amount {"):ui.index(".po-basis {")]
     assert "var(--accent)" not in css
     assert "var(--success)" not in css
     assert "color: var(--text);" in css

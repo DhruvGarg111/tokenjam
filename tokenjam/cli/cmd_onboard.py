@@ -848,7 +848,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
 
     try:
         config = load_config(str(config_path.resolve()))
-    except Exception as exc:  # noqa: BLE001 — surface a clean message, no traceback
+    except Exception as exc:  # surface a clean message, no traceback
         console.print(f"[red]Could not load config[/red] at {display_path(config_path)}: {exc}")
         ctx.exit(1)
         return
@@ -2889,27 +2889,6 @@ def _restart_tj_server(
     if stopped:
         return "stopped stale server; please run `tj serve` manually"
     return "restart attempted; verify with `tj status`"
-
-
-def _restart_tj_server_for_secret_rotation(config_path: str, no_daemon: bool) -> str:
-    """Backward-compatible alias for secret-rotation restarts."""
-    return _restart_tj_server(config_path, no_daemon, reason="secret")
-
-
-def _codex_mcp_toml_block() -> str:
-    """Return the legacy [mcp_servers.tj] TOML block for ~/.codex/config.toml.
-
-    Retained only to *recognize* a previously tj-written block so onboard can
-    retire it (see ``_codex_strip_tj_mcp_from_content``). tj no longer registers
-    an MCP server for Codex — an in-loop MCP is a per-turn token burden on
-    subscription users (+36% measured); tj is out-of-band for Codex via OTel.
-    """
-    return (
-        "[mcp_servers.tj]\n"
-        "# Managed by tj — gives Codex access to TokenJam observability tools\n"
-        'command = "tj"\n'
-        'args = ["mcp"]\n'
-    )
 
 
 def _codex_strip_tj_mcp_from_content(content: str) -> tuple[str, bool]:

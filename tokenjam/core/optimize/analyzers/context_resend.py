@@ -91,7 +91,6 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
     introduced_tokens,
     main_thread_turns,
     premium_driver_role,
-    resend_tail_tokens,
     resend_tail_tokens_per_turn,
     session_context_tokens,
 )
@@ -159,7 +158,6 @@ AVOIDABLE_FRACTION_OF_REPEAT = 0.683
 # compute it from one implementation; the private aliases below keep every
 # existing call site and test working unchanged.
 _resend_tail_tokens_per_turn = resend_tail_tokens_per_turn
-_resend_tail_tokens = resend_tail_tokens
 _introduced_tokens = introduced_tokens
 
 RESEND_HONESTY_CAVEAT = (

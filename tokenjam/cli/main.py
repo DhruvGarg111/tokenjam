@@ -182,7 +182,7 @@ cli.add_command(cmd_relearn, name="relearn")
 
 # cmd_drift is provided by task 05 — register if available
 try:
-    from tokenjam.cli.cmd_drift import cmd_drift  # noqa: E402
+    from tokenjam.cli.cmd_drift import cmd_drift  # 2
     cli.add_command(cmd_drift, name="drift")
 except ImportError:
     pass
