@@ -1570,7 +1570,6 @@ code.md-code {
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <a href="#/traces" class="nav-link" data-view="traces" data-lens="observe"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
-  <a href="#/analytics" class="nav-link" data-view="analytics" data-lens="observe"><span class="icon">&#9636;</span> Analytics</a>
   <a href="#/alerts" class="nav-link" data-view="alerts" data-lens="observe"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
@@ -7850,10 +7849,14 @@ function downloadCsv(filename, text) {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-// `route` lets the pivot live on another screen (the merged Dashboard preview
-// reuses it under #/dashboard); `embedded` drops the standalone title + window
-// picker so the host screen owns those. Default args preserve the standalone
-// #/analytics behavior exactly.
+// `route` lets the pivot live on another screen (the Dashboard reuses it under
+// #/dashboard, which is now the ONLY way to reach this component: the
+// standalone #/analytics route was retired, since it was a second nav entry
+// for the exact same explorer the Dashboard already embeds. Old #/analytics
+// links alias to the Dashboard instead of 404ing — see primaryKeyFor).
+// `embedded` drops the standalone title + window picker so the host screen
+// owns those. Default args keep this signature call-compatible even though
+// nothing invokes it bare anymore.
 function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null }) {
   const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
     agent_id: '', provider: '', model: '', tool: '' };
@@ -8090,13 +8093,14 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 }
 
 // ============================
-// Merged Dashboard (PREVIEW, #/dashboard) — prototype for design review.
+// Merged Dashboard (#/dashboard) — the Improve lens's main triage front door.
 // ============================
-// Composes the Overview triage front-door (spend hero + run-rate, compact
+// Composes the triage front-door (spend hero + run-rate, compact
 // recoverable-waste + health bands) with the Analytics pivot explorer as the
-// hero canvas. Purely additive: a NEW route that reuses the existing helpers /
-// components (SpendChart, recoverableTiles, HealthTile, AnalyticsView) — it does
-// NOT touch the standalone Overview/Analytics screens or the default landing.
+// hero canvas, reusing the existing helpers / components (SpendChart,
+// recoverableTiles, HealthTile, AnalyticsView). The standalone Overview and
+// Analytics screens this once sat alongside are both retired now: #/overview
+// and #/analytics alias here (see primaryKeyFor) rather than 404ing.
 // One window selector (header) drives BOTH the triage fetch and the embedded
 // explorer (which reads `since` from the same URL params).
 // ---- Review inbox (Improve lens home) ----
@@ -9590,6 +9594,21 @@ function DashboardView({ params }) {
   const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: '30d' });
   const [d, setD] = useState({ loading: true, empty: false, error: null });
 
+  // A retired #/analytics link lands here (primaryKeyFor aliases it to
+  // 'dashboard') with its metric/group_by/stack/chart/since params intact, but
+  // the explorer it deep-links to is below the triage band, not at the top of
+  // the page. Scroll straight to it so an old bookmark still opens "the same
+  // view it used to" rather than a triage band the link never promised. Reads
+  // location.hash directly (not route state, which DashboardView never
+  // receives) and re-checks on every params change since this view stays
+  // mounted (keep-alive) across navigations.
+  useEffect(() => {
+    const isAnalyticsAlias = location.hash.replace(/^#\/?/, '').split(/[?/]/)[0] === 'analytics';
+    if (!isAnalyticsAlias) return;
+    const el = document.getElementById('dash-explore');
+    if (el) el.scrollIntoView({ block: 'start' });
+  }, [params]);
+
   // Triage fetch — same parallel fast=true pattern as Overview (#124): /cost is
   // load-bearing (no .catch), the rest degrade individually. The Analytics hero
   // fetches independently, so a triage failure never blanks the explorer.
@@ -9769,7 +9788,7 @@ function DashboardView({ params }) {
 
         <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
-        <div class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
+        <div id="dash-explore" class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
         <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;
 }
@@ -9780,7 +9799,7 @@ function DashboardView({ params }) {
 // existing view still renders, this only decides which nav group frames it.
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
-  traces: 'observe', cost: 'observe', analytics: 'observe', alerts: 'observe', drift: 'observe',
+  traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
   optimize: 'observe', budget: 'observe',
 };
 
@@ -9801,7 +9820,6 @@ const PRIMARY_VIEWS = [
   ['sessions',  StatusView],
   ['traces',    TracesListView],
   ['cost',      CostView],
-  ['analytics', AnalyticsView],
   ['alerts',    AlertsView],
   ['drift',     DriftView],
   ['optimize',  OptimizeView],
@@ -9812,13 +9830,16 @@ const PRIMARY_KEYS = new Set(PRIMARY_VIEWS.map(([k]) => k));
 const EMPTY_PARAMS = new URLSearchParams();
 const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
 
-// Map a raw route to the keep-alive primary key that frames it. #/overview is a
-// retired alias for the Dashboard; #/status and #/runs are silent aliases for
-// Sessions (they render the same StatusView); #/optimize/summarize is the
-// Summarize sub-view. Anything else is its own view key.
+// Map a raw route to the keep-alive primary key that frames it. #/overview and
+// #/analytics are retired aliases for the Dashboard (the standalone Analytics
+// screen was the same AnalyticsView the Dashboard already embeds as its
+// "Explore" section, so the separate route was a second door to one room);
+// #/status and #/runs are silent aliases for Sessions (they render the same
+// StatusView); #/optimize/summarize is the Summarize sub-view. Anything else
+// is its own view key.
 function primaryKeyFor(route) {
   const v = route.view;
-  if (v === 'overview') return 'dashboard';
+  if (v === 'overview' || v === 'analytics') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   return v;

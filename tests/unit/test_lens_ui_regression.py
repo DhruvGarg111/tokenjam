@@ -566,10 +566,23 @@ def test_trim_card_no_longer_a_flat_three_column_table(html):
 # --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
 def test_analytics_screen_registered(html):
     assert "function AnalyticsView" in html
-    # Keep-alive router: the view is wired via the PRIMARY_VIEWS registry (which
-    # replaced the switch-and-unmount router) rather than a `case` arm.
-    assert "['analytics', AnalyticsView]" in html
-    assert 'href="#/analytics"' in html  # sidebar nav link
+
+
+def test_analytics_route_retired(html):
+    # The standalone Analytics screen + nav item are gone: it was a duplicate
+    # of the Dashboard's own embedded "Explore" section (same AnalyticsView
+    # component), so the separate nav entry was a second door to one room.
+    # Lingering #/analytics links fall through to the Dashboard, same pattern
+    # as the earlier #/overview retirement.
+    assert 'href="#/analytics"' not in html
+    assert "['analytics', AnalyticsView]" not in html
+    assert "analytics: 'observe'" not in html  # VIEW_LENS entry retired too
+    # Keep-alive router: #/analytics folds into the Dashboard key via primaryKeyFor.
+    assert "if (v === 'overview' || v === 'analytics') return 'dashboard';" in html
+    # The component itself and the API route it calls both stay -- the
+    # Dashboard's embedded explorer hard-depends on both.
+    assert "function AnalyticsView" in html
+    assert "await api('/analytics'" in html
 
 
 def test_analytics_metric_dimension_chart_controls(html):
@@ -610,8 +623,9 @@ def test_analytics_presets_and_csv_export(html):
 
 def test_analytics_url_is_source_of_truth(html):
     # state read from URL params with validators, written back via navigate().
-    # navigate() targets `route` (default 'analytics' preserves the standalone
-    # screen; the dashboard preview passes route="dashboard").
+    # navigate() targets `route` (the 'analytics' default is a vestige of the
+    # now-retired standalone screen -- unused today since every live caller,
+    # the Dashboard, passes route="dashboard" explicitly).
     assert "route = 'analytics'" in html
     assert "navigate(route, { ...cur" in html
     assert "readParam(params, 'metric'" in html
@@ -867,17 +881,34 @@ def test_overview_retired(html):
     assert 'href="#/overview"' not in html
     # Keep-alive router: #/overview folds into the Dashboard key via primaryKeyFor
     # (replaced the switch's `case 'overview': case 'dashboard'` fallthrough).
-    assert "if (v === 'overview') return 'dashboard';" in html
+    # #/analytics was folded into the same alias branch later — see
+    # test_analytics_route_retired.
+    assert "if (v === 'overview' || v === 'analytics') return 'dashboard';" in html
 
 
 def test_dashboard_embeds_analytics_explorer(html):
     # The hero composes the existing AnalyticsView (route rewired to dashboard,
-    # embedded, with the run-rate caption) — not a reimplemented pivot. Standalone
-    # #/analytics keeps working: the props are default-preserving.
+    # embedded, with the run-rate caption) — not a reimplemented pivot. The
+    # component's default args stay call-compatible even though nothing
+    # invokes it bare any more (the standalone #/analytics route is retired;
+    # see test_analytics_route_retired).
     assert 'route="dashboard" embedded=${true} kpiCaption=${kpiCaption}' in html
     assert "function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null })" in html
-    # The full-screen explorer nav item stays.
-    assert 'href="#/analytics"' in html
+
+
+def test_analytics_alias_preserves_query_params_and_deep_links_to_explore(html):
+    # An old #/analytics?metric=...&group_by=... bookmark must land on the same
+    # explorer slice, not a bare Dashboard. primaryKeyFor only remaps the VIEW
+    # KEY used to pick a component out of PRIMARY_VIEWS; route.params (built
+    # from the raw query string in getRoute(), independent of that mapping)
+    # flow straight through to DashboardView and then to the embedded
+    # AnalyticsView unchanged, so metric/group_by/stack/chart/since survive.
+    dash_start = html.index("function DashboardView")
+    dash_end = html.index("function ", dash_start + 1)
+    dash_view = html[dash_start:dash_end]
+    assert 'id="dash-explore"' in dash_view
+    assert "isAnalyticsAlias" in dash_view
+    assert "scrollIntoView" in dash_view
 
 
 def test_dashboard_spend_deduped(html):
