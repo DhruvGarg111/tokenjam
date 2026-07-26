@@ -314,8 +314,13 @@ def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
 
     assert len(relearn_cards) == 1, "one aggregate card, never one per cluster"
     card = relearn_cards[0]
-    assert card.past_overspend_usd == pytest.approx(finding.past_overspend_usd)
-    assert card.past_overspend_basis
+    # relearn carries no avoidable/forward claim (see below), so its observed
+    # past cost lands on `observed_cost_usd`, never on the avoidable-only
+    # `past_overspend_usd` headline field (`_with_past_overspend` maps that
+    # from `estimated_recoverable_usd`, which this card deliberately omits).
+    assert card.observed_cost_usd == pytest.approx(finding.past_overspend_usd)
+    assert card.observed_cost_basis
+    assert card.past_overspend_usd is None
     assert not card.apply_capable and card.advise_only
     # No forward claim on this card: relearn's re-read tail is the same re-sent
     # context `resend` already claims, and two analyzers claiming one span in
@@ -326,7 +331,10 @@ def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
         finding.estimated_recoverable_usd)
 
     rollup = past_overspend_rollup(proposals)
-    assert rollup["past_overspend_usd"] == pytest.approx(finding.past_overspend_usd)
+    # Cost, not avoidable: relearn's figure sums into the separate
+    # `observed_cost_usd` rollup total, never into the waste-labelled
+    # `past_overspend_usd` headline.
+    assert rollup["observed_cost_usd"] == pytest.approx(finding.past_overspend_usd)
     assert "relearn" in {a["analyzer"] for a in rollup["by_analyzer"]}
 
 
@@ -352,7 +360,8 @@ def test_relearn_card_survives_a_finding_whose_clusters_all_lack_a_fix(db):
 
     cards = [p for p in cost_proposals_from_report(_Report(finding)) if p.analyzer == "relearn"]
     assert len(cards) == 1
-    assert cards[0].past_overspend_usd > 0
+    # The observed cost is real even though nothing was claimable.
+    assert cards[0].observed_cost_usd > 0
     # The second number (what a fix would return) is correctly zero/absent —
     # they are different quantities and only one of them is gated.
-    assert not cards[0].past_avoidable_usd
+    assert not cards[0].past_overspend_usd

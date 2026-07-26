@@ -425,6 +425,98 @@ def test_offload_recoverable_prices_each_turn_at_its_own_model(db):
     assert mixed.offload_recoverable_usd < all_opus.offload_recoverable_usd
 
 
+# --------------------------------------------------------------------------
+# Coverage: the two dollar figures are computed over DIFFERENT populations,
+# and the analyzer has to say so rather than letting their ratio imply that
+# everything outside the avoidable figure was unavoidable.
+# --------------------------------------------------------------------------
+
+def test_cost_is_partitioned_by_the_same_predicate_the_avoidable_figure_uses(db):
+    """The three coverage buckets must exactly re-sum to the cost figure.
+
+    If they don't, the card would be stating a coverage split that isn't the
+    one the code applied — which is worse than stating nothing, because a
+    reader would trust it.
+    """
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.cost_of_waste_usd is not None
+    parts = (
+        finding.cost_in_scope_usd,
+        finding.cost_driver_role_usd,
+        finding.cost_no_lever_usd,
+    )
+    assert all(p is not None for p in parts)
+    assert sum(parts) == pytest.approx(finding.cost_of_waste_usd, abs=1e-5)
+    # And the session counts partition the priced sessions the same way.
+    assert finding.sessions_in_scope >= 1
+    assert (finding.sessions_in_scope + finding.sessions_no_lever
+            + finding.driver_role_sessions) <= finding.sessions_examined
+
+
+def test_a_cost_figure_never_ships_without_a_coverage_note(db):
+    """The invariant behind the card copy: any window that produces a cost
+    figure produces the prose that stops its gap to the avoidable figure being
+    read as a measurement of what was unavoidable."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.cost_of_waste_usd is not None
+    assert finding.coverage_note
+    assert "COVERAGE" in finding.coverage_note
+    # The load-bearing sentence: the gap is un-analysed, not established.
+    assert "NOT a measurement of what was unavoidable" in finding.coverage_note
+
+
+def test_sessions_below_the_context_floor_are_counted_as_cost_but_not_analysed(db):
+    """The exact asymmetry this ticket was filed for: a session too small for
+    an offload lever still bills, so it belongs in the cost figure — but it is
+    dropped from the avoidability calculation, and the card has to say which
+    sessions and how many dollars that was."""
+    _seed_offload_corpus(db)
+    # A small session: real repeat volume, nowhere near MIN_SESSION_CONTEXT_TOKENS.
+    _seed_session(db, "small", [1000, 1000, 1000], provider="anthropic",
+                  model="claude-opus-4-8")
+    finding = _run(db, _config())
+    assert finding.sessions_no_lever >= 1
+    assert finding.cost_no_lever_usd is not None and finding.cost_no_lever_usd > 0
+    assert "never accumulate" in finding.coverage_note
+    # It is genuinely in the cost total and genuinely out of the avoidable one.
+    assert finding.cost_of_waste_usd > finding.cost_in_scope_usd
+
+
+def test_the_tail_definition_gap_is_stated_not_left_implicit(db):
+    """Inside the sessions that ARE analysed, only the compaction-bounded
+    main-thread tail is claimable — much smaller than the raw repeat volume the
+    cost figure prices. Surfacing the ceiling separates 'outside the tail
+    definition' from 'discounted by the measured share'."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.offload_ceiling_usd is not None
+    # The ceiling is the un-discounted tail, so it bounds the offload term from
+    # above and is itself bounded by the in-scope cost.
+    assert finding.offload_recoverable_usd <= finding.offload_ceiling_usd + 1e-9
+    assert finding.offload_ceiling_usd <= finding.cost_in_scope_usd + 1e-9
+    assert "compaction-bounded main-thread re-read tail" in finding.coverage_note
+
+
+def test_offloadable_share_discloses_its_behavioural_basis_and_sample_size(db):
+    """The share is measured over the sessions that delegate and applied to the
+    ones that never do — a behavioural sample generalized onto the population
+    with the most headroom. That is defensible only if the basis string says
+    so, with the sample size, every time it is shown."""
+    _seed_offload_corpus(db)
+    finding = _run(db, _config())
+    assert finding.offloadable_share is not None
+    assert finding.offloadable_share_sessions >= 1
+    assert finding.offloadable_share_sessions_total > finding.offloadable_share_sessions
+    basis = finding.estimate_basis
+    assert "BEHAVIOURAL BASIS AND SAMPLE SIZE" in basis
+    assert f"{finding.offloadable_share_sessions:,} of " in basis
+    assert "dispatch a subagent at all" in basis
+    # It must NOT be presented as a structural property of the work.
+    assert "not how much of this window's in-thread work was structurally offloadable" in basis
+
+
 def test_no_delegating_session_means_no_offload_claim(db):
     """Nothing to measure the share from, so nothing is claimed — never a
     fraction invented to fill the gap."""

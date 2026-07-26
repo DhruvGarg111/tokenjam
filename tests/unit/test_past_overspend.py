@@ -1,19 +1,25 @@
 """The past-overspend contract: the number the product leads with.
 
-Every user-facing figure on the Dashboard hero and the Review inbox is now
-PAST TENSE and window-OBSERVED — what the flagged behaviour already cost,
-priced at the rates it actually billed at, over a window that has already
-happened. These tests pin the three properties that make that figure safe to
-show, because each of them failing turns the feature net-negative rather than
-merely wrong:
+Every user-facing figure on the Dashboard hero and the Review inbox is
+PAST TENSE and window-OBSERVED — priced at the rates it actually billed at,
+over a window that has already happened. These tests pin the four properties
+that make that figure safe to show, because each of them failing turns the
+feature net-negative rather than merely wrong:
 
-  1. it is never summed into a recoverable total (a reader who adds them
-     concludes the big number is claimable, which is exactly the overclaim
-     the resend split was created to remove);
-  2. it is never multiplied by the central 30-day pacing ratio (an observation
-     multiplied by a forecast is a forecast);
-  3. the surfaces read it off the payload rather than deriving it in JS (two
-     derivations of one number drift the moment either side is edited).
+  0. the figure a reader will call waste/overspend is the AVOIDABLE amount,
+     never the full observed cost. Waste is only what could have been avoided;
+     unavoidable spend is cost. Leading with the cost figure implicitly
+     asserted that everything it exceeded the avoidable figure by had been
+     shown to be unavoidable — a claim nothing in the analyzer supports, since
+     the two are computed over DIFFERENT POPULATIONS;
+  1. neither figure is ever summed into a recoverable total, and the two are
+     never summed with each other (the avoidable figure is a subset of the
+     cost figure, so adding them double-counts);
+  2. neither is multiplied by the central 30-day pacing ratio — both sides of
+     the pair read the same raw analysed window, so their difference is
+     attributable to avoidability alone and never to a time-basis artifact;
+  3. the surfaces read them off the payload rather than deriving them in JS
+     (two derivations of one number drift the moment either side is edited).
 """
 from __future__ import annotations
 
@@ -63,7 +69,95 @@ def _resend_finding():
         cost_of_waste_usd=7_038.85,
         cost_of_waste_tokens=14_382_971_851,
         cost_of_waste_basis="observed; do NOT read this as a saving",
+        # The real analyzer always emits this alongside a cost figure (pinned
+        # by test_context_resend.py); stated here because this fixture builds
+        # the finding directly rather than running the analyzer.
+        coverage_note=(
+            "COVERAGE. The cost figure covers every session with repeat volume; "
+            "the avoidable figure was computed over 12 of them."
+        ),
     )
+
+
+# --- 0. the waste-labelled figure is the AVOIDABLE one --------------------- #
+
+def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
+    """THE invariant this whole surface rests on.
+
+    `past_overspend_usd` is what every waste/overspend-worded surface renders.
+    It may never exceed the avoidable figure, because a figure a reader calls
+    "wasted" is a claim that it could have been avoided. Before this was
+    enforced, resend put its full $6,972 cost of re-sending context here beside
+    a $398 avoidable figure — implicitly asserting 94.3% of it was unavoidable,
+    when in truth that 94.3% was analysed on another card, filtered out below
+    the context floor, or outside the tail definition, and was never shown to
+    be unavoidable at all.
+
+    Asserted across a whole report rather than one hand-built proposal, so a
+    future analyzer that routes a cost figure into the headline slot fails here
+    rather than shipping.
+    """
+    from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
+
+    window = WindowSummary(
+        since=NOW - timedelta(days=30), until=NOW, days=30, sessions=200,
+        spans=1_000, total_tokens=1, total_cost_usd=50.0, thin_data=False,
+        active_days=28,
+    )
+    dg = DowngradeFinding(
+        candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
+        alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
+        estimated_recoverable_usd=3.0, estimated_recoverable_tokens=1_000,
+        percent_of_tokens=35.0, estimate_basis="downsize basis",
+    )
+    report = OptimizeReport(window=window, downgrade=dg)
+    report.findings["resend"] = _resend_finding()
+
+    props = cost_proposals_from_report(report)
+    assert props, "fixture produced no proposals — the guard would be vacuous"
+    for p in props:
+        if p.past_overspend_usd is None:
+            continue
+        assert p.estimated_recoverable_usd is not None, (
+            f"{p.analyzer} renders a waste figure with no avoidable figure behind it"
+        )
+        assert p.past_overspend_usd <= p.estimated_recoverable_usd + 1e-9, (
+            f"{p.analyzer} labels {p.past_overspend_usd} as overspend but only "
+            f"{p.estimated_recoverable_usd} of it was shown to be avoidable"
+        )
+        if p.observed_cost_usd is not None:
+            # The cost figure is legitimately larger — it just may never be the
+            # one wearing the waste label, and it must arrive with its coverage
+            # stated rather than leaving the gap to imply necessity.
+            assert p.observed_cost_usd >= p.past_overspend_usd
+            assert p.coverage_note, f"{p.analyzer} ships a cost figure with no coverage note"
+
+    block = past_overspend_rollup(props)
+    assert block["past_overspend_usd"] <= block["observed_cost_usd"]
+
+
+def test_the_rollup_headline_is_avoidable_and_the_cost_total_stays_separate():
+    props = [
+        _with_past_overspend(_proposal(
+            analyzer="resend", signature="cost:resend",
+            estimated_recoverable_usd=398.41,
+            cost_of_waste_usd=6_972.80, cost_of_waste_basis="observed",
+            coverage_note="COVERAGE. ...",
+        )),
+        _with_past_overspend(_proposal(signature="cost:downsize",
+                                       estimated_recoverable_usd=40.0)),
+    ]
+    block = past_overspend_rollup(props)
+    # The headline sums avoidable figures only — one meaning across analyzers.
+    assert block["past_overspend_usd"] == pytest.approx(438.41)
+    # The cost total ships, separately, and is never folded into the headline.
+    assert block["observed_cost_usd"] == pytest.approx(6_972.80)
+    assert block["past_overspend_usd"] != pytest.approx(6_972.80 + 438.41)
+    by_analyzer = {a["analyzer"]: a for a in block["by_analyzer"]}
+    assert by_analyzer["resend"]["usd"] == 398.41
+    assert by_analyzer["resend"]["observed_cost_usd"] == 6_972.80
+    assert by_analyzer["downsize"]["observed_cost_usd"] is None
 
 
 def _report():
@@ -103,18 +197,17 @@ def _report():
 # --- 1. never summed into a recoverable total ------------------------------ #
 
 def test_past_overspend_is_never_summed_into_the_recoverable_rollup():
-    # The two answer different questions ("what did this cost me" vs "what
-    # does the fix return") and, for resend, are different quantities over the
-    # SAME window — so adding them double-counts. The recoverable rollup must
-    # read only the estimated_* fields no matter how large the observed one is.
+    # The two answer different questions ("what of this could I have avoided"
+    # vs "what does the fix return going forward"). The recoverable rollup must
+    # read only the estimated_* fields no matter how large the observed cost is.
     prop = _with_past_overspend(_proposal(
         analyzer="resend", signature="cost:resend",
         estimated_recoverable_usd=703.78, estimated_recoverable_tokens=1_400_000_000,
         cost_of_waste_usd=7_038.85, cost_of_waste_tokens=14_382_971_851,
         cost_of_waste_basis="observed",
     ))
-    assert prop.past_overspend_usd == 7_038.85
-    assert prop.past_avoidable_usd == 703.78
+    assert prop.past_overspend_usd == 703.78
+    assert prop.observed_cost_usd == 7_038.85
 
     rollup = estimated_recoverable_rollup([prop])
     assert rollup["estimated_recoverable_usd"] == 703.78
@@ -142,10 +235,9 @@ def test_past_overspend_rollup_and_recoverable_rollup_read_disjoint_fields():
     assert past_overspend_rollup([past_only])["past_overspend_usd"] == 100.0
 
 
-def test_avoidable_share_is_never_rolled_up_into_a_total():
-    # The second number qualifies ONE card's headline. A cross-analyzer
-    # "avoidable" total would read as precisely the claimable figure this
-    # design refuses to state, so it exists per-analyzer and nowhere else.
+def test_the_two_totals_are_never_added_to_each_other():
+    # They overlap by construction — the avoidable total is a SUBSET of the
+    # cost total — so any surface adding them double-counts the avoidable part.
     props = [
         _with_past_overspend(_proposal(
             analyzer="resend", signature="cost:resend",
@@ -156,11 +248,10 @@ def test_avoidable_share_is_never_rolled_up_into_a_total():
                                        estimated_recoverable_usd=40.0)),
     ]
     block = past_overspend_rollup(props)
-    assert "past_avoidable_usd" not in block
-    assert block["past_overspend_usd"] == pytest.approx(7_078.85)
-    by_analyzer = {a["analyzer"]: a for a in block["by_analyzer"]}
-    assert by_analyzer["resend"]["avoidable_usd"] == 703.78
-    assert by_analyzer["downsize"]["avoidable_usd"] is None
+    combined = 7_038.85 + 743.78
+    for key, value in block.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            assert value != pytest.approx(combined), f"{key} summed the two totals"
 
 
 # --- 2. never paced ---------------------------------------------------------#
@@ -217,25 +308,28 @@ def test_past_overspend_reads_the_netted_figure_not_the_gross_one():
 
 def test_only_a_finding_with_its_own_observed_cost_renders_two_numbers():
     # Verified against the analyzer sources: for 6 of the 7 CC-eligible
-    # analyzers the "recoverable" figure IS the observed window overspend, so
-    # rendering both would show one quantity twice. Only resend computes a
-    # separate observed cost (its avoidable share is gated by a MEASURED
-    # offloadable share), so only resend gets a second number.
+    # analyzers the "recoverable" figure IS the observed window avoidable
+    # spend, so rendering both would show one quantity twice. Only resend
+    # computes a separate TOTAL cost of the behaviour it flags, so only resend
+    # gets a second number.
     single = _with_past_overspend(_proposal(estimated_recoverable_usd=12.0,
                                             estimated_recoverable_tokens=99,
                                             estimate_basis="downsize basis"))
     assert single.past_overspend_usd == 12.0
-    assert single.past_avoidable_usd is None
-    assert single.past_avoidable_tokens is None
+    assert single.observed_cost_usd is None
+    assert single.observed_cost_tokens is None
     assert "downsize basis" in single.past_overspend_basis
 
     paired = _with_past_overspend(_proposal(
         analyzer="resend", estimated_recoverable_usd=703.78,
+        estimate_basis="resend basis",
         cost_of_waste_usd=7_038.85, cost_of_waste_basis="Do NOT read this as a saving.",
     ))
-    assert paired.past_avoidable_usd == 703.78
-    # The honesty basis travels WITH the figure it qualifies, unweakened.
-    assert "Do NOT read this as a saving." in paired.past_overspend_basis
+    assert paired.past_overspend_usd == 703.78
+    assert paired.observed_cost_usd == 7_038.85
+    # Each basis travels WITH the figure it qualifies, unweakened.
+    assert "resend basis" in paired.past_overspend_basis
+    assert "Do NOT read this as a saving." in paired.observed_cost_basis
 
 
 def test_resend_adapter_carries_both_observed_figures_end_to_end():
@@ -244,13 +338,17 @@ def test_resend_adapter_carries_both_observed_figures_end_to_end():
     prop = _with_past_overspend(
         _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     )
-    assert prop.past_overspend_usd == 7_038.85
-    assert prop.past_overspend_tokens == 14_382_971_851
-    assert prop.past_avoidable_usd == 703.78
-    assert prop.past_overspend_usd > prop.past_avoidable_usd
-    # The evidence line states the observation without recovery vocabulary.
+    assert prop.past_overspend_usd == 703.78
+    assert prop.past_overspend_tokens == 1_400_000_000
+    assert prop.observed_cost_usd == 7_038.85
+    assert prop.past_overspend_usd < prop.observed_cost_usd
+    # The evidence line states the observation without recovery vocabulary,
+    # and without asserting that the rest of the cost was unavoidable.
     assert "recoverable" not in prop.evidence
-    assert "avoidable" in prop.evidence
+    assert "as cost, not waste" in prop.evidence
+    assert "inherently re-sends" not in prop.evidence
+    # The cost figure is stated exactly once on the card, on its own COST line.
+    assert "7,038.85" not in prop.evidence
 
 
 def test_legacy_cached_proposal_backfills_the_same_derivation_on_read():
@@ -262,14 +360,14 @@ def test_legacy_cached_proposal_backfills_the_same_derivation_on_read():
          "estimated_recoverable_tokens": 700, "estimate_basis": "cache basis"}
     )
     assert single["past_overspend_usd"] == 4.5
-    assert single.get("past_avoidable_usd") is None
+    assert single.get("observed_cost_usd") is None
 
     paired = backfill_legacy_past_overspend_fields(
         {"analyzer": "resend", "estimated_recoverable_usd": 703.78,
          "cost_of_waste_usd": 7_038.85, "cost_of_waste_basis": "observed"}
     )
-    assert paired["past_overspend_usd"] == 7_038.85
-    assert paired["past_avoidable_usd"] == 703.78
+    assert paired["past_overspend_usd"] == 703.78
+    assert paired["observed_cost_usd"] == 7_038.85
 
     # Never overwrites a current entry.
     current = {"past_overspend_usd": 1.0, "estimated_recoverable_usd": 99.0}
@@ -537,17 +635,55 @@ def test_both_headline_surfaces_read_the_same_server_block(ui):
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
     band = ui[ui.index("function PastOverspendBand"):]
     band = band[:band.index("\n}")]
-    assert "What this already cost you" in band
-    assert "cost you this over" in band
+    # The headline is the AVOIDABLE amount, and says so — it is no longer
+    # labelled as everything the behaviour cost.
+    assert "What you could have avoided" in band
+    assert "was avoidable" in band
     assert "recoverable" not in band
     assert "could save" not in ui
     # No ratio framing ("recovering $X of a $Y problem") anywhere.
     assert "recovering $" not in ui
-    # The avoidable sentence is past tense too, never "recoverable".
-    fn = ui[ui.index("function pastAvoidableSentence"):]
+    # The cost line is present, past tense, and worded as COST — never waste.
+    assert "cost ${fmtUsd(cost)} in total" in band
+    assert "That is cost, not waste" in band
+    fn = ui[ui.index("function observedCostSentence"):]
     fn = fn[:fn.index("\n}")]
-    assert "was avoidable." in fn
+    assert "this behaviour cost " in fn
     assert "recoverable" not in fn
+    assert "wasted" not in fn
+
+
+def test_no_ui_surface_labels_the_total_cost_figure_as_waste(ui):
+    # The `observed_cost_*` fields carry the unavoidable-inclusive total. No
+    # rendering of them may sit next to waste/overspend wording, because the
+    # part they exceed the avoidable figure by was never shown to be avoidable.
+    for marker in ("observed_cost_usd", "observed_cost_tokens"):
+        for idx in _all_indices(ui, marker):
+            around = ui[max(0, idx - 400): idx + 400].lower()
+            for forbidden in ("wasted", "waste you", "overspent", "overspend you"):
+                assert forbidden not in around, (
+                    f"{marker} is rendered within 400 chars of '{forbidden}'"
+                )
+
+
+def test_the_card_states_the_two_figures_differing_coverage(ui):
+    # A cost spanning every session shown beside an avoidable figure spanning a
+    # filtered subset must never be presented as two views of one quantity: the
+    # ratio between them would otherwise read as "94% of this was unavoidable".
+    card = ui[ui.index("function CostProposalCard"):]
+    card = card[:card.index("\n// The headline band")]
+    assert "${prop.coverage_note}" in card
+    assert "observedCostSentence(prop)" in card
+
+
+def _all_indices(haystack: str, needle: str):
+    start = 0
+    while True:
+        i = haystack.find(needle, start)
+        if i < 0:
+            return
+        yield i
+        start = i + 1
 
 
 def test_the_basis_is_reachable_from_the_card_not_only_on_hover(ui):

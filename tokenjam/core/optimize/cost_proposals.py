@@ -233,42 +233,63 @@ class CostProposal:
     cost_of_waste_tokens:         int | None   = None
     cost_of_waste_basis:          str          = ""
     # PAST OVERSPEND — the one PAST-TENSE, window-OBSERVED figure every card
-    # renders as its headline ("re-sending context cost you $X over the last
-    # 30 days"), stamped centrally by `_with_past_overspend` so no adapter
-    # decides its own basis. Derivation, in full:
-    #   * a finding that carries `cost_of_waste_usd` (today only `resend`)
-    #     puts THAT here — the observed cost of the flagged behaviour — and
-    #     puts its (smaller, also window-observed) avoidable share on the
-    #     `past_avoidable_*` fields below;
-    #   * every other analyzer's window `estimated_recoverable_usd` IS its
-    #     observed window overspend — the two differ at most by the central
-    #     30-day pace, never by a fractional/adoption discount — so that value
-    #     is carried here unchanged and `past_avoidable_*` stays None. Verified
-    #     per analyzer against source: downsize (`actual_cost - alt_cost` over
-    #     the window), deadweight (window tax, "NO projection folded in"),
-    #     subagent (deltas priced off already-incurred tokens), summarize
-    #     (per-call reduction over observed calls), relearn (a standing-cost
-    #     offset, not a discount), reuse (avg cost x (reps - 1)).
+    # renders as its headline, stamped centrally by `_with_past_overspend` so
+    # no adapter decides its own basis.
+    #
+    # **It is the AVOIDABLE amount, always.** Waste is what could have been
+    # avoided; unavoidable spend is cost, not waste (the same rule `reuse`
+    # already applies by pricing `reps - 1` rather than `reps` — the necessary
+    # first instance is not waste). A figure a reader will call "overspend"
+    # may therefore only ever be an avoidable figure, so this field carries the
+    # window `estimated_recoverable_usd` for EVERY analyzer, `resend` included.
+    #
+    # It deliberately does NOT carry `cost_of_waste_usd`. That figure is the
+    # full observed cost of the behaviour over EVERY session, whereas the
+    # avoidable figure is computed over a filtered subset (see `resend`'s
+    # driver-role partition and context floor). Leading with the big number
+    # asserted, implicitly, that the ~94% difference had been shown to be
+    # unavoidable. It had not — it was analysed on another card, filtered out
+    # before analysis, or outside the tail definition. The cost figure still
+    # ships, on `observed_cost_*` below, labelled as cost and never as waste.
+    #
+    # Per-analyzer derivation: every analyzer's window `estimated_recoverable_usd`
+    # IS its observed window avoidable spend — never a forecast, never an
+    # adoption discount. Verified per analyzer against source: downsize
+    # (`actual_cost - alt_cost` over the window), deadweight (window tax, "NO
+    # projection folded in"), subagent (deltas priced off already-incurred
+    # tokens), summarize (per-call reduction over observed calls), relearn (a
+    # standing-cost offset, not a discount), reuse (avg cost x (reps - 1)),
+    # resend (the measured offload + right-size terms).
+    #
     # NEVER paced: `compute_projection_ratio`'s `r` is a forward projection and
     # is applied only to the `estimated_monthly_*` fields. Multiplying an
-    # observation by a forecast ratio would make it a forecast.
-    # NEVER summed with `estimated_recoverable_*` on any surface: for `resend`
-    # the two are different quantities over the same window and adding them
-    # double-counts; `estimated_recoverable_rollup` reads only the
-    # `estimated_*` fields, `past_overspend_rollup` only these.
+    # observation by a forecast ratio would make it a forecast — and a paired
+    # past/avoidable display whose two sides sat on different time bases would
+    # attribute a 7% pacing artifact to avoidability.
     past_overspend_usd:           float | None = None
     past_overspend_tokens:        int | None   = None
     past_overspend_basis:         str          = ""
-    # The SECOND past-tense number, populated ONLY where the observed waste and
-    # the share of it that was avoidable are genuinely different quantities
-    # (today: `resend` alone, whose offload term is gated by a MEASURED
-    # `offloadable_share`). Also a window observation, never a forecast, so it
-    # is stated in the past tense too ("about $703 of that was avoidable") —
-    # never as "recoverable" or "you could save". `None` everywhere else, which
-    # is what makes a card render one number instead of two.
-    past_avoidable_usd:           float | None = None
-    past_avoidable_tokens:        int | None   = None
-    past_avoidable_basis:         str          = ""
+    # OBSERVED COST — what the flagged behaviour cost in total over the same
+    # window, including the part that was never shown to be avoidable.
+    # Populated ONLY where that total is a genuinely different quantity from
+    # the avoidable figure above (today: `resend` alone, from
+    # `cost_of_waste_usd`); `None` everywhere else, which is what makes a card
+    # render one number instead of saying the same thing twice.
+    #
+    # Rendered with COST wording only — "re-sending context cost you $X" — and
+    # never as waste, overspend, or anything a reader could take as claimable.
+    # NEVER summed with `past_overspend_usd` (they overlap: the avoidable
+    # figure is a subset of this cost) and never summed into the recoverable
+    # rollup. `past_overspend_rollup` reports it as its own separate total.
+    observed_cost_usd:            float | None = None
+    observed_cost_tokens:         int | None   = None
+    observed_cost_basis:          str          = ""
+    # Plain-language statement of how the two figures' POPULATIONS differ,
+    # supplied by the analyzer. Required whenever `observed_cost_usd` is set:
+    # a cost spanning all sessions shown beside an avoidable figure spanning a
+    # filtered subset must never be presented as two views of one quantity
+    # without the coverage being stated.
+    coverage_note:                str          = ""
     # Monthly-basis fields (Review inbox stat tiles) — a SEPARATE, explicitly-
     # named basis from the two window fields above; see the "Recoverable-
     # savings contract" note in model_downgrade.py / CLAUDE.md. `downsize`
@@ -2214,11 +2235,17 @@ def _resend_to_proposals(
     )
     cost_of_waste_usd = getattr(finding, "cost_of_waste_usd", None)
     if cost_of_waste_usd is not None:
+        # Deliberately does NOT restate the dollar figure: the card renders it
+        # once, on its own COST line (`observed_cost_usd`), immediately
+        # followed by the coverage note. This sentence used to carry the number
+        # AND end "the rest is what multi-turn work inherently re-sends" —
+        # asserting that everything outside the avoidable figure had been shown
+        # to be necessary. It had not been: most of it is simply outside the
+        # avoidability analysis, which `coverage_note` now spells out.
         evidence += (
-            f" That re-sent volume cost {_money(float(cost_of_waste_usd))} over "
-            f"the window: an observation of what already billed, not a claim "
-            f"about what a fix returns. Only a smaller share of it was "
-            f"avoidable; the rest is what multi-turn work inherently re-sends."
+            " What that volume cost is reported below as cost, not waste: it is "
+            "an observation of what already billed, not a claim about what a "
+            "fix returns."
         )
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
@@ -2268,10 +2295,22 @@ def _resend_to_proposals(
             "repeat_share_median": getattr(finding, "repeat_share_median", None),
             "repeat_share_p90": getattr(finding, "repeat_share_p90", None),
             "offloadable_share": getattr(finding, "offloadable_share", None),
+            "offloadable_share_sessions": getattr(finding, "offloadable_share_sessions", 0),
+            "offloadable_share_sessions_total": getattr(finding, "offloadable_share_sessions_total", 0),
+            "offloadable_share_median": getattr(finding, "offloadable_share_median", None),
             "offload_recoverable_usd": getattr(finding, "offload_recoverable_usd", None),
             "rightsize_recoverable_usd": getattr(finding, "rightsize_recoverable_usd", None),
             "rightsize_agent_name": rightsize.get("agent_name", ""),
             "rightsize_target_path": rightsize.get("target_path", ""),
+            # The two figures' differing populations, carried machine-readable
+            # alongside the prose `coverage_note` so the split is auditable.
+            "cost_in_scope_usd": getattr(finding, "cost_in_scope_usd", None),
+            "cost_driver_role_usd": getattr(finding, "cost_driver_role_usd", None),
+            "cost_no_lever_usd": getattr(finding, "cost_no_lever_usd", None),
+            "offload_ceiling_usd": getattr(finding, "offload_ceiling_usd", None),
+            "sessions_in_scope": getattr(finding, "sessions_in_scope", 0),
+            "sessions_no_lever": getattr(finding, "sessions_no_lever", 0),
+            "driver_role_sessions": getattr(finding, "driver_role_sessions", 0),
         },
         advise_text=advise,
         suggestion=cache_snippet,
@@ -2281,6 +2320,7 @@ def _resend_to_proposals(
         cost_of_waste_usd=cost_of_waste_usd,
         cost_of_waste_tokens=getattr(finding, "cost_of_waste_tokens", None) or None,
         cost_of_waste_basis=str(getattr(finding, "cost_of_waste_basis", "") or ""),
+        coverage_note=str(getattr(finding, "coverage_note", "") or ""),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
         **write_fields,
@@ -2807,18 +2847,21 @@ PAST_OVERSPEND_OBSERVED_NOTE = (
     "claim about what a fix returns."
 )
 
-#: Same, for the second (avoidable-share) number. Still past tense: it is a
-#: window observation gated by a MEASURED share, never a forecast.
-PAST_AVOIDABLE_OBSERVED_NOTE = (
-    "Also observed over the same window: the share of the figure above that "
-    "was avoidable, measured from this window's own telemetry. The rest was "
-    "structurally necessary."
+#: Same, for the second (total observed cost) number. Cost wording only — the
+#: whole point of separating it from the figure above is that this one includes
+#: spend nobody has shown to be avoidable, so calling it waste would be a claim
+#: the data does not support.
+OBSERVED_COST_NOTE = (
+    "Also observed over the same window: what this behaviour cost in TOTAL, "
+    "including the part that was never shown to be avoidable. This is cost, "
+    "not waste, and not a claim about what a fix returns. It is not summed "
+    "with the figure above — the avoidable figure is a subset of it."
 )
 
 
 def _with_past_overspend(proposal: CostProposal) -> CostProposal:
-    """Stamp the past-tense, window-observed ``past_overspend_*`` (and, where
-    the two are genuinely different quantities, ``past_avoidable_*``) fields.
+    """Stamp the past-tense, window-observed ``past_overspend_*`` (and, where a
+    total observed cost is a different quantity, ``observed_cost_*``) fields.
 
     ONE place decides the basis for every analyzer, for the same reason
     ``_with_rollup_projection`` is the one place the 30-day pace is applied:
@@ -2826,46 +2869,57 @@ def _with_past_overspend(proposal: CostProposal) -> CostProposal:
     figures is how the Overview hero and the Review inbox headline silently
     come to disagree.
 
-    A finding that computes an explicit observed cost of the flagged behaviour
-    (``cost_of_waste_usd`` — today only ``resend``, whose avoidable share is
-    gated by a measured ``offloadable_share`` and so is ~10x smaller) leads
-    with THAT, and carries its avoidable share as the second number. For every
-    other analyzer the window ``estimated_recoverable_usd`` already IS the
-    observed window overspend, so it is carried across unchanged and there is
-    no second number to show — rendering both would be showing one quantity
-    twice. See the ``past_overspend_usd`` field comment for the per-analyzer
-    verification.
+    **The headline is the AVOIDABLE figure for every analyzer**, because waste
+    is only ever the avoidable portion. A finding that also computes the full
+    observed cost of the behaviour (``cost_of_waste_usd`` — today only
+    ``resend``) carries it on ``observed_cost_*`` as an explicitly-cost second
+    number, together with the analyzer's ``coverage_note`` stating how the two
+    figures' populations differ. This used to be inverted, which made the card
+    assert that the ~94% gap between them was unavoidable; it never was, it was
+    merely un-analysed. Every other analyzer produces one quantity, so the
+    second number stays ``None`` and the card shows a single figure rather than
+    saying the same thing twice.
 
-    Never applies a projection ratio. Never mutates: returns a new proposal.
+    Never applies a projection ratio: both sides of the pair read the same
+    analysed window, so their difference is attributable to avoidability alone
+    and never to a time-basis artifact. Never mutates: returns a new proposal.
     """
-    waste_usd = proposal.cost_of_waste_usd
-    waste_tokens = proposal.cost_of_waste_tokens
-    if waste_usd is None and not waste_tokens:
-        # The single-number case: the observed overspend and the avoidable
-        # figure are the same quantity, so only the first is populated.
-        if proposal.estimated_recoverable_usd is None and proposal.estimated_recoverable_tokens is None:
-            return proposal
-        return replace(
-            proposal,
+    has_avoidable = (
+        proposal.estimated_recoverable_usd is not None
+        or proposal.estimated_recoverable_tokens is not None
+    )
+    cost_usd = proposal.cost_of_waste_usd
+    cost_tokens = proposal.cost_of_waste_tokens
+    has_cost = cost_usd is not None or bool(cost_tokens)
+    if not has_avoidable and not has_cost:
+        # Nothing observed at all — e.g. relearn's window produced no priced
+        # figure of either kind. Neither field would have anything to carry.
+        return proposal
+
+    stamped = proposal
+    if has_avoidable:
+        stamped = replace(
+            stamped,
             past_overspend_usd=proposal.estimated_recoverable_usd,
             past_overspend_tokens=proposal.estimated_recoverable_tokens,
             past_overspend_basis=" ".join(
                 x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
             ),
         )
-    return replace(
-        proposal,
-        past_overspend_usd=waste_usd,
-        past_overspend_tokens=waste_tokens or None,
-        past_overspend_basis=" ".join(
-            x for x in (proposal.cost_of_waste_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
-        ),
-        past_avoidable_usd=proposal.estimated_recoverable_usd,
-        past_avoidable_tokens=proposal.estimated_recoverable_tokens,
-        past_avoidable_basis=" ".join(
-            x for x in (proposal.estimate_basis, PAST_AVOIDABLE_OBSERVED_NOTE) if x
-        ),
-    )
+    if has_cost:
+        # A cost-only card (no avoidable claim at all — e.g. relearn, whose
+        # forward claim is deliberately omitted per CLAUDE.md rule 27) must
+        # still get its observed cost stamped here; it cannot ride along on
+        # the `has_avoidable` branch above, which it never enters.
+        stamped = replace(
+            stamped,
+            observed_cost_usd=cost_usd,
+            observed_cost_tokens=cost_tokens or None,
+            observed_cost_basis=" ".join(
+                x for x in (proposal.cost_of_waste_basis, OBSERVED_COST_NOTE) if x
+            ),
+        )
+    return stamped
 
 
 def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str, Any]:
@@ -2882,28 +2936,24 @@ def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str,
     """
     if "past_overspend_usd" in proposal:
         return proposal
-    waste_usd = proposal.get("cost_of_waste_usd")
-    waste_tokens = proposal.get("cost_of_waste_tokens")
-    if waste_usd is None and not waste_tokens:
-        return {
-            **proposal,
-            "past_overspend_usd": proposal.get("estimated_recoverable_usd"),
-            "past_overspend_tokens": proposal.get("estimated_recoverable_tokens"),
-            "past_overspend_basis": " ".join(
-                x for x in (proposal.get("estimate_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
-            ),
-        }
-    return {
+    stamped = {
         **proposal,
-        "past_overspend_usd": waste_usd,
-        "past_overspend_tokens": waste_tokens or None,
+        "past_overspend_usd": proposal.get("estimated_recoverable_usd"),
+        "past_overspend_tokens": proposal.get("estimated_recoverable_tokens"),
         "past_overspend_basis": " ".join(
-            x for x in (proposal.get("cost_of_waste_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
+            x for x in (proposal.get("estimate_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
         ),
-        "past_avoidable_usd": proposal.get("estimated_recoverable_usd"),
-        "past_avoidable_tokens": proposal.get("estimated_recoverable_tokens"),
-        "past_avoidable_basis": " ".join(
-            x for x in (proposal.get("estimate_basis") or "", PAST_AVOIDABLE_OBSERVED_NOTE) if x
+    }
+    cost_usd = proposal.get("cost_of_waste_usd")
+    cost_tokens = proposal.get("cost_of_waste_tokens")
+    if cost_usd is None and not cost_tokens:
+        return stamped
+    return {
+        **stamped,
+        "observed_cost_usd": cost_usd,
+        "observed_cost_tokens": cost_tokens or None,
+        "observed_cost_basis": " ".join(
+            x for x in (proposal.get("cost_of_waste_basis") or "", OBSERVED_COST_NOTE) if x
         ),
     }
 
@@ -3199,9 +3249,12 @@ def past_overspend_rollup(
     ``proposals``, deduplicated by ``signature`` exactly as
     ``estimated_recoverable_rollup`` does.
 
-    This is what the flagged behaviours ALREADY cost over the analyzed window,
-    every token priced at the rate it genuinely billed at. Nothing here is
-    projected, discounted, or claimed:
+    This is the AVOIDABLE portion of what the flagged behaviours already cost
+    over the analyzed window, every token priced at the rate it genuinely
+    billed at. Waste is only ever what could have been avoided, so this — not
+    the larger total-cost figure — is the number any surface using
+    waste/overspend wording may show. Nothing here is projected, discounted, or
+    claimed:
 
     * **No pacing.** ``compute_projection_ratio``'s ``r`` is never applied —
       not here, not by any caller. The whole point of the figure is that it is
@@ -3212,12 +3265,14 @@ def past_overspend_rollup(
     * **Never summed with a recoverable total.** See the module block comment
       above.
 
-    ``past_avoidable_usd`` (the second, smaller number ``resend`` alone
-    carries) is deliberately NOT summed into a total of its own: it exists to
-    qualify one card's headline, and a cross-analyzer "avoidable" total would
-    read as exactly the claimable figure this design refuses to state. It is
-    reported per analyzer in ``by_analyzer`` so a renderer can pair the two on
-    the card that owns them, and nowhere else.
+    ``observed_cost_usd`` (the second, LARGER number ``resend`` alone carries:
+    the full cost of the behaviour including the part nobody has shown to be
+    avoidable) IS summed, into its own separate ``observed_cost_usd`` key and
+    per-analyzer entry — never into ``past_overspend_usd``. The two totals
+    overlap by construction (the avoidable figure is a subset of the cost), so
+    adding them would double-count, and swapping them would relabel unanalysed
+    cost as waste. A renderer shows the avoidable total as the headline and the
+    cost total as an explicitly-cost second line.
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:
@@ -3229,6 +3284,8 @@ def past_overspend_rollup(
 
     total_usd = 0.0
     total_tokens = 0
+    total_observed_cost_usd = 0.0
+    observed_cost_count = 0
     usd_count = 0
     token_count = 0
     by_analyzer: dict[str, dict[str, Any]] = {}
@@ -3236,7 +3293,8 @@ def past_overspend_rollup(
         analyzer = str(row.get("analyzer") or "unknown")
         entry = by_analyzer.setdefault(
             analyzer,
-            {"analyzer": analyzer, "count": 0, "usd": 0.0, "tokens": 0, "avoidable_usd": None},
+            {"analyzer": analyzer, "count": 0, "usd": 0.0, "tokens": 0,
+             "observed_cost_usd": None},
         )
         entry["count"] += 1
 
@@ -3246,9 +3304,13 @@ def past_overspend_rollup(
             token_count += 1
             entry["tokens"] = int(entry["tokens"]) + int(tokens)
 
-        avoidable = row.get("past_avoidable_usd")
-        if avoidable is not None:
-            entry["avoidable_usd"] = round((entry["avoidable_usd"] or 0.0) + float(avoidable), 6)
+        observed_cost = row.get("observed_cost_usd")
+        if observed_cost is not None:
+            total_observed_cost_usd += float(observed_cost)
+            observed_cost_count += 1
+            entry["observed_cost_usd"] = round(
+                (entry["observed_cost_usd"] or 0.0) + float(observed_cost), 6
+            )
 
         usd = row.get("past_overspend_usd")
         if usd is None:
@@ -3270,10 +3332,11 @@ def past_overspend_rollup(
             for a in sorted(by_analyzer.values(), key=lambda x: x["analyzer"])
         )
         basis = (
-            f"sum of past_overspend_usd across {usd_count} of "
-            f"{deduplicated_proposal_count} open (not yet applied), "
-            f"deduplicated-by-signature cost proposal(s), observed over the "
-            f"last {window_days} days; contributing analyzers: {breakdown}."
+            f"sum of the AVOIDABLE window figure (past_overspend_usd) across "
+            f"{usd_count} of {deduplicated_proposal_count} open (not yet "
+            f"applied), deduplicated-by-signature cost proposal(s), observed "
+            f"over the last {window_days} days; contributing analyzers: "
+            f"{breakdown}."
         )
     if token_count:
         basis += (
@@ -3281,9 +3344,24 @@ def past_overspend_rollup(
             f"{token_count} of {deduplicated_proposal_count} proposal(s); the "
             f"rest carry no token figure, so it is a floor, not a total."
         )
+    if observed_cost_count:
+        basis += (
+            f" Separately, {observed_cost_count} proposal(s) also report a "
+            f"total observed COST of the behaviour they flag, summed into "
+            f"observed_cost_usd. That total includes spend that was never "
+            f"shown to be avoidable, so it is never added to the figure above "
+            f"and is never labelled waste or overspend."
+        )
     return {
         "past_overspend_usd": round(total_usd, 6),
         "past_overspend_tokens": total_tokens,
+        # The total observed cost of the same behaviours, kept as a distinct
+        # key so no renderer can confuse it for the avoidable headline and no
+        # caller can accidentally sum the two overlapping quantities.
+        "observed_cost_usd": (
+            round(total_observed_cost_usd, 6) if observed_cost_count else None
+        ),
+        "observed_cost_proposal_count": observed_cost_count,
         "proposal_count": usd_count,
         "token_proposal_count": token_count,
         "deduplicated_proposal_count": deduplicated_proposal_count,
@@ -3291,4 +3369,5 @@ def past_overspend_rollup(
         "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
         "basis": basis,
         "disclosure": PAST_OVERSPEND_OBSERVED_NOTE,
+        "cost_disclosure": OBSERVED_COST_NOTE if observed_cost_count else "",
     }
