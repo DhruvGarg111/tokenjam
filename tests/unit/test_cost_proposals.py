@@ -743,15 +743,16 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep.persona = "claude-code"
     by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
-    # `reuse` keeps its workspace write for this persona. `script` and
-    # `verbosity` are skipped for it entirely by the pre-dispatch persona gate
-    # (script's cluster signature can't match heterogeneous coding work;
-    # verbosity's only remedy is a global be-terser rule), so no card is built
-    # for them at all. Independently of that gate, verbosity never offers the
-    # write for ANY persona it IS run for — see
+    # `script`, `reuse`, and `verbosity` are all skipped for this persona
+    # entirely by the pre-dispatch persona gate (script's cluster signature
+    # can't match heterogeneous coding work; reuse's clustering has no content
+    # signal and prices a null-tool-signature catch-all as if it were a
+    # repeated plan; verbosity's only remedy is a global be-terser rule), so
+    # no card is built for any of them. Independently of that gate, verbosity
+    # never offers the write for ANY persona it IS run for — see
     # test_verbosity_never_offers_the_write_for_any_persona.
-    assert by_analyzer["reuse"].apply_capable is True
     assert "script" not in by_analyzer
+    assert "reuse" not in by_analyzer
     assert "verbosity" not in by_analyzer
 
     # A report with no persona set at all (e.g. hand-built, pre-gating test

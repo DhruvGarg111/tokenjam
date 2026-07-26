@@ -473,7 +473,7 @@ def test_relearn_totals_are_the_netted_ones():
 
 # --- Lane integration: cost proposals -------------------------------------------
 
-def _cost_report(sessions=100, active_days=10, days=30.0, summarize=None):
+def _cost_report(sessions=100, active_days=10, days=30.0, summarize=None, persona="claude-code"):
     from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
     from tokenjam.utils.time_parse import utcnow
 
@@ -484,7 +484,7 @@ def _cost_report(sessions=100, active_days=10, days=30.0, summarize=None):
         thin_data=False,
     )
     findings = {"summarize": summarize} if summarize is not None else {}
-    return OptimizeReport(window=window, persona="claude-code", findings=findings)
+    return OptimizeReport(window=window, persona=persona, findings=findings)
 
 
 def _reuse_finding(tokens, usd):
@@ -508,7 +508,11 @@ def _reuse_finding(tokens, usd):
 def test_a_cost_write_reports_net_of_its_own_standing_cost():
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
-    report = _cost_report()
+    # "mixed" persona: reuse still offers its workspace write (claude-code
+    # gates reuse out entirely — see test_persona_analyzer_gate.py), so
+    # this is the write-netting mechanics, exercised on a persona the gate
+    # leaves untouched.
+    report = _cost_report(persona="mixed")
     report.findings["reuse"] = _reuse_finding(2_000_000, 60.0)
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "reuse")
 
@@ -527,7 +531,7 @@ def test_write_budget_suppresses_net_negative_cost_write():
     one, and claims nothing."""
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
-    report = _cost_report(sessions=100)
+    report = _cost_report(sessions=100, persona="mixed")
     report.findings["reuse"] = _reuse_finding(900, 0.03)
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "reuse")
 
@@ -551,7 +555,7 @@ def test_cost_writes_stop_when_the_agent_files_are_pathologically_large():
         SummarizeCandidate(path="CLAUDE.md", kind="prompt", scope="project",
                            est_tokens_saved=5_000, total_chars=400_000),
     ])
-    report = _cost_report(summarize=summarize)
+    report = _cost_report(summarize=summarize, persona="mixed")
     report.findings["reuse"] = _reuse_finding(2_000_000, 60.0)
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "reuse")
 
