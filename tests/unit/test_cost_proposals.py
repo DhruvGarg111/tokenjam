@@ -1107,7 +1107,9 @@ def test_resend_finding_produces_an_advisory():
     from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
 
     assert "resend" in COST_ANALYZERS
-    assert "summarize" not in COST_ANALYZERS   # has its own curate/diff screen
+    # summarize is a real peer card now (routes to its own curate/diff
+    # screen instead of an inline apply — see test_summarize_* below).
+    assert "summarize" in COST_ANALYZERS
 
     finding = ResendFinding(
         sessions_examined=5, repeat_share=0.6, repeat_tokens=10_000,

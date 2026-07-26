@@ -6182,6 +6182,7 @@ const ANALYZER_META = {
   deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
   resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
   placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
+  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files — review a compression in the curate/diff surface' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -8388,7 +8389,7 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
 const COST_BADGE_BY_ANALYZER = {
   downsize: 'DOWNSIZE', cache: 'CACHE', 'cache-recommend': 'CACHE', trim: 'TRIM',
   subagent: 'SUBAGENT', deadweight: 'DEADWEIGHT', script: 'SCRIPT', reuse: 'REUSE',
-  verbosity: 'VERBOSITY', placement: 'PLACEMENT', resend: 'TRIM',
+  verbosity: 'VERBOSITY', placement: 'PLACEMENT', resend: 'TRIM', summarize: 'SUMMARIZE',
 };
 
 // Thousands-grouped once the figure is big enough to need it: the past-overspend
@@ -8611,7 +8612,17 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
           ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
         </div>
-      `) : html`
+      `) : prop.analyzer === 'summarize' ? html`
+        ${/* summarize's real fix lives in its own curate -> diff -> apply
+              lifecycle, which already tracks what's staged/applied — "Mark
+              applied" here would be a second, disconnected ledger for the
+              same state. The card's one affordance is the link to that
+              surface, worded as a review action, never a claimable "Apply". */ ''}
+        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+          <a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || '#/optimize/summarize'}>Review in Summarize →</a>
+          <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+        </div>
+      ` : html`
         <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>
           ${/* Dismiss is the secondary, discarding action — plain text, so the
@@ -8910,7 +8921,16 @@ function ReviewInboxView({ params }) {
     ? { index: reviewTotal - reviewQueue.length, total: reviewTotal }
     : null;
   const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
-  const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
+  // The `relearn` cost proposal is a ROLLUP participant, not a card. relearn
+  // reaches the aggregate surfaces through it (past_overspend_rollup and the
+  // Dashboard hero were structurally blind to the whole self-improve loop
+  // before it existed — see cost_proposals._relearn_to_proposals), but this
+  // page already renders every relearn CLUSTER individually, with a richer
+  // treatment than a cost card can give. Showing the aggregate card too would
+  // put the same money on the page twice and re-fill the inbox this page was
+  // just downsized to keep clear.
+  const visibleCost = (costProps || []).filter(p =>
+    p.analyzer !== 'relearn' && !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
