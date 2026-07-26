@@ -6770,10 +6770,15 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         ${(!dollarsSuppressed(framing) && usd == null && tok != null) ? html`<div class="opt-line dim">No dollar figure: no session in this window carries a priced, cache-capable model to estimate the cache_control-adoption saving from. The token estimate above still applies to the compaction lever, which is cache-agnostic.</div>` : null}
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     } else if (name === 'cache-recommend') {
+      // This analyzer is Anthropic-only by design (structural prefix
+      // detection, not a cross-provider extension — see cache_recommend.py).
+      // A non-Anthropic user must be told their calls were EXCLUDED, not left
+      // to read a bare "no prefixes found" as "you have no repetition."
+      const skippedProvider = fd.skipped_provider_count || 0;
       body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled. Set [capture] prompts = true to run this analyzer.'}</div>`
         : (fd.candidates || []).length ? html`<div class="opt-line">${fd.candidates.length} prefix candidate(s) for cache_control:</div>
           <table class="opt-table"><tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.prefix_hash || '').slice(0, 8)}…</td><td>${c.occurrences}× shared</td><td>~${fmtTokens(c.estimated_cacheable_tokens)} cacheable</td></tr>`)}</tbody></table>`
-        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.</div>`;
+        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.${skippedProvider ? ` ${skippedProvider} call(s) on a non-Anthropic provider were excluded from this analysis: this analyzer only looks at Anthropic calls today.` : ''}</div>`;
     } else if (name === 'script') {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
@@ -9236,6 +9241,11 @@ function ReviewInboxView({ params }) {
   // this page ignores dollarsSuppressed() entirely. Kept in case a future
   // qualifier note wants the raw framing block.
   const [relearnFraming, setRelearnFraming] = useState(null);
+  // Full-corpus dominant persona (`/relearn/proposals`'s own `persona` key,
+  // mirroring `opt.persona` on the Optimize payload — see runner.py). Used
+  // ONLY to disclose why the mistakes tab is empty for an SDK-dominant
+  // window; never to change routing.
+  const [reviewPersona, setReviewPersona] = useState('unknown');
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
@@ -9266,6 +9276,7 @@ function ReviewInboxView({ params }) {
         failuresExamined: f.failures_examined,
       });
       setRelearnFraming(r.framing || null);
+      setReviewPersona(r.persona || 'unknown');
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -9512,7 +9523,11 @@ function ReviewInboxView({ params }) {
         ${d.error ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>` : null}
         ${!d.error && d.loading ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>` : null}
         ${!d.error && !d.loading && d.status === 'never_run' ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
-        ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
+        ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? (
+          reviewPersona === 'sdk'
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center">This detector reads Claude Code's own on-disk session transcripts, so it does not apply to SDK sessions and will never find anything here: an empty tab is not a signal you're doing great, it's this detector structurally unable to see your usage. See <span class="sz-link" onClick=${() => setTab('advisories')}>Cost advisories</span> for the analyzers that do read SDK telemetry.</div>`
+            : html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>`
+        ) : null}
         ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`) : null}
         <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
           summary=${combinedObservedCost(tailRelearn)}

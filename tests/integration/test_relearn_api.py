@@ -21,6 +21,7 @@ from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConf
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.optimize import relearn_apply as pa
+from tests.factories import make_session
 
 
 @pytest.fixture
@@ -146,6 +147,34 @@ async def test_read_endpoints_do_not_require_the_write_token(client):
     assert r.status_code == 200
     r2 = await client.get("/api/v1/relearn/applied")
     assert r2.status_code == 200
+
+
+# --- persona: the mistakes-tab empty state needs to know if it applies -------- #
+
+async def test_relearn_proposals_carries_persona_when_never_run(client, db):
+    """`relearn` reads only on-disk Claude Code transcripts (see its module
+    docstring), so an SDK-dominant window's mistakes tab is permanently empty
+    -- the empty state needs `persona` to disclose that, even before any
+    background scan has completed (the `cached is None` branch)."""
+    for i in range(3):
+        db.upsert_session(make_session(session_id=f"sdk-{i}", agent_id="my-sdk-service"))
+
+    resp = await client.get("/api/v1/relearn/proposals")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "never_run"
+    assert body["persona"] == "sdk"
+
+
+async def test_relearn_proposals_persona_reflects_claude_code_dominant_window(
+    client, db, stored_proposal,
+):
+    for i in range(3):
+        db.upsert_session(make_session(session_id=f"cc-{i}", agent_id="claude-code-cli"))
+
+    resp = await client.get("/api/v1/relearn/proposals")
+    assert resp.status_code == 200
+    assert resp.json()["persona"] == "claude-code"
 
 
 # --- must-fix #1 (defense-in-depth): home-anchored target_path allowlist ------

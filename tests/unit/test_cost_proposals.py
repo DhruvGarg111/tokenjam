@@ -1145,16 +1145,43 @@ def test_resend_cost_of_waste_is_carried_but_never_the_recoverable_figure():
     assert rollup["past_overspend_tokens"] == 6_830
 
 
-def test_resend_sdk_persona_gets_no_write_and_leads_with_compact():
-    # The SDK branch is unchanged: no coding-agent harness reads a CLAUDE.md
-    # note there, so no write is offered and /compact remains the lead fix.
+def test_resend_unknown_persona_gets_no_write_and_leads_with_compact():
+    # "unknown" is untouched by the SDK /compact fix below: no coding-agent
+    # harness reads a CLAUDE.md note there, so no write is offered and
+    # /compact remains the lead fix.
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
-    for persona in ("sdk", "unknown"):
-        prop = _resend_to_proposals(_resend_finding(), persona=persona)[0]
-        assert prop.advise_only is True
-        assert prop.apply_capable is False
-        assert prop.advise_text == "Run /compact."
+    prop = _resend_to_proposals(_resend_finding(), persona="unknown")[0]
+    assert prop.advise_only is True
+    assert prop.apply_capable is False
+    assert prop.advise_text == "Run /compact."
+
+
+def test_resend_sdk_persona_never_sees_compact():
+    # `/compact` is a Claude Code interactive command an SDK caller has no
+    # access to. When a priced cache_control example exists, the advise text
+    # must lead with adopting it instead, never with /compact.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="sdk")[0]
+    assert prop.advise_only is True
+    assert prop.apply_capable is False
+    assert "/compact" not in prop.advise_text
+    assert "cache_control" in prop.advise_text
+
+
+def test_resend_sdk_persona_without_a_snippet_gets_a_neutral_fallback():
+    # No priced example -> fix_cache_control is empty. The fallback must be
+    # persona-neutral and actionable, and must still never mention /compact.
+    from tokenjam.core.optimize.analyzers.context_resend import RESEND_SDK_TRIM_FIX
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    finding = _resend_finding()
+    finding.fix_cache_control = ""
+    prop = _resend_to_proposals(finding, persona="sdk")[0]
+    assert "/compact" not in prop.advise_text
+    assert prop.advise_text == RESEND_SDK_TRIM_FIX
+    assert prop.one_paste_fix == RESEND_SDK_TRIM_FIX
 
 
 def test_resend_mixed_persona_offers_write_and_keeps_snippet():

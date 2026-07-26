@@ -2324,6 +2324,25 @@ def _resend_to_proposals(
         # because the rung-1 write lands in CLAUDE.md, and the apply machinery
         # writes exactly one target per apply.
         one_paste_fix = _rightsize_frontmatter_snippet(rightsize)
+    elif persona == "sdk":
+        # `/compact` is a Claude Code interactive command an SDK caller has
+        # no access to, so it must never be the advise text here — see
+        # RESEND_SDK_TRIM_FIX's docstring in context_resend.py. Lead with the
+        # cache_control snippet when a priced example produced one; fall
+        # back to a persona-neutral, call-site instruction otherwise.
+        from tokenjam.core.optimize.analyzers.context_resend import (
+            RESEND_SDK_TRIM_FIX,
+        )
+        advise = (
+            "Adopt a cache_control breakpoint at the call site (snippet "
+            "below) so this repeated context bills at the cache rate "
+            "instead of full price every turn."
+        ) if cache_snippet else RESEND_SDK_TRIM_FIX
+        write_fields = {
+            "advise_only": True, "apply_capable": False,
+            "rung": 0, "scope": "", "proposed_fix": "",
+        }
+        one_paste_fix = cache_snippet or RESEND_SDK_TRIM_FIX
     else:
         advise = fix_compaction
         write_fields = {
