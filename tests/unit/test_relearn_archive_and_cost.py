@@ -265,7 +265,19 @@ def test_recurrence_gate_residue_is_counted_not_silently_dropped(db):
     assert finding.clusters == []
     assert finding.below_threshold_clusters == 1
     assert finding.below_threshold_occurrences == 1
-    assert finding.below_threshold_past_overspend_tokens == GROUNDED_TOKENS_PER_OCCURRENCE
+    # Priced on the SAME head basis the kept clusters use — the measured cost
+    # of the recovery turn, not the error text's size. Asserted as the
+    # invariant rather than a literal, because the head is corpus-derived now:
+    # pinning it to the constant is what let the residue silently keep the old
+    # ~15-20x-low basis when the head term moved.
+    from tokenjam.core.optimize.analyzers.relearn import _measured_turn_tokens
+    from tokenjam.core.optimize.rate_profile import blended_rate_profile
+
+    expected = _measured_turn_tokens(
+        db.conn, {"solo"}, blended_rate_profile(db.conn, session_ids={"solo"}),
+    )
+    assert expected is not None and expected >= GROUNDED_TOKENS_PER_OCCURRENCE
+    assert finding.below_threshold_past_overspend_tokens == expected
 
 
 # --------------------------------------------------------------------------- #
@@ -638,3 +650,115 @@ def test_relearn_finding_round_trips_its_observed_dollar_figure():
     # defaults, never to None on a non-optional int.
     legacy = report_from_dict({"findings": {"relearn": {"sessions_scanned": 1}}})
     assert legacy.findings["relearn"].past_overspend_tokens == 0
+
+
+# --------------------------------------------------------------------------- #
+# The head term is MEASURED, and the claim is disjoint from `resend`.
+#
+# relearn priced a pothole at a flat 1,500 tokens -- an unmeasured guess for
+# "one extra assistant turn's overhead". Measured on a real corpus, one turn
+# costs ~140k tokens (836 fresh + 138k cache-read + 795 out), because a coding
+# turn re-sends the whole context. The constant was ~15-20x low, which is why
+# relearn read as noise: 70% of the inbox cards carrying 0.8% of the money.
+#
+# The fix splits one conflated constant into the two quantities it was standing
+# in for: the forced RETRY TURN (measured, and relearn's own claim) and the
+# error TEXT re-read on later calls (~1,500 tokens really is right for a block
+# of error text, and it is `resend`'s money, so it is observed but not claimed).
+# --------------------------------------------------------------------------- #
+
+
+def test_head_term_is_measured_from_the_corpus_not_a_constant(db):
+    """The recovery turn is priced from what a call actually cost in the
+    contributing sessions, so a corpus of expensive calls yields a bigger
+    figure than one of cheap calls off the identical failure count."""
+    from tokenjam.core.optimize.analyzers.relearn import (
+        _measured_turn_tokens,
+        cluster_failures,
+    )
+    from tokenjam.core.optimize.rate_profile import blended_rate_profile
+
+    failures = []
+    for i in range(MIN_RECURRING_SESSIONS):
+        session_id = f"m{i}"
+        _priced_session(db, session_id)
+        failures.append(_episode(
+            session_id,
+            "File has not been read yet. Read it first before writing to it.",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+        ))
+    sessions = {f.session_id for f in failures}
+    profile = blended_rate_profile(db.conn, session_ids=sessions)
+    measured = _measured_turn_tokens(db.conn, sessions, profile)
+
+    assert measured is not None, "a priced corpus must yield a measured turn"
+    # Never BELOW the error-text constant: a forced retry carries the error
+    # text, so it cannot cost less than the text alone.
+    assert measured >= GROUNDED_TOKENS_PER_OCCURRENCE
+    # And it must actually be derived, not the constant echoed back: these
+    # sessions carry 2,000-token calls, well above the 1,500 floor.
+    assert measured > GROUNDED_TOKENS_PER_OCCURRENCE
+
+    clusters = list(cluster_failures(failures).values())
+    proposals, _ = build_proposals(
+        clusters, conn=db.conn, window_days=30.0, persona="claude-code",
+        repo_cwd_map={"demo": "/tmp/demo"},
+    )
+    p = proposals[0]
+    # The head alone already exceeds what the OLD flat model charged for head
+    # plus tail combined.
+    assert p.past_overspend_tokens > p.occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+
+
+def test_relearn_claims_the_retry_turn_and_never_the_reread_tail(db):
+    """The disjointness rule between the two analyzers, asserted.
+
+    `resend` prices redundant context inside calls that had to happen.
+    `relearn` prices a call that should not have happened at all. The error
+    text's re-read tail belongs to the first, so it appears in relearn's
+    OBSERVED figure and never in its CLAIM -- otherwise the same tokens are
+    priced on two cards (CLAUDE.md rule 27).
+    """
+    from tokenjam.core.optimize.analyzers.relearn import cluster_failures
+
+    failures = []
+    for i in range(MIN_RECURRING_SESSIONS + 2):
+        session_id = f"d{i}"
+        _priced_session(db, session_id)
+        failures.append(_episode(
+            session_id,
+            "File has not been read yet. Read it first before writing to it.",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+        ))
+    clusters = list(cluster_failures(failures).values())
+    proposals, _ = build_proposals(
+        clusters, conn=db.conn, window_days=30.0, persona="claude-code",
+        repo_cwd_map={"demo": "/tmp/demo"},
+    )
+    p = proposals[0]
+    assert p.write_offered, "this family has a real fix; expected a claim"
+
+    # The observation is the whole cost: retry turns + the text's re-read tail.
+    # The claim is the retry turns alone, so it is strictly the smaller of the
+    # two whenever a tail exists at all.
+    assert p.past_overspend_tokens >= p.estimated_recoverable_tokens
+    if p.past_reread_tokens:
+        assert p.estimated_recoverable_tokens < p.past_overspend_tokens, (
+            "a cluster with a re-read tail must not claim that tail"
+        )
+        # The claim plus the tail reconstructs the observation: nothing is
+        # invented and nothing goes missing between the two figures.
+        assert (
+            p.estimated_recoverable_tokens + p.past_reread_tokens
+            == p.past_overspend_tokens
+        )
+    # And both basis strings say which figure is which, in the user's words:
+    # the observed one discloses the overlap, the claim one says it is excluded.
+    from tokenjam.core.optimize.analyzers.relearn import (
+        ESTIMATE_BASIS,
+        PAST_OVERSPEND_BASIS,
+    )
+
+    assert "must never be added together" in PAST_OVERSPEND_BASIS
+    assert "NOT claimed here" in ESTIMATE_BASIS
+    assert "should not have happened" in ESTIMATE_BASIS

@@ -122,12 +122,22 @@ DISTILL_MODEL = "haiku"
 COMPACTION_PROMPT_DROP_RATIO = 0.5
 
 ESTIMATE_BASIS = (
-    "occurrences x a conservative per-turn token cost (one re-issued tool "
-    "call + re-narration) — never the inflated whole-session footprint — "
-    "then x the occurrence's own re-read tail: a failure's text is re-sent on "
-    "every later call that still carries it, billed at the cache-read rate, so "
-    "one occurrence is worth 1 + cache_read_ratio x tail input-token "
-    "equivalents. The tail is truncated at the first compaction (a prompt-size "
+    "occurrences x the MEASURED cost of one extra assistant turn in the "
+    "sessions the cluster actually occurred in (median billed cost per call, "
+    "divided back through those sessions' own input rate) — never the inflated "
+    "whole-session footprint, and never a fixed guess: a failed tool call "
+    "forces the model to emit a recovery turn a successful call would not have "
+    "needed, and in a coding session a turn re-sends the whole context. That "
+    "forced turn is the CLAIM, and it is the part no other analyzer prices: "
+    "the context re-send analyzer measures redundant context inside calls that "
+    "had to happen, whereas this measures a call that should not have happened "
+    "at all. Observed here but NOT claimed here: the error text's own re-read "
+    "tail, priced at ~1,500 tokens (the size of a block of error text) x the "
+    "occurrence's tail, billed at the cache-read rate. Those are re-sent "
+    "context tokens the context re-send analyzer already prices in full, so "
+    "they are shown on this card as part of what the recurrence cost and left "
+    "out of what this card claims, rather than counted twice. The tail is "
+    "truncated at the first compaction (a prompt-size "
     "collapse), not run to end-of-session, and the cluster takes the MEDIAN of "
     "its occurrences' multipliers rather than the mean — a handful of very long "
     "uncompacted sessions otherwise dominate. Reported NET of what the proposed "
@@ -139,9 +149,11 @@ ESTIMATE_BASIS = (
 #: `ESTIMATE_BASIS` above and must never be described with it: that one is a
 #: forward, netted, gated CLAIM; this is a backward, ungated OBSERVATION.
 PAST_OVERSPEND_BASIS = (
-    "observed occurrences x a conservative per-turn token cost (one re-issued "
-    "tool call + re-narration) x the occurrence's own measured re-read tail, "
-    "priced at the rate the contributing sessions actually billed at. "
+    "observed occurrences x the MEASURED cost of one extra assistant turn in "
+    "the sessions the cluster occurred in (the recovery turn a failed call "
+    "forces and a successful one does not), PLUS the error text's own measured "
+    "re-read tail, priced at the rate the contributing sessions actually "
+    "billed at. "
     "Accumulated over the scanned corpus, NOT paced to 30 days. Deliberately "
     "ungated: a cluster with no fix template in our library and a cluster "
     "whose rule is uneconomic to keep both still cost this, and no future "
@@ -578,9 +590,18 @@ def _below_threshold_residue(
     if not dropped:
         return {"clusters": 0, "occurrences": 0, "tokens": 0, "usd": None}
     occurrences = sum(len(c.failures) for c in dropped)
-    tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
     sessions = {f.session_id for c in dropped for f in c.failures}
     profile = blended_rate_profile(conn, session_ids=sessions)
+    # The SAME head basis the kept clusters use -- the measured cost of the
+    # recovery turn these occurrences forced, not the error text's size. This
+    # has to move whenever the head term moves or the docstring's "same
+    # head-term basis" promise silently becomes false, and the residue starts
+    # understating itself by the same ~15-20x the head term used to.
+    turn_tokens = (
+        _measured_turn_tokens(conn, sessions, profile)
+        or GROUNDED_TOKENS_PER_OCCURRENCE
+    )
+    tokens = occurrences * turn_tokens
     return {
         "clusters": len(dropped),
         "occurrences": occurrences,
@@ -1150,6 +1171,71 @@ def _monthly_scale(window_days: float | None) -> float:
     return 30.0 / window_days
 
 
+def _measured_turn_tokens(
+    conn: Any, session_ids: set[str], profile: RateProfile | None,
+) -> int | None:
+    """What ONE extra assistant turn actually cost in these sessions, in
+    input-token equivalents. ``None`` when it cannot be measured.
+
+    This is the head term's basis, and it replaces a guess. A failed tool call
+    forces a retry: the harness hands the error back to the model, the model
+    has to emit another turn to recover. A SUCCESSFUL call would not have
+    needed that turn, so it is the marginal cost of the failure, and it is one
+    whole round trip -- not the ~1,500 tokens of error text that ride along in
+    it.
+
+    Measured from ``cost_usd``, the rate the contributing sessions were
+    actually billed at, then divided back through the cluster's own input rate
+    so the result lands in the same input-token-equivalent unit every other
+    figure here uses. Going through the billed cost rather than summing token
+    columns means the cache-read / cache-write / output rate mix is whatever
+    those calls really paid, with no ratio assumed locally.
+
+    The MEDIAN, never the mean: per-call cost in a coding corpus is heavily
+    right-skewed (a handful of near-context-limit calls dwarf the rest), and a
+    mean would let those set the price of every occurrence.
+    """
+    if conn is None or not session_ids or profile is None:
+        return None
+    if not profile.input_rate_per_token:
+        return None
+    ids = sorted(session_ids)
+    placeholders = ", ".join(f"${i + 1}" for i in range(len(ids)))
+    try:
+        row = conn.execute(
+            f"SELECT median(cost_usd), "
+            f"median(COALESCE(input_tokens, 0) "
+            f"       + COALESCE(cache_tokens, 0) * {profile.cache_read_ratio}) "
+            f"FROM spans WHERE session_id IN ({placeholders}) "
+            f"AND name = 'gen_ai.llm.call'",
+            ids,
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    billed, from_tokens = row[0], row[1]
+    if billed:
+        # Preferred: the rate these calls were ACTUALLY billed at, divided back
+        # through the cluster's input rate so the result is an input-token
+        # equivalent. Assumes no rate mix locally -- the bill already knows it.
+        tokens = float(billed) / profile.input_rate_per_token
+    elif from_tokens:
+        # Fallback for a corpus with no cost recorded (a partial ingest): the
+        # prompt's own size in input-token equivalents, on the same
+        # `input + cache_read x ratio` convention `_prompt_timelines` uses.
+        # Conservative -- it counts the re-sent prompt and not the output.
+        tokens = float(from_tokens)
+    else:
+        return None
+    if tokens <= 0:
+        return None
+    # Floor at the text constant: a measured turn is always the larger of the
+    # two, and a pathologically cheap corpus must never price a forced retry
+    # BELOW the error text it carries.
+    return max(int(round(tokens)), GROUNDED_TOKENS_PER_OCCURRENCE)
+
+
 def _prompt_timelines(conn: Any, session_ids: set[str]) -> dict[str, list[tuple[Any, int]]]:
     """``session_id -> [(start_time, prompt_size), ...]`` in wall-clock order.
 
@@ -1360,8 +1446,27 @@ def build_proposals(
         # re-read at the cache-read rate, expressed on the head's basis so the
         # token and dollar figures stay proportional. See the constants above.
         scale = _monthly_scale(window_days)
-        head_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
-        gross_tokens = round(head_tokens * multiplier)
+        # TWO DIFFERENT QUANTITIES, two different bases. They used to share the
+        # `GROUNDED_TOKENS_PER_OCCURRENCE` constant, which is right for one and
+        # wrong for the other by a measured ~15-20x:
+        #
+        #   HEAD -- the forced retry. A failed call makes the model emit a turn
+        #     it would not have emitted had the call succeeded. That turn costs
+        #     a whole round trip, and in a coding session a round trip re-sends
+        #     the entire context (this product's own central measurement). On
+        #     this corpus a real turn measured ~24k input-token equivalents
+        #     against the 1,500 that were being charged.
+        #   TAIL -- the error TEXT, re-sent on every later call that still
+        #     carries it. ~1,500 tokens IS the right size for a block of error
+        #     text, so the constant stays exactly where it was earned.
+        #
+        # Conflating them priced the retry as though it were the text.
+        turn_tokens = _measured_turn_tokens(conn, sessions, profile)
+        head_tokens = occurrences * (turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE)
+        # `multiplier - 1` is the tail's own share (`cache_read_ratio x tail`),
+        # kept on the TEXT basis rather than rescaled by the head.
+        text_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+        gross_tokens = head_tokens + round(text_tokens * max(multiplier - 1.0, 0.0))
         gross_monthly_tokens = round(gross_tokens * scale)
         gross_monthly_usd = (
             round(gross_monthly_tokens * profile.input_rate_per_token, 6)
@@ -1381,8 +1486,23 @@ def build_proposals(
             round(reread_tokens * profile.input_rate_per_token, 6)
             if profile is not None else None
         )
-        # The CLAIM, as distinct from the observation above.
-        recoverable_tokens = gross_tokens if has_real_fix else 0
+        # The CLAIM, as distinct from the observation above -- and deliberately
+        # the HEAD ONLY, which is what makes it disjoint from `resend`.
+        #
+        # THE LINE BETWEEN THE TWO ANALYZERS:
+        #   `resend` targets context re-sent across calls that HAD to happen.
+        #     Its fix makes each necessary call carry less.
+        #   `relearn` targets calls that should never have happened at all.
+        #     Its fix stops the failure, so the retry turn never occurs.
+        #
+        # The head is a turn that would not exist if the pothole were fixed, so
+        # eliminating it takes its whole cost with it and no other analyzer is
+        # claiming that. The tail is re-sent context inside calls that happen
+        # regardless -- that is `resend`'s population by definition, and
+        # claiming it here would price the same tokens on two cards
+        # (CLAUDE.md rule 27). So the tail stays in the OBSERVED figure, broken
+        # out as `past_reread_*`, and is claimed by `resend` alone.
+        recoverable_tokens = head_tokens if has_real_fix else 0
         recoverable_usd = (
             round(recoverable_tokens * profile.input_rate_per_token, 6)
             if profile is not None else None
