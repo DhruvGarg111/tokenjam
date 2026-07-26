@@ -61,9 +61,22 @@ _DIMENSION_EXPR: dict[str, str] = {
 
 # Metric name -> (SQL aggregate, value unit). spend is the only dollar-bearing
 # (framing-sensitive) metric.
+#
+# `tokens` sums ALL FOUR token columns — input, output, cache-read
+# (`cache_tokens`) and cache-write (`cache_write_tokens`). Cache reads
+# dominate real corpora, so an input+output-only sum understates true token
+# volume by roughly an order of magnitude while the axis just says "Tokens".
+# This is the canonical form used elsewhere in this repo (see root CLAUDE.md,
+# "Cache token types in aggregates") — COALESCE(SUM(input_tokens +
+# output_tokens + cache_tokens + cache_write_tokens), 0). If a split view is
+# ever needed, add explicit new metrics rather than narrowing this one.
 _METRIC_EXPR: dict[str, tuple[str, str]] = {
     "spend": ("COALESCE(SUM(cost_usd), 0.0)", "usd"),
-    "tokens": ("COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)), 0)", "tokens"),
+    "tokens": (
+        "COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)"
+        "+COALESCE(cache_tokens,0)+COALESCE(cache_write_tokens,0)), 0)",
+        "tokens",
+    ),
     "events": ("COUNT(*)", "count"),
     "sessions": ("COUNT(DISTINCT session_id)", "count"),
 }
@@ -84,7 +97,13 @@ _FILTER_COLUMN = {
     "prompt_version": "prompt_template_version",
 }
 
-_TOKENS_EXPR = "COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)), 0)"
+# Kept in sync with _METRIC_EXPR["tokens"] (all four token columns) —
+# test_metric_expr_covers_all_token_columns in tests/unit/test_analytics_metric_expr.py
+# asserts the two never drift apart.
+_TOKENS_EXPR = (
+    "COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)"
+    "+COALESCE(cache_tokens,0)+COALESCE(cache_write_tokens,0)), 0)"
+)
 
 
 def _bucket_unit(since_dt, until_dt) -> str:

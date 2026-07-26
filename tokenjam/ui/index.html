@@ -6124,11 +6124,58 @@ function BudgetRow({ scope, label, daily, session, effectiveDaily, effectiveSess
   `;
 }
 
+// Provider spend-forecast ceiling — the OTHER budget object on this screen.
+// Distinct from BudgetRow (per-agent daily/session ALERT caps, checked on
+// every ingested span): this is a per-provider recurring monthly ceiling that
+// Optimize's Budget projection analyzer projects the current run rate
+// against. Editing it here means the projection can never point at a ceiling
+// this screen doesn't also show.
+function ProviderBudgetRow({ provider, usd, cycleStartDay, highlighted, onSave }) {
+  const [usdVal, setUsdVal] = useState(usd != null ? String(usd) : '');
+  const [cycleVal, setCycleVal] = useState(cycleStartDay != null ? String(cycleStartDay) : '1');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await onSave(provider, usdVal, cycleVal);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      alert('Save failed: ' + e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return html`
+    <tr id=${'provider-budget-' + provider} style=${highlighted ? 'background:var(--surface-hover, rgba(127,127,127,0.08))' : ''}>
+      <td class="mono">${provider}</td>
+      <td>
+        <input type="number" min="0" step="0.01" placeholder="no ceiling"
+          value=${usdVal} onInput=${e => setUsdVal(e.target.value)}
+          style="width:120px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:13px" />
+      </td>
+      <td>
+        <input type="number" min="1" max="28" step="1" placeholder="1"
+          value=${cycleVal} onInput=${e => setCycleVal(e.target.value)}
+          style="width:70px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:13px" />
+      </td>
+      <td>
+        <button class="btn" onClick=${save} disabled=${saving}
+          style="padding:4px 12px;font-size:12px">
+          ${saving ? 'Saving...' : saved ? '✓ Saved' : 'Save'}
+        </button>
+      </td>
+    </tr>
+  `;
+}
+
 function BudgetView({ params }) {
-  // `provider` deep-link param (#112). The budget surface is per-agent today, so
-  // there's nothing to filter on yet — we preserve the param so the deep-link
-  // round-trips and surface it as a clearable chip. Provider-scoped budget
-  // content arrives with budget-projection surfacing (#114).
+  // `provider` deep-link param (#112), now wired to the provider spend-forecast
+  // table below: Optimize's Budget projection links here with `?provider=X` so
+  // the ceiling it projected against is highlighted where it's editable.
   const provider = readParam(params, 'provider', '');
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
@@ -6149,6 +6196,14 @@ function BudgetView({ params }) {
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, []);
 
+  // Scroll the deep-linked provider's forecast row into view (arriving from
+  // Optimize's Budget projection via #/budget?provider=X, #114).
+  useEffect(() => {
+    if (!provider || !data) return;
+    const el = document.getElementById('provider-budget-' + provider);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [provider, data]);
+
   const handleSave = async (scope, dailyStr, sessionStr) => {
     // Empty field means "no limit" — send 0 so the server runs validate_budget_value(0) → None.
     const daily = dailyStr !== '' ? parseFloat(dailyStr) : 0;
@@ -6161,18 +6216,55 @@ function BudgetView({ params }) {
     setData(updated);
   };
 
+  const handleSaveProvider = async (prov, usdStr, cycleStr) => {
+    // Empty field means "no ceiling" — send 0 so the server runs validate_budget_value(0) → None.
+    const usd = usdStr !== '' ? parseFloat(usdStr) : 0;
+    const cycleStartDay = cycleStr !== '' ? parseInt(cycleStr, 10) : 1;
+    const updated = await apiPost('/budget/provider', {
+      provider: prov,
+      usd,
+      cycle_start_day: cycleStartDay,
+    });
+    setData(updated);
+  };
+
+  const [newProvider, setNewProvider] = useState('');
+  // Providers typed into "Add" but not yet saved — kept local-only so typing a
+  // name doesn't round-trip an empty [budget.<provider>] stanza to the server
+  // (POST /budget/provider drops a provider entirely once every field on it
+  // is unset, which would otherwise make the just-added row vanish again).
+  const [pendingProviders, setPendingProviders] = useState([]);
+  const addProvider = () => {
+    const p = newProvider.trim();
+    if (p) {
+      setPendingProviders(prev => prev.includes(p) ? prev : [...prev, p]);
+      setNewProvider('');
+    }
+  };
+
   if (error) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
   if (!data) return html`<div class="empty">Loading...</div>`;
 
   const agentEntries = Object.entries(data.agents || {});
+  const providerBudgets = data.provider_budgets || {};
+  // Every provider we know about: configured + the one deep-linked from
+  // Optimize's projection (even with no ceiling set yet) + any just-added
+  // pending row not yet saved.
+  const providerNames = Array.from(new Set([
+    ...Object.keys(providerBudgets),
+    ...(provider ? [provider] : []),
+    ...pendingProviders,
+  ])).sort();
 
   return html`
     <div class="page-title">Budget</div>
     ${provider ? html`<div class="filters"><button class="btn" onClick=${() => navigate('budget', {}, {})}>provider: ${provider} ✕</button></div>` : null}
 
-    <div style="font-size:13px;font-weight:600;margin-bottom:8px">Budget limits</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px">Per-agent budget caps</div>
     <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
-      Clear a field or enter 0 to remove a limit. Changes are written to your config file immediately.
+      An enforcement ceiling per agent, per day/session. Fires a real-time alert the moment an
+      agent's spend crosses the line. Clear a field or enter 0 to remove a limit. Changes are
+      written to your config file immediately.
     </div>
     <div class="table-wrap"><table>
       <thead><tr><th>Scope</th><th>Daily (USD)</th><th>Per-session (USD)</th><th></th></tr></thead>
@@ -6201,6 +6293,47 @@ function BudgetView({ params }) {
             No agents configured yet. Run your agent once to register it.
           </td></tr>
         ` : null}
+      </tbody>
+    </table></div>
+
+    <div style="font-size:13px;font-weight:600;margin-top:28px;margin-bottom:8px">Provider spend forecast</div>
+    <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
+      A recurring monthly ceiling per provider, scoped to its billing cycle rather than a single
+      agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>
+      projects your current run rate against — it is advisory only (a forecast, never an alert).
+      Clear a field or enter 0 to remove the ceiling.
+    </div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Provider</th><th>Monthly ceiling (USD)</th><th>Cycle start day</th><th></th></tr></thead>
+      <tbody>
+        ${providerNames.map(p => html`
+          <${ProviderBudgetRow}
+            key=${p}
+            provider=${p}
+            usd=${(providerBudgets[p] || {}).usd}
+            cycleStartDay=${(providerBudgets[p] || {}).cycle_start_day}
+            highlighted=${p === provider}
+            onSave=${handleSaveProvider}
+          />
+        `)}
+        ${providerNames.length === 0 ? html`
+          <tr><td colspan="4" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+            No provider budgets configured yet.
+          </td></tr>
+        ` : null}
+        <tr>
+          <td>
+            <input type="text" placeholder="provider (e.g. anthropic)" value=${newProvider}
+              onInput=${e => setNewProvider(e.target.value)}
+              style="width:160px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-size:13px" />
+          </td>
+          <td colspan="2" style="color:var(--text-dim);font-size:12px">Enter a ceiling in the new row below, then Save.</td>
+          <td>
+            <button class="btn" style="padding:4px 12px;font-size:12px" onClick=${addProvider}>
+              Add
+            </button>
+          </td>
+        </tr>
       </tbody>
     </table></div>
 
@@ -6872,8 +7005,14 @@ function OptimizeView({ params }) {
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
         <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling — not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
-        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}</div>`)}
-        <div class="opt-caveat">! This projects your current run rate forward against the ceiling — it identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the budget.</div>
+        ${st.opt.budgets.map(b => html`<div class="opt-line">
+          <a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)} title="Edit this provider's monthly ceiling on the Budget screen">${b.provider}</a>:
+          run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs
+          ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling
+          (<a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)}>configured for ${b.provider}</a>, cycle resets day ${b.cycle_start_day})
+          ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}
+        </div>`)}
+        <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a> — not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
         ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
         <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a> — the fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}

@@ -969,6 +969,105 @@ async def test_post_budget_zero_clears_limit(db):
     assert agent["configured"]["daily_usd"] is None  # limit was cleared
 
 
+async def test_get_budget_includes_provider_budgets(db):
+    """GET /budget surfaces the provider spend-forecast ceiling
+    (`[budget.<provider>]`) that Optimize's Budget projection reads, alongside
+    the per-agent enforcement caps — the two budget objects were previously
+    disconnected (this screen showed only the per-agent caps)."""
+    from tokenjam.core.config import ProviderBudget
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        budgets={"anthropic": ProviderBudget(usd=100.0, cycle_start_day=15)},
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/budget")
+
+    assert resp.status_code == 200
+    pb = resp.json()["provider_budgets"]["anthropic"]
+    assert pb["usd"] == 100.0
+    assert pb["cycle_start_day"] == 15
+
+
+async def test_post_provider_budget_creates_new_ceiling(db):
+    """POST /budget/provider writes a NEW [budget.<provider>] ceiling for a
+    provider with none configured yet."""
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+         patch("tokenjam.api.routes.budget.write_config"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget/provider",
+                json={"provider": "anthropic", "usd": 250.0, "cycle_start_day": 10},
+            )
+
+    assert resp.status_code == 200
+    pb = resp.json()["provider_budgets"]["anthropic"]
+    assert pb["usd"] == 250.0
+    assert pb["cycle_start_day"] == 10
+
+
+async def test_post_provider_budget_zero_clears_ceiling_but_keeps_cycle(db):
+    """Posting usd=0 (empty field from UI) clears the ceiling but a
+    non-default cycle_start_day keeps the [budget.<provider>] entry alive
+    rather than dropping it outright."""
+    from tokenjam.core.config import ProviderBudget
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        budgets={"anthropic": ProviderBudget(usd=100.0, cycle_start_day=15)},
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+         patch("tokenjam.api.routes.budget.write_config"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post("/api/v1/budget/provider", json={"provider": "anthropic", "usd": 0})
+
+    assert resp.status_code == 200
+    pb = resp.json()["provider_budgets"]["anthropic"]
+    assert pb["usd"] is None
+    assert pb["cycle_start_day"] == 15  # untouched field survives
+
+
+async def test_post_provider_budget_rejects_invalid_cycle_start_day(db):
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+         patch("tokenjam.api.routes.budget.write_config"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget/provider",
+                json={"provider": "anthropic", "usd": 50.0, "cycle_start_day": 40},
+            )
+
+    assert resp.status_code == 400
+
+
 # ===========================================================================
 # Status route: concurrent live sessions each get a tile, read as active
 #
