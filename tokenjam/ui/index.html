@@ -6468,10 +6468,15 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         ${(!dollarsSuppressed(framing) && usd == null && tok != null) ? html`<div class="opt-line dim">No dollar figure: no session in this window carries a priced, cache-capable model to estimate the cache_control-adoption saving from. The token estimate above still applies to the compaction lever, which is cache-agnostic.</div>` : null}
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     } else if (name === 'cache-recommend') {
+      // This analyzer is Anthropic-only by design (structural prefix
+      // detection, not a cross-provider extension — see cache_recommend.py).
+      // A non-Anthropic user must be told their calls were EXCLUDED, not left
+      // to read a bare "no prefixes found" as "you have no repetition."
+      const skippedProvider = fd.skipped_provider_count || 0;
       body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled. Set [capture] prompts = true to run this analyzer.'}</div>`
         : (fd.candidates || []).length ? html`<div class="opt-line">${fd.candidates.length} prefix candidate(s) for cache_control:</div>
           <table class="opt-table"><tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.prefix_hash || '').slice(0, 8)}…</td><td>${c.occurrences}× shared</td><td>~${fmtTokens(c.estimated_cacheable_tokens)} cacheable</td></tr>`)}</tbody></table>`
-        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.</div>`;
+        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.${skippedProvider ? ` ${skippedProvider} call(s) on a non-Anthropic provider were excluded from this analysis: this analyzer only looks at Anthropic calls today.` : ''}</div>`;
     } else if (name === 'script') {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
