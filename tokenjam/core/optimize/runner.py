@@ -647,8 +647,6 @@ def _build_finding_constructors() -> dict:
             past_overspend_tokens=int(d.get("past_overspend_tokens") or 0),
             past_overspend_usd=d.get("past_overspend_usd"),
             past_overspend_basis=d.get("past_overspend_basis", ""),
-            estimate_basis=d.get("estimate_basis", ""),
-            estimate_confidence=d.get("estimate_confidence", "heuristic"),
             caveat=d.get("caveat", ""),
         )
 

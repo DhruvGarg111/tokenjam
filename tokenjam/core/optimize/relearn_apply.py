@@ -1108,17 +1108,20 @@ def apply_relearn_fix(
     # `verify` field's class docstring above); left unset rather than
     # computed since nothing consumes it.
     record.verify["baseline_total_sessions"] = None
-    # A bounded, POINT-IN-TIME snapshot of the cluster's monthly estimate at
-    # the moment of apply — deliberately NOT a live re-measurement. The
+    # A bounded, POINT-IN-TIME snapshot of the cluster's past-overspend figure
+    # at the moment of apply — deliberately NOT a live re-measurement. The
     # perpetual verify/receipts layer that used to fill these fields with an
     # ever-growing post-apply comparison was removed (it made unsupportable
     # realized-savings claims with no confounder control); this is a single
-    # read of the estimate the human actually reviewed and approved, so the
-    # Review inbox's Applied tab has an honest `est.` figure to show. Never
-    # promoted to a "verified" claim — see `relearn_store`/the Review inbox's
-    # Applied-tab rendering, which always labels this `est.` with no chip.
-    record.verify["estimated_monthly_usd"] = cluster.get("estimated_monthly_usd")
-    record.verify["estimated_monthly_tokens"] = cluster.get("estimated_monthly_tokens")
+    # read of the figure the human actually reviewed and approved, so the
+    # Review inbox's Applied tab has an honest figure to show. Never promoted
+    # to a "verified" claim — see `relearn_store`/the Review inbox's
+    # Applied-tab rendering, which always labels this with no chip. This is
+    # `past_overspend_*` (the one canonical dollar field), not a forward
+    # claim — the Applied tab shows what the cluster already cost, same as
+    # every other analyzer's card.
+    record.verify["past_overspend_usd"] = cluster.get("past_overspend_usd")
+    record.verify["past_overspend_tokens"] = cluster.get("past_overspend_tokens")
     return {"dry_run": False, "record": _save_record(config, record)}
 
 

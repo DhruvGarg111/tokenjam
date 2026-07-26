@@ -115,12 +115,18 @@ def test_the_boundary_is_stated_once_and_quoted_by_both_analyzers():
     """Two analyzers price nearly the same physical tokens (a coding turn is
     ~99.8% re-read context), so an unstated boundary lets both claim them.
     Neither side may paraphrase it — both quote the one constant, so the two
-    cards cannot drift into two different accounts of the same line."""
-    from tokenjam.core.optimize.analyzers.context_resend import RESEND_ESTIMATE_BASIS
-    from tokenjam.core.optimize.analyzers.relearn import ESTIMATE_BASIS
+    cards cannot drift into two different accounts of the same line.
 
-    assert RELEARN_RESEND_BOUNDARY in ESTIMATE_BASIS
+    relearn used to quote it from `ESTIMATE_BASIS` (the retired forward-claim
+    basis); the one canonical dollar field means the quote now lives on
+    `PAST_OVERSPEND_BASIS`, relearn's only basis string."""
+    import tokenjam.core.optimize.analyzers.relearn as relearn_mod
+    from tokenjam.core.optimize.analyzers.context_resend import RESEND_ESTIMATE_BASIS
+    from tokenjam.core.optimize.analyzers.relearn import PAST_OVERSPEND_BASIS
+
+    assert RELEARN_RESEND_BOUNDARY in PAST_OVERSPEND_BASIS
     assert RELEARN_RESEND_BOUNDARY in RESEND_ESTIMATE_BASIS
+    assert not hasattr(relearn_mod, "ESTIMATE_BASIS")
 
 
 def test_the_boundary_names_the_counterfactual_not_the_token_class():

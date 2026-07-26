@@ -1072,10 +1072,10 @@ def _run_relearn_first_fix(config: TjConfig, *, port: int, want_daemon: bool) ->
             f"{distilled}  [dim]· {cluster.sessions} sessions · "
             f"rung {cluster.rung}[/dim]"
         )
-    total_tokens = finding.estimated_recoverable_tokens or 0
+    total_tokens = finding.past_overspend_tokens or 0
     if total_tokens:
         console.print(
-            f"  [dim]~{total_tokens:,} estimated recoverable tokens across "
+            f"  [dim]~{total_tokens:,} tokens already spent on these across "
             f"{len(finding.clusters)} pattern"
             f"{'s' if len(finding.clusters) != 1 else ''} — {finding.caveat}[/dim]"
         )

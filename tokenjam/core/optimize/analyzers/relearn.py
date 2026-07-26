@@ -45,13 +45,19 @@ transcript has been rotated away are recovered from tokenjam's retained spans
 instead — see ``compute_relearn_finding``'s THREE LANES note. The two lanes are
 disjoint by session id, so no failure is extracted twice.
 
-TWO KINDS OF NUMBER, never conflated. ``estimated_*`` is a FORWARD claim: only
-clusters with a real fix, netted against what that fix costs to keep. The
-``past_overspend_*`` fields are a BACKWARD observation: what the recurrence
-already cost, reported for every cluster including the ones no fix template
-matches and the ones whose rule is uneconomic. "We have no action for this" is
-not "this was unavoidable", and no future maintenance cost is ever netted out of
-money already spent.
+ONE KIND OF NUMBER. A relearn cluster reports only ``past_overspend_*`` — a
+BACKWARD observation of what the recurrence already cost, for every cluster
+including the ones no fix template matches and the ones whose rule is
+uneconomic. There is no forward "you could recover $X" claim anywhere on the
+cluster or the finding: a relearn card shows its past figure only, same as
+every other analyzer's card, per the repo `CLAUDE.md`'s per-analyzer
+dollar-field contract. "We have no action for this" is not "this was
+unavoidable", and no future maintenance cost is ever netted out of money
+already spent. The net-of-standing-cost arithmetic in
+``core/optimize/write_budget.py`` still runs — it decides whether a
+PERMANENT artifact is worth OFFERING at all (``write_offered`` /
+``advise_only`` / ``write_blocked_reason`` / ``payback_ratio``) — but its
+output is never rendered as a savings figure.
 
 Never raises: a single unreadable transcript, a distill failure, or a missing
 CLAUDE.md is skipped, not fatal — this runs unattended on a schedule.
@@ -84,7 +90,7 @@ MAX_EXAMPLE_SESSIONS = 3
 #: one extra assistant turn's overhead (re-issue the tool call, re-parse the
 #: harness context, re-narrate) — NOT the inflated whole-afflicted-session
 #: footprint the spec explicitly warns against. This is a heuristic magnitude
-#: signal, never a causal claim; surfaced with ``estimate_basis`` below.
+#: signal, never a causal claim; surfaced with ``past_overspend_basis`` below.
 GROUNDED_TOKENS_PER_OCCURRENCE = 1_500
 #: Cap on how many residual (non-family-matched) clusters get a distill call,
 #: bounding both latency and $ spend on a full-corpus run.
@@ -122,43 +128,19 @@ DISTILL_MODEL = "haiku"
 #: ones that dominate a corpus by call count) and inflates the aggregate.
 COMPACTION_PROMPT_DROP_RATIO = 0.5
 
-ESTIMATE_BASIS = (
-    "the MEASURED length of each failure's RECOVERY ARC — the assistant turns "
-    "between hitting the pothole and getting the same tool to work again, "
-    "walked from the session's own step order — priced at the MEASURED cost of "
-    "one turn in the sessions the cluster occurred in (median billed cost per "
-    "call, divided back through those sessions' own input rate). Not one turn "
-    "per failure: on a real corpus the median failure costs 2 turns and some "
-    "families over 4, so a flat one-turn charge halves the figure. Turns shared "
-    "by two overlapping failures are split between them, so a burst of potholes "
-    "never bills the same turn twice. Never the inflated whole-session "
-    "footprint, and never a fixed guess: a failed tool call forces the model to "
-    "emit recovery turns a successful call would not have needed, and in a "
-    "coding session a turn re-sends the whole context. That "
-    "forced turn is the CLAIM, and it is the part no other analyzer prices — "
-    + RELEARN_RESEND_BOUNDARY + ". Observed here but NOT claimed here: the error text's own re-read "
-    "tail, priced at ~1,500 tokens (the size of a block of error text) x the "
-    "occurrence's tail, billed at the cache-read rate. Those are re-sent "
-    "context tokens the context re-send analyzer already prices in full, so "
-    "they are shown on this card as part of what the recurrence cost and left "
-    "out of what this card claims, rather than counted twice. The tail is "
-    "truncated at the first compaction (a prompt-size "
-    "collapse), not run to end-of-session, and the cluster takes the MEDIAN of "
-    "its occurrences' multipliers rather than the mean — a handful of very long "
-    "uncompacted sessions otherwise dominate. Reported NET of what the proposed "
-    "fix costs to keep (a CLAUDE.md rule is re-sent on every future session, a "
-    "hook is not); a cluster with no derived fix claims nothing at all. Review "
-    "the example sessions before applying a fix"
-)
-#: The basis behind the PAST-TENSE figure, which is a different quantity from
-#: `ESTIMATE_BASIS` above and must never be described with it: that one is a
-#: forward, netted, gated CLAIM; this is a backward, ungated OBSERVATION.
+#: The basis behind relearn's one figure — a backward, ungated OBSERVATION,
+#: never a forward claim. Quotes `RELEARN_RESEND_BOUNDARY` verbatim (the same
+#: constant `resend`'s own basis quotes) so the two analyzers' cards cannot
+#: drift into two different accounts of where one prices a call's existence
+#: and the other prices a call's size — see
+#: `test_the_boundary_is_stated_once_and_quoted_by_both_analyzers`.
 PAST_OVERSPEND_BASIS = (
     "each observed failure's MEASURED recovery arc (the assistant turns between "
     "hitting the pothole and the same tool succeeding again, median 2 on a real "
     "corpus rather than the 1 a flat charge assumes, with turns shared by "
     "overlapping failures split between them) x the MEASURED cost of one "
-    "assistant turn in the sessions the cluster occurred in, PLUS the error "
+    "assistant turn in the sessions the cluster occurred in — "
+    + RELEARN_RESEND_BOUNDARY + " — PLUS the error "
     "text's own measured "
     "re-read tail, priced at the rate the contributing sessions actually "
     "billed at. "
@@ -1237,12 +1219,6 @@ class RelearnCluster:
     scope:                      str              # "project" | "user-global"
     proposed_fix:                str
     examples:                    list[RelearnExample] = field(default_factory=list)
-    estimated_recoverable_tokens: int = 0
-    #: The same claim in dollars, on the same accumulated corpus basis as the
-    #: token field beside it (never the 30-day one below). Priced at the
-    #: cluster's own blended rate, so tokens/USD always divide back to a real
-    #: price band (CLAUDE.md rule 28). ``None`` when nothing could be priced.
-    estimated_recoverable_usd:    float | None = None
     confidence:                   str = "heuristic"
     novel:                        bool = True
     # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
@@ -1259,23 +1235,7 @@ class RelearnCluster:
     # and Verify runs off spans instead of transcripts. See
     # `core/optimize/relearn_otel.py`.
     advise_only:                  bool = False
-    # Monthly-basis fields (Review inbox stat tiles). The window-basis field
-    # above (`estimated_recoverable_tokens`) is the raw full-corpus-scan
-    # total, not a monthly rate — relearn scans unbounded history, unlike a
-    # window-scoped cost analyzer, so there is no natural "the window IS a
-    # month" shortcut. These extrapolate occurrences-per-day (over the run's
-    # own observed timespan, `RelearnFinding.window_days`) to 30 days —
-    # mirrors `monthly_savings_usd` in model_downgrade.py, a NEW explicitly-
-    # named basis alongside the existing one (the Recoverable-savings
-    # contract there is unchanged; Overview/Optimize keep reading the window
-    # field). `estimated_monthly_usd` is populated only when a blended $/token
-    # rate could be derived from the cluster's own sessions' spans (see
-    # `_blended_dollar_rate`); `monthly_rate_basis` names the models that rate
-    # came from so it's never a silent number.
-    estimated_monthly_tokens:     int = 0
-    estimated_monthly_usd:        float | None = None
-    monthly_rate_basis:           str = ""
-    #: The measured re-read tail behind the figures above: the MEDIAN number of
+    #: The measured re-read tail behind the figures below: the MEDIAN number of
     #: later calls that still carried one of this cluster's occurrences before
     #: the context was compacted away, and the input-token-equivalent
     #: multiplier that follows from it (`1 + cache_read_ratio x tail`). Carried
@@ -1283,18 +1243,14 @@ class RelearnCluster:
     #: tokens; 0 / 1.0 when no tail could be measured.
     tail_calls_median:            int = 0
     tail_multiplier:              float = 1.0
-    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). The
-    # four `estimated_*` fields above are reported NET of what the proposed
-    # artifact costs to KEEP: a rung-1 CLAUDE.md rule is re-sent on every
-    # future session forever, so its block is priced against the same session
-    # pace the saving is projected on and subtracted. The pre-net figures stay
-    # here, inspectable, so the derivation is never hidden — but no surface may
-    # claim a saving larger than the net one. Rung 3+ (hook / wrapper / config)
-    # is never sent to the model as prompt text, so its standing cost is a
-    # genuine zero and net == gross.
-    gross_recoverable_tokens:         int = 0
-    gross_monthly_tokens:             int = 0
-    gross_monthly_usd:                float | None = None
+    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). This
+    # decides whether a PERMANENT artifact is worth writing at all: a rung-1
+    # CLAUDE.md rule is re-sent on every future session forever, so its
+    # standing cost is priced against the same session pace and compared
+    # against what the cluster cost (`past_overspend_tokens` below — there is
+    # no separate pre-net figure any more; the observation IS the netting
+    # input). Rung 3+ (hook / wrapper / config) is never sent to the model as
+    # prompt text, so its standing cost is a genuine zero.
     standing_cost_tokens_per_session: int = 0
     standing_cost_tokens:             int = 0
     standing_cost_basis:              str = ""
@@ -1352,13 +1308,6 @@ class RelearnFinding:
     failures_examined:    int = 0
     distilled_clusters:   int = 0
     dropped_codified:     int = 0
-    estimated_recoverable_tokens: int | None = None
-    #: The same accumulated claim in dollars — see
-    #: ``RelearnCluster.estimated_recoverable_usd``. Distinct from
-    #: ``estimated_monthly_usd`` below, which is the 30-day basis.
-    estimated_recoverable_usd: float | None = None
-    estimate_basis:        str = ESTIMATE_BASIS
-    estimate_confidence:   str = "heuristic"
     caveat:                 str = HONESTY_CAVEAT
     # The effective recurrence bar this run applied (config-overridable, see
     # core.config.OptimizeConfig.min_recurring_sessions) — carried on the
@@ -1366,26 +1315,14 @@ class RelearnFinding:
     # that could be stale against the user's own config.
     min_sessions:           int = MIN_RECURRING_SESSIONS
     # The observed span (days, earliest to latest timestamped occurrence
-    # across every failure this run examined) every cluster's monthly figure
-    # was extrapolated from. ``None`` when nothing in the run carried a
-    # parseable timestamp — callers then treat the scale as 1 (no
-    # extrapolation) rather than inventing a window. See `_corpus_window_days`.
+    # across every failure this run examined). ``None`` when nothing in the
+    # run carried a parseable timestamp. See `_corpus_window_days`.
     window_days:             float | None = None
-    # Sum of every cluster's `estimated_monthly_tokens` — the Review inbox
-    # headline's token-basis total when it can't lead with dollars.
-    estimated_monthly_tokens: int | None = None
-    # Sum of every cluster's `estimated_monthly_usd`. ``None`` when no cluster
-    # could be priced at all (no DB connection, no priced spans, no model with
-    # pricing data) — a zero would read as "this waste is free", which it is
-    # not (CLAUDE.md anti-pattern #22). Clusters with no derived fix contribute
-    # nothing here by construction: they claim zero on every basis.
-    estimated_monthly_usd: float | None = None
     # PAST OVERSPEND, summed across EVERY cluster — including the ones with no
     # fix template and the ones whose write is uneconomic. See
     # `RelearnCluster.past_overspend_tokens` for why none of those gates may
     # zero an observed cost. This is the figure the Review inbox card leads
-    # with; the `estimated_*` totals above stay the (smaller, forward, netted)
-    # claim.
+    # with — the only figure a relearn cluster displays.
     past_overspend_tokens: int = 0
     past_overspend_usd:    float | None = None
     past_overspend_basis:  str = ""
@@ -1485,15 +1422,6 @@ def _corpus_active_days(failures: list[FailureEpisode]) -> int:
     """
     stamps = [t for t in (_parse_failure_ts(f.ts) for f in failures) if t is not None]
     return len({t.date() for t in stamps})
-
-
-def _monthly_scale(window_days: float | None) -> float:
-    """The occurrences-per-day -> per-30-days multiplier. 1.0 (no
-    extrapolation) when the window is unknown or degenerate — never invent a
-    multiplier from missing data (behavioral requirement #1)."""
-    if not window_days or window_days <= 0:
-        return 1.0
-    return 30.0 / window_days
 
 
 def _measured_turn_tokens(
@@ -1770,7 +1698,6 @@ def build_proposals(
         # Input-token EQUIVALENTS: the head token at the input rate plus each
         # re-read at the cache-read rate, expressed on the head's basis so the
         # token and dollar figures stay proportional. See the constants above.
-        scale = _monthly_scale(window_days)
         # TWO DIFFERENT QUANTITIES, two different bases. They used to share the
         # `GROUNDED_TOKENS_PER_OCCURRENCE` constant, which is right for one and
         # wrong for the other by a measured ~15-20x:
@@ -1805,11 +1732,6 @@ def build_proposals(
         # kept on the TEXT basis rather than rescaled by the head.
         text_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
         gross_tokens = head_tokens + round(text_tokens * max(multiplier - 1.0, 0.0))
-        gross_monthly_tokens = round(gross_tokens * scale)
-        gross_monthly_usd = (
-            round(gross_monthly_tokens * profile.input_rate_per_token, 6)
-            if profile is not None else None
-        )
         # THE OBSERVATION. Accumulated over the whole scanned corpus, never
         # paced to 30 days, never netted against a fix's standing cost, never
         # zeroed by a gate. The re-read tail is broken out as a COMPONENT (not
@@ -1838,17 +1760,6 @@ def build_proposals(
         # claiming it here would price the same tokens on two cards
         # (CLAUDE.md rule 27). So the tail stays in the OBSERVED figure, broken
         # out as `past_reread_*`, and is claimed by `resend` alone.
-        recoverable_tokens = head_tokens if has_real_fix else 0
-        recoverable_usd = (
-            round(recoverable_tokens * profile.input_rate_per_token, 6)
-            if profile is not None else None
-        )
-        monthly_tokens = gross_monthly_tokens if has_real_fix else 0
-        monthly_usd = gross_monthly_usd if has_real_fix else None
-        rate_basis = "" if profile is None else (
-            f"{profile.basis}; x{multiplier:.2f} for a median re-read tail of "
-            f"{median_tail} later call(s) per occurrence"
-        )
 
         proposals.append(RelearnCluster(
             signature=cluster.signature,
@@ -1861,23 +1772,16 @@ def build_proposals(
             scope=scope,
             proposed_fix=fix,
             examples=examples,
-            estimated_recoverable_tokens=recoverable_tokens,
-            estimated_recoverable_usd=recoverable_usd,
             novel=True,
             repo_cwd=repo_cwd,
             suggested_target=suggested_target,
             advise_only=advise_only,
-            estimated_monthly_tokens=monthly_tokens,
-            estimated_monthly_usd=monthly_usd,
-            monthly_rate_basis=rate_basis,
             tail_calls_median=median_tail,
             tail_multiplier=round(multiplier, 4),
-            # Pre-net figures, kept inspectable. `_apply_write_budget` nets the
-            # four `estimated_*` fields above in place, so nothing downstream
-            # can read a gross figure by accident.
-            gross_recoverable_tokens=gross_tokens,
-            gross_monthly_tokens=gross_monthly_tokens,
-            gross_monthly_usd=gross_monthly_usd,
+            # The one observation. `_apply_write_budget` consults it (via
+            # `WriteCandidate.gross_tokens`) to decide whether a permanent
+            # write is offered at all — the netting disclosure only, never a
+            # headline.
             past_overspend_tokens=gross_tokens,
             past_overspend_usd=past_overspend_usd,
             past_overspend_basis=PAST_OVERSPEND_BASIS,
@@ -1968,7 +1872,10 @@ def _apply_write_budget(
             family=p.family_key or f"signature:{p.signature}",
             rung=p.rung,
             artifact_text=artifact or p.proposed_fix,
-            gross_tokens=p.gross_recoverable_tokens,
+            # `past_overspend_tokens` IS the pre-net observation — there is no
+            # separate gross field any more; the past-tense figure doubles as
+            # the netting input.
+            gross_tokens=p.past_overspend_tokens,
             # Same quantity as `gross_tokens`, priced at the cluster's own
             # rate (`past_overspend_usd` IS `gross_tokens x rate`), so the two
             # divide back to a real price band (repo CLAUDE.md rule 28) and
@@ -1998,37 +1905,8 @@ def _apply_write_budget(
             # write that does not exist.
             out.append(replace(p, write_offered=False))
             continue
-        # The monthly field lives on the 30-day basis, so it is netted against
-        # the PROJECTED session count while the window field is netted against
-        # the observed one. Both use the same per-session standing cost, which
-        # is what keeps the two bases from drifting (the exact error a
-        # window-scoped saving minus a 30-day cost would introduce).
-        monthly_standing = round(
-            decision.standing_tokens_per_session * decision.exposure_sessions * basis.ratio
-        )
-        net_monthly_tokens = (
-            0 if decision.claim_suppressed
-            else max(p.gross_monthly_tokens - monthly_standing, 0)
-        )
-        rate = (
-            p.gross_monthly_usd / p.gross_monthly_tokens
-            if p.gross_monthly_usd is not None and p.gross_monthly_tokens > 0
-            else None
-        )
-        net_monthly_usd = (
-            round(net_monthly_tokens * rate, 6) if rate is not None
-            else (None if p.gross_monthly_usd is None else 0.0)
-        )
         out.append(replace(
             p,
-            estimated_recoverable_tokens=decision.claimed_tokens,
-            # Same rate the gross figure was priced at, so the netted token and
-            # dollar fields keep dividing back to a real price band (rule 28).
-            estimated_recoverable_usd=(
-                round(decision.claimed_tokens * rate, 6) if rate is not None else None
-            ),
-            estimated_monthly_tokens=net_monthly_tokens,
-            estimated_monthly_usd=net_monthly_usd,
             standing_cost_tokens_per_session=decision.standing_tokens_per_session,
             standing_cost_tokens=decision.standing_tokens,
             standing_cost_basis=decision.basis,
@@ -2137,17 +2015,8 @@ def analyze_relearns(
         existing_agent_file_tokens=existing_agent_file_tokens,
         sessions_by_repo=sessions_by_repo,
     )
-    total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
-    claim_priced = [
-        p.estimated_recoverable_usd for p in proposals
-        if p.estimated_recoverable_usd is not None
-    ]
-    total_monthly_tokens = sum(p.estimated_monthly_tokens for p in proposals) if proposals else None
-    priced = [p.estimated_monthly_usd for p in proposals if p.estimated_monthly_usd is not None]
-    total_monthly_usd = round(sum(priced), 6) if priced else None
-
     # The past-tense totals sum EVERY cluster, gated or not — that is the whole
-    # point of the field. `estimated_*` above sums the (smaller) claim.
+    # point of the field, and the only figure a relearn cluster displays.
     past_tokens = sum(p.past_overspend_tokens for p in proposals)
     past_priced = [p.past_overspend_usd for p in proposals if p.past_overspend_usd is not None]
     reread_tokens = sum(p.past_reread_tokens for p in proposals)
@@ -2159,14 +2028,8 @@ def analyze_relearns(
         failures_examined=len(all_failures),
         distilled_clusters=distilled_count,
         dropped_codified=dropped,
-        estimated_recoverable_tokens=total_tokens if proposals else None,
-        estimated_recoverable_usd=(
-            round(sum(claim_priced), 6) if claim_priced else None
-        ),
         min_sessions=min_sessions,
         window_days=window_days,
-        estimated_monthly_tokens=total_monthly_tokens,
-        estimated_monthly_usd=total_monthly_usd,
         past_overspend_tokens=past_tokens,
         past_overspend_usd=round(sum(past_priced), 6) if past_priced else None,
         past_overspend_basis=PAST_OVERSPEND_BASIS if proposals else "",

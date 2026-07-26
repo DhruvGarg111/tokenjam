@@ -29,7 +29,7 @@ def _cluster(**overrides) -> RelearnCluster:
         examples=[
             RelearnExample(session_id="s1", repo="demo", ts=None, snippet="no such file"),
         ],
-        estimated_recoverable_tokens=486_000,
+        past_overspend_tokens=486_000,
         suggested_target="/tmp/does-not-matter/.claude/hooks/cwd-confusion.py",
     )
     base.update(overrides)
@@ -39,7 +39,7 @@ def _cluster(**overrides) -> RelearnCluster:
 def _finding(clusters, **overrides) -> RelearnFinding:
     base = dict(
         clusters=clusters, sessions_scanned=42,
-        estimated_recoverable_tokens=sum(c.estimated_recoverable_tokens for c in clusters) or None,
+        past_overspend_tokens=sum(c.past_overspend_tokens for c in clusters),
     )
     base.update(overrides)
     return RelearnFinding(**base)

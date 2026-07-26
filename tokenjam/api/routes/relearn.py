@@ -175,10 +175,10 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
 
     ``framing`` is the same plan-tier dollar-suppression block the cost-
     proposals endpoint carries (``core.framing.compute_framing``) — relearn
-    clusters now carry their own blended-rate ``estimated_monthly_usd``
-    (behavioral requirement #2), so this surface needs the same suppression
-    rule the cost-advisory dollars already respect rather than a second,
-    un-gated dollar figure on the page.
+    clusters carry their own blended-rate ``past_overspend_usd``, the one
+    canonical dollar field (no relearn-specific forward claim any more), so
+    this surface needs the same suppression rule the cost-advisory dollars
+    already respect rather than a second, un-gated dollar figure on the page.
     """
     cached = relearn_store.read_cache(config=_config(request))
     computing = relearn_store.is_computing()
@@ -335,8 +335,8 @@ def _open_cost_verify_window(
             "agent_name": str(cluster.get("agent_name") or ""),
         },
         "baseline": {"proposed_model": str(cluster.get("proposed_model") or "")},
-        "estimated_recoverable_usd": None,
-        "estimated_recoverable_tokens": None,
+        "past_overspend_usd": None,
+        "past_overspend_tokens": None,
         "estimate_basis": "",
     }
     try:

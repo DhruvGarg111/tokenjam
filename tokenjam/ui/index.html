@@ -7895,33 +7895,21 @@ function belowInboxFloor(item) {
 // non-null number. dollarsSuppressed() itself is NOT touched by this set — it
 // still governs every other surface in the app unchanged.
 const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
-// RELEARN-CLUSTER ONLY. A relearn cluster scans unbounded history, so it has
-// no window to observe a figure over and states its own 30-day-basis
-// `estimated_monthly_*` instead — the one remaining monthly-basis figure in
-// the product. A COST proposal never comes through here: it carries the one
-// canonical `past_overspend_*` and renders via `pastOverspendFigure` below.
-// Do not "unify" the two by pacing the cost figure onto this basis; the whole
-// point of the collapse was that a paced twin of the observed figure existed
-// and a surface rendered it by mistake.
-function monthlyUsdForDisplay(item) {
-  return NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer) ? null : item.estimated_monthly_usd;
-}
 
 // Rank by tokens — the one figure every item on this page carries, priced or
 // not (a resend/deadweight/subagent/verbosity advisory has real recoverable
 // tokens but no dollar rate at all). Dollars stay a per-item DISPLAY
-// preference (requirement #2, estMonthlyLine below) decoupled from ranking:
-// comparing a $-priced item against a tokens-only one would mean inventing a
-// $/token conversion rate to make them comparable, which the spec forbids
-// (never invent a rate silently). Sorting by tokens uniformly means the
-// rendered order is always monotonic even though some rows DISPLAY dollars —
-// the sort key and a token-only row's display value are the same number.
-// Ranks on the observed past-overspend token figure where the item carries
-// one (every cost proposal does), falling back to the monthly token figure
-// for a relearn cluster, which has no window to observe one over. Ranking on
-// the same quantity the row DISPLAYS keeps the rendered order monotonic.
-function sortByEstMonthly(items) {
-  const rank = i => (i.past_overspend_tokens != null ? i.past_overspend_tokens : (i.estimated_monthly_tokens || 0));
+// preference decoupled from ranking: comparing a $-priced item against a
+// tokens-only one would mean inventing a $/token conversion rate to make them
+// comparable, which the spec forbids (never invent a rate silently). Sorting
+// by tokens uniformly means the rendered order is always monotonic even
+// though some rows DISPLAY dollars — the sort key and a token-only row's
+// display value are the same number. A relearn cluster carries
+// `past_overspend_tokens` on exactly the same basis a cost proposal does
+// (there is no separate monthly-basis figure any more), so one ranking
+// function now serves both tabs.
+function sortByPastOverspend(items) {
+  const rank = i => (i.past_overspend_tokens || 0);
   return [...items].sort((a, b) => rank(b) - rank(a));
 }
 
@@ -7950,40 +7938,20 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
-// A relearn tail item's headline est./mo figure — dollars first when a rate
-// exists and the plan tier doesn't suppress dollars, tokens as fallback
-// (requirement #2). RELEARN CLUSTERS ONLY (see `monthlyUsdForDisplay`); the
-// cost tab passes its own past-tense `summary` to CollapsedTailRow instead.
-// `suppressed` is always `false` on this page (the founder-approved
-// always-dollars carve-out above `sortByEstMonthly`); the parameter survives
-// so this function still degrades correctly if that ever changes.
-function estMonthlyLine(item, suppressed) {
-  const usd = monthlyUsdForDisplay(item);
-  const toks = item.estimated_monthly_tokens;
-  if (!suppressed && usd != null) {
-    return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
-  }
-  if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
-  return { big: '—', sub: '' };
-}
-
-// --- Relearn cluster: observed cost, and the write-economics verdict -------
+// --- Relearn cluster: observed cost only, no forward claim ------------------
 //
-// A recurring-mistake row used to render exactly ONE number — the forward
-// `estimated_monthly_*` claim, captioned "est. / mo". That figure is GATED:
-// `write_budget.py` zeroes it whenever no permanent rule is worth offering.
+// A recurring-mistake row used to render a SECOND number — a forward
+// `estimated_monthly_*` claim, captioned "est. / mo". That figure was GATED:
+// `write_budget.py` zeroed it whenever no permanent rule was worth offering.
 // On a real corpus that meant 50 of 55 rows rendering "$0.00 est./mo" with no
 // reason given, while those same 55 clusters had already cost $46 of observed
 // spend between them. A zero with no explanation reads as "this was free",
 // which is the exact inversion of what the gate means: the gate is a gap in
-// OUR fix library, never a finding that the failure was harmless (CLAUDE.md
-// anti-pattern 32b).
+// OUR fix library, never a finding that the failure was harmless.
 //
-// So the row now LEADS with what the recurrence already cost — ungated, past
-// tense, straight off `past_overspend_*` — and states a forward figure only
-// where a fix is genuinely on offer. The two vocabularies stay strictly
-// apart, per the same rule that governs the cost cards: an observation is
-// past tense and never netted, a claim is forward and always gated.
+// Founder decision: the forward claim is deleted from the card entirely, not
+// merely de-emphasised. A relearn cluster now shows its PAST figure only —
+// straight off `past_overspend_*` — same as every other analyzer's card.
 function relearnObservedFigure(cluster) {
   const usd = cluster.past_overspend_usd;
   const toks = cluster.past_overspend_tokens;
@@ -8148,27 +8116,11 @@ function PastOverspendTile({ block }) {
     </div>`;
 }
 
-// Same priceable-majority rule as InboxStatTiles (requirement #2): dollars
-// only when at least half the collapsed items are themselves priceable, so a
-// tail of 7 tokens-only advisories plus 1 small-dollar one still reads in
-// tokens rather than understating itself as a tiny dollar sum.
-function combinedEstMonthly(items, suppressed) {
-  const priceable = items.filter(i => monthlyUsdForDisplay(i) != null);
-  const leadWithUsd = !suppressed && items.length > 0 && priceable.length * 2 >= items.length;
-  if (leadWithUsd) return fmtUsd(priceable.reduce((s, i) => s + monthlyUsdForDisplay(i), 0));
-  return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
-}
-
-// The relearn tail's summary on the SAME basis its expanded rows now use
-// (`relearnObservedFigure`). Without this the collapsed row advertised a
-// combined forward est./mo while every row inside it led with observed cost —
-// and since the write budget zeroes the forward figure for a suppressed
-// cluster, a tail of 40 gated clusters summarised itself as "$0.00 combined"
-// while containing tens of dollars of real, already-billed spend.
-//
-// Returns null when no item carries an observed figure (a pre-observed-fields
-// cache), so the caller falls back to the forward summary rather than
-// printing a confident $0.00.
+// The tail's summary line, on the SAME past-tense basis its expanded rows
+// use (`pastOverspendFigure` / `relearnObservedFigure` — both read
+// `past_overspend_*`, the one canonical dollar field). Returns null when no
+// item carries an observed figure (a pre-observed-fields cache), so the
+// caller states nothing rather than printing a confident $0.00.
 function combinedObservedCost(items) {
   const observed = items.filter(i => i.past_overspend_usd != null);
   if (observed.length) {
@@ -8179,14 +8131,13 @@ function combinedObservedCost(items) {
   return null;
 }
 
-// The collapsed long-tail row: count + combined est./mo, an expand toggle,
-// and the bulk Dismiss all / (optional) Mark all applied actions (requirement
-// #3). `renderItem` renders one expanded tail row in the caller's own shape
-// (a RecurringMistakeRow or a CostProposalCard).
-// `summary` overrides the default "combined est./mo" line for a tab whose
-// items are stated in the past tense (the cost advisories) — the recurring-
-// mistakes tab has no observed window to report one over, so it keeps the
-// projected figure. Each tab therefore says what its own rows say.
+// The collapsed long-tail row: count + combined figure, an expand toggle, and
+// the bulk Dismiss all / (optional) Mark all applied actions. `renderItem`
+// renders one expanded tail row in the caller's own shape (a
+// RecurringMistakeRow or a CostProposalCard). `summary` is always supplied by
+// the caller now — both tabs state their combined figure in the past tense,
+// off `combinedObservedCost` — so there is no separate forward-basis default
+// to fall back to any more.
 function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, onMarkAllApplied, renderItem }) {
   const [open, setOpen] = useState(false);
   if (tail.length === 0) return null;
@@ -8194,7 +8145,7 @@ function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, 
     <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span class="sz-link" onClick=${() => setOpen(o => !o)}>
-          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel} · ${summary || ('~' + combinedEstMonthly(tail, suppressed) + ' combined est./mo')}
+          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel}${summary ? ' · ' + summary : ''}
         </span>
         <span style="margin-left:auto;display:flex;gap:14px">
           ${onMarkAllApplied ? html`<span class="sz-link" onClick=${onMarkAllApplied}>Mark all applied</span>` : null}
@@ -8222,25 +8173,14 @@ function relearnBadge(cluster) {
 // preserves the existing bulk-dismiss flow (requirement #9) — not in the
 // mockup's own sketch, but the bulk action it drives is explicitly required.
 function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed }) {
-  // Observed first, projection second (see `relearnObservedFigure`). `observed`
-  // is null only for a pre-observed-fields cache, in which case the forward
-  // figure renders instead — under its own "est. / mo" caption, never
-  // relabelled as something that already happened.
+  // The card's only figure: what the recurrence already cost. No forward
+  // claim renders anywhere on this row any more — the founder decision that
+  // retired it: a relearn cluster shows its PAST figure only, deleted from
+  // the card entirely rather than de-emphasised. `observed` is null only for
+  // a pre-observed-fields cache (a cache written before these fields
+  // existed), in which case the row falls back to a bare dash.
   const observed = relearnObservedFigure(cluster);
-  const est = estMonthlyLine(cluster, suppressed);
-  const headline = observed || est;
-  // The forward claim is a SECOND line, and only where a fix is really on
-  // offer. A suppressed cluster's gross saving is not claimable, so it is not
-  // rendered anywhere on this row — showing it would be the precise defect
-  // this row's gate note exists to explain.
-  //
-  // Tested on the NUMBER, never on the formatted string: `fmtUsd` output is a
-  // display concern and comparing against "$0.00" would silently start showing
-  // zero rows the day that formatting changes.
-  const forwardUsd = monthlyUsdForDisplay(cluster);
-  const forwardTokens = cluster.estimated_monthly_tokens;
-  const showForward = observed && cluster.write_offered !== false
-    && ((forwardUsd != null && forwardUsd > 0) || (forwardUsd == null && forwardTokens > 0));
+  const headline = observed || { big: '—', sub: '' };
   const gate = writeGateNote(cluster);
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
   return html`
@@ -8262,13 +8202,10 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
         ${gate ? html`<div class="dim" style="font-size:11px;margin-top:4px;font-style:italic">${gate}</div>` : null}
       </div>
       <div style="text-align:right;flex-shrink:0">
-        ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
-              asserted "estimated", stacking four lines in this column. Matches
-              the cost cards' single caption so both tabs read alike. The basis
-              stays on hover. */ ''}
-        <div class="mono" style="color:var(--accent);font-weight:600" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${headline.big}</div>
-        <div class="dim" style="font-size:11px">${observed ? 'already cost' : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
-        ${showForward ? html`<div class="dim" style="font-size:11px">~${est.big} / mo if fixed</div>` : null}
+        ${/* One caption, one figure — matches the cost cards' single caption
+              so both tabs read alike. The basis stays on hover. */ ''}
+        <div class="mono" style="color:var(--accent);font-weight:600" title=${cluster.past_overspend_basis || 'occurrences x a conservative per-turn token cost — review before applying'}>${headline.big}</div>
+        <div class="dim" style="font-size:11px">already cost${headline.sub ? ' · ' + headline.sub : ''}</div>
         ${/* The row's only affordance used to be the title styled as a link,
               so the constructive action was invisible next to a prominent
               bulk Dismiss. Name the verb. */ ''}
@@ -8456,27 +8393,25 @@ function daysAgoLabel(iso) {
 // removed in commit c0316aba for making unsupportable realized-savings
 // claims; see the note above InboxStatTiles).
 //
-// The two ledgers are on DIFFERENT time bases and this function does not
-// pretend otherwise — it returns bare `usd`/`tokens`, and the caller labels
-// them per kind. For a COST marker it is `past_overspend_usd`/`_tokens`, the
-// window-observed avoidable figure carried straight onto the ledger record by
-// cost_apply.mark_applied — the same one canonical field the open card
-// rendered. For RELEARN it is `verify.estimated_monthly_usd/tokens`, the
-// cluster's own 30-day-basis figure stamped once by
-// relearn_apply.apply_relearn_fix (relearn scans unbounded history and has no
-// window to observe a figure over; it is the ONE remaining monthly-basis
-// figure in the product and it is never mixed into a cost total).
+// The two ledgers are on DIFFERENT storage shapes but the SAME one canonical
+// field now — this function does not pretend otherwise, it returns bare
+// `usd`/`tokens`, and the caller labels them per kind. For a COST marker it
+// is `past_overspend_usd`/`_tokens`, the window-observed avoidable figure
+// carried straight onto the ledger record by cost_apply.mark_applied. For
+// RELEARN it is `verify.past_overspend_usd/tokens`, the same field snapshotted
+// once by relearn_apply.apply_relearn_fix at the moment of apply — a relearn
+// cluster shows its past figure only, same as every other analyzer's card, so
+// there is no separate monthly-basis figure to reach for here any more.
 //
 // Applies the same NOT_A_SAVINGS_CLAIM_ANALYZERS exclusion a resend/TRIM
-// marker needs here too, inlined rather than routed through
-// monthlyUsdForDisplay (which is relearn-shaped).
+// marker needs here too.
 function appliedEstimate(rec) {
   const isRelearn = rec.kind === 'relearn';
-  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.past_overspend_usd;
+  const usd = isRelearn ? (rec.verify && rec.verify.past_overspend_usd) : rec.past_overspend_usd;
   return {
     isRelearn,
     usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
-    tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.past_overspend_tokens,
+    tokens: isRelearn ? (rec.verify && rec.verify.past_overspend_tokens) : rec.past_overspend_tokens,
   };
 }
 
@@ -9142,9 +9077,9 @@ function ReviewInboxView({ params }) {
   // Sort + long-tail collapse (requirement #3), independently per tab. Deep-
   // linking to a specific analyzer skips the collapse on the advisories tab —
   // a highlighted card must never be hidden inside a folded tail.
-  const sortedRelearn = sortByEstMonthly(shownRelearn);
+  const sortedRelearn = sortByPastOverspend(shownRelearn);
   const { top: topRelearn, tail: tailRelearn } = splitTopAndTail(sortedRelearn);
-  const sortedCost = sortByEstMonthly(shownCost);
+  const sortedCost = sortByPastOverspend(shownCost);
   const { top: topCost, tail: tailCost } = analyzerFocus
     ? { top: sortedCost, tail: [] } : splitTopAndTail(sortedCost);
 

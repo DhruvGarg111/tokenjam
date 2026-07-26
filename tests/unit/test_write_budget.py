@@ -397,10 +397,12 @@ def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
     assert p.write_offered is False
     assert p.suggested_target == ""
     assert p.advise_only is True
-    assert p.estimated_recoverable_tokens == 0
+    assert not hasattr(p, "estimated_recoverable_tokens")
+    assert not hasattr(p, "gross_recoverable_tokens")
     assert p.write_blocked_reason == wb.REASON_PLACEHOLDER
-    # The pre-net observation is still inspectable; only the CLAIM is zero.
-    assert p.gross_recoverable_tokens > 0
+    # The observation is still inspectable and unaffected — only the
+    # (now-retired) forward claim was ever zero.
+    assert p.past_overspend_tokens > 0
 
 
 def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
@@ -421,14 +423,18 @@ def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
     hook = by_family["cwd_confusion"]
     note = by_family["edit_before_read"]
 
+    # The netting arithmetic itself (not a rendered forward field any more —
+    # see `write_budget.py`) still distinguishes a zero-standing-cost hook
+    # from a rung-1 note that costs something to keep.
     assert hook.rung == 3
     assert hook.standing_cost_tokens == 0
-    assert hook.estimated_recoverable_tokens == hook.gross_recoverable_tokens
+    assert hook.payback_ratio is None or hook.payback_ratio >= 1.0
+    assert not hasattr(hook, "estimated_recoverable_tokens")
 
     assert note.rung == 1
     assert note.standing_cost_tokens > 0
-    assert note.estimated_recoverable_tokens < note.gross_recoverable_tokens
     assert note.standing_cost_basis
+    assert not hasattr(note, "estimated_recoverable_tokens")
 
 
 def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
@@ -446,17 +452,25 @@ def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
     offered = [p for p in proposals if p.write_offered]
     assert len(proposals) == 12
     assert len(offered) <= wb.RELEARN_MAX_OFFERED_WRITES
-    # Ranked: nothing suppressed outranks anything offered.
+    # Ranked: nothing suppressed outranks anything offered, on the pre-net
+    # observation the budget itself ranks by (no forward field is rendered
+    # any more to check this against).
     suppressed = [p for p in proposals if not p.write_offered and not p.net_negative]
     if offered and suppressed:
-        assert min(p.estimated_recoverable_tokens for p in offered) >= max(
-            p.estimated_recoverable_tokens for p in suppressed
+        assert min(p.past_overspend_tokens for p in offered) >= max(
+            p.past_overspend_tokens for p in suppressed
         )
 
 
-def test_relearn_totals_are_the_netted_ones():
-    """The finding's headline sums the NET per-cluster figures, so no rollup
-    can reach a gross number by adding the parts back up."""
+def test_relearn_carries_no_monthly_forward_field():
+    """The 30-day-basis forward claim (`estimated_monthly_*` /
+    `gross_monthly_*`) is retired entirely — a relearn cluster's headline is
+    `past_overspend_*`, the same past-tense figure every other analyzer's
+    card shows. `gross_recoverable_tokens` is also gone: it held the SAME
+    value as `past_overspend_tokens`, so the one observation now doubles as
+    the netting input `write_budget.WriteCandidate.gross_tokens` needs to
+    decide whether a permanent write is worth OFFERING
+    (`standing_cost_*`, `payback_ratio` survive on that decision)."""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
@@ -466,9 +480,14 @@ def test_relearn_totals_are_the_netted_ones():
         projection=_basis(sessions=80, active_days=10),
     )
     p = proposals[0]
-    assert p.estimated_monthly_tokens <= p.gross_monthly_tokens
-    if p.gross_monthly_usd is not None:
-        assert p.estimated_monthly_usd <= p.gross_monthly_usd
+    for retired in (
+        "estimated_monthly_tokens", "estimated_monthly_usd",
+        "gross_monthly_tokens", "gross_monthly_usd",
+        "estimated_recoverable_tokens", "estimated_recoverable_usd",
+        "gross_recoverable_tokens",
+    ):
+        assert not hasattr(p, retired)
+    assert p.past_overspend_tokens > 0
 
 
 # --- Lane integration: cost proposals -------------------------------------------
