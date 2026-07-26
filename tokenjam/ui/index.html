@@ -5032,18 +5032,30 @@ function RunDetailView({ runId }) {
 // ============================
 // Traces View
 // ============================
+// Sort options for the Traces list (trace-cost-ranking). "recent" is the
+// historical default (reverse-chronological, additive-safe); "cost" is the
+// dedicated entry point onto the most expensive traces in the window.
+const TRACE_SORTS = ['recent', 'cost'];
+
 function TracesListView({ params }) {
   // Filters come from the URL (issue #112). `result` maps to the API's `status`.
-  const DEFAULTS = { since: '24h', result: '', agent_id: '' };
+  const DEFAULTS = { since: '24h', result: '', agent_id: '', sort: 'recent', min_cost: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const result = readParam(params, 'result', DEFAULTS.result, v => ['ok', 'error'].includes(v));
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
-  const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
+  const sort = readParam(params, 'sort', DEFAULTS.sort, v => TRACE_SORTS.includes(v));
+  const minCost = readParam(params, 'min_cost', DEFAULTS.min_cost, v => !isNaN(parseFloat(v)));
+  const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, sort, min_cost: minCost, [k]: v }, DEFAULTS);
 
   const [traces, setTraces] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
   const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
+  // Window-level cost distribution behind the outlier badge (Tukey's-fence
+  // rule) -- carried from the server so the plain-language explanation always
+  // matches the flags actually rendered. Null until the first fetch resolves,
+  // or if the backend didn't ship the block (older server behind a newer UI).
+  const [outlierRule, setOutlierRule] = useState(null);
   const TRACE_PAGE_SIZE = 100;
   // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
   // until the first /traces fetch settles, show a loading shimmer rather than
@@ -5053,25 +5065,65 @@ function TracesListView({ params }) {
 
   const load = useCallback(async ({ append = false } = {}) => {
     const offset = append ? traces.length : 0;
+    const minCostUsd = minCost !== '' && !isNaN(parseFloat(minCost)) ? parseFloat(minCost) : undefined;
     const [td, sd] = await Promise.all([
-      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: TRACE_PAGE_SIZE, offset }),
+      api('/traces', {
+        since, status: result || undefined, agent_id: agentId || undefined,
+        sort, min_cost_usd: minCostUsd, limit: TRACE_PAGE_SIZE, offset,
+      }),
       api('/status'),
     ]);
     const nextTraces = td.traces || [];
     setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
     setTotalCount(td.total_count ?? nextTraces.length);
     setFraming(td.framing || null);
+    setOutlierRule(td.outlier_rule || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
     setLoaded(true);
-  }, [since, result, agentId, traces.length]);
+  }, [since, result, agentId, sort, minCost, traces.length]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  // Plain-language statement of the outlier rule, with the actual numbers for
+  // this window (never just a bare badge) -- conservative wording, no claim
+  // of more rigor than a box-plot rule actually provides. The rule itself is
+  // computed server-side on real cost_usd regardless of plan tier (it's the
+  // same magnitude signal as the token totals), but the DOLLAR figures in the
+  // copy must still respect plan-tier framing (#187/#249) -- a subscription
+  // or local install never gets a bare $ in the explanation, only the flag.
+  const outlierDollarsShown = !perItemUsesTokens(framing);
+  const outlierNote = (() => {
+    if (!outlierRule) return null;
+    if (outlierRule.threshold_usd == null) {
+      return `Cost outliers need at least ${outlierRule.min_sample} priced traces in this window to measure a reliable range; this window has ${outlierRule.sample_size}, so none are flagged.`;
+    }
+    if (!outlierDollarsShown) {
+      return `Traces marked "outlier" cost far more than the rest of this window's traces: above the top of the typical range (a box-plot style rule over ${outlierRule.sample_size} priced traces), not a fraud or error signal. Dollar amounts aren't shown on your plan; compare the token totals instead.`;
+    }
+    return `Traces marked "outlier" cost more than ${fmtCost(outlierRule.threshold_usd)}: above the top of the typical cost range for this window (Q1 ${fmtCost(outlierRule.q1_usd)} to Q3 ${fmtCost(outlierRule.q3_usd)}, plus 1.5x that range, over ${outlierRule.sample_size} priced traces). This is a box-plot style rule, not a fraud or error signal.`;
+  })();
+  const outlierTooltip = () => {
+    if (!outlierRule || outlierRule.threshold_usd == null) return 'Cost outlier for this window';
+    if (!outlierDollarsShown) {
+      return 'Cost outlier for this window: above the top of the typical range (box-plot rule), based on ' + outlierRule.sample_size + ' priced traces. Dollar amounts aren\'t shown on your plan.';
+    }
+    return [
+      'Cost outlier for this window.',
+      'Above the typical range: Q1 ' + fmtCost(outlierRule.q1_usd) + ' to Q3 ' + fmtCost(outlierRule.q3_usd) + ', plus 1.5x that range.',
+      'Threshold: above ' + fmtCost(outlierRule.threshold_usd) + '.',
+      'Based on ' + outlierRule.sample_size + ' priced traces in this window.',
+    ].join('\n');
+  };
 
   return html`
     <div class="page-title">Traces</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on a trace row for details</div>
+    <div class="view-toggle" style="margin:0 0 12px">
+      <button class=${sort === 'recent' ? 'active' : ''} onClick=${() => setFilter('sort', 'recent')}>Most recent</button>
+      <button class=${sort === 'cost' ? 'active' : ''} onClick=${() => setFilter('sort', 'cost')}>Most expensive</button>
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
@@ -5085,10 +5137,13 @@ function TracesListView({ params }) {
         <option value="ok">ok</option>
         <option value="error">error</option>
       </select>
+      <input type="number" min="0" step="0.0001" placeholder="Min cost $" value=${minCost}
+        onChange=${e => setFilter('min_cost', e.target.value)} style="width:110px" title="Only show traces costing at least this much" />
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${() => load()}>Refresh</button>
     </div>
     ${traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
+    ${outlierNote ? html`<div class="meta" style="margin-top:-8px">${outlierNote}</div>` : null}
     ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
       : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
@@ -5102,7 +5157,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
+              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}${t.is_outlier ? html`<span class="badge badge-warning" style="margin-left:6px" title=${outlierTooltip()}>outlier</span>` : null}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>
@@ -5135,12 +5190,16 @@ function TraceDetailView({ traceId }) {
   // Waterfall bar-sizing mode (#244): cost / tokens / duration. null = follow
   // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
   const [wfMode, setWfMode] = useState(null);
+  // Rank spans WITHIN this trace by cost (trace-cost-ranking): span_ids of the
+  // costliest spans, most expensive first, so a runaway single span is
+  // findable without scanning the whole waterfall by eye.
+  const [topCostSpanIds, setTopCostSpanIds] = useState([]);
 
   // Poll so a live trace's spans appear without re-navigating. Selection is
   // tracked by span_id, so replacing the spans array preserves it.
   const load = useCallback(() => {
     api('/traces/' + traceId)
-      .then(d => { setSpans(d.spans || []); setFraming(d.framing || null); })
+      .then(d => { setSpans(d.spans || []); setFraming(d.framing || null); setTopCostSpanIds(d.top_cost_span_ids || []); })
       .catch(() => {});
   }, [traceId]);
 
@@ -5222,6 +5281,19 @@ function TraceDetailView({ traceId }) {
       <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
       <span><b>${spans.length}</b> spans</span>
     </div>
+    ${topCostSpanIds.length > 0 ? html`
+      <div class="meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-8px 0 12px">
+        <span>Costliest spans in this trace:</span>
+        ${topCostSpanIds.map((sid, i) => {
+          const s = byId[sid];
+          if (!s) return null;
+          // Plan-tier framed, same as every other per-span figure in this view
+          // (#187/#249): dollars for api/unknown, tokens when $ is suppressed.
+          const label = wfUseTokens ? fmtTokens(spanTokens(s)) + ' tok' : fmtFramedDollar(s.cost_usd, framing);
+          return html`<span class="badge badge-warning" style="cursor:pointer" title=${'Rank #' + (i + 1) + ' by cost in this trace. Click to jump to it below.'} onClick=${() => setSelected(sid)}>#${i + 1} ${spanPrimaryName(s)} · ${label}</span>`;
+        })}
+      </div>
+    ` : null}
     <div class="wf-toolbar">
       <div class="wf-legend">
         <span><i class="wf-kind-dot llm"></i>LLM</span>

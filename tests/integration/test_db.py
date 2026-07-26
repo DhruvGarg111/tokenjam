@@ -239,6 +239,97 @@ def test_get_traces_with_filters(db):
     assert len(traces) == 0
 
 
+# -- Trace cost ranking --
+
+def test_get_traces_sort_cost_orders_highest_first(db):
+    _insert_agent(db)
+    now = utcnow()
+    cheap = make_llm_span(agent_id="test-agent", cost_usd=0.01, trace_id="cheap", start_time=now)
+    pricey = make_llm_span(
+        agent_id="test-agent", cost_usd=5.0, trace_id="pricey",
+        start_time=now - timedelta(minutes=1),  # older, so "recent" sort would put it 2nd
+    )
+    db.insert_span(cheap)
+    db.insert_span(pricey)
+
+    traces = db.get_traces(TraceFilters(sort="cost"))
+    assert [t.trace_id for t in traces] == ["pricey", "cheap"]
+
+    # Default ("recent") sort is unaffected — reverse-chronological.
+    traces = db.get_traces(TraceFilters())
+    assert [t.trace_id for t in traces] == ["cheap", "pricey"]
+
+
+def test_get_traces_min_cost_usd_filters_and_matches_count(db):
+    _insert_agent(db)
+    now = utcnow()
+    for i, cost in enumerate([0.01, 1.0, 10.0]):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", cost_usd=cost, trace_id=f"t{i}", start_time=now,
+        ))
+
+    traces = db.get_traces(TraceFilters(min_cost_usd=1.0))
+    assert {t.trace_id for t in traces} == {"t1", "t2"}
+    assert db.count_traces(TraceFilters(min_cost_usd=1.0)) == 2
+    assert db.count_traces(TraceFilters()) == 3
+
+
+def test_get_traces_flags_statistical_cost_outlier(db):
+    """Tukey's-fence rule: Q3 + 1.5*IQR over priced traces in the window."""
+    _insert_agent(db)
+    now = utcnow()
+    # 7 traces at $1 + 1 trace at $50 -> the $50 trace is a clear outlier once
+    # there are enough priced traces to trust the quartiles.
+    for i in range(7):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", cost_usd=1.0, trace_id=f"cheap-{i}", start_time=now,
+        ))
+    db.insert_span(make_llm_span(
+        agent_id="test-agent", cost_usd=50.0, trace_id="spike", start_time=now,
+    ))
+
+    traces = {t.trace_id: t for t in db.get_traces(TraceFilters())}
+    assert traces["spike"].is_outlier is True
+    assert all(not t.is_outlier for tid, t in traces.items() if tid != "spike")
+
+    stats = db.get_trace_cost_stats(TraceFilters())
+    assert stats.sample_size == 8
+    assert stats.threshold_usd is not None
+    assert stats.q3_usd is not None and stats.q1_usd is not None
+
+
+def test_get_traces_outlier_requires_minimum_sample(db):
+    """Below MIN_OUTLIER_SAMPLE priced traces, nothing is flagged — a handful
+    of traces can't support a reliable quartile-based rule."""
+    _insert_agent(db)
+    now = utcnow()
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=1.0, trace_id="a", start_time=now))
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=100.0, trace_id="b", start_time=now))
+
+    traces = db.get_traces(TraceFilters())
+    assert all(not t.is_outlier for t in traces)
+
+    stats = db.get_trace_cost_stats(TraceFilters())
+    assert stats.sample_size == 2
+    assert stats.threshold_usd is None
+
+
+def test_get_traces_zero_cost_trace_never_flagged_outlier(db):
+    """A $0/unpriced trace is not an 'outlier' even in a window with a real
+    spike — is_outlier only ever fires on a trace with positive cost."""
+    _insert_agent(db)
+    now = utcnow()
+    for i in range(7):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", cost_usd=1.0, trace_id=f"cheap-{i}", start_time=now,
+        ))
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=50.0, trace_id="spike", start_time=now))
+    db.insert_span(make_llm_span(agent_id="test-agent", cost_usd=0.0, trace_id="free", start_time=now))
+
+    traces = {t.trace_id: t for t in db.get_traces(TraceFilters())}
+    assert traces["free"].is_outlier is False
+
+
 # -- Alerts --
 
 def test_insert_and_get_alerts(db):

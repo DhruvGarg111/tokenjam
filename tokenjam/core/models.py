@@ -332,6 +332,29 @@ class TraceRecord:
     # compute path) rather than re-aggregated in JS.
     input_tokens:  int        = 0
     output_tokens: int        = 0
+    # Statistical cost-outlier flag for the trace-cost-ranking work: True when
+    # this trace's cost_usd sits above the window's Tukey fence
+    # (Q3 + 1.5 * IQR over priced traces in the SAME filtered window). Computed
+    # server-side in DuckDBBackend.get_traces so the rule has one implementation;
+    # see TraceCostStats for the numbers backing the flag.
+    is_outlier:    bool       = False
+
+
+@dataclass
+class TraceCostStats:
+    """Window-level cost distribution behind the `is_outlier` flag on TraceRecord.
+
+    Carried alongside a /traces response so the UI can render the outlier rule
+    in plain language with the actual numbers, never just a bare badge. `None`
+    fields mean "not enough priced traces to compute a reliable range" (see
+    MIN_OUTLIER_SAMPLE) — in that case no trace in the response is flagged.
+    """
+    method:       str          = "iqr_1.5x"
+    sample_size:  int          = 0
+    min_sample:   int          = 0
+    q1_usd:       float | None = None
+    q3_usd:       float | None = None
+    threshold_usd: float | None = None
 
 
 @dataclass
@@ -417,6 +440,13 @@ class TraceFilters:
     status:     str | None   = None
     limit:      int          = 50
     offset:     int          = 0
+    # "recent" (default, reverse-chronological) or "cost" (highest cost_usd
+    # first) — additive: existing callers that never set this keep the
+    # historical ordering.
+    sort:       str          = "recent"
+    # Cost-floor filter: only traces whose summed cost_usd is >= this value.
+    # Applied via HAVING on the same per-trace aggregate, no extra scan.
+    min_cost_usd: float | None = None
 
 
 @dataclass

@@ -31,12 +31,34 @@ from tokenjam.core.models import (
     SessionRecord,
     SpanKind,
     SpanStatus,
+    TraceCostStats,
     TraceFilters,
     TraceRecord,
 )
 from tokenjam.utils.time_parse import utcnow
 
 logger = logging.getLogger("tokenjam.db")
+
+
+def _is_cost_outlier(
+    cost_usd: float | None,
+    q1: float | None,
+    q3: float | None,
+    priced_count: int,
+    min_sample: int,
+) -> bool:
+    """Tukey's-fence outlier check shared by get_traces / get_trace_cost_stats.
+
+    False whenever there isn't enough priced-trace history to trust the
+    quartiles (`priced_count < min_sample`), or this trace itself has no
+    positive cost — a $0 trace is never an "outlier," it's just unpriced.
+    """
+    if cost_usd is None or cost_usd <= 0:
+        return False
+    if q1 is None or q3 is None or priced_count < min_sample:
+        return False
+    fence = q3 + 1.5 * (q3 - q1)
+    return cost_usd > fence
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +89,7 @@ class StorageBackend(Protocol):
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
+    def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats: ...
     def get_session_id_for_trace(self, trace_id: str) -> str | None: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
     def get_alerts(self, filters: AlertFilters) -> list[Alert]: ...
@@ -1803,43 +1826,134 @@ class DuckDBBackend:
         where = " AND ".join(clauses) if clauses else "1=1"
         return where, params, idx
 
+    # Trace-cost-ranking sort options. "recent" (default) preserves the
+    # historical reverse-chronological order; "cost" ranks the highest-spend
+    # trace first within the same filtered/paginated window — additive, not a
+    # replacement (see TracesListView in ui/index.html for the toggle).
+    _TRACE_SORT_EXPR = {
+        "recent": "tc.start_time DESC",
+        "cost": "tc.cost_usd DESC NULLS LAST, tc.start_time DESC",
+    }
+
+    # Statistical cost-outlier rule (Tukey's fence): a trace is flagged when its
+    # cost sits above Q3 + 1.5 * IQR of the *priced* (cost_usd > 0) traces in the
+    # same filtered window. Below this many priced traces the quartiles are too
+    # noisy to mean anything, so nothing is flagged at all. This is the classic
+    # box-plot outlier rule — conservative, well-known, and cheap to compute
+    # alongside the existing per-trace aggregation (no second table scan).
+    MIN_OUTLIER_SAMPLE = 8
+
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         where, params, idx = self._trace_filter_where(filters)
+        sort_expr = self._TRACE_SORT_EXPR.get(filters.sort, self._TRACE_SORT_EXPR["recent"])
+        having = ""
+        if filters.min_cost_usd is not None:
+            having = f"WHERE tc.cost_usd >= ${idx}"
+            params.append(filters.min_cost_usd)
+            idx += 1
         # Use FIRST(name ORDER BY start_time) to pick the root span name —
         # the previous correlated-subquery variant returned NULL for most
         # rows in DuckDB, leaving the TYPE column blank in `tj traces` (U2).
+        #
+        # trace_costs aggregates spans -> traces over the SAME filtered window
+        # as before (bounded by since/until/agent_id/etc, same complexity class
+        # as the prior query — no new scan). cost_stats computes the window's
+        # cost quartiles ONCE, over the unfiltered-by-threshold trace set, so a
+        # `min_cost_usd` filter never skews the outlier fence. Both are derived
+        # from one pass over trace_costs; the min-cost filter and pagination are
+        # applied only in the outer SELECT.
         sql = (
-            f"SELECT trace_id, MAX(agent_id) AS agent_id, "
-            f"FIRST(name ORDER BY start_time) AS name, "
-            f"MIN(start_time) AS start_time, "
-            f"SUM(duration_ms) AS duration_ms, "
-            f"SUM(cost_usd) AS cost_usd, "
-            f"CASE WHEN SUM(CASE WHEN status_code='error' THEN 1 ELSE 0 END) > 0 THEN 'error' "
-            f"     WHEN SUM(CASE WHEN status_code='ok' THEN 1 ELSE 0 END) > 0 THEN 'ok' "
-            f"     ELSE 'unset' END AS status_code, "
-            f"COUNT(*) AS span_count, "
-            f"SUM(input_tokens) AS input_tokens, "
-            f"SUM(output_tokens) AS output_tokens "
-            f"FROM spans WHERE {where} "
-            f"GROUP BY trace_id "
-            f"ORDER BY start_time DESC "
+            f"WITH trace_costs AS ("
+            f"  SELECT trace_id, MAX(agent_id) AS agent_id, "
+            f"  FIRST(name ORDER BY start_time) AS name, "
+            f"  MIN(start_time) AS start_time, "
+            f"  SUM(duration_ms) AS duration_ms, "
+            f"  SUM(cost_usd) AS cost_usd, "
+            f"  CASE WHEN SUM(CASE WHEN status_code='error' THEN 1 ELSE 0 END) > 0 THEN 'error' "
+            f"       WHEN SUM(CASE WHEN status_code='ok' THEN 1 ELSE 0 END) > 0 THEN 'ok' "
+            f"       ELSE 'unset' END AS status_code, "
+            f"  COUNT(*) AS span_count, "
+            f"  SUM(input_tokens) AS input_tokens, "
+            f"  SUM(output_tokens) AS output_tokens "
+            f"  FROM spans WHERE {where} "
+            f"  GROUP BY trace_id"
+            f"), cost_stats AS ("
+            f"  SELECT "
+            f"  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cost_usd) AS q1, "
+            f"  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY cost_usd) AS q3, "
+            f"  COUNT(*) AS priced_count "
+            f"  FROM trace_costs WHERE cost_usd > 0"
+            f") "
+            f"SELECT tc.trace_id, tc.agent_id, tc.name, tc.start_time, tc.duration_ms, "
+            f"tc.cost_usd, tc.status_code, tc.span_count, tc.input_tokens, tc.output_tokens, "
+            f"cs.q1, cs.q3, cs.priced_count "
+            f"FROM trace_costs tc CROSS JOIN cost_stats cs "
+            f"{having} "
+            f"ORDER BY {sort_expr} "
             f"LIMIT ${idx} OFFSET ${idx + 1}"
         )
         params.extend([filters.limit, filters.offset])
         rows = self.conn.execute(sql, params).fetchall()
-        return [
-            TraceRecord(
+        result = []
+        for r in rows:
+            cost_usd = r[5]
+            q1, q3, priced_count = r[10], r[11], int(r[12] or 0)
+            is_outlier = _is_cost_outlier(cost_usd, q1, q3, priced_count, self.MIN_OUTLIER_SAMPLE)
+            result.append(TraceRecord(
                 trace_id=r[0], agent_id=r[1], name=r[2], start_time=r[3],
-                duration_ms=r[4], cost_usd=r[5], status_code=r[6],
+                duration_ms=r[4], cost_usd=cost_usd, status_code=r[6],
                 span_count=r[7],
                 input_tokens=int(r[8] or 0), output_tokens=int(r[9] or 0),
-            )
-            for r in rows
-        ]
+                is_outlier=is_outlier,
+            ))
+        return result
+
+    def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats:
+        """Window-level cost distribution behind `TraceRecord.is_outlier`.
+
+        Mirrors the `cost_stats` CTE in `get_traces` (same `where`, no
+        pagination/threshold) so the numbers the UI shows for "why is this
+        flagged" always match the flags actually returned.
+        """
+        where, params, _ = self._trace_filter_where(filters)
+        sql = (
+            f"WITH trace_costs AS ("
+            f"  SELECT trace_id, SUM(cost_usd) AS cost_usd "
+            f"  FROM spans WHERE {where} GROUP BY trace_id"
+            f") "
+            f"SELECT "
+            f"PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cost_usd) AS q1, "
+            f"PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY cost_usd) AS q3, "
+            f"COUNT(*) AS priced_count "
+            f"FROM trace_costs WHERE cost_usd > 0"
+        )
+        row = self.conn.execute(sql, params).fetchone()
+        q1, q3, priced_count = (row[0], row[1], int(row[2] or 0)) if row else (None, None, 0)
+        threshold = None
+        if q1 is not None and q3 is not None and priced_count >= self.MIN_OUTLIER_SAMPLE:
+            threshold = q3 + 1.5 * (q3 - q1)
+        return TraceCostStats(
+            method="iqr_1.5x",
+            sample_size=priced_count,
+            min_sample=self.MIN_OUTLIER_SAMPLE,
+            q1_usd=q1,
+            q3_usd=q3,
+            threshold_usd=threshold,
+        )
 
     def count_traces(self, filters: TraceFilters) -> int:
-        where, params, _ = self._trace_filter_where(filters)
-        row = self.conn.execute(f"SELECT COUNT(DISTINCT trace_id) FROM spans WHERE {where}", params).fetchone()
+        where, params, idx = self._trace_filter_where(filters)
+        if filters.min_cost_usd is not None:
+            sql = (
+                f"SELECT COUNT(*) FROM ("
+                f"  SELECT trace_id FROM spans WHERE {where} "
+                f"  GROUP BY trace_id HAVING SUM(cost_usd) >= ${idx}"
+                f")"
+            )
+            params.append(filters.min_cost_usd)
+        else:
+            sql = f"SELECT COUNT(DISTINCT trace_id) FROM spans WHERE {where}"
+        row = self.conn.execute(sql, params).fetchone()
         return int(row[0] or 0) if row else 0
 
     def get_session_id_for_trace(self, trace_id: str) -> str | None:
