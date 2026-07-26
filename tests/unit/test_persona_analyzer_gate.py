@@ -212,14 +212,14 @@ def _report_with_no_lever_findings(persona: str) -> OptimizeReport:
     cache = CacheEfficacyFinding(
         flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
                                   0.05, "full", True)],
-        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+        past_overspend_usd=1.2, estimate_basis="cache basis",
     )
     trim = PromptBloatFinding(
         enabled=True,
         per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
                                 significant_chars=3000, bloat_chars=5000,
                                 estimated_token_reduction=1250)],
-        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+        past_overspend_usd=0.8, estimate_basis="trim basis",
     )
     return OptimizeReport(
         window=w, persona=persona, findings={"cache": cache, "trim": trim},
@@ -241,7 +241,7 @@ def test_review_inbox_still_gates_placement_for_claude_code():
                       spans=100, total_tokens=1_000_000, total_cost_usd=50.0,
                       thin_data=False)
     placement = BatchPlacementFinding(
-        candidates=[], estimated_recoverable_usd=None, estimate_basis="batch basis",
+        candidates=[], past_overspend_usd=None, estimate_basis="batch basis",
         min_sessions_for_cadence=5, min_group_cost_usd=1.0,
     )
     rep = OptimizeReport(window=w, persona="claude-code", findings={"placement": placement})

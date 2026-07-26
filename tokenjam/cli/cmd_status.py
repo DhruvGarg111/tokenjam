@@ -146,7 +146,7 @@ def _recoverable_teaser(db, config) -> str | None:
     doctor, statusline or the banner ever mentioned optimize existed.
 
     Reuses the same recoverable-savings contract every analyzer already
-    carries (`estimated_recoverable_usd`, #111) rather than inventing a new
+    carries (`past_overspend_usd`, #111) rather than inventing a new
     figure, scoped to `COST_ANALYZERS` — the analyzers that actually feed the
     cost/apply rail (`cost_proposals.py`).
 
@@ -183,11 +183,11 @@ def _recoverable_teaser(db, config) -> str | None:
         )
         estimates: list[float] = []
         if report.downgrade is not None:
-            usd = report.downgrade.estimated_recoverable_usd
+            usd = report.downgrade.past_overspend_usd
             if usd is not None:
                 estimates.append(usd)
         for finding in (report.findings or {}).values():
-            usd = getattr(finding, "estimated_recoverable_usd", None)
+            usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:
                 estimates.append(usd)
         largest = max(estimates, default=0.0)

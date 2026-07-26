@@ -2,7 +2,7 @@
 
 The analyzer reasons over the summarize scan (filesystem), not telemetry, so the
 scan is monkeypatched to a controlled ScanResult. Asserts the #111 recoverable
-contract: `estimated_recoverable_tokens` and `estimated_recoverable_usd` are on
+contract: `past_overspend_tokens` and `past_overspend_usd` are on
 the SAME window-priced basis — both None when no loading session is
 observed, both populated together when one is — while the one-time per-call
 aggregate lives in `file_reduction_tokens`. Also checks an explicit basis and a
@@ -83,8 +83,8 @@ def test_sums_per_call_tokens_drops_zero_saving(db, monkeypatch):
     # (its ancestor names match no agent_id-derived repo), so NEITHER window
     # figure is attached — tokens and dollars are on the same basis:
     # never a zero, never a rate borrowed from a file that did resolve.
-    assert f.estimated_recoverable_tokens is None
-    assert f.estimated_recoverable_usd is None
+    assert f.past_overspend_tokens is None
+    assert f.past_overspend_usd is None
     assert f.estimate_confidence == "heuristic"
     assert f.estimate_basis                          # explicit basis required by contract
     assert {c.path for c in f.candidates} == {"./CLAUDE.md", "./AGENTS.md"}
@@ -108,7 +108,7 @@ def test_dead_window_contributes_nothing(db, monkeypatch):
                           since=since, until=until, findings=["summarize"])
     f = report.findings["summarize"]
     assert f.files == 0
-    assert f.estimated_recoverable_tokens is None
+    assert f.past_overspend_tokens is None
     assert f.reduction_pct is None
 
 
@@ -116,8 +116,8 @@ def test_empty_scan_yields_no_tokens_but_keeps_basis(db, monkeypatch):
     _patch_scan(monkeypatch, [])
     f = _run(db)
     assert f.files == 0
-    assert f.estimated_recoverable_tokens is None
-    assert f.estimated_recoverable_usd is None
+    assert f.past_overspend_tokens is None
+    assert f.past_overspend_usd is None
     assert f.estimate_basis
 
 
@@ -127,7 +127,7 @@ def test_scan_error_never_breaks_the_report(db, monkeypatch, caplog):
     monkeypatch.setattr("tokenjam.core.summarize.candidates.list_candidates", boom)
     with caplog.at_level(logging.DEBUG, logger="tokenjam.core.optimize.analyzers.summarize"):
         f = _run(db)
-    assert f.files == 0 and f.estimated_recoverable_tokens is None
+    assert f.files == 0 and f.past_overspend_tokens is None
     # the swallow must leave a trail (not silent) so a real regression is diagnosable
     assert any("scan failed" in r.message for r in caplog.records)
 
@@ -166,7 +166,7 @@ def test_render_summarize_lists_candidates_and_points_to_summarize_list(db, monk
 
     _patch_scan(monkeypatch, [_cand("./CLAUDE.md", 410), _cand("./AGENTS.md", 300)])
     finding = _run(db)
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
 
     for mode in ("api", "subscription", "local", "unknown"):
         _render_summarize(finding, pricing_mode=mode, marker="①")
@@ -217,18 +217,18 @@ def test_global_scope_file_is_priced_across_every_session_in_the_window(
     assert f.sessions_examined == 2
     assert f.calls_per_session == 3.0
     assert f.candidates[0].sessions_loading == 2
-    assert f.estimated_recoverable_usd == pytest.approx(round(expected, 6))
+    assert f.past_overspend_usd == pytest.approx(round(expected, 6))
     assert f.rate_basis
     # Strictly more than a single send: the saving recurs, it is not one-time.
-    assert f.estimated_recoverable_usd > 1_000 * rates.input_per_mtok / 1_000_000
+    assert f.past_overspend_usd > 1_000 * rates.input_per_mtok / 1_000_000
 
 
 def test_token_and_dollar_aggregates_describe_the_same_quantity(db, monkeypatch):
     """Basis-coherence guard: dividing the dollar aggregate by the token
     aggregate must land on the blended per-token rate the basis advertises.
 
-    Before the fix `estimated_recoverable_tokens` was the un-multiplied one-time
-    file reduction while `estimated_recoverable_usd` was per-call-multiplied, so
+    Before the fix `past_overspend_tokens` was the un-multiplied one-time
+    file reduction while `past_overspend_usd` was per-call-multiplied, so
     the implied rate came out orders of magnitude above any real price — a card
     whose own tokens and dollars described different quantities. Both fields are
     now the same event count (reduction x reads x loading sessions), one counted
@@ -251,14 +251,14 @@ def test_token_and_dollar_aggregates_describe_the_same_quantity(db, monkeypatch)
                      since=since, until=until, findings=["summarize"]).findings["summarize"]
 
     # 1,000 tokens x 3 reads per session (one send + two re-reads) x 2 sessions.
-    assert f.estimated_recoverable_tokens == 6_000
+    assert f.past_overspend_tokens == 6_000
     # The one-time per-call reduction keeps its own field and its own basis.
     assert f.file_reduction_tokens == 1_000
 
     rates = get_rates("anthropic", "claude-haiku-4-5")
     input_per_token = rates.input_per_mtok / 1_000_000
     cache_read_per_token = rates.cache_read_per_mtok / 1_000_000
-    implied = f.estimated_recoverable_usd / f.estimated_recoverable_tokens
+    implied = f.past_overspend_usd / f.past_overspend_tokens
     # One send at the input rate + two re-reads at the cache-read rate, over 3
     # token-events: the exact blend the basis string states.
     assert implied == pytest.approx((input_per_token + 2 * cache_read_per_token) / 3)
@@ -336,7 +336,7 @@ def test_render_summarize_shows_the_window_dollar_figure_when_priced(
     report = build_report(db=db, config=TjConfig(version="1"),
                           since=since, until=until, findings=["summarize"])
     finding = report.findings["summarize"]
-    assert finding.estimated_recoverable_usd
+    assert finding.past_overspend_usd
 
     _render_summarize(finding, pricing_mode="api", marker="①")
     out = capsys.readouterr().out
@@ -388,14 +388,14 @@ def test_finding_round_trips(db, monkeypatch):
     # No session in this window loads a repo-scoped "./CLAUDE.md", so neither
     # window figure resolves; the one-time aggregate still does.
     assert sd["file_reduction_tokens"] == 410
-    assert sd["estimated_recoverable_tokens"] is None
-    assert sd["estimated_recoverable_usd"] is None
+    assert sd["past_overspend_tokens"] is None
+    assert sd["past_overspend_usd"] is None
     assert "meaning may change" in sd["caveat"]       # caveat survives serialization
     assert sd["reduction_pct"] == 33 and sd["avg_reduction_pct"] == 33
     back = report_from_dict(payload).findings["summarize"]
     assert back.files == 1
     assert back.file_reduction_tokens == 410
-    assert back.estimated_recoverable_tokens is None
+    assert back.past_overspend_tokens is None
     assert back.candidates[0].path == "./CLAUDE.md"
     assert back.candidates[0].reduction_pct == 33     # per-file % survives the round-trip
     assert "meaning may change" in back.caveat        # and the caveat survives the ctor

@@ -290,9 +290,9 @@ def render_html(
 ) -> str:
     scope_label = f"agent={html.escape(agent_scope)}, " if agent_scope else ""
     cache_total, script_total = (
-        (f"~{finding.estimated_recoverable_tokens or 0:,} tokens", "")
+        (f"~{finding.past_overspend_tokens or 0:,} tokens", "")
         if pricing_mode in ("subscription", "local")
-        else (f"${finding.estimated_recoverable_usd or 0.0:,.2f}", "")
+        else (f"${finding.past_overspend_usd or 0.0:,.2f}", "")
     )
 
     mode_hint = ""

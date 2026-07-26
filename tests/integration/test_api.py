@@ -701,7 +701,7 @@ async def test_optimize_chain_framing_and_recoverable_fields(client):
     findings = data.get("findings") or {}
     for name in ("cache", "script", "trim"):
         if name in findings:
-            assert "estimated_recoverable_usd" in findings[name]
+            assert "past_overspend_usd" in findings[name]
             assert "estimate_basis" in findings[name]
 
 

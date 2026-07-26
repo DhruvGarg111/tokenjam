@@ -11,7 +11,7 @@ mechanism `resend` prices — material re-read by every later main-thread turn �
 so the two must never draw from the same sessions. `resend` skips exactly the
 sessions `premium_driver_role` flags, and both call that one shared predicate.
 The end-to-end test walks `build_report` -> `cost_proposals_from_report` ->
-`estimated_recoverable_rollup`, which is the only level at which a cross-analyzer
+`past_overspend_rollup`, which is the only level at which a cross-analyzer
 overlap is visible at all.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
 )
 from tokenjam.core.optimize.cost_proposals import (
     cost_proposals_from_report,
-    estimated_recoverable_rollup,
+    past_overspend_rollup,
 )
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_tool_span
@@ -213,14 +213,14 @@ def test_the_tiny_session_case_survives_as_a_secondary_contribution(db):
     assert finding is not None
     assert finding.driver_sessions == 0
     assert finding.candidate_sessions == 1
-    assert finding.estimated_recoverable_usd > 0
+    assert finding.past_overspend_usd > 0
 
 
 def test_a_driver_session_is_excluded_from_the_tiny_session_case(db):
     # The two gates can both admit one session: the SMALL_* gate reads UNCACHED
     # input, so a session with little uncached input but a huge cache-read tail
     # clears it while still being a context-heavy driver session. Both cases
-    # feed one `estimated_recoverable_usd`, so the exclusion is what stops the
+    # feed one `past_overspend_usd`, so the exclusion is what stops the
     # finding double-counting against itself.
     start = utcnow() - timedelta(days=2)
     for i in range(TURNS):
@@ -245,7 +245,7 @@ def test_a_driver_session_is_excluded_from_the_tiny_session_case(db):
     # Claimed by the driver case, so the tiny-session walk must not see it —
     # even though its summed shape clears every SMALL_* threshold.
     assert finding.candidate_sessions == 0
-    assert finding.estimated_recoverable_usd == pytest.approx(
+    assert finding.past_overspend_usd == pytest.approx(
         finding.driver_recoverable_usd, abs=1e-6,
     )
 
@@ -297,15 +297,15 @@ def test_the_rollup_counts_a_driver_session_exactly_once(db):
     assert len(driver_cards) == 1, "exactly one window-wide driver card, never one per agent"
     assert CHEAP in driver_cards[0].evidence
 
-    rollup = estimated_recoverable_rollup(proposals)
+    rollup = past_overspend_rollup(proposals)
     # Nothing may claim back more than the window actually spent.
-    assert rollup["estimated_recoverable_usd"] <= deleg_cost + driver_cost + 0.01
+    assert rollup["past_overspend_usd"] <= deleg_cost + driver_cost + 0.01
     # And the driver card's own claim stays inside its own session's spend.
-    assert 0 < (driver_cards[0].estimated_recoverable_usd or 0.0) < driver_cost
+    assert 0 < (driver_cards[0].past_overspend_usd or 0.0) < driver_cost
 
 
 def test_the_driver_card_and_the_tiny_card_do_not_claim_the_same_dollars(db):
-    # Both cases fire in one window. The finding's `estimated_recoverable_usd`
+    # Both cases fire in one window. The finding's `past_overspend_usd`
     # is their sum, so the two CARDS must split it rather than each carrying
     # the total — the failure mode Critical Rule 27 describes.
     _seed_driver_session(db, session_id="deleg", delegate=True)
@@ -329,7 +329,7 @@ def test_the_driver_card_and_the_tiny_card_do_not_claim_the_same_dollars(db):
     driver = [p for p in proposals if p.signature == "cost:downsize:driver-role"]
     others = [p for p in proposals if p.signature != "cost:downsize:driver-role"]
     assert len(driver) == 1
-    assert driver[0].estimated_recoverable_usd == pytest.approx(
+    assert driver[0].past_overspend_usd == pytest.approx(
         finding.driver_recoverable_usd, abs=1e-6,
     )
     # The tiny-session cards carry the tiny-session share and nothing more.
@@ -337,8 +337,8 @@ def test_the_driver_card_and_the_tiny_card_do_not_claim_the_same_dollars(db):
     # than the recorded `cost_usd`, so this is an upper bound, not an equality —
     # what it forbids is the driver dollars appearing a second time here.
     tiny_savings = finding.actual_cost_usd - finding.alternative_cost_usd
-    assert 0 < sum(p.estimated_recoverable_usd or 0.0 for p in others) <= tiny_savings * 1.01
+    assert 0 < sum(p.past_overspend_usd or 0.0 for p in others) <= tiny_savings * 1.01
     # Nothing claims the combined figure twice.
-    assert sum(p.estimated_recoverable_usd or 0.0 for p in proposals) <= (
-        finding.estimated_recoverable_usd + 1e-6
+    assert sum(p.past_overspend_usd or 0.0 for p in proposals) <= (
+        finding.past_overspend_usd + 1e-6
     )

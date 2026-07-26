@@ -311,10 +311,10 @@ def run(ctx: AnalyzerContext) -> None:
         # 2-repetition cluster it is a 2x overclaim. The upper bound stays
         # available per-cluster as script_replacement_recoverable_usd/_tokens
         # for the template-authoring case. See REUSE_ESTIMATE_BASIS.
-        finding.estimated_recoverable_usd = round(
+        finding.past_overspend_usd = round(
             sum(c.cache_reuse_recoverable_usd for c in surfaced), 6
         )
-        finding.estimated_recoverable_tokens = sum(
+        finding.past_overspend_tokens = sum(
             c.cache_reuse_recoverable_tokens for c in surfaced
         )
 

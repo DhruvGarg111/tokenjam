@@ -23,6 +23,7 @@ feature net-negative rather than merely wrong:
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,9 +33,7 @@ from tokenjam.core.optimize.cost_proposals import (
     CostProposal,
     _with_past_overspend,
     backfill_legacy_past_overspend_fields,
-    compute_projection_ratio,
     cost_proposals_from_report,
-    estimated_recoverable_rollup,
     past_overspend_rollup,
 )
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
@@ -43,6 +42,16 @@ from tokenjam.core.optimize.types import (
     OptimizeReport,
     WindowSummary,
 )
+
+#: The per-analyzer dollar/token field names retired by the field collapse.
+#: `estimated_recoverable_*` was `past_overspend_*` under a forward-framed
+#: name; `estimated_monthly_*` was that number times a pace ratio. Neither may
+#: reappear on a proposal, a payload, or a rollup — see the field contract in
+#: the repo CLAUDE.md.
+_RETIRED_DOLLAR_FIELDS = frozenset({
+    "estimated_recoverable_usd", "estimated_recoverable_tokens",
+    "estimated_monthly_usd", "estimated_monthly_tokens",
+})
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 
@@ -63,8 +72,8 @@ def _resend_finding():
 
     return ResendFinding(
         sessions_examined=40, repeat_share=0.93, repeat_tokens=10_000,
-        estimated_recoverable_tokens=1_400_000_000,
-        estimated_recoverable_usd=703.78,
+        past_overspend_tokens=1_400_000_000,
+        past_overspend_usd=703.78,
         estimate_basis="resend basis",
         fix_compaction="Run /compact.",
         cost_of_waste_usd=7_038.85,
@@ -143,7 +152,7 @@ def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, estimated_recoverable_tokens=1_000,
+        past_overspend_usd=3.0, past_overspend_tokens=1_000,
         percent_of_tokens=35.0, estimate_basis="downsize basis",
     )
     report = OptimizeReport(window=window, downgrade=dg)
@@ -153,15 +162,17 @@ def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
     props = cost_proposals_from_report(report)
     assert props, "fixture produced no proposals — the guard would be vacuous"
     for p in props:
+        # The invariant is now STRUCTURAL rather than a comparison: there is
+        # exactly one avoidable field, so the waste-labelled figure cannot be
+        # anything other than the avoidable one. What still has to be checked
+        # is that no SECOND avoidable quantity has crept back onto the card.
+        fields = set(asdict(p))
+        assert not (fields & _RETIRED_DOLLAR_FIELDS), (
+            f"{p.analyzer} carries a second per-analyzer dollar field "
+            f"({fields & _RETIRED_DOLLAR_FIELDS}) beside past_overspend_usd"
+        )
         if p.past_overspend_usd is None:
             continue
-        assert p.estimated_recoverable_usd is not None, (
-            f"{p.analyzer} renders a waste figure with no avoidable figure behind it"
-        )
-        assert p.past_overspend_usd <= p.estimated_recoverable_usd + 1e-9, (
-            f"{p.analyzer} labels {p.past_overspend_usd} as overspend but only "
-            f"{p.estimated_recoverable_usd} of it was shown to be avoidable"
-        )
         if p.observed_cost_usd is not None:
             # The cost figure is legitimately larger — it just may never be the
             # one wearing the waste label, and it must arrive with its coverage
@@ -213,12 +224,12 @@ def test_the_rollup_headline_is_avoidable_and_the_cost_total_stays_separate():
     props = [
         _with_past_overspend(_proposal(
             analyzer="resend", signature="cost:resend",
-            estimated_recoverable_usd=398.41,
+            past_overspend_usd=398.41,
             cost_of_waste_usd=6_972.80, cost_of_waste_basis="observed",
             coverage_note="COVERAGE. ...",
         )),
         _with_past_overspend(_proposal(signature="cost:downsize",
-                                       estimated_recoverable_usd=40.0)),
+                                       past_overspend_usd=40.0)),
     ]
     block = past_overspend_rollup(props)
     # The headline sums avoidable figures only — one meaning across analyzers.
@@ -246,20 +257,20 @@ def _report():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        past_overspend_usd=3.0, percent_of_tokens=35.0,
         estimate_basis="downsize basis",
     )
     cache = CacheEfficacyFinding(
         flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
                                   0.05, "full", True)],
-        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+        past_overspend_usd=1.2, estimate_basis="cache basis",
     )
     trim = PromptBloatFinding(
         enabled=True,
         per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
                                 significant_chars=3000, bloat_chars=5000,
                                 estimated_token_reduction=1250)],
-        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+        past_overspend_usd=0.8, estimate_basis="trim basis",
     )
     window = WindowSummary(since=NOW - timedelta(days=5), until=NOW, days=5, sessions=10,
                            spans=100, total_tokens=1, total_cost_usd=5.0, thin_data=False)
@@ -268,43 +279,52 @@ def _report():
 
 # --- 1. never summed into a recoverable total ------------------------------ #
 
-def test_past_overspend_is_never_summed_into_the_recoverable_rollup():
+def test_the_headline_total_never_absorbs_the_observed_cost_total():
     # The two answer different questions ("what of this could I have avoided"
-    # vs "what does the fix return going forward"). The recoverable rollup must
-    # read only the estimated_* fields no matter how large the observed cost is.
+    # vs "what did this behaviour cost in total"), and the first is a SUBSET of
+    # the second, so no key may carry the cost figure or the sum of the pair.
     prop = _with_past_overspend(_proposal(
         analyzer="resend", signature="cost:resend",
-        estimated_recoverable_usd=703.78, estimated_recoverable_tokens=1_400_000_000,
+        past_overspend_usd=703.78, past_overspend_tokens=1_400_000_000,
         cost_of_waste_usd=7_038.85, cost_of_waste_tokens=14_382_971_851,
         cost_of_waste_basis="observed",
     ))
     assert prop.past_overspend_usd == 703.78
     assert prop.observed_cost_usd == 7_038.85
 
-    rollup = estimated_recoverable_rollup([prop])
-    assert rollup["estimated_recoverable_usd"] == 703.78
-    assert rollup["estimated_recoverable_tokens"] == 1_400_000_000
-    assert rollup["projected_usd_30d"] == 703.78          # ratio blocked, thin window
-    # No key of the recoverable rollup carries the observed figure, under any
-    # name — this is the assertion that survives someone adding a field later.
+    rollup = past_overspend_rollup([prop])
+    assert rollup["past_overspend_usd"] == 703.78
+    assert rollup["past_overspend_tokens"] == 1_400_000_000
     for key, value in rollup.items():
+        if key.startswith("observed_cost"):
+            continue
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             assert value != pytest.approx(7_038.85), f"{key} leaked the observed figure"
             assert value != pytest.approx(7_038.85 + 703.78), f"{key} summed the two"
 
 
-def test_past_overspend_rollup_and_recoverable_rollup_read_disjoint_fields():
-    # A proposal carrying ONLY a past figure contributes nothing to the
-    # recoverable rollup, and one carrying ONLY a recoverable figure
-    # contributes nothing to the past rollup. Structural separation, not a
-    # convention a caller has to remember.
-    past_only = _proposal(signature="a", past_overspend_usd=100.0, past_overspend_tokens=10)
-    rec_only = _proposal(signature="b", estimated_recoverable_usd=7.0,
-                         estimated_recoverable_tokens=3)
+def test_there_is_exactly_one_rollup_and_one_per_analyzer_dollar_field():
+    """The collapse itself, pinned.
 
-    assert estimated_recoverable_rollup([past_only])["estimated_recoverable_usd"] == 0.0
-    assert past_overspend_rollup([rec_only])["past_overspend_usd"] == 0.0
-    assert past_overspend_rollup([past_only])["past_overspend_usd"] == 100.0
+    Three near-identical per-analyzer dollar quantities used to coexist
+    (`past_overspend_usd`, `estimated_recoverable_usd`, and
+    `estimated_monthly_usd` = that number x a pace ratio). A session comparing
+    the first two reported them "identical for 6 of 7 analyzers" while the
+    Review inbox rendered the third, 7.14% larger. One field now, one rollup.
+    """
+    import tokenjam.core.optimize.cost_proposals as cp
+
+    assert not hasattr(cp, "estimated_recoverable_rollup")
+    assert not hasattr(cp, "compute_projection_ratio")
+    assert not hasattr(cp, "_with_rollup_projection")
+    assert not (set(CostProposal.__dataclass_fields__) & _RETIRED_DOLLAR_FIELDS)
+
+    priced = _proposal(signature="a", past_overspend_usd=100.0, past_overspend_tokens=10)
+    unpriced = _proposal(signature="b")
+    block = past_overspend_rollup([priced, unpriced])
+    assert block["past_overspend_usd"] == 100.0
+    assert block["proposal_count"] == 1              # only the priced one counts
+    assert block["deduplicated_proposal_count"] == 2  # both still render
 
 
 def test_the_two_totals_are_never_added_to_each_other():
@@ -313,11 +333,11 @@ def test_the_two_totals_are_never_added_to_each_other():
     props = [
         _with_past_overspend(_proposal(
             analyzer="resend", signature="cost:resend",
-            estimated_recoverable_usd=703.78,
+            past_overspend_usd=703.78,
             cost_of_waste_usd=7_038.85, cost_of_waste_basis="observed",
         )),
         _with_past_overspend(_proposal(signature="cost:downsize",
-                                       estimated_recoverable_usd=40.0)),
+                                       past_overspend_usd=40.0)),
     ]
     block = past_overspend_rollup(props)
     combined = 7_038.85 + 743.78
@@ -329,18 +349,16 @@ def test_the_two_totals_are_never_added_to_each_other():
 # --- 2. never paced ---------------------------------------------------------#
 
 def test_no_pacing_ratio_is_applied_to_a_past_overspend_figure():
-    # The ONE sanctioned projection in this product is the central 30-day
-    # active-day pace, applied centrally to the monthly fields. Applying it to
-    # an observation would turn the one figure that needs no trust into one
-    # that needs the most.
-    ratio, label = compute_projection_ratio(window_days=30, active_days=10, n_sessions=200)
-    assert ratio == 3.0 and label == "per 30 days"          # a live, non-trivial ratio
-
+    # Pacing is gone from the cost pipeline entirely: multiplying an
+    # observation by a forward ratio turns the one figure that needs no trust
+    # into the one that needs the most. A window whose guardrails WOULD have
+    # produced a live 3.0x ratio (10 active days, 200 sessions over 30 days)
+    # must still yield the raw window figure.
     dg = DowngradeFinding(
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, estimated_recoverable_tokens=1_000,
+        past_overspend_usd=3.0, past_overspend_tokens=1_000,
         percent_of_tokens=35.0, estimate_basis="downsize basis",
     )
     window = WindowSummary(
@@ -350,16 +368,16 @@ def test_no_pacing_ratio_is_applied_to_a_past_overspend_figure():
     props = cost_proposals_from_report(OptimizeReport(window=window, downgrade=dg))
     prop = next(p for p in props if p.analyzer == "downsize")
 
-    # The projection DID happen on the monthly fields...
-    assert prop.estimated_monthly_usd == pytest.approx(9.0)
-    # ...and did NOT touch the observed one, which stays the raw window figure.
+    # The figure is the raw window observation — 3.0, not 3.0 x 3.0.
     assert prop.past_overspend_usd == pytest.approx(3.0)
     assert prop.past_overspend_tokens == 1_000
+    assert not (set(asdict(prop)) & _RETIRED_DOLLAR_FIELDS)
 
     # And the rollup can't pace it either: it takes no pace to project from.
     block = past_overspend_rollup(props)
     assert block["past_overspend_usd"] == pytest.approx(3.0)
     assert "projection_ratio" not in block
+    assert "projected_usd_30d" not in block
     with pytest.raises(TypeError):
         past_overspend_rollup(props, active_days=10, n_sessions=200)  # type: ignore[call-arg]
 
@@ -371,7 +389,7 @@ def test_past_overspend_reads_the_netted_figure_not_the_gross_one():
     # says it is.
     prop = _with_past_overspend(_proposal(
         signature="cost:reuse", analyzer="reuse",
-        estimated_recoverable_usd=4.0, gross_recoverable_usd=9.0,
+        past_overspend_usd=4.0, gross_recoverable_usd=9.0,
     ))
     assert prop.past_overspend_usd == 4.0
 
@@ -384,8 +402,8 @@ def test_only_a_finding_with_its_own_observed_cost_renders_two_numbers():
     # spend, so rendering both would show one quantity twice. Only resend
     # computes a separate TOTAL cost of the behaviour it flags, so only resend
     # gets a second number.
-    single = _with_past_overspend(_proposal(estimated_recoverable_usd=12.0,
-                                            estimated_recoverable_tokens=99,
+    single = _with_past_overspend(_proposal(past_overspend_usd=12.0,
+                                            past_overspend_tokens=99,
                                             estimate_basis="downsize basis"))
     assert single.past_overspend_usd == 12.0
     assert single.observed_cost_usd is None
@@ -393,7 +411,7 @@ def test_only_a_finding_with_its_own_observed_cost_renders_two_numbers():
     assert "downsize basis" in single.past_overspend_basis
 
     paired = _with_past_overspend(_proposal(
-        analyzer="resend", estimated_recoverable_usd=703.78,
+        analyzer="resend", past_overspend_usd=703.78,
         estimate_basis="resend basis",
         cost_of_waste_usd=7_038.85, cost_of_waste_basis="Do NOT read this as a saving.",
     ))
@@ -423,15 +441,21 @@ def test_resend_adapter_carries_both_observed_figures_end_to_end():
     assert "7,038.85" not in prop.evidence
 
 
-def test_legacy_cached_proposal_backfills_the_same_derivation_on_read():
-    # A cache written before these fields existed would otherwise render an em
-    # dash where the page's headline number belongs, for up to a scheduled
-    # recompute interval.
+def test_legacy_cached_proposal_migrates_the_old_field_names_on_read():
+    # A cache written before the collapse carries `estimated_recoverable_*`
+    # (the same quantity under its old name) and `estimated_monthly_*` (that
+    # number paced). The first migrates; the second is DROPPED rather than
+    # promoted — reviving a paced figure as the past-tense headline is the
+    # exact mistake this collapse exists to prevent.
     single = backfill_legacy_past_overspend_fields(
         {"analyzer": "cache", "estimated_recoverable_usd": 4.5,
-         "estimated_recoverable_tokens": 700, "estimate_basis": "cache basis"}
+         "estimated_recoverable_tokens": 700, "estimated_monthly_usd": 4.82,
+         "estimated_monthly_tokens": 750, "estimate_basis": "cache basis"}
     )
     assert single["past_overspend_usd"] == 4.5
+    assert single["past_overspend_tokens"] == 700
+    assert "cache basis" in single["past_overspend_basis"]
+    assert not (set(single) & _RETIRED_DOLLAR_FIELDS)
     assert single.get("observed_cost_usd") is None
 
     paired = backfill_legacy_past_overspend_fields(
@@ -441,8 +465,16 @@ def test_legacy_cached_proposal_backfills_the_same_derivation_on_read():
     assert paired["past_overspend_usd"] == 703.78
     assert paired["observed_cost_usd"] == 7_038.85
 
+    # A legacy entry carrying ONLY the paced figure renders no dollar figure —
+    # the honest degradation, until the next recompute.
+    monthly_only = backfill_legacy_past_overspend_fields(
+        {"analyzer": "trim", "estimated_monthly_usd": 12.0}
+    )
+    assert monthly_only["past_overspend_usd"] is None
+    assert not (set(monthly_only) & _RETIRED_DOLLAR_FIELDS)
+
     # Never overwrites a current entry.
-    current = {"past_overspend_usd": 1.0, "estimated_recoverable_usd": 99.0}
+    current = {"past_overspend_usd": 1.0, "past_overspend_basis": "already stamped"}
     assert backfill_legacy_past_overspend_fields(current)["past_overspend_usd"] == 1.0
 
 
@@ -472,8 +504,8 @@ def _summarize_finding(**overrides):
     ]
     fields = dict(
         candidates=candidates, files=len(candidates),
-        estimated_recoverable_usd=3_969.74,
-        estimated_recoverable_tokens=6_986_110_266,
+        past_overspend_usd=3_969.74,
+        past_overspend_tokens=6_986_110_266,
         estimate_basis="summarize basis", avg_reduction_pct=40,
         sessions_examined=120,
     )
@@ -492,8 +524,8 @@ def test_summarize_is_a_cost_analyzer_producing_a_real_peer_card():
     assert p.kind == "cost"
     assert p.analyzer == "summarize"
     assert p.signature == "cost:summarize"
-    assert p.estimated_recoverable_usd == 3_969.74
-    assert p.estimated_recoverable_tokens == 6_986_110_266
+    assert p.past_overspend_usd == 3_969.74
+    assert p.past_overspend_tokens == 6_986_110_266
     # Copy names the review flow, not a claimable "Apply" — the founder
     # decision's exact phrasing ("Review N oversized files, $X reads
     # correctly; a bare Apply button would misrepresent the flow").
@@ -512,7 +544,7 @@ def test_summarize_card_empty_with_no_candidates_or_no_priced_evidence():
 
     assert _summarize_to_proposals(SummarizeFinding()) == []          # dead window
     assert _summarize_to_proposals(_summarize_finding(
-        estimated_recoverable_usd=None, estimated_recoverable_tokens=None,
+        past_overspend_usd=None, past_overspend_tokens=None,
     )) == []   # candidates found, but no session observed loading them
 
 
@@ -559,7 +591,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        past_overspend_usd=3.0, percent_of_tokens=35.0,
         estimate_basis="downsize basis",
     )
     from tokenjam.core.optimize.analyzers.cache_efficacy import (
@@ -569,7 +601,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
     cache = CacheEfficacyFinding(
         flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
                                   0.05, "full", True)],
-        estimated_recoverable_usd=1.2, estimate_basis="cache basis",
+        past_overspend_usd=1.2, estimate_basis="cache basis",
     )
     from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
     trim = PromptBloatFinding(
@@ -577,7 +609,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
         per_prompt=[BloatPrompt(agent_id="svc-a", sample_chars="x", prompt_chars=8000,
                                 significant_chars=3000, bloat_chars=5000,
                                 estimated_token_reduction=1250)],
-        estimated_recoverable_usd=0.8, estimate_basis="trim basis",
+        past_overspend_usd=0.8, estimate_basis="trim basis",
     )
     subagent = SubagentRightsizingFinding(
         flagged=[SubagentRow(session_id="s1", sub_agent_id="sa0", model="claude-opus-4-8",
@@ -585,7 +617,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
                              cache_tokens=0, cache_write_tokens=0, cost_usd=1.2,
                              provider="anthropic", flags=["over_powered"])],
         percent_of_cost=0.66, flagged_cost_usd=1.2, subagent_cost_usd=1.5,
-        estimated_recoverable_usd=0.4, estimated_recoverable_tokens=60500,
+        past_overspend_usd=0.4, past_overspend_tokens=60500,
     )
     dead_server = ServerDeadweight(
         name="apollo", scope="project", source="/repo/.mcp.json",
@@ -599,7 +631,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
         servers=[dead_server], dead_servers=[dead_server],
         tax_table=[ContextTaxRow(source="MCP schema: apollo", sessions=10,
                                  avg_tokens_per_session=25_000, total_tokens_window=250_000)],
-        estimated_recoverable_tokens=225_000,
+        past_overspend_tokens=225_000,
         estimate_basis="sum of each dead server's schema-injection tax observed over this window",
     )
     script_cluster = WorkflowCluster(
@@ -610,7 +642,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
     )
     script = WorkflowRestructureFinding(
         clusters=[script_cluster], sessions_examined=25, degraded=False,
-        estimated_recoverable_usd=0.5, estimated_recoverable_tokens=12_500,
+        past_overspend_usd=0.5, past_overspend_tokens=12_500,
         estimate_basis="script basis",
     )
     reuse_cluster = ReuseCluster(
@@ -622,12 +654,12 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
         example_session_ids=["s1", "s2", "s3"], skeleton_session_id="s1",
     )
     reuse = ReuseFinding(
-        clusters=[reuse_cluster], estimated_recoverable_usd=0.03,
-        estimated_recoverable_tokens=900, estimate_basis="reuse basis",
+        clusters=[reuse_cluster], past_overspend_usd=0.03,
+        past_overspend_tokens=900, estimate_basis="reuse basis",
     )
     verbosity = VerbosityFinding(
         total_candidates=6, sessions_examined=40, cohorts_examined=3,
-        estimated_recoverable_usd=0.9, estimated_recoverable_tokens=9_000,
+        past_overspend_usd=0.9, past_overspend_tokens=9_000,
         estimate_basis="verbosity basis", suggested_max_tokens=800,
     )
     resend = _resend_finding()
@@ -651,7 +683,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
 
     priced_analyzers = {
         p.analyzer for p in props
-        if p.estimated_recoverable_usd is not None or p.cost_of_waste_usd is not None
+        if p.past_overspend_usd is not None or p.cost_of_waste_usd is not None
     }
     assert priced_analyzers  # sanity: the fixture actually produced priced cards
     assert priced_analyzers <= by_analyzer, (

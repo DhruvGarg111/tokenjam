@@ -110,19 +110,18 @@ def read_cost_proposals(
     computed AND no recompute has ever failed either (a genuinely fresh
     install). Shape: ``{"cost_computed_at": iso, "cost_proposals": [dict,
     ...], "cost_proposals_error": str | None, "cost_proposals_error_at": iso |
-    None, "cost_window_days": int, "cost_active_days": int,
-    "cost_n_sessions": int, "cost_excluded": dict}``. ``cost_proposals_error``
+    None, "cost_window_days": int, "cost_excluded": dict}``.
+    ``cost_proposals_error``
     is the last recompute failure's message (behavioral requirement #5) —
     present alongside a GOOD ``cost_proposals`` list when a later recompute
     failed after an earlier one had already succeeded, so a transient failure
-    never hides the last good result. The three ``cost_*`` count fields
-    (#273) are the window's active-day pace at the moment of the LAST
-    successful recompute — the inputs ``cost_proposals.
-    estimated_recoverable_rollup`` needs to compute its shared 30-day
-    projection ratio centrally; ``0`` for a cache written before they existed
-    (a caller passes them straight to ``compute_projection_ratio``, whose
-    guardrails treat ``0`` as "not enough data", never as a fabricated
-    ratio). ``cost_excluded`` (#326) is the rollup's cross-reference for
+    never hides the last good result. ``cost_window_days`` is the window the
+    stored figures were OBSERVED over, so the headline names the window its
+    own data came from rather than whatever picker the reader's screen is set
+    to. The pace inputs this block used to also carry (``cost_active_days`` /
+    ``cost_n_sessions``) are gone with the projection they fed: nothing in the
+    cost pipeline paces a figure any more, and a cached pace input is an
+    invitation to re-derive one. ``cost_excluded`` is the rollup's cross-reference for
     waste a caller deliberately did NOT sum in — generic infrastructure with
     no current occupant (``summarize`` used to be the one entry here until
     it got a real peer card instead; see ``cost_proposals.
@@ -141,8 +140,6 @@ def read_cost_proposals(
         "cost_proposals_error": raw.get("cost_proposals_error"),
         "cost_proposals_error_at": raw.get("cost_proposals_error_at"),
         "cost_window_days": raw.get("cost_window_days") or 0,
-        "cost_active_days": raw.get("cost_active_days") or 0,
-        "cost_n_sessions": raw.get("cost_n_sessions") or 0,
         "cost_excluded": raw.get("cost_excluded") or {},
     }
 
@@ -185,29 +182,27 @@ def clear_cost_proposals_error(
 
 def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
-    window_days: int | None = None, active_days: int | None = None,
-    n_sessions: int | None = None, excluded: dict[str, Any] | None = None,
+    window_days: int | None = None, excluded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
     ``finding`` block. ``proposals`` is a list of ``CostProposal`` (or plain
     dicts). Atomic; best-effort on I/O error.
 
-    ``window_days``/``active_days``/``n_sessions`` (#273) are the window this
-    recompute ran over, stored alongside the proposals so
-    ``estimated_recoverable_rollup`` can compute its shared 30-day projection
-    ratio the next time this cache is read — never recomputed ad hoc at read
-    time, since the window that produced these proposals may not be the
-    window a later reader assumes. ``None`` (the default) leaves any
-    previously-stored value untouched, so a caller that doesn't track these
-    yet (a legacy call site) doesn't silently zero out a real prior value.
+    ``window_days`` is the window this recompute ran over, stored alongside
+    the proposals so a later reader labels the figures with the window they
+    were actually observed over rather than one it assumes. ``None`` (the
+    default) leaves any previously-stored value untouched, so a caller that
+    doesn't track it yet (a legacy call site) doesn't silently zero out a real
+    prior value. It is a LABEL, never a divisor: nothing rescales a stored
+    figure by it.
 
-    ``excluded`` (#326) is the rollup's cross-reference block for waste a
-    caller deliberately did not fold in as a peer card — generic
-    infrastructure with no current occupant (see ``read_cost_proposals``) —
-    always written when this call succeeds (unlike the three window fields
-    above, this one has no "leave untouched" case: a fresh recompute always
-    knows the current excluded state, even if it's "nothing")."""
+    ``excluded`` is the rollup's cross-reference block for waste a caller
+    deliberately did not fold in as a peer card — generic infrastructure with
+    no current occupant (see ``read_cost_proposals``) — always written when
+    this call succeeds (unlike ``window_days`` above, this one has no "leave
+    untouched" case: a fresh recompute always knows the current excluded
+    state, even if it's "nothing")."""
     from dataclasses import is_dataclass
 
     p = path or default_cache_path(config)
@@ -226,10 +221,6 @@ def write_cost_proposals(
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
     if window_days is not None:
         payload["cost_window_days"] = window_days
-    if active_days is not None:
-        payload["cost_active_days"] = active_days
-    if n_sessions is not None:
-        payload["cost_n_sessions"] = n_sessions
     payload["cost_excluded"] = excluded or {}
     _atomic_write(p, payload)
     return payload

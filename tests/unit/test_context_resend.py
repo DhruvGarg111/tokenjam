@@ -197,22 +197,22 @@ def test_aggregate_is_token_weighted_not_averaged(db):
 # Recoverable-estimate tests (honesty discipline: fraction, not full share)
 # --------------------------------------------------------------------------
 
-def test_estimated_recoverable_tokens_uses_avoidable_fraction(db):
+def test_past_overspend_tokens_uses_avoidable_fraction(db):
     _seed_session(db, "heavy", [1000, 1000, 1000, 1000])
     _seed_session(db, "pad1", [500])
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
     expected = round(AVOIDABLE_FRACTION_OF_REPEAT * finding.repeat_tokens)
-    assert finding.estimated_recoverable_tokens == expected
+    assert finding.past_overspend_tokens == expected
     # Never the full repeat share: recoverable must be strictly less than
     # repeat_tokens (0.683 < 1.0).
-    assert finding.estimated_recoverable_tokens < finding.repeat_tokens
+    assert finding.past_overspend_tokens < finding.repeat_tokens
 
 
 def test_cost_of_waste_is_observed_and_never_the_recoverable_figure(db):
     """The gross cost of re-sent context is an OBSERVATION on its own field.
 
-    It used to be absent entirely while `estimated_recoverable_usd` carried the
+    It used to be absent entirely while `past_overspend_usd` carried the
     cache_control-adoption delta. Now the two are separate quantities: the gross
     is priced per token class at what it really billed (cache reads at the
     cache-read rate, the still-uncached repeat at the input rate) and is never
@@ -234,8 +234,8 @@ def test_cost_of_waste_is_observed_and_never_the_recoverable_figure(db):
     # No subagent anywhere in the window, so nothing measures the offloadable
     # share and no recoverable dollar figure is claimed at all.
     assert finding.offloadable_share is None
-    assert finding.estimated_recoverable_usd is None
-    assert finding.cost_of_waste_usd != finding.estimated_recoverable_usd
+    assert finding.past_overspend_usd is None
+    assert finding.cost_of_waste_usd != finding.past_overspend_usd
 
 
 def test_cost_of_waste_prices_cache_reads_at_the_cache_read_rate(db):
@@ -251,7 +251,7 @@ def test_cost_of_waste_prices_cache_reads_at_the_cache_read_rate(db):
     assert finding.cost_of_waste_usd == pytest.approx(
         round(4000 / 1_000_000 * rates.cache_read_per_mtok, 6)
     )
-    assert finding.estimated_recoverable_tokens > 0
+    assert finding.past_overspend_tokens > 0
 
 
 def test_recoverable_usd_none_when_no_priced_model(db):
@@ -260,9 +260,9 @@ def test_recoverable_usd_none_when_no_priced_model(db):
     _seed_session(db, "pad1", [500])
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
     assert finding.cost_of_waste_usd is None
-    assert finding.estimated_recoverable_tokens is not None
+    assert finding.past_overspend_tokens is not None
 
 
 def _seed_mixed_model_session(db, session_id, sizes, models, *, cache_ratio=0.0, start=None):
@@ -366,12 +366,12 @@ def test_recoverable_usd_is_offload_plus_rightsize_and_excludes_gross(db):
     finding = _run(db, _config())
     assert finding.offload_recoverable_usd is not None
     assert finding.rightsize_recoverable_usd is not None
-    assert finding.estimated_recoverable_usd == pytest.approx(
+    assert finding.past_overspend_usd == pytest.approx(
         round(finding.offload_recoverable_usd + finding.rightsize_recoverable_usd, 6)
     )
     # The whole point of the split: the recoverable claim is a small fraction
     # of what re-sending actually cost, and the gross never leaks into it.
-    assert finding.cost_of_waste_usd > finding.estimated_recoverable_usd
+    assert finding.cost_of_waste_usd > finding.past_overspend_usd
 
 
 def _seed_recoverable_corpus(db, first_turn_model):
@@ -525,7 +525,7 @@ def test_no_delegating_session_means_no_offload_claim(db):
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
     assert finding.offloadable_share is None
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
     assert any("offload lever" in n for n in finding.notes)
 
 
@@ -609,6 +609,6 @@ def test_finding_round_trips_through_report_dict(db):
     original = report.findings["resend"]
     restored = rebuilt.findings["resend"]
     assert restored.repeat_share == original.repeat_share
-    assert restored.estimated_recoverable_tokens == original.estimated_recoverable_tokens
+    assert restored.past_overspend_tokens == original.past_overspend_tokens
     assert len(restored.examples) == len(original.examples)
     assert restored.examples[0].session_id == original.examples[0].session_id

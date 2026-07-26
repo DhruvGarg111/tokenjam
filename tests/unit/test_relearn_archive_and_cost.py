@@ -316,10 +316,10 @@ def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
 
     assert len(relearn_cards) == 1, "one aggregate card, never one per cluster"
     card = relearn_cards[0]
-    # relearn carries no avoidable/forward claim (see below), so its observed
-    # past cost lands on `observed_cost_usd`, never on the avoidable-only
-    # `past_overspend_usd` headline field (`_with_past_overspend` maps that
-    # from `estimated_recoverable_usd`, which this card deliberately omits).
+    # relearn carries no avoidable claim (see below), so its observed past
+    # cost lands on `observed_cost_usd` and the avoidable-only
+    # `past_overspend_usd` headline field stays None — "not priced", never a
+    # 0.0 that would read as "worth nothing".
     assert card.observed_cost_usd == pytest.approx(finding.past_overspend_usd)
     assert card.observed_cost_basis
     # coverage_note is REQUIRED whenever observed_cost_usd is set (this
@@ -332,9 +332,13 @@ def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
     assert not card.apply_capable and card.advise_only
     # No forward claim on this card: relearn's re-read tail is the same re-sent
     # context `resend` already claims, and two analyzers claiming one span in
-    # `estimated_recoverable_rollup` is CLAUDE.md rule 27.
-    assert card.estimated_recoverable_usd is None
-    assert card.estimated_recoverable_tokens is None
+    # `past_overspend_rollup` is CLAUDE.md rule 27.
+    assert card.past_overspend_usd is None
+    assert card.past_overspend_tokens is None
+    # relearn's own forward claim keeps its own name on its own finding — a
+    # genuinely different quantity (a fix-gated claim over an unbounded corpus,
+    # not a window observation) — and is carried on the card's `baseline` for
+    # inspection only, never on the canonical field.
     assert card.baseline["relearn_claim_usd"] == pytest.approx(
         finding.estimated_recoverable_usd)
 

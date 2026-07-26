@@ -159,7 +159,6 @@ def list_cost_proposals(
     """
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.cost_proposals import (
-        backfill_legacy_monthly_fields,
         backfill_legacy_past_overspend_fields,
     )
 
@@ -167,9 +166,9 @@ def list_cost_proposals(
     if not isinstance(block, dict):
         return []
     return [
-        backfill_legacy_past_overspend_fields(backfill_legacy_monthly_fields(
+        backfill_legacy_past_overspend_fields(
             {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
-        ))
+        )
         for pr in (block.get("cost_proposals") or []) if isinstance(pr, dict)
     ]
 

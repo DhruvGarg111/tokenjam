@@ -92,9 +92,8 @@ COST_CORRELATIONAL_CAVEAT = (
 #: index of everything actionable, not the list of things whose apply flow
 #: happens to live here. relearn was the last analyzer whose measured cost
 #: reached NO aggregate surface at all — it produces ``RelearnCluster``s, not
-#: ``CostProposal``s, so ``past_overspend_rollup`` and
-#: ``estimated_recoverable_rollup`` were both structurally blind to it and the
-#: Dashboard hero's "what waste already cost you" omitted the entire
+#: ``CostProposal``s, so ``past_overspend_rollup`` was structurally blind to
+#: it and the Dashboard hero's "what waste already cost you" omitted the entire
 #: self-improve loop. ``_relearn_to_proposals`` adds exactly one aggregate
 #: card, never one per cluster (relearn's own per-cluster rows in the Review
 #: inbox are richer and stay the detail view), and it is never
@@ -217,55 +216,58 @@ class CostProposal:
     # Recommendation the user applies themselves + an optional copyable snippet.
     advise_text: str
     suggestion:  str = ""
-    # Estimated recoverable saving, carried straight from the finding and
-    # labeled. ``None`` when the finding produced no estimate for this item.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
     # COST OF WASTE — what the flagged behaviour actually COST over the window,
-    # fully observed. Structurally separate from every `estimated_*` field
-    # above and MUST NEVER be summed with them, on any surface: those answer
-    # "what does the fix return", this answers "what did this cost me", and the
-    # second is legitimately much larger than the first (a floor of zero is not
-    # achievable — see `analyzers/context_resend.py`'s module docstring).
-    # `estimated_recoverable_rollup` reads only the `estimated_*` fields, so
-    # this never leaks into the Review inbox headline.
+    # fully observed. An ANALYZER-SIDE input, never rendered directly: the
+    # stamper below routes it onto `observed_cost_*`. Structurally separate
+    # from `past_overspend_*` and MUST NEVER be summed with it, on any surface:
+    # the avoidable figure is a SUBSET of this cost, and the difference is
+    # spend that was never analysed, not spend shown to be unavoidable (see
+    # `analyzers/context_resend.py`'s module docstring).
     cost_of_waste_usd:            float | None = None
     cost_of_waste_tokens:         int | None   = None
     cost_of_waste_basis:          str          = ""
-    # PAST OVERSPEND — the one PAST-TENSE, window-OBSERVED figure every card
-    # renders as its headline, stamped centrally by `_with_past_overspend` so
-    # no adapter decides its own basis.
+    # PAST OVERSPEND — **THE canonical per-analyzer dollar/token figure.** One
+    # field, one meaning, one time basis; there is no second name for it and no
+    # paced variant of it anywhere in the tree (see the field contract in the
+    # repo `CLAUDE.md`). Every surface — Dashboard hero, Review inbox headline,
+    # per-card headline, CLI, MCP — renders THIS field or the rollup of it.
     #
-    # **It is the AVOIDABLE amount, always.** Waste is what could have been
-    # avoided; unavoidable spend is cost, not waste (the same rule `reuse`
-    # already applies by pricing `reps - 1` rather than `reps` — the necessary
-    # first instance is not waste). A figure a reader will call "overspend"
-    # may therefore only ever be an avoidable figure, so this field carries the
-    # window `estimated_recoverable_usd` for EVERY analyzer, `resend` included.
+    # **It is the AVOIDABLE amount, observed over the analyzed window, past
+    # tense.** Waste is what could have been avoided; unavoidable spend is
+    # cost, not waste (the same rule `reuse` already applies by pricing
+    # `reps - 1` rather than `reps` — the necessary first instance is not
+    # waste). A figure a reader will call "overspend" may therefore only ever
+    # be an avoidable figure.
     #
-    # It deliberately does NOT carry `cost_of_waste_usd`. That figure is the
-    # full observed cost of the behaviour over EVERY session, whereas the
-    # avoidable figure is computed over a filtered subset (see `resend`'s
-    # driver-role partition and context floor). Leading with the big number
-    # asserted, implicitly, that the ~94% difference had been shown to be
-    # unavoidable. It had not — it was analysed on another card, filtered out
-    # before analysis, or outside the tail definition. The cost figure still
-    # ships, on `observed_cost_*` below, labelled as cost and never as waste.
+    # Set by the ADAPTER, straight off its analyzer's own
+    # `past_overspend_usd`/`_tokens`; `_with_past_overspend` adds only the
+    # basis string (and the `observed_cost_*` pair below), so no adapter
+    # invents its own tense or wording. ``None`` when the finding produced no
+    # priced figure for this item — never coerced to 0.0, which would state
+    # "worth nothing" for "not measured" (relearn's aggregate card relies on
+    # this: it has no fixed window, so it carries a cost figure only).
     #
-    # Per-analyzer derivation: every analyzer's window `estimated_recoverable_usd`
-    # IS its observed window avoidable spend — never a forecast, never an
-    # adoption discount. Verified per analyzer against source: downsize
+    # It deliberately does NOT carry `cost_of_waste_usd`. That figure spans
+    # EVERY session, whereas the avoidable figure is computed over a filtered
+    # subset (see `resend`'s driver-role partition and context floor). Leading
+    # with the big number asserted, implicitly, that the ~94% difference had
+    # been shown to be unavoidable. It had not — it was analysed on another
+    # card, filtered out before analysis, or outside the tail definition. The
+    # cost figure still ships, on `observed_cost_*` below, labelled as cost
+    # and never as waste.
+    #
+    # Per-analyzer derivation, verified against source: downsize
     # (`actual_cost - alt_cost` over the window), deadweight (window tax, "NO
     # projection folded in"), subagent (deltas priced off already-incurred
-    # tokens), summarize (per-call reduction over observed calls), relearn (a
-    # standing-cost offset, not a discount), reuse (avg cost x (reps - 1)),
-    # resend (the measured offload + right-size terms).
+    # tokens), summarize (per-call reduction over observed calls), reuse (avg
+    # cost x (reps - 1)), resend (the measured offload + right-size terms).
     #
-    # NEVER paced: `compute_projection_ratio`'s `r` is a forward projection and
-    # is applied only to the `estimated_monthly_*` fields. Multiplying an
-    # observation by a forecast ratio would make it a forecast — and a paired
-    # past/avoidable display whose two sides sat on different time bases would
-    # attribute a 7% pacing artifact to avoidability.
+    # **NEVER paced.** There is no ratio to apply: pacing left the tree with
+    # `estimated_monthly_*` and `compute_projection_ratio`. Multiplying an
+    # observation by a forward ratio would make it a forecast — and a paired
+    # display whose two sides sat on different time bases would attribute a
+    # pacing artifact (measured 1.0714 on the reference corpus) to
+    # avoidability.
     past_overspend_usd:           float | None = None
     past_overspend_tokens:        int | None   = None
     past_overspend_basis:         str          = ""
@@ -290,38 +292,6 @@ class CostProposal:
     # filtered subset must never be presented as two views of one quantity
     # without the coverage being stated.
     coverage_note:                str          = ""
-    # Monthly-basis fields (Review inbox stat tiles) — a SEPARATE, explicitly-
-    # named basis from the two window fields above; see the "Recoverable-
-    # savings contract" note in model_downgrade.py / CLAUDE.md. `downsize`
-    # copies its own `monthly_savings_usd`/`monthly_tokens_in_candidates`
-    # straight across (it already computes a 30-day projection); every other
-    # analyzer gets a generic `30/window_days` extrapolation of its window
-    # figure, applied once in `cost_proposals_from_report` so no adapter has
-    # to reimplement the arithmetic.
-    estimated_monthly_usd:        float | None = None
-    estimated_monthly_tokens:     int | None   = None
-    # Whether this proposal's waste RECURS at the user's own session pace
-    # (`"per_session"` — the shared, centrally-computed 30-day-pace ratio
-    # rescales it) or is a `"one_time"` fixed-occurrence / delete-this-
-    # artifact saving (never rescaled; its monthly figure always equals its
-    # window figure). See `compute_projection_ratio` and #273's approved
-    # design ("each analyzer declares scaling ... state the choice
-    # explicitly"). Defaulted here rather than repeated at every adapter's
-    # `CostProposal(...)` call site because EVERY current analyzer is
-    # `"per_session"`: downsize/cache/cache-recommend/resend/trim/subagent/
-    # script/reuse/verbosity/placement/deadweight's waste all recur every
-    # session (or call) the underlying condition persists — including the
-    # deadweight MCP tax, which keeps accruing every session the server stays
-    # configured even though ITS fix is a one-time config edit; the SAVING is
-    # what recurs, not the fix. `"one_time"` is reserved for a future
-    # analyzer whose estimate is a genuinely single fixed occurrence, which
-    # must set it explicitly at its own call site when it's added.
-    # relearn IS adapted now (`_relearn_to_proposals`), but its card carries no
-    # `estimated_recoverable_*` at all (rule 27 — see that adapter's
-    # docstring), so `_with_rollup_projection` has nothing to project and this
-    # window's ratio never touches a figure derived from relearn's own,
-    # different horizon.
-    scaling:               str = "per_session"
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
     correlational:        bool = True
@@ -473,20 +443,14 @@ def _downsize_to_proposal(
         # exactly the failure Critical Rule 27 describes. Subtractive rather
         # than recomputed, so a window with no driver case passes the finding's
         # own numbers through byte for byte (including a `None`).
-        estimated_recoverable_usd=_minus_driver_usd(finding),
-        estimated_recoverable_tokens=_minus_driver_tokens(finding),
+        past_overspend_usd=_minus_driver_usd(finding),
+        past_overspend_tokens=_minus_driver_tokens(finding),
         estimate_basis=_tiny_session_basis(finding),
-        # `estimated_monthly_usd`/`estimated_monthly_tokens` are intentionally
-        # left unset here (#273): `model_downgrade.py`'s own
-        # `monthly_savings_usd`/`monthly_tokens_in_candidates` is a
-        # `30/window_days` projection computed inside the analyzer, which is
-        # exactly the per-analyzer self-projection the approved design
-        # forbids for the SHARED monthly basis — every analyzer's Review-inbox
-        # monthly figure must come from the ONE central ratio
-        # (`compute_projection_ratio`), applied uniformly in
-        # `cost_proposals_from_report`, or two analyzers' "monthly" figures
-        # are silently on different bases again. `monthly_savings_usd` itself
-        # is untouched and still backs the CLI's own `tj optimize` line.
+        # `model_downgrade.py`'s own `monthly_savings_usd` /
+        # `monthly_tokens_in_candidates` is a `30/window_days` projection
+        # computed inside the analyzer. It is deliberately NOT carried onto
+        # this card: a card states one past-tense observation, never a paced
+        # one. That field survives only to back the CLI's `tj optimize` line.
     )]
 
 
@@ -494,7 +458,7 @@ def _minus_driver_usd(finding: Any) -> float | None:
     """The finding's recoverable dollars with the driver-role card's share
     removed, so the two downsize cards partition one figure instead of each
     carrying the total. ``None`` passes straight through."""
-    total = getattr(finding, "estimated_recoverable_usd", None)
+    total = getattr(finding, "past_overspend_usd", None)
     if total is None:
         return None
     driver = float(getattr(finding, "driver_recoverable_usd", 0.0) or 0.0)
@@ -503,7 +467,7 @@ def _minus_driver_usd(finding: Any) -> float | None:
 
 def _minus_driver_tokens(finding: Any) -> int | None:
     """Token counterpart of :func:`_minus_driver_usd`."""
-    total = getattr(finding, "estimated_recoverable_tokens", None)
+    total = getattr(finding, "past_overspend_tokens", None)
     if total is None:
         return None
     driver = int(getattr(finding, "driver_tokens", 0) or 0)
@@ -601,14 +565,14 @@ def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostP
         advise_text=_DRIVER_ROLE_ADVICE,
         suggestion=one_paste,
         one_paste_fix=one_paste,
-        estimated_recoverable_usd=round(usd, 6),
-        estimated_recoverable_tokens=int(getattr(finding, "driver_tokens", 0) or 0),
+        past_overspend_usd=round(usd, 6),
+        past_overspend_tokens=int(getattr(finding, "driver_tokens", 0) or 0),
         estimate_basis=str(getattr(finding, "driver_estimate_basis", "") or ""),
     )]
 
 
 def _per_agent_cache_recoverable_by_model(finding: Any) -> dict[tuple[str, str], tuple[float, int]]:
-    """Sum of ``estimated_recoverable_usd``/``estimated_recoverable_tokens``
+    """Sum of ``past_overspend_usd``/``past_overspend_tokens``
     already claimed by the root-caused per-agent cards (A1 uncached / A2
     thrash / A3 lookback), keyed by (provider, model).
 
@@ -617,7 +581,7 @@ def _per_agent_cache_recoverable_by_model(finding: Any) -> dict[tuple[str, str],
     are part of the aggregate the generic row's efficacy is computed over. So
     the dollars a per-agent card claims must be subtracted from the generic
     row's figure before it's surfaced, or the Review-inbox rollup (which sums
-    every open card's ``estimated_recoverable_usd`` with no analyzer
+    every open card's ``past_overspend_usd`` with no analyzer
     allowlist) double-counts the same waste under two signatures. See
     ``_cache_to_proposals``.
     """
@@ -629,8 +593,8 @@ def _per_agent_cache_recoverable_by_model(finding: Any) -> dict[tuple[str, str],
     )
     for group in groups:
         for c in group:
-            usd = getattr(c, "estimated_recoverable_usd", None) or 0.0
-            tokens = getattr(c, "estimated_recoverable_tokens", None) or 0
+            usd = getattr(c, "past_overspend_usd", None) or 0.0
+            tokens = getattr(c, "past_overspend_tokens", None) or 0
             if usd <= 0 and tokens <= 0:
                 continue
             key = (c.provider, c.model)
@@ -788,14 +752,13 @@ def _downsize_agent_proposals(
             advise_text=advise,
             suggestion=one_paste,
             one_paste_fix=one_paste,
-            estimated_recoverable_usd=row.delta_usd,
-            estimated_recoverable_tokens=row.total_tokens,
+            past_overspend_usd=row.delta_usd,
+            past_overspend_tokens=row.total_tokens,
             estimate_basis=row.estimate_basis,
-            # `estimated_monthly_usd`/`estimated_monthly_tokens` are left
-            # unset here for the same reason as the window-wide downsize card
-            # above (#273): `row.projected_30d_delta_usd` is this row's own
-            # `window_days`-based self-projection, not the shared central
-            # ratio. The central function fills these in uniformly.
+            # `row.projected_30d_delta_usd` is this row's own `window_days`-based
+            # self-projection and never reaches the card, for the same reason as
+            # the window-wide downsize card above: one past-tense figure, never
+            # a paced one.
             agent_id=row.agent_id if row.agent_id != "unknown" else "",
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
@@ -841,7 +804,7 @@ def _placement_to_proposals(
         return []
     agents = ", ".join(c.agent_id for c in candidates[:5])
     total = float(getattr(finding, "candidate_cost_usd", 0.0) or 0.0)
-    saving = float(getattr(finding, "estimated_recoverable_usd", 0.0) or 0.0)
+    saving = float(getattr(finding, "past_overspend_usd", 0.0) or 0.0)
     percent = float(getattr(finding, "percent_of_window_cost", 0.0) or 0.0)
     cadence = ", ".join(
         f"{c.agent_id} every {c.median_gap_seconds / 3600:.1f}h across "
@@ -897,8 +860,8 @@ def _placement_to_proposals(
             "synchronous endpoint:\n"
             + "\n".join(f"#   {c.agent_id}" for c in candidates)
         ),
-        estimated_recoverable_usd=recoverable_usd,
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        past_overspend_usd=recoverable_usd,
+        past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         agent_id=candidates[0].agent_id if len(candidates) == 1 else "",
     )]
@@ -928,8 +891,8 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
     if finding is None:
         return []
     files = int(getattr(finding, "files", 0) or 0)
-    usd = getattr(finding, "estimated_recoverable_usd", None)
-    tokens = getattr(finding, "estimated_recoverable_tokens", None)
+    usd = getattr(finding, "past_overspend_usd", None)
+    tokens = getattr(finding, "past_overspend_tokens", None)
     if files <= 0 or (usd is None and tokens is None):
         # No candidates, or candidates with no observed load evidence to price
         # against (see `SummarizeFinding`'s "carries neither figure" case) —
@@ -971,8 +934,8 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
             "avg_reduction_pct": reduction,
         },
         advise_text=advise,
-        estimated_recoverable_usd=usd,
-        estimated_recoverable_tokens=tokens,
+        past_overspend_usd=usd,
+        past_overspend_tokens=tokens,
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
     )]
@@ -991,10 +954,9 @@ def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
     individually in the Review inbox, with a richer treatment than a cost card
     could give (apply path, rung badge, example sessions). What it lacked was
     any presence on an AGGREGATE surface: it is a ``RelearnCluster``, not a
-    ``CostProposal``, so ``past_overspend_rollup`` and
-    ``estimated_recoverable_rollup`` could not see a cent of it and the
-    Dashboard hero's "what waste already cost you" total silently omitted the
-    entire self-improve loop. This adapter closes exactly that gap and nothing
+    ``CostProposal``, so ``past_overspend_rollup`` could not see a cent of it
+    and the Dashboard hero's "what waste already cost you" total silently
+    omitted the entire self-improve loop. This adapter closes exactly that gap and nothing
     more.
 
     ONE number, past tense. ``cost_of_waste_*`` is what the recurrences ALREADY
@@ -1002,14 +964,16 @@ def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
     and the ones whose rule is uneconomic to keep. Ungated and un-netted on
     purpose: "we have no action for this" is not "this was unavoidable", and a
     fix's future maintenance cost is not subtracted from money already spent.
-    ``_with_past_overspend`` stamps it as ``past_overspend_*``.
+    ``_with_past_overspend`` routes it onto ``observed_cost_*``.
 
-    The forward CLAIM is deliberately left off this card
-    (``estimated_recoverable_*`` stays ``None``, so no ``past_avoidable_*`` is
-    stamped either). relearn prices each occurrence at one re-issued turn TIMES
-    its measured re-read tail, and that tail is re-sent context — the exact
-    quantity ``resend`` already claims in full. Two analyzers claiming the same
-    spans in ``estimated_recoverable_rollup`` is CLAUDE.md rule 27, and the
+    ``past_overspend_usd`` — the canonical avoidable field — stays ``None`` on
+    this card, deliberately, and must NOT be coerced to 0.0: relearn scans
+    unbounded history and has no fixed window to observe an avoidable figure
+    over, so the card states "Not priced" rather than "worth nothing". relearn
+    prices each occurrence at one re-issued turn TIMES its measured re-read
+    tail, and that tail is re-sent context — the exact quantity ``resend``
+    already claims in full. Two analyzers claiming the same spans in
+    ``past_overspend_rollup`` is CLAUDE.md rule 27, and the
     rollup's signature dedup cannot catch it. The claim is not lost: it lives
     where it always has, on relearn's own per-cluster rows in the Review inbox,
     counted once. ``baseline`` carries the re-read share so the overlap is
@@ -1093,8 +1057,11 @@ def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
             # claim at all (CLAUDE.md rule 27; see the docstring).
             "past_reread_tokens": int(getattr(finding, "past_reread_tokens", 0) or 0),
             "past_reread_usd": getattr(finding, "past_reread_usd", None),
-            # The claim, for reference only. NOT on `estimated_recoverable_*`:
-            # it must not enter `estimated_recoverable_rollup` beside resend's.
+            # relearn's OWN forward claim, kept under its own name on its own
+            # finding because it is a genuinely different quantity (fix-gated,
+            # over an unbounded corpus). Carried here for reference only: it
+            # must never reach `past_overspend_usd`, or it would enter
+            # `past_overspend_rollup` beside resend's claim on the same spans.
             "relearn_claim_usd": getattr(finding, "estimated_recoverable_usd", None),
             "relearn_claim_tokens": getattr(finding, "estimated_recoverable_tokens", None),
         },
@@ -1282,8 +1249,8 @@ def _cache_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProp
                 "efficacy": float(row.efficacy),
                 "efficacy_ceiling": float(getattr(finding, "efficacy_ceiling", 0.80)),
             },
-            estimated_recoverable_usd=usd,
-            estimated_recoverable_tokens=tokens,
+            past_overspend_usd=usd,
+            past_overspend_tokens=tokens,
             estimate_basis=basis,
             **_persona_gated_cache_fields(
                 persona,
@@ -1326,8 +1293,8 @@ def _cache_uncached_to_proposals(finding: Any, persona: str = "unknown") -> list
                 "calls": c.calls, "sessions": c.sessions,
                 "assumed_prefix_tokens": c.assumed_prefix_tokens,
             },
-            estimated_recoverable_usd=c.estimated_recoverable_usd,
-            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            past_overspend_usd=c.past_overspend_usd,
+            past_overspend_tokens=c.past_overspend_tokens,
             estimate_basis=c.estimate_basis,
             agent_id=c.agent_id,
             **_persona_gated_cache_fields(
@@ -1404,8 +1371,8 @@ def _cache_thrash_to_proposals(finding: Any, persona: str = "unknown") -> list[C
                 "ttl_worth_it": c.ttl_worth_it,
                 "ttl_breakeven_usd": c.ttl_breakeven_usd,
             },
-            estimated_recoverable_usd=c.estimated_recoverable_usd,
-            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            past_overspend_usd=c.past_overspend_usd,
+            past_overspend_tokens=c.past_overspend_tokens,
             estimate_basis=c.estimate_basis,
             agent_id=c.agent_id,
             **_persona_gated_cache_fields(persona, advise, c.cache_control_snippet),
@@ -1445,8 +1412,8 @@ def _cache_lookback_to_proposals(finding: Any, persona: str = "unknown") -> list
                 "miss_count": c.miss_count,
                 "avg_prior_turn_blocks": c.avg_prior_turn_blocks,
             },
-            estimated_recoverable_usd=c.estimated_recoverable_usd,
-            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            past_overspend_usd=c.past_overspend_usd,
+            past_overspend_tokens=c.past_overspend_tokens,
             estimate_basis=c.estimate_basis,
             agent_id=c.agent_id,
             **_persona_gated_cache_fields(
@@ -1498,8 +1465,8 @@ def _cache_recommend_to_proposals(
 
     proposals: list[CostProposal] = []
     for c in candidates:
-        usd = c.estimated_recoverable_usd
-        tokens = c.estimated_recoverable_tokens
+        usd = c.past_overspend_usd
+        tokens = c.past_overspend_tokens
         basis = str(getattr(finding, "estimate_basis", "") or "")
         claimed_usd, claimed_tokens = already_claimed.get(("anthropic", c.model), (0.0, 0))
         if claimed_usd > 0 or claimed_tokens > 0:
@@ -1533,8 +1500,8 @@ def _cache_recommend_to_proposals(
                 "avg_input_tokens": c.avg_input_tokens,
                 "estimated_cacheable_tokens": c.estimated_cacheable_tokens,
             },
-            estimated_recoverable_usd=usd,
-            estimated_recoverable_tokens=tokens,
+            past_overspend_usd=usd,
+            past_overspend_tokens=tokens,
             estimate_basis=basis,
             **_persona_gated_cache_fields(
                 persona,
@@ -1571,7 +1538,7 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
     # Prorate the finding-level dollar estimate across agents by bloat share, so
     # each card carries a coherent (labeled) slice rather than the whole figure.
     total_bloat = sum(a["bloat_chars"] for a in by_agent.values()) or 1
-    finding_usd = getattr(finding, "estimated_recoverable_usd", None)
+    finding_usd = getattr(finding, "past_overspend_usd", None)
 
     proposals: list[CostProposal] = []
     for agent, acc in sorted(by_agent.items()):
@@ -1602,8 +1569,8 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
                 "template (boilerplate, repeated instructions, dead context) so "
                 "every call carries fewer input tokens."
             ),
-            estimated_recoverable_usd=usd,
-            estimated_recoverable_tokens=acc["token_reduction"] or None,
+            past_overspend_usd=usd,
+            past_overspend_tokens=acc["token_reduction"] or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
             agent_id=agent if agent != "unknown" else "",
         ))
@@ -1769,8 +1736,8 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
                 f"# In {agent_apply['target_path']}, frontmatter:\n"
                 f"model: {agent_apply['proposed_model']}"
             ),
-            estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-            estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+            past_overspend_usd=getattr(finding, "past_overspend_usd", None),
+            past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
             advise_only=False,
             apply_capable=True,
@@ -1800,8 +1767,8 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
             "orchestrating agent reads before it spawns subagents. "
             + str(getattr(finding, "caveat", "") or "")
         ).strip(),
-        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        past_overspend_usd=getattr(finding, "past_overspend_usd", None),
+        past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         advise_only=not apply_capable,
         apply_capable=apply_capable,
@@ -1845,9 +1812,9 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     visibility) never feeds a proposal here, so a server's schema-injection
     tax is never counted both in the tax table AND a proposal (the same
     dedup guarantee ``compute_deadweight_finding`` itself enforces on
-    ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
+    ``past_overspend_tokens`` / ``past_overspend_usd``).
 
-    ``estimated_recoverable_usd`` is carried straight off the analyzer's own
+    ``past_overspend_usd`` is carried straight off the analyzer's own
     ``ServerDeadweight.estimated_tax_usd_window`` — a WINDOW-scoped figure
     with no projection folded in (#273: this used to be a fixed 90-day
     projection, which made it incomparable to every other analyzer's window
@@ -1915,8 +1882,8 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             },
             advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
-            estimated_recoverable_tokens=server.estimated_tax_tokens_window or None,
-            estimated_recoverable_usd=server.estimated_tax_usd_window,
+            past_overspend_tokens=server.estimated_tax_tokens_window or None,
+            past_overspend_usd=server.estimated_tax_usd_window,
             estimate_basis=server.tax_construction,
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
@@ -2067,8 +2034,8 @@ def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
                 ],
             },
             advise_text=advise,
-            estimated_recoverable_usd=cluster.total_cost_usd or None,
-            estimated_recoverable_tokens=cluster.total_tokens or None,
+            past_overspend_usd=cluster.total_cost_usd or None,
+            past_overspend_tokens=cluster.total_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
             **_persona_gated_write_fields(persona, advise, rung=2, scope="project"),
         ))
@@ -2129,8 +2096,8 @@ def _reuse_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProp
                 ],
             },
             advise_text=advise,
-            estimated_recoverable_usd=cluster.cache_reuse_recoverable_usd or None,
-            estimated_recoverable_tokens=cluster.cache_reuse_recoverable_tokens or None,
+            past_overspend_usd=cluster.cache_reuse_recoverable_usd or None,
+            past_overspend_tokens=cluster.cache_reuse_recoverable_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
             **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
         ))
@@ -2194,8 +2161,8 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
         },
         advise_text=advise,
         suggestion=advise,
-        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        past_overspend_usd=getattr(finding, "past_overspend_usd", None),
+        past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
     )]
 
@@ -2398,8 +2365,8 @@ def _resend_to_proposals(
         advise_text=advise,
         suggestion=cache_snippet,
         one_paste_fix=one_paste_fix,
-        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        past_overspend_usd=getattr(finding, "past_overspend_usd", None),
+        past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
         cost_of_waste_usd=cost_of_waste_usd,
         cost_of_waste_tokens=getattr(finding, "cost_of_waste_tokens", None) or None,
         cost_of_waste_basis=str(getattr(finding, "cost_of_waste_basis", "") or ""),
@@ -2517,8 +2484,6 @@ def recompute_cost_proposals(
                 report, config=config, pricing_mode=pricing_mode,
                 window_days=float(effective_window_days),
             )
-            active_days = int(getattr(report.window, "active_days", 0) or 0)
-            n_sessions = int(getattr(report.window, "sessions", 0) or 0)
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -2530,8 +2495,6 @@ def recompute_cost_proposals(
             relearn_store.write_cost_proposals(
                 proposals, config=config,
                 window_days=effective_window_days,
-                active_days=active_days,
-                n_sessions=n_sessions,
             )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
@@ -2583,85 +2546,24 @@ def trigger_background_cost_recompute(
 
 
 # --------------------------------------------------------------------------- #
-# The ONE central 30-day-pace projection (#273's approved design). Deleted
-# every per-analyzer self-projection (deadweight's old fixed 90-day factor,
-# downsize's own `monthly_savings_usd` feeding the shared field) in favor of
-# this single function, applied once here and again in
-# `estimated_recoverable_rollup` — never inside an analyzer — so every cost
-# analyzer's "monthly" figure is on the SAME basis and a sum across them
-# never silently mixes bases again.
+# PACING IS GONE FROM THIS MODULE, DELIBERATELY.
+#
+# `compute_projection_ratio()` used to live here: `r = clamp(30/active_days,
+# 1.0, 3.0)`, the one shared multiplier turning each analyzer's window figure
+# into an `estimated_monthly_*` forecast. Both are deleted. The product no
+# longer makes a forward per-analyzer claim, so the only thing `r` still did
+# was produce a THIRD dollar quantity (measured 7.14% larger than the window
+# figure on the reference corpus) that a surface could render by mistake —
+# which is exactly what happened.
+#
+# Do not reintroduce a ratio here. The 30-day pace basis still exists for the
+# ONE calculation that genuinely needs a per-month horizon —
+# `core/optimize/projection.build_projection_basis`, used by
+# `core/optimize/write_budget` to price how many future sessions will re-send
+# a permanent CLAUDE.md rule. It is reached only through `_write_budget_basis`
+# below, it never touches a past-tense figure, and nothing it produces lands
+# on a payload. See the field contract in the repo `CLAUDE.md`.
 # --------------------------------------------------------------------------- #
-
-#: Guardrails: below any of these, the window's data is too thin to trust a
-#: forward projection from — show the observed figure, unscaled, instead.
-#: (Below this many days the window itself is barely wider than the ratio's
-#: own 30-day target, so a projection would mostly be noise.)
-MIN_WINDOW_DAYS_FOR_PROJECTION = 14
-#: Below this many distinct active days, the "sessions per active day" pace
-#: is estimated from too few data points to extrapolate honestly.
-MIN_ACTIVE_DAYS_FOR_PROJECTION = 8
-#: Below this many total sessions, there isn't enough volume for a pace
-#: figure to mean anything.
-MIN_SESSIONS_FOR_PROJECTION = 20
-#: Upper bound on the ratio — never claim more than 3x the observed window
-#: figure, however sparse the user's active days were.
-MAX_PROJECTION_RATIO = 3.0
-
-OBSERVED_LABEL = "observed"
-PROJECTED_LABEL = "per 30 days"
-
-
-def compute_projection_ratio(
-    window_days: float, active_days: int, n_sessions: int,
-) -> tuple[float | None, str]:
-    """The single ratio every cost analyzer's window figure is multiplied by
-    to get its 30-day-pace projection, and the label to render beside it.
-
-    ``r = clamp(30 / active_days, floor, MAX_PROJECTION_RATIO)`` where
-    ``active_days`` is the count of distinct calendar days in the window with
-    >=1 session (``WindowSummary.active_days``) — projecting on the user's
-    OWN observed pace, not a fixed multiplier on the window length (the bug
-    this replaces: a shrinking window inflated a fixed-days-over-window_days
-    ratio unboundedly). ``floor`` is ``1.0`` only when ``window_days <= 30``
-    (a real month's worth of pace can't be claimed to be LESS than what was
-    already observed over a sub-month window); a window LONGER than 30 days
-    may legitimately normalize DOWN below 1.0 — that's not a bug, it's
-    averaging a longer observation back down to a 30-day figure.
-
-    Returns ``(None, "observed")`` — no projection at all — when the window
-    is too thin to trust one: fewer than ``MIN_WINDOW_DAYS_FOR_PROJECTION``
-    days, fewer than ``MIN_ACTIVE_DAYS_FOR_PROJECTION`` active days, or fewer
-    than ``MIN_SESSIONS_FOR_PROJECTION`` sessions. A caller sees ``None`` and
-    renders the observed (window) figure labeled "observed in the last W
-    days" instead of "per 30 days" — never silently substitutes 1.0 for the
-    ratio and pretends that's a projection.
-
-    Deliberately NOT provided as an alternative basis: peak-single-day or a
-    p90-daily rate. Either cherry-picks the user's single worst day/week,
-    which is the first thing a skeptic attacks (#273's explicit prohibition)
-    — the mean pace over ALL active days is the only basis used here.
-    """
-    if (
-        window_days < MIN_WINDOW_DAYS_FOR_PROJECTION
-        or active_days < MIN_ACTIVE_DAYS_FOR_PROJECTION
-        or n_sessions < MIN_SESSIONS_FOR_PROJECTION
-    ):
-        return None, OBSERVED_LABEL
-    raw = 30.0 / active_days
-    ratio = min(raw, MAX_PROJECTION_RATIO)
-    if window_days <= 30:
-        ratio = max(ratio, 1.0)
-    return ratio, PROJECTED_LABEL
-
-
-def _effective_ratio(scaling: str, ratio: float | None) -> float:
-    """The ratio actually applied to ONE proposal: a `"one_time"` finding is
-    never rescaled regardless of the window's pace (its monthly figure always
-    equals its window figure), and a `None` ratio (guardrails blocked the
-    projection) means nothing is scaled either."""
-    if scaling == "one_time" or ratio is None:
-        return 1.0
-    return ratio
 
 
 def cost_proposals_from_report(
@@ -2714,26 +2616,16 @@ def cost_proposals_from_report(
     docstring) — neither ever assumes ``"claude-code"``.
 
     ``window_days`` (default 30 — ``DEFAULT_COST_WINDOW_DAYS``, matching the
-    daemon's own default look-back) feeds ``compute_projection_ratio`` along
-    with ``report.window.active_days``/``report.window.sessions`` (#273):
-    every proposal's ``estimated_monthly_usd``/``estimated_monthly_tokens``
-    is stamped here as ``window_figure * ratio`` — the SAME ratio for every
-    proposal, computed ONCE, respecting each proposal's own ``scaling``
-    (``"one_time"`` is never rescaled). No adapter sets these fields itself
-    any more (``downsize`` used to; #273 removed that self-projection so a
-    later scan over a non-default window can't leave it on a different basis
-    than everyone else). A caller building a report over a non-30-day window
-    (e.g. ``tj optimize --since 7d``) still gets an honest monthly figure
-    rather than a raw window total mislabeled "/ mo" — or, when the window is
-    too thin to trust a projection from (see ``compute_projection_ratio``'s
-    guardrails), the unscaled observed figure instead of an invented one.
+    daemon's own default look-back) is used for exactly ONE thing: sizing the
+    write budget's per-month standing-cost comparison
+    (``_write_budget_basis``). It never rescales a proposal's figure. Every
+    card's ``past_overspend_usd``/``_tokens`` is its analyzer's own
+    observation of THIS window, carried through unscaled — there is no
+    projection step here any more (see the block comment above
+    ``_write_budget_basis``).
     """
     findings = getattr(report, "findings", {}) or {}
     persona = str(getattr(report, "persona", "") or "unknown")
-    window = getattr(report, "window", None)
-    active_days = int(getattr(window, "active_days", 0) or 0)
-    n_sessions = int(getattr(window, "sessions", 0) or 0)
-    ratio, _label = compute_projection_ratio(window_days, active_days, n_sessions)
     proposals: list[CostProposal] = []
 
     # Second half of the persona skip gate. `build_report` already refuses to
@@ -2791,14 +2683,27 @@ def cost_proposals_from_report(
         except Exception:
             continue
     proposals = _apply_write_budget(proposals, report, window_days)
-    # Order matters: the write budget can NET a proposal's window figure down
-    # against what its rule costs to keep, and both the 30-day projection and
-    # the past-overspend stamp must read the netted figure, never the gross.
-    return [_with_past_overspend(_with_rollup_projection(p, ratio)) for p in proposals]
+    # Order matters: the write budget can NET a proposal's figure down against
+    # what its rule costs to keep, and the past-overspend basis stamp must
+    # describe the netted figure, never the gross.
+    return [_with_past_overspend(p) for p in proposals]
 
 
 def _write_budget_basis(report: Any, window_days: float) -> Any:
-    """The shared 30-day projection basis for this report's window.
+    """The 30-day pace basis for this report's window — THE ONLY remaining
+    consumer of pacing in the cost pipeline, and deliberately internal.
+
+    ``write_budget`` prices a permanent CLAUDE.md rule against how many future
+    sessions will re-send it, so it genuinely needs a per-month horizon: a rule
+    written today is charged on every one of those sessions. That is a
+    standing-cost comparison, not a claim about the user's spend, and nothing
+    it produces reaches a payload — only the NETTED
+    ``past_overspend_*`` figure and the ``standing_cost_*`` fields do.
+
+    The per-analyzer forward projection this basis used to ALSO feed
+    (``estimated_monthly_*`` via ``compute_projection_ratio``) is gone; do not
+    route a past-tense figure back through here. See the field contract in the
+    repo ``CLAUDE.md``.
 
     Reads ``active_days``/``sessions`` off the window summary the runner already
     computed. A hand-constructed report (a test, an older cached one) carries
@@ -2857,8 +2762,8 @@ def _apply_write_budget(
             family=f"{p.analyzer}:rung{p.rung}",
             rung=p.rung,
             artifact_text=p.proposed_fix,
-            gross_tokens=int(p.estimated_recoverable_tokens or 0),
-            gross_usd=p.estimated_recoverable_usd,
+            gross_tokens=int(p.past_overspend_tokens or 0),
+            gross_usd=p.past_overspend_usd,
         )
         for p in proposals
         if p.apply_capable and p.rung >= 1 and p.proposed_fix
@@ -2874,12 +2779,12 @@ def _apply_write_budget(
             out.append(p)
             continue
         updates: dict[str, Any] = {
-            "gross_recoverable_usd": p.estimated_recoverable_usd,
-            "gross_recoverable_tokens": p.estimated_recoverable_tokens,
-            "estimated_recoverable_tokens": (
-                decision.claimed_tokens if p.estimated_recoverable_tokens is not None else None
+            "gross_recoverable_usd": p.past_overspend_usd,
+            "gross_recoverable_tokens": p.past_overspend_tokens,
+            "past_overspend_tokens": (
+                decision.claimed_tokens if p.past_overspend_tokens is not None else None
             ),
-            "estimated_recoverable_usd": decision.claimed_usd,
+            "past_overspend_usd": decision.claimed_usd,
             "standing_cost_tokens_per_session": decision.standing_tokens_per_session,
             "standing_cost_tokens": decision.standing_tokens,
             "standing_cost_usd": decision.standing_usd,
@@ -2897,29 +2802,6 @@ def _apply_write_budget(
             )
         out.append(replace(p, **updates))
     return out
-
-
-def _with_rollup_projection(proposal: CostProposal, ratio: float | None) -> CostProposal:
-    """Fill in ``estimated_monthly_usd``/``estimated_monthly_tokens`` from the
-    window figure using the one shared ``ratio`` (``None`` when
-    ``compute_projection_ratio``'s guardrails blocked projection, in which
-    case the monthly figure equals the observed window figure unscaled).
-    Respects the proposal's own ``scaling`` — a ``"one_time"`` finding is
-    never rescaled regardless of ``ratio``. Returns a NEW ``CostProposal``
-    (``dataclasses.replace``) rather than mutating the one the adapter built
-    — every proposal here is otherwise treated as an immutable,
-    already-complete record. Only fills a field an adapter left ``None``; no
-    current adapter sets these itself (#273), but a future one may."""
-    scale = _effective_ratio(proposal.scaling, ratio)
-    updates: dict[str, Any] = {}
-    if proposal.estimated_monthly_usd is None and proposal.estimated_recoverable_usd is not None:
-        updates["estimated_monthly_usd"] = round(proposal.estimated_recoverable_usd * scale, 6)
-    if (
-        proposal.estimated_monthly_tokens is None
-        and proposal.estimated_recoverable_tokens is not None
-    ):
-        updates["estimated_monthly_tokens"] = round(proposal.estimated_recoverable_tokens * scale)
-    return replace(proposal, **updates) if updates else proposal
 
 
 #: Suffix appended to every stamped ``past_overspend_basis`` so the figure can
@@ -2943,33 +2825,38 @@ OBSERVED_COST_NOTE = (
 
 
 def _with_past_overspend(proposal: CostProposal) -> CostProposal:
-    """Stamp the past-tense, window-observed ``past_overspend_*`` (and, where a
-    total observed cost is a different quantity, ``observed_cost_*``) fields.
+    """Stamp the tense-bearing BASIS strings onto a finished proposal:
+    ``past_overspend_basis`` for the canonical figure the adapter already set,
+    and the ``observed_cost_*`` trio where a finding also measured the full
+    cost of the behaviour.
 
-    ONE place decides the basis for every analyzer, for the same reason
-    ``_with_rollup_projection`` is the one place the 30-day pace is applied:
-    two surfaces reading two differently-derived "what did this cost me"
-    figures is how the Overview hero and the Review inbox headline silently
-    come to disagree.
+    ONE place decides the wording for every analyzer: two surfaces reading two
+    differently-worded "what did this cost me" figures is how the Dashboard
+    hero and the Review inbox headline silently come to disagree.
+
+    It no longer MOVES a number between fields. It used to copy
+    ``estimated_recoverable_usd`` onto ``past_overspend_usd``, which is what
+    left two names live for one quantity — the ambiguity this collapse removed.
+    The adapter sets ``past_overspend_usd``/``_tokens`` directly, from its
+    analyzer's field of the same name, and nothing rewrites it here.
 
     **The headline is the AVOIDABLE figure for every analyzer**, because waste
     is only ever the avoidable portion. A finding that also computes the full
     observed cost of the behaviour (``cost_of_waste_usd`` — today only
-    ``resend``) carries it on ``observed_cost_*`` as an explicitly-cost second
-    number, together with the analyzer's ``coverage_note`` stating how the two
-    figures' populations differ. This used to be inverted, which made the card
-    assert that the ~94% gap between them was unavoidable; it never was, it was
-    merely un-analysed. Every other analyzer produces one quantity, so the
-    second number stays ``None`` and the card shows a single figure rather than
-    saying the same thing twice.
+    ``resend`` and ``relearn``) carries it on ``observed_cost_*`` as an
+    explicitly-cost second number, together with the analyzer's
+    ``coverage_note`` stating how the two figures' populations differ. This
+    used to be inverted, which made the card assert that the ~94% gap between
+    them was unavoidable; it never was, it was merely un-analysed. Every other
+    analyzer produces one quantity, so the second number stays ``None`` and the
+    card shows a single figure rather than saying the same thing twice.
 
-    Never applies a projection ratio: both sides of the pair read the same
-    analysed window, so their difference is attributable to avoidability alone
-    and never to a time-basis artifact. Never mutates: returns a new proposal.
+    Never applies a projection ratio — there is none left to apply. Never
+    mutates: returns a new proposal.
     """
     has_avoidable = (
-        proposal.estimated_recoverable_usd is not None
-        or proposal.estimated_recoverable_tokens is not None
+        proposal.past_overspend_usd is not None
+        or proposal.past_overspend_tokens is not None
     )
     cost_usd = proposal.cost_of_waste_usd
     cost_tokens = proposal.cost_of_waste_tokens
@@ -2983,8 +2870,6 @@ def _with_past_overspend(proposal: CostProposal) -> CostProposal:
     if has_avoidable:
         stamped = replace(
             stamped,
-            past_overspend_usd=proposal.estimated_recoverable_usd,
-            past_overspend_tokens=proposal.estimated_recoverable_tokens,
             past_overspend_basis=" ".join(
                 x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
             ),
@@ -3005,28 +2890,51 @@ def _with_past_overspend(proposal: CostProposal) -> CostProposal:
     return stamped
 
 
+#: The pre-collapse names a cached cost-proposal dict may still carry, mapped
+#: onto the one canonical field. ``estimated_recoverable_*`` was the SAME
+#: quantity under a forward-framed name, so it migrates straight across.
+#: ``estimated_monthly_*`` deliberately does NOT appear here: it was that
+#: quantity multiplied by a pace ratio, and reviving a paced figure as the
+#: past-tense headline is exactly the mistake this collapse exists to prevent —
+#: a legacy entry carrying only the monthly key renders no dollar figure until
+#: the next recompute (at most 6h), which is the honest degradation.
+_LEGACY_PROPOSAL_FIELD_ALIASES = (
+    ("past_overspend_usd", "estimated_recoverable_usd"),
+    ("past_overspend_tokens", "estimated_recoverable_tokens"),
+)
+
+
 def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str, Any]:
     """Read-time backward compat for a cost-proposal dict cached before the
-    ``past_overspend_*`` fields existed, mirroring
-    ``backfill_legacy_monthly_fields``.
+    per-analyzer dollar fields were collapsed onto ``past_overspend_*``.
 
-    A cache written by the CURRENT build always carries them (they are stamped
-    in ``cost_proposals_from_report``), so this only fires for an entry that
-    predates them — which would otherwise render an em dash where the page's
-    headline number belongs until the next scheduled recompute, up to 6h away.
-    Applies the SAME derivation ``_with_past_overspend`` does, on the dict, and
-    never invents a figure: a legacy entry with no estimate at all stays empty.
+    A cache written by the CURRENT build always carries them (the adapters set
+    them and ``_with_past_overspend`` stamps the basis), so this only fires for
+    an entry that predates the collapse — which would otherwise render an em
+    dash where the page's headline number belongs until the next scheduled
+    recompute, up to 6h away. Renames the legacy keys, applies the SAME basis
+    derivation ``_with_past_overspend`` does, and never invents a figure: a
+    legacy entry with no observed figure at all stays empty.
     """
-    if "past_overspend_usd" in proposal:
+    if "past_overspend_basis" in proposal:
         return proposal
-    stamped = {
-        **proposal,
-        "past_overspend_usd": proposal.get("estimated_recoverable_usd"),
-        "past_overspend_tokens": proposal.get("estimated_recoverable_tokens"),
-        "past_overspend_basis": " ".join(
-            x for x in (proposal.get("estimate_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
-        ),
-    }
+    stamped = {**proposal}
+    for canonical, legacy in _LEGACY_PROPOSAL_FIELD_ALIASES:
+        # Always PRESENT, even when there is nothing to carry: a renderer that
+        # indexes the canonical key must not blow up on a legacy entry, and an
+        # explicit `None` reads as "not measured" rather than "worth nothing".
+        stamped[canonical] = (
+            stamped.get(canonical)
+            if stamped.get(canonical) is not None
+            else proposal.get(legacy)
+        )
+        stamped.pop(legacy, None)
+    stamped["past_overspend_basis"] = " ".join(
+        x for x in (proposal.get("estimate_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
+    )
+    # The retired paced fields never render again, whatever a stale cache says.
+    stamped.pop("estimated_monthly_usd", None)
+    stamped.pop("estimated_monthly_tokens", None)
     cost_usd = proposal.get("cost_of_waste_usd")
     cost_tokens = proposal.get("cost_of_waste_tokens")
     if cost_usd is None and not cost_tokens:
@@ -3041,296 +2949,32 @@ def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str,
     }
 
 
-def backfill_legacy_monthly_fields(proposal: dict[str, Any]) -> dict[str, Any]:
-    """Read-time backward compat for a cached cost-proposal dict written
-    before the monthly-basis fields existed on ``CostProposal``.
-
-    ``recompute_cost_proposals`` always runs every fresh proposal through the
-    central projection pass (``cost_proposals_from_report`` applies the one
-    ``compute_projection_ratio`` via ``_with_rollup_projection``) before it's
-    written to disk, so a cache
-    produced by the CURRENT build already carries both
-    ``estimated_monthly_usd``/``estimated_monthly_tokens`` whenever a window
-    figure exists — this never touches those. It only fires for an entry that
-    predates those fields (the key is simply absent from the cached JSON, not
-    present-and-``None``), which otherwise renders a tokens-only headline for
-    an item that genuinely has a computable dollar rate, forever, until the
-    next successful recompute (up to the 6h scheduled interval away). The
-    window figure is used AS the monthly one (scale 1.0): the daemon's
-    recompute window has always defaulted to ``DEFAULT_COST_WINDOW_DAYS`` ==
-    30, so for a stale entry the window figure already approximates the
-    30-day rate closely enough for backward-compat display purposes, without
-    the exact ``window_days`` that produced it. Mirrors ``list_proposals``'s
-    defensive proposal-ID stamping: a stale cache resolves correctly without
-    forcing a recompute.
-    """
-    if "estimated_monthly_usd" not in proposal and proposal.get("estimated_recoverable_usd") is not None:
-        proposal = {**proposal, "estimated_monthly_usd": proposal["estimated_recoverable_usd"]}
-    if "estimated_monthly_tokens" not in proposal and proposal.get("estimated_recoverable_tokens") is not None:
-        proposal = {**proposal, "estimated_monthly_tokens": proposal["estimated_recoverable_tokens"]}
-    return proposal
-
-
 # --------------------------------------------------------------------------- #
-# Component E — the Review inbox's single "estimated recoverable" headline.
-# Pure arithmetic over whatever proposals the caller hands it (the API route
-# is what narrows that set to "open" — not yet applied — before calling
-# this); kept separate so the sum/dedup logic is unit-testable on its own and
-# never entangled with the applied-ledger lookup.
-# --------------------------------------------------------------------------- #
-
-def estimated_recoverable_rollup(
-    proposals: list[Any],
-    *,
-    window_days: int = DEFAULT_COST_WINDOW_DAYS,
-    active_days: int = 0,
-    n_sessions: int = 0,
-    relearn_clusters: list[Any] | None = None,
-    excluded: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Sum ``estimated_recoverable_usd`` across ``proposals``, deduplicated by
-    ``signature`` (a proposal's stable identity — see the ``CostProposal``
-    docstring) so a stale or duplicate cache entry is never double-counted.
-
-    Generic over ``analyzer``: reads only the shared ``CostProposal`` fields,
-    so a new analyzer's cards are picked up automatically with no changes
-    here (§3's dedup rule already lives one layer down, in each analyzer's
-    adapter — one underlying waste source becomes one card before it ever
-    reaches this function).
-
-    Only a proposal carrying a numeric estimate contributes to the sum AND to
-    ``proposal_count`` — a card with no estimate yet still renders
-    individually in the inbox, it just isn't folded into this aggregate
-    (counting it in "N proposals" without a dollar contribution would
-    silently understate the average the headline implies).
-
-    ``estimated_recoverable_tokens`` is summed independently, over whichever
-    proposals carry a token estimate — a different (often overlapping but never
-    identical) set from the dollar-bearing ones. Renderers that lead with the
-    token figure (subscription users, where dollars cover only the API-billed
-    slice) must therefore quote ``token_proposal_count`` rather than
-    ``proposal_count``, and say so against ``deduplicated_proposal_count`` when
-    coverage is partial: the token sum is a floor, not a total.
-
-    Both ``estimated_recoverable_usd``/``estimated_recoverable_tokens`` stay
-    the raw OBSERVED (window-scoped) sums — unchanged contract, so an
-    existing caller reading these two keys keeps seeing exactly what it saw
-    before. #273 adds a SEPARATE, single-basis 30-day projection alongside
-    them (never folded into the same field the window figure lives in, per
-    the Recoverable-savings contract): ``projected_usd_30d``/
-    ``projected_tokens_30d`` are each proposal's window figure multiplied by
-    the ONE ratio ``compute_projection_ratio(window_days, active_days,
-    n_sessions)`` computes (respecting each proposal's own ``scaling`` —
-    ``"one_time"`` is never rescaled), summed the same way. ``active_days``/
-    ``n_sessions`` default to 0 (guardrails always block the projection),
-    so a caller that doesn't yet know them gets the honest "observed" state
-    rather than a fabricated ratio.
-
-    Tagged ``estimated`` — this is a heuristic figure, never a measured one.
-
-    ``relearn_clusters`` (issue #326) folds the relearn detector's proposals
-    into the SAME headline, on the same 30-day basis — the only basis relearn
-    has (it scans unbounded history, so it has no fixed window to report an
-    ``estimated_recoverable_usd`` against; see ``RelearnCluster``'s own
-    docstring). Deduplicated by ``signature`` exactly like a cost proposal.
-    Each cluster's ``estimated_monthly_usd``/``estimated_monthly_tokens`` is
-    ALREADY a 30-day-pace figure, so it is added straight into
-    ``projected_usd_30d``/``projected_tokens_30d`` with no further scaling —
-    and deliberately NEVER into ``estimated_recoverable_usd``/
-    ``estimated_recoverable_tokens``, which would silently mix a monthly
-    figure into a window-observed sum (the two analyzers are not on the same
-    time basis, and the window fields' contract is unchanged, per above).
-    ``relearn_monthly_usd``/``relearn_monthly_tokens`` carry relearn's own
-    contribution separately so a caller can render "cost advisories: $X + N
-    recurring fixes: $Y" without re-deriving the split from the combined
-    total.
-
-    ``excluded`` (issue #326) is a passthrough for waste a caller decided NOT
-    to sum in as a peer proposal. Generic, with no current occupant —
-    ``summarize`` was the one entry here until it got a real peer card
-    instead (see ``COST_ANALYZERS``'s docstring); kept for a FUTURE analyzer
-    whose fix has no representable inbox card. Never summed into any total
-    here; carried on the result unchanged so a caller can render "$X more
-    available in <analyzer> -> review it" instead of silently omitting a
-    real figure. ``None`` becomes ``{}`` — "nothing known to be excluded",
-    not "excluded total is zero".
-    """
-    seen: dict[str, dict[str, Any]] = {}
-    for p in proposals:
-        row = asdict(p) if is_dataclass(p) and not isinstance(p, type) else dict(p)
-        sig = str(row.get("signature") or "")
-        if not sig or sig in seen:
-            continue  # empty/duplicate signature never counts twice
-        seen[sig] = row
-
-    ratio, label = compute_projection_ratio(window_days, active_days, n_sessions)
-
-    contributing: list[dict[str, Any]] = []
-    by_analyzer: dict[str, dict[str, Any]] = {}
-    total_usd = 0.0
-    total_tokens = 0
-    token_proposal_count = 0
-    projected_usd = 0.0
-    projected_tokens = 0
-    for row in seen.values():
-        scale = _effective_ratio(str(row.get("scaling") or "per_session"), ratio)
-
-        # The token sum is counted INDEPENDENTLY of the dollar sum: the two
-        # estimates are populated by different analyzers and a proposal can
-        # carry either one alone. Folding tokens in only where a dollar
-        # estimate also exists would silently understate the token headline
-        # the suppressed-dollars rendering path leads with.
-        tokens = row.get("estimated_recoverable_tokens")
-        if tokens is not None:
-            total_tokens += int(tokens)
-            projected_tokens += round(int(tokens) * scale)
-            token_proposal_count += 1
-
-        usd = row.get("estimated_recoverable_usd")
-        if usd is None:
-            continue
-        usd = float(usd)
-        total_usd += usd
-        projected_usd += usd * scale
-        analyzer = str(row.get("analyzer") or "unknown")
-        entry = by_analyzer.setdefault(analyzer, {"analyzer": analyzer, "count": 0, "usd": 0.0})
-        entry["count"] += 1
-        entry["usd"] = round(entry["usd"] + usd, 6)
-        contributing.append({
-            "signature": row.get("signature"), "analyzer": analyzer,
-            "title": row.get("title"), "usd": round(usd, 6),
-        })
-
-    # Fold the relearn detector's OWN 30-day-basis figures into the projected
-    # total (never into the window-observed one — see the docstring). Deduped
-    # by signature the same way cost proposals are, independently of them
-    # (relearn and cost-proposal signatures live in different namespaces, so
-    # there is no cross-set collision to guard against).
-    relearn_seen: dict[str, dict[str, Any]] = {}
-    for c in relearn_clusters or []:
-        row = asdict(c) if is_dataclass(c) and not isinstance(c, type) else dict(c)
-        sig = str(row.get("signature") or "")
-        if not sig or sig in relearn_seen:
-            continue
-        relearn_seen[sig] = row
-    relearn_monthly_usd = 0.0
-    relearn_monthly_tokens = 0
-    relearn_priced_count = 0
-    for row in relearn_seen.values():
-        toks = row.get("estimated_monthly_tokens")
-        if toks is not None:
-            relearn_monthly_tokens += int(toks)
-        usd = row.get("estimated_monthly_usd")
-        if usd is None:
-            continue
-        usd = float(usd)
-        relearn_monthly_usd += usd
-        relearn_priced_count += 1
-    projected_usd += relearn_monthly_usd
-    projected_tokens += relearn_monthly_tokens
-
-    proposal_count = len(contributing)
-    # Denominator for BOTH coverage claims: every open, deduplicated proposal,
-    # including the ones carrying neither estimate. A renderer that says "across
-    # N proposals" without this can't tell the reader its figure is partial.
-    deduplicated_proposal_count = len(seen)
-    if proposal_count == 0:
-        basis = (
-            "no open (not yet applied) cost proposal currently carries a "
-            "dollar estimate. Estimated, correlational; never mixed with "
-            "the measured verified-saved figure."
-        )
-    else:
-        breakdown = "; ".join(
-            f"{a['analyzer']} ({a['count']})"
-            for a in sorted(by_analyzer.values(), key=lambda x: x["analyzer"])
-        )
-        basis = (
-            f"sum of estimated_recoverable_usd across {proposal_count} of "
-            f"{deduplicated_proposal_count} open (not yet applied), "
-            f"deduplicated-by-signature cost proposal(s) over the last "
-            f"{window_days}d; contributing analyzers: {breakdown}. "
-            "Estimated, correlational; never mixed with the measured "
-            "verified-saved figure."
-        )
-    if token_proposal_count:
-        basis += (
-            f" Token figure: sum of estimated_recoverable_tokens across "
-            f"{token_proposal_count} of {deduplicated_proposal_count} "
-            f"proposal(s); the rest carry no token estimate, so it is a "
-            f"floor, not a total."
-        )
-    if ratio is not None:
-        disclosure = (
-            f"Projected to a 30-day month at your own pace: "
-            f"{n_sessions / active_days:.1f} sessions per active coding day, "
-            f"measured from {n_sessions} sessions across {active_days} active "
-            f"days in the last {window_days} days."
-        )
-    else:
-        disclosure = (
-            f"Observed in the last {window_days} days ({n_sessions} sessions "
-            f"across {active_days} active days) — not enough data to project "
-            f"a 30-day pace yet (needs >= {MIN_WINDOW_DAYS_FOR_PROJECTION} "
-            f"days, >= {MIN_ACTIVE_DAYS_FOR_PROJECTION} active days, and "
-            f">= {MIN_SESSIONS_FOR_PROJECTION} sessions)."
-        )
-    if relearn_priced_count:
-        disclosure += (
-            f" Recurring-mistake fixes add ${round(relearn_monthly_usd, 2)}/mo "
-            f"across {relearn_priced_count} of {len(relearn_seen)} open, "
-            f"deduplicated cluster(s) (already a 30-day-pace figure — the "
-            f"detector scans unbounded history, so it has no window to "
-            f"observe a figure over); included in projected_usd_30d only."
-        )
-
-    return {
-        "estimated_recoverable_usd": round(total_usd, 6),
-        "estimated_recoverable_tokens": total_tokens,
-        "proposal_count": proposal_count,
-        "token_proposal_count": token_proposal_count,
-        "deduplicated_proposal_count": deduplicated_proposal_count,
-        "window_days": window_days,
-        "active_days": active_days,
-        "n_sessions": n_sessions,
-        "projection_ratio": ratio,
-        "projection_label": label,
-        "projected_usd_30d": round(projected_usd, 6),
-        "projected_tokens_30d": projected_tokens,
-        "relearn_monthly_usd": round(relearn_monthly_usd, 6),
-        "relearn_monthly_tokens": relearn_monthly_tokens,
-        "relearn_cluster_count": len(relearn_seen),
-        "relearn_priced_cluster_count": relearn_priced_count,
-        "excluded": excluded or {},
-        "disclosure": disclosure,
-        "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
-        "contributing": contributing,
-        "estimate_confidence": COST_ESTIMATE_CONFIDENCE,
-        "estimate_basis": basis,
-    }
-
-
-# --------------------------------------------------------------------------- #
-# The past-overspend rollup — the number the product LEADS with, on both the
-# Overview hero and the Review inbox headline.
+# THE rollup — the one aggregate every surface reads. There is no second one.
 #
-# Deliberately a SEPARATE function returning a SEPARATE block rather than more
-# keys on `estimated_recoverable_rollup`'s dict: the one failure mode that
-# would make this feature net-negative is a reader concluding the big past
-# figure is claimable. Structural separation is the guard — there is no code
-# path on which a past-overspend value can reach a recoverable total, because
-# the function that computes recoverable totals never reads these fields and
-# this one never reads theirs.
+# There used to be two (`estimated_recoverable_rollup` beside this), summing
+# two per-analyzer fields that had become the same quantity under two names,
+# plus a third paced figure derived from them. A driver session comparing them
+# reported "identical for 6 of 7 analyzers" while the Review inbox rendered the
+# paced third value, 7.14% larger. Both extra fields and the second rollup are
+# gone; if you find yourself adding a rollup here, you are re-creating that bug.
 # --------------------------------------------------------------------------- #
 
 def past_overspend_rollup(
     proposals: list[Any],
     *,
     window_days: int = DEFAULT_COST_WINDOW_DAYS,
+    excluded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Sum ``past_overspend_usd``/``past_overspend_tokens`` across
-    ``proposals``, deduplicated by ``signature`` exactly as
-    ``estimated_recoverable_rollup`` does.
+    ``proposals``, deduplicated by ``signature`` (a proposal's stable identity —
+    see the ``CostProposal`` docstring) so a stale or duplicate cache entry is
+    never double-counted.
+
+    Generic over ``analyzer``: reads only the shared ``CostProposal`` fields, so
+    a new analyzer's cards are picked up automatically with no change here (the
+    dedup rule for overlapping CLAIMS lives one layer down, in each analyzer's
+    adapter — see CLAUDE.md rule 27).
 
     This is the AVOIDABLE portion of what the flagged behaviours already cost
     over the analyzed window, every token priced at the rate it genuinely
@@ -3339,23 +2983,35 @@ def past_overspend_rollup(
     waste/overspend wording may show. Nothing here is projected, discounted, or
     claimed:
 
-    * **No pacing.** ``compute_projection_ratio``'s ``r`` is never applied —
-      not here, not by any caller. The whole point of the figure is that it is
-      an observation of a window that already happened; multiplying it by a
-      forward ratio would turn it into the forecast it exists to replace. This
-      function does not even accept ``active_days``/``n_sessions``, so there is
-      nothing to project FROM.
-    * **Never summed with a recoverable total.** See the module block comment
-      above.
+    * **No pacing.** There is no ratio in this module any more, and this
+      function does not accept ``active_days``/``n_sessions``, so there is
+      nothing to project FROM. The whole point of the figure is that it is an
+      observation of a window that already happened.
+    * **Only a proposal carrying a numeric figure contributes** — to the sum
+      AND to ``proposal_count``. A card with no figure still renders
+      individually in the inbox; counting it here without a contribution would
+      silently understate the average the headline implies.
+    * The token sum is counted INDEPENDENTLY of the dollar sum (a different,
+      often overlapping, never identical set of proposals carries each). A
+      renderer leading with the token figure must quote
+      ``token_proposal_count`` against ``deduplicated_proposal_count`` and say
+      the figure is a floor, not a total.
 
-    ``observed_cost_usd`` (the second, LARGER number ``resend`` alone carries:
-    the full cost of the behaviour including the part nobody has shown to be
-    avoidable) IS summed, into its own separate ``observed_cost_usd`` key and
-    per-analyzer entry — never into ``past_overspend_usd``. The two totals
+    ``observed_cost_usd`` (the second, LARGER number ``resend`` and ``relearn``
+    carry: the full cost of the behaviour including the part nobody has shown
+    to be avoidable) IS summed, into its own separate ``observed_cost_usd`` key
+    and per-analyzer entry — never into ``past_overspend_usd``. The two totals
     overlap by construction (the avoidable figure is a subset of the cost), so
     adding them would double-count, and swapping them would relabel unanalysed
     cost as waste. A renderer shows the avoidable total as the headline and the
     cost total as an explicitly-cost second line.
+
+    ``excluded`` is a passthrough for waste a caller decided NOT to sum in as a
+    peer proposal (an analyzer with its own review surface and no representable
+    inbox card). Never summed into any total here; carried on the result
+    unchanged so a caller can render "$X more available in <analyzer> → review
+    it" instead of silently omitting a real figure. ``None`` becomes ``{}`` —
+    "nothing known to be excluded", not "excluded total is zero".
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:
@@ -3374,6 +3030,16 @@ def past_overspend_rollup(
     by_analyzer: dict[str, dict[str, Any]] = {}
     for row in seen.values():
         analyzer = str(row.get("analyzer") or "unknown")
+        # An analyzer earns a breakdown entry only by CONTRIBUTING a figure.
+        # A card carrying nothing still renders individually in the inbox, but
+        # listing it here (and in the "contributing analyzers:" basis string)
+        # would name it as a contributor to a total it added nothing to.
+        if (
+            row.get("past_overspend_usd") is None
+            and row.get("past_overspend_tokens") is None
+            and row.get("observed_cost_usd") is None
+        ):
+            continue
         entry = by_analyzer.setdefault(
             analyzer,
             {"analyzer": analyzer, "count": 0, "usd": 0.0, "tokens": 0,
@@ -3450,6 +3116,7 @@ def past_overspend_rollup(
         "deduplicated_proposal_count": deduplicated_proposal_count,
         "window_days": window_days,
         "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
+        "excluded": excluded or {},
         "basis": basis,
         "disclosure": PAST_OVERSPEND_OBSERVED_NOTE,
         "cost_disclosure": OBSERVED_COST_NOTE if observed_cost_count else "",

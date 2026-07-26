@@ -2428,7 +2428,7 @@ function componentWasteTooltip(meta, fmtFn) {
 // Per-analyzer legend-wording override for the component-waste chart/legend,
 // keyed by the API's stable `analyzer` registry name (never `title`, which is
 // display text). `placement` is the one entry today (CLAUDE.md anti-pattern
-// #22): its `estimated_recoverable_usd`/`_tokens` is a PRICE difference on
+// #22): its `past_overspend_usd`/`_tokens` is a PRICE difference on
 // the SAME tokens (the Batch API bills the same work at half rate, freeing
 // nothing), so its legend row must never wear the "estimated recoverable"
 // wording/tag every sibling analyzer shares here — this mirrors the wording
@@ -2460,8 +2460,8 @@ function buildComponentWaste(resp, useTokens, isApi) {
     })
     .map(r => ({
       title: r.title, component: r.component, analyzer: r.analyzer,
-      value: useTokens ? (r.estimated_recoverable_tokens || 0) : (r.estimated_recoverable_usd || 0),
-      usd: r.estimated_recoverable_usd, tokens: r.estimated_recoverable_tokens,
+      value: useTokens ? (r.past_overspend_tokens || 0) : (r.past_overspend_usd || 0),
+      usd: r.past_overspend_usd, tokens: r.past_overspend_tokens,
       basis: r.estimate_basis || '', caveat: r.caveat || '',
     }))
     .filter(r => r.value > 0);
@@ -6169,7 +6169,7 @@ function BudgetView({ params }) {
 // ============================
 // Per-analyzer display metadata for the recoverable band + Optimize sections.
 // cache-recommend / budget-projection are intentionally absent from the savings
-// band (no estimated_recoverable_usd); they surface elsewhere.
+// band (no past_overspend_usd); they surface elsewhere.
 const ANALYZER_META = {
   downsize:   { title: 'Downsize',   hint: 'Route candidate sessions to a cheaper model' },
   cache:      { title: 'Cache',      hint: 'Raise cache-read efficacy toward the 80% ceiling' },
@@ -6313,8 +6313,8 @@ function classifyFinding(name, fd, skipped) {
   if (fd && fd.enabled === false) {
     return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
   }
-  const usd = fd ? fd.estimated_recoverable_usd : null;
-  const tokens = fd ? fd.estimated_recoverable_tokens : null;
+  const usd = fd ? fd.past_overspend_usd : null;
+  const tokens = fd ? fd.past_overspend_tokens : null;
   if (usd != null && usd > 0) {
     return { state: 'actionable', usd, tokens, basis: fd.estimate_basis || '' };
   }
@@ -6337,7 +6337,7 @@ function classifyFinding(name, fd, skipped) {
 
 // Flatten the optimize report into recoverable-band tiles, each carrying a
 // state (see classifyFinding). Registry-driven: downsize is a typed slot; any
-// wave-2 finding carrying the `estimated_recoverable_usd` contract field becomes
+// wave-2 finding carrying the `past_overspend_usd` contract field becomes
 // a tile (so a future `reuse` analyzer appears with no UI change).
 // cache-recommend / budget-projection lack the field → excluded by contract.
 // Persona-disabled analyzers (`opt.persona_disabled_analyzers`, sourced from
@@ -6360,7 +6360,7 @@ function recoverableTiles(opt) {
   }
   Object.keys(f).forEach(k => {
     if (disabled.has(k)) return;
-    if (f[k] && 'estimated_recoverable_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
+    if (f[k] && 'past_overspend_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
   });
   skipped.forEach(k => {
     if (disabled.has(k)) return;
@@ -6455,8 +6455,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       <table class="opt-table"><thead><tr><th>Agent</th><th>Cadence</th><th>Tokens</th>${isApi ? html`<th>Spend → batch rate</th>` : null}</tr></thead>
         <tbody>${fd.candidates.slice(0, 10).map(c => html`<tr><td class="mono">${c.agent_id}</td><td>${c.sessions} session${c.sessions !== 1 ? 's' : ''} every ${fmtCadence(c.median_gap_seconds)}</td><td>${fmtTokens(c.tokens)}</td>${isApi ? html`<td class="mono">${fmtCost(c.cost_usd)} → <span style="color:var(--success)">${fmtCost(c.cost_usd - c.estimated_batch_saving_usd)}</span></td>` : null}</tr>`)}</tbody></table>
       ${fd.candidates.length > 10 ? html`<div class="opt-line dim">…and ${fd.candidates.length - 10} more.</div>` : null}
-      ${isApi && fd.estimated_recoverable_usd != null ? html`
-        <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.estimated_recoverable_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
+      ${isApi && fd.past_overspend_usd != null ? html`
+        <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.past_overspend_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
         : html`<div class="opt-line dim" style="margin-top:8px">The Batch API's discount is an api-billed price lever, so no dollar figure is shown for this plan. The workload sizes above still say how much work fits the shape.</div>`}
       ${fd.friction ? html`<div class="opt-caveat">! ${fd.friction}</div>` : null}`;
   } else {
@@ -6473,7 +6473,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       // alike) — only the fix differs, so both fixes always render, labeled
       // by who acts on them. `repeat_share === null` is the below-threshold
       // empty state; name the reason from `notes` rather than an empty card.
-      const usd = fd.estimated_recoverable_usd, tok = fd.estimated_recoverable_tokens;
+      const usd = fd.past_overspend_usd, tok = fd.past_overspend_tokens;
       const median = fd.repeat_share_median, p90 = fd.repeat_share_p90;
       body = fd.repeat_share == null ? html`
         <div class="opt-line dim">${(fd.notes && fd.notes[0]) || 'Not enough data in this window to measure a repeat share.'}</div>`
@@ -6578,8 +6578,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
   // (CLAUDE.md anti-pattern #22 — the generic "estimated recoverable" wording
   // below would be dishonest for a figure that frees no tokens at all).
   const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
-  const recUsd = name === 'placement' ? null : (fd ? fd.estimated_recoverable_usd : null);
-  const recTok = name === 'placement' ? null : (fd ? fd.estimated_recoverable_tokens : null);
+  const recUsd = name === 'placement' ? null : (fd ? fd.past_overspend_usd : null);
+  const recTok = name === 'placement' ? null : (fd ? fd.past_overspend_tokens : null);
   const rec = (recUsd != null || recTok != null) ? fmtFramedSavings(recUsd, recTok, framing) : null;
 
   return html`<section class="opt-section" id=${'opt-' + name}>
@@ -6597,8 +6597,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
 // is an observed post-recommendation span-mix shift (correlation), never a
 // projected figure and never "tokenjam saved you".
 function RecommendationsPanel({ rec }) {
-  const estTok = rec.estimated_recoverable_tokens || 0;
-  const estUsd = rec.estimated_recoverable_usd || 0;
+  const estTok = rec.past_overspend_tokens || 0;
+  const estUsd = rec.past_overspend_usd || 0;
   const measTok = rec.measured_recovered_tokens || 0;
   const measUsd = rec.measured_recovered_usd || 0;
   const rows = (rec.rows || []).slice(0, 12);
@@ -7901,11 +7901,18 @@ const INBOX_COLLAPSE_THRESHOLD = 8;
 // ("TRIM") card's own dollar figure is a structural token-share measurement,
 // not a savings claim (RESEND_HONESTY_CAVEAT in analyzers/context_resend.py
 // says so explicitly), so this page treats it as unpriced for every
-// dollar-first decision below even though estimated_monthly_usd carries a
-// real, non-null number for it. Every other analyzer's dollar figure is a
-// genuine recoverable estimate. dollarsSuppressed() itself is NOT touched by
-// this set — it still governs every other surface in the app unchanged.
+// dollar-first decision below even though its dollar field carries a real,
+// non-null number. dollarsSuppressed() itself is NOT touched by this set — it
+// still governs every other surface in the app unchanged.
 const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
+// RELEARN-CLUSTER ONLY. A relearn cluster scans unbounded history, so it has
+// no window to observe a figure over and states its own 30-day-basis
+// `estimated_monthly_*` instead — the one remaining monthly-basis figure in
+// the product. A COST proposal never comes through here: it carries the one
+// canonical `past_overspend_*` and renders via `pastOverspendFigure` below.
+// Do not "unify" the two by pacing the cost figure onto this basis; the whole
+// point of the collapse was that a paced twin of the observed figure existed
+// and a surface rendered it by mistake.
 function monthlyUsdForDisplay(item) {
   return NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer) ? null : item.estimated_monthly_usd;
 }
@@ -7936,10 +7943,10 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
   return { top: sorted.slice(0, max), tail: sorted.slice(max) };
 }
 
-// A tail item's headline est./mo figure — dollars first when a rate exists
-// and the plan tier doesn't suppress dollars, tokens as fallback (requirement
-// #2). Works for both relearn clusters and cost proposals: both carry the
-// same `estimated_monthly_usd`/`estimated_monthly_tokens` field names.
+// A relearn tail item's headline est./mo figure — dollars first when a rate
+// exists and the plan tier doesn't suppress dollars, tokens as fallback
+// (requirement #2). RELEARN CLUSTERS ONLY (see `monthlyUsdForDisplay`); the
+// cost tab passes its own past-tense `summary` to CollapsedTailRow instead.
 // `suppressed` is always `false` on this page (the founder-approved
 // always-dollars carve-out above `sortByEstMonthly`); the parameter survives
 // so this function still degrades correctly if that ever changes.
@@ -8293,27 +8300,34 @@ function daysAgoLabel(iso) {
   return days === 1 ? '1 day ago' : days + ' days ago';
 }
 
-// A merged applied record's (`rec.kind`: 'relearn' | 'cost') own estimate, in
-// the same `estimated_monthly_usd`/`estimated_monthly_tokens` shape open
-// items carry — a bounded, point-in-time snapshot taken at the moment of
-// apply, NEVER a live re-measurement (behavioral requirement #7, REVISED:
-// the perpetual verify/receipts layer that would have produced a real
-// measured figure was removed in commit c0316aba for making unsupportable
-// realized-savings claims; see the note above InboxStatTiles). For relearn,
-// `verify.estimated_monthly_usd/tokens` (stamped once by relearn_apply.
-// apply_relearn_fix); for a cost marker, the proposal's own estimate, carried
-// straight onto the ledger record by cost_apply.mark_applied. Shared by
-// AppliedItemRow (per-row) and InboxStatTiles (summed across all applied).
+// A merged applied record's (`rec.kind`: 'relearn' | 'cost') own figure — a
+// bounded, point-in-time snapshot taken at the moment of apply, NEVER a live
+// re-measurement (behavioral requirement #7, REVISED: the perpetual
+// verify/receipts layer that would have produced a real measured figure was
+// removed in commit c0316aba for making unsupportable realized-savings
+// claims; see the note above InboxStatTiles).
+//
+// The two ledgers are on DIFFERENT time bases and this function does not
+// pretend otherwise — it returns bare `usd`/`tokens`, and the caller labels
+// them per kind. For a COST marker it is `past_overspend_usd`/`_tokens`, the
+// window-observed avoidable figure carried straight onto the ledger record by
+// cost_apply.mark_applied — the same one canonical field the open card
+// rendered. For RELEARN it is `verify.estimated_monthly_usd/tokens`, the
+// cluster's own 30-day-basis figure stamped once by
+// relearn_apply.apply_relearn_fix (relearn scans unbounded history and has no
+// window to observe a figure over; it is the ONE remaining monthly-basis
+// figure in the product and it is never mixed into a cost total).
+//
 // Applies the same NOT_A_SAVINGS_CLAIM_ANALYZERS exclusion a resend/TRIM
-// marker needs here too — a cost applied record, unlike an open proposal,
-// has no `estimated_monthly_usd` field of its own to route through
-// monthlyUsdForDisplay, so the check is inlined instead.
+// marker needs here too, inlined rather than routed through
+// monthlyUsdForDisplay (which is relearn-shaped).
 function appliedEstimate(rec) {
   const isRelearn = rec.kind === 'relearn';
-  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.estimated_recoverable_usd;
+  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.past_overspend_usd;
   return {
-    estimated_monthly_usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
-    estimated_monthly_tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.estimated_recoverable_tokens,
+    isRelearn,
+    usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
+    tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.past_overspend_tokens,
   };
 }
 
@@ -8339,8 +8353,8 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
   const enforcement = rec.enforcement;
   const isEnforcement = isRelearn && ENFORCEMENT_RUNGS.has(rec.rung);
   const est = appliedEstimate(rec);
-  const usd = est.estimated_monthly_usd;
-  const toks = est.estimated_monthly_tokens;
+  const usd = est.usd;
+  const toks = est.tokens;
   const revertUrl = isRelearn ? `/relearn/${rec.id}/revert` : `/relearn/cost-applied/${rec.id}/revert`;
 
   return html`
@@ -8669,7 +8683,7 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // shows per row), never a live re-measurement of what happened afterward. A
 // bounded verify redesign is a separate, later product decision — see
 // c0316aba before building one.
-// #326: `excluded` (from GET /relearn/cost-proposals's rollup.excluded) is
+// `excluded` (from GET /relearn/cost-proposals's past_overspend.excluded) is
 // waste this page's own totals deliberately do NOT sum in — currently only
 // `summarize`, which keeps its own curate/diff review surface rather than a
 // peer card here (see COST_ANALYZERS's docstring server-side). Left unstated
@@ -8678,29 +8692,29 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // into the headline band's own number (a different review flow, not a peer
 // figure to add).
 //
-// Reads the WINDOW figure (`estimated_recoverable_usd`), not the projected
+// Reads the WINDOW figure (`past_overspend_usd`), not the projected
 // monthly one: it sits under a past-tense headline, and mixing a "/mo"
 // projection into that band would put two time bases side by side under one
 // tense. `summarize`'s window figure is itself an observed window overspend
 // (its per-call reduction priced over the calls that were actually made), so
 // the past tense is honest for it.
 function ExcludedWasteNote({ excluded }) {
-  const entries = Object.values(excluded || {}).filter(e => e && e.estimated_recoverable_usd != null);
+  const entries = Object.values(excluded || {}).filter(e => e && e.past_overspend_usd != null);
   if (entries.length === 0) return null;
   return html`
     <div class="dim" style="font-size:12px;margin-top:6px">
       ${entries.map(e => html`
-        A further ${fmtUsd(e.estimated_recoverable_usd)} went on ${e.label || 'Summarize'} over the same window (its own review surface, not summed above) ·
+        A further ${fmtUsd(e.past_overspend_usd)} went on ${e.label || 'Summarize'} over the same window (its own review surface, not summed above) ·
         <a class="sz-link" href=${e.href || '#/optimize/summarize'}>Review it →</a>
       `)}
     </div>`;
 }
 
 function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed, excluded, pastOverspend }) {
-  const appliedPriceable = appliedEstimates.filter(i => i.estimated_monthly_usd != null);
+  const appliedPriceable = appliedEstimates.filter(i => i.usd != null);
   const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
-  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.estimated_monthly_usd, 0);
-  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0);
+  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.usd, 0);
+  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.tokens || 0), 0);
   // Falls back to the bare count when nothing applied carries an estimate —
   // never a fabricated "$0"/"0 tok" standing in for "no data".
   const appliedBig = appliedLeadWithUsd ? fmtUsd(appliedUsdSum)
@@ -8814,7 +8828,7 @@ function ReviewInboxView({ params }) {
       setCostDegraded(!!r.degraded);
       setCostLastError(r.last_error || null);
       setCostFraming(r.framing || null);
-      setCostExcluded((r.rollup && r.rollup.excluded) || {});
+      setCostExcluded((r.past_overspend && r.past_overspend.excluded) || {});
       setCostPastOverspend(r.past_overspend || null);
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {

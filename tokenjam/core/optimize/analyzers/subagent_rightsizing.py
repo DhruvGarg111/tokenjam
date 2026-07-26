@@ -133,8 +133,8 @@ class SubagentRightsizingFinding:
     # priced anything (e.g. no flagged subagent had a priced alternative or a
     # usable cohort baseline) — flagged_cost_usd above still reports the raw
     # spend sitting in every flagged row regardless.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = SUBAGENT_ESTIMATE_BASIS
     # The effective noise floor this run applied (config-overridable, see
     # core.config.OptimizeConfig.min_flag_cost_usd) — carried on the finding
@@ -403,7 +403,7 @@ def run(ctx: AnalyzerContext) -> None:
         flagged_cost_usd=round(sum(r.cost_usd for r in flagged), 8),
         rows=rows[:TOP_N],
         flagged=flagged[:TOP_N],
-        estimated_recoverable_usd=est_usd,
-        estimated_recoverable_tokens=est_tokens,
+        past_overspend_usd=est_usd,
+        past_overspend_tokens=est_tokens,
         min_flag_cost_usd=min_flag_cost_usd,
     )

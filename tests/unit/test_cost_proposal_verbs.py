@@ -48,8 +48,8 @@ def _advise_only(**overrides) -> CostProposal:
         baseline={"sessions_present": 12, "invocations": 0},
         advise_text="Remove it; it costs a standing schema-injection tax.",
         suggestion="claude mcp remove foo --scope user",
-        estimated_recoverable_usd=12.5,
-        estimated_recoverable_tokens=50_000,
+        past_overspend_usd=12.5,
+        past_overspend_tokens=50_000,
         estimate_basis="measured over the last 90d.",
         apply_capable=False,
     )
@@ -66,8 +66,8 @@ def _apply_capable(*, target_path: str, **overrides) -> CostProposal:
         evidence="`bar` subagent averages 200 tokens output across 40 calls.",
         baseline={"apply_sessions": 40, "apply_repos": ["demo"]},
         advise_text="Route `bar` to a smaller model.",
-        estimated_recoverable_usd=8.0,
-        estimated_recoverable_tokens=20_000,
+        past_overspend_usd=8.0,
+        past_overspend_tokens=20_000,
         estimate_basis="measured over the last 30d.",
         apply_capable=True,
         rung=1,
@@ -160,32 +160,34 @@ def test_list_json_carries_the_full_proposal_and_framing(cfg):
     assert "framing" in payload
 
 
-def test_list_backfills_monthly_fields_missing_from_a_pre_redesign_cache(cfg):
-    # A cache written by a build that predates the Review inbox's monthly-
-    # basis fields: the raw dict on disk simply doesn't have
-    # estimated_monthly_usd/estimated_monthly_tokens keys at all (unlike a
-    # CostProposal built fresh by this build, which always carries them via
-    # _with_monthly_extrapolation). Without a read-time backfill this renders
-    # a tokens-only headline forever for an item that's genuinely priceable,
-    # until the next successful scheduled recompute.
+def test_list_migrates_the_pre_collapse_field_names_from_an_old_cache(cfg):
+    # A cache written before the per-analyzer dollar fields were collapsed:
+    # the raw dict on disk carries `estimated_recoverable_*` (the same
+    # quantity under its old forward-framed name) and its paced twin. Without
+    # a read-time migration this renders an em dash where the headline number
+    # belongs, until the next successful scheduled recompute.
     from tokenjam.core.optimize import relearn_proposals
 
     legacy_dict = {
         "kind": "cost", "analyzer": "downsize", "signature": "cost:downsize:claude-code",
         "title": "Model over-sizing in claude-code (claude-opus-4-7 to claude-haiku-4-5)",
         "estimated_recoverable_usd": 36.65, "estimated_recoverable_tokens": 10_144_061,
+        "estimated_monthly_usd": 39.27, "estimated_monthly_tokens": 10_869_075,
         "advise_only": True, "apply_capable": False,
     }
     relearn_store.write_cost_proposals([legacy_dict], config=cfg)
     [prop] = relearn_proposals.list_cost_proposals(cfg)
-    assert prop["estimated_monthly_usd"] == 36.65
-    assert prop["estimated_monthly_tokens"] == 10_144_061
+    assert prop["past_overspend_usd"] == 36.65
+    assert prop["past_overspend_tokens"] == 10_144_061
+    # The paced twin is dropped rather than promoted onto the past-tense field.
+    assert "estimated_monthly_usd" not in prop
+    assert "estimated_recoverable_usd" not in prop
 
 
-def test_list_shows_estimated_recoverable_rollup(cfg):
+def test_list_shows_past_overspend_rollup(cfg):
     _store(cfg, _advise_only())
     result = _run(cfg, ["cost-proposals"])
-    assert "estimated recoverable" in result.output
+    assert "already overspent" in result.output
 
 
 def test_list_omits_the_advise_only_footer_when_every_proposal_is_apply_capable(cfg, tmp_path):

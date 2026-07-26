@@ -75,13 +75,15 @@ class WindowSummary:
     total_cost_usd: float
     thin_data:   bool
     #: Distinct calendar days within the window with >=1 session — the
-    #: user's own "active day" pace, the `D_active` term of the shared 30-day
-    #: projection basis every cost analyzer's rollup uses (see
-    #: `cost_proposals.compute_projection_ratio` / `core/optimize/
-    #: projection.py`). Defaults to 0 for a hand-built `WindowSummary` (tests,
-    #: older callers, a cached report predating the field) — a 0 fails that
-    #: ratio's guardrail, so the projection is simply skipped rather than
-    #: dividing by zero or inventing a pace from a missing count.
+    #: user's own "active day" pace, the `D_active` term of the 30-day
+    #: projection basis in `core/optimize/projection.py`. Read by exactly ONE
+    #: consumer: `write_budget`, which needs "how many sessions will re-send
+    #: this artifact in a month" to price a permanent CLAUDE.md rule. It does
+    #: NOT pace any per-analyzer dollar figure — no such figure exists any
+    #: more (see the field contract in the repo `CLAUDE.md`). Defaults to 0
+    #: for a hand-built `WindowSummary` (tests, older callers, a cached report
+    #: predating the field) — a 0 fails that basis's guardrail, so the standing
+    #: cost is simply not charged rather than invented from a missing count.
     active_days: int = 0
 
 
@@ -136,14 +138,14 @@ class DowngradeFinding:
     window_total_tokens:        int   = 0  # input + output + cache, all sessions
     percent_of_tokens:          float = 0.0
     monthly_tokens_in_candidates: int = 0  # projected to a 30-day month
-    # Recoverable-savings contract (#111). estimated_recoverable_usd is for
-    # api-billed framing; estimated_recoverable_tokens for subscription / local.
+    # Recoverable-savings contract (#111). past_overspend_usd is for
+    # api-billed framing; past_overspend_tokens for subscription / local.
     # None means "no estimate available for this finding state". estimate_basis
     # is the one-line heuristic explanation surfaced behind the "estimated" tag.
     # estimate_confidence is the estimate's confidence (distinct from any
     # structural `confidence` on wave-2 findings); always "heuristic" in v1.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # Sampling confidence (#308). `n_sessions` is the candidate-session sample
@@ -169,7 +171,7 @@ class DowngradeFinding:
     # describes ONLY that case; the fields above describe ONLY the secondary
     # tiny-session case. The two populations are disjoint (a driver-flagged
     # session is excluded from the tiny-session walk), which is what makes it
-    # safe for `estimated_recoverable_usd` to be their sum.
+    # safe for `past_overspend_usd` to be their sum.
     driver_sessions:          int   = 0
     driver_recoverable_usd:   float = 0.0
     # The two halves of the driver-role claim, kept visible so the headline is
@@ -314,8 +316,8 @@ class ReuseFinding:
     # upper bound (avg cost x reps): the first planning call in a cluster was
     # necessary work, so a figure that includes it is one a user can disprove.
     # None when no cluster cleared the thresholds.
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:    str = REUSE_ESTIMATE_BASIS
     confidence:        Literal["heuristic"] = "heuristic"
     # Populated in Mode 1 (capture.prompts off) to nudge the richer mode.

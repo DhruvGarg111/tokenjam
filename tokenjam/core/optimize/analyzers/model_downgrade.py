@@ -418,7 +418,7 @@ def analyze_model_downgrade(
     case. The two gates can both admit the same session — the ``SMALL_*`` gate
     reads uncached ``input_tokens``, so a session with 3K of uncached input and
     500K of cache reads clears it while still being a context-heavy driver
-    session — and both contribute to the one ``estimated_recoverable_usd``, so
+    session — and both contribute to the one ``past_overspend_usd``, so
     without the exclusion the finding would double-count against itself.
 
     The candidate aggregation is scoped to the MAIN THREAD (``sub_agent_id IS
@@ -427,7 +427,7 @@ def analyze_model_downgrade(
     them (``sub_agent_id IS NOT NULL``, per (session, subagent)). Without this
     filter the two analyzers claim the same tokens under two structurally
     different signatures (``cost:downsize:<agent>`` and
-    ``cost:subagent[:<name>]``), which ``estimated_recoverable_rollup``'s
+    ``cost:subagent[:<name>]``), which ``past_overspend_rollup``'s
     dedup-by-signature cannot catch — so the Review-inbox headline came out
     inflated by the overlap. Same class of guard as
     ``cost_proposals._per_agent_cache_recoverable_by_model`` provides for the
@@ -523,7 +523,7 @@ def analyze_model_downgrade(
             continue
         if session_id in driver_sessions:
             # Already claimed, in full, by the driver-role case above. Both
-            # cases feed one `estimated_recoverable_usd`, so a session admitted
+            # cases feed one `past_overspend_usd`, so a session admitted
             # by both gates would be counted twice against itself.
             continue
         alt = _lookup_downgrade(provider, model)
@@ -677,20 +677,14 @@ def analyze_model_downgrade(
         window_total_tokens=window_total_tokens,
         percent_of_tokens=round(percent_tokens, 1),
         monthly_tokens_in_candidates=monthly_tokens_in_candidates,
-        # Recoverable-savings contract (#111). Use the WINDOW savings (not the
-        # 30-day projection) so every analyzer's estimated_recoverable_usd shares
-        # one time basis — "recoverable over the analyzed window" — and the
-        # Overview/Optimize tiles are directly comparable (#122). This module's
-        # OWN `monthly_savings_usd` / `monthly_tokens_in_candidates` are a SECOND,
-        # separately-named basis (a 30-day linear projection) that the Review
-        # inbox's cost-advisories tab reads directly (surfaced onto
-        # `CostProposal.estimated_monthly_usd`/`estimated_monthly_tokens` — see
-        # `cost_proposals._downsize_to_proposal`); every other cost-advisory
-        # analyzer gets the same 30-day basis via a generic window-days
-        # extrapolation applied once in `cost_proposals_from_report`, since
-        # they don't compute their own monthly figure. Two bases, two
-        # explicitly-named surfaces: Overview/Optimize stay window-scoped,
-        # the Review inbox is always monthly. Never mix the two on one card.
+        # THE canonical field (see the field contract in the repo CLAUDE.md).
+        # The WINDOW savings, never the 30-day projection, so this analyzer's
+        # figure sits on the same time basis as every other analyzer's and a
+        # sum across them means something. This module's OWN
+        # `monthly_savings_usd` / `monthly_tokens_in_candidates` survive for
+        # the CLI's `tj optimize` line only; they reach NO cost card, NO
+        # payload, and NO aggregate. Routing a paced figure onto a card is the
+        # exact defect the field collapse removed — do not re-open it.
         #
         # Deliberately session-scoped, not turn-scoped: `audit_opus_quota`
         # below also computes a cheap-segment / mechanical-stretch dollar
@@ -721,8 +715,8 @@ def analyze_model_downgrade(
         # BOTH cases sum into this one field. They are disjoint by
         # construction: a driver-flagged session is skipped by the
         # tiny-session loop above, and the two never price the same span.
-        estimated_recoverable_usd=round(total_savings, 6),
-        estimated_recoverable_tokens=candidate_tokens + driver_tokens,
+        past_overspend_usd=round(total_savings, 6),
+        past_overspend_tokens=candidate_tokens + driver_tokens,
         estimate_basis=(
             (
                 "PRIMARY (premium model in the driver role): " + driver_basis
@@ -1019,7 +1013,7 @@ def audit_opus_quota(
     # Secondary API-only implied-dollar counterfactual, aggregated over the
     # flagged premium turns and priced at each session's dominant premium model's
     # cheaper alternative (never the headline). Deliberately never folded into
-    # `analyze_model_downgrade`'s `DowngradeFinding.estimated_recoverable_usd`
+    # `analyze_model_downgrade`'s `DowngradeFinding.past_overspend_usd`
     # (the `tj optimize` downsize card) — see the comment on that assignment
     # for why the two stay separate.
     for agg in aggs.values():

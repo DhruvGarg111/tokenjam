@@ -72,8 +72,8 @@ class CachePrefixCandidate:
     # Recoverable-savings contract (#111), same field names as every other
     # analyzer. None when no priced rate was observed for `model` — never a
     # zero or a borrowed rate (CLAUDE.md anti-pattern #22).
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
 
 
 @dataclass
@@ -86,8 +86,8 @@ class CacheRecommendFinding:
     hint:             str | None = None             # surfaced when enabled is false
     # Sum across candidates with a priced rate. None when none of them had one
     # (never a $0.00 standing in for "no rate observed").
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None   = None
+    past_overspend_usd:    float | None = None
+    past_overspend_tokens: int | None   = None
     estimate_basis:               str          = ""
     # The effective occurrence bar this run applied (config-overridable, see
     # core.config.OptimizeConfig.min_prefix_occurrences) — carried on the
@@ -305,18 +305,18 @@ def run(ctx: AnalyzerContext) -> None:
             cache_control_snippet=_prefix_cache_control_snippet(
                 dominant_model, str(entry["sample"]), int(entry["count"]), estimated_cacheable,
             ),
-            estimated_recoverable_usd=usd,
-            estimated_recoverable_tokens=tokens,
+            past_overspend_usd=usd,
+            past_overspend_tokens=tokens,
         ))
 
     candidates.sort(key=lambda c: c.occurrences * c.estimated_cacheable_tokens,
                     reverse=True)
     candidates = candidates[:10]
 
-    priced_usd = [c.estimated_recoverable_usd for c in candidates
-                  if c.estimated_recoverable_usd is not None]
-    priced_tokens = [c.estimated_recoverable_tokens for c in candidates
-                      if c.estimated_recoverable_tokens is not None]
+    priced_usd = [c.past_overspend_usd for c in candidates
+                  if c.past_overspend_usd is not None]
+    priced_tokens = [c.past_overspend_tokens for c in candidates
+                      if c.past_overspend_tokens is not None]
     finding_usd = round(sum(priced_usd), 6) if priced_usd else None
     finding_tokens = sum(priced_tokens) if priced_tokens else None
     basis = (
@@ -330,8 +330,8 @@ def run(ctx: AnalyzerContext) -> None:
         enabled=True,
         candidates=candidates,
         skipped_provider_count=skipped_provider,
-        estimated_recoverable_usd=finding_usd,
-        estimated_recoverable_tokens=finding_tokens,
+        past_overspend_usd=finding_usd,
+        past_overspend_tokens=finding_tokens,
         estimate_basis=basis,
         min_prefix_occurrences=min_prefix_occurrences,
     )

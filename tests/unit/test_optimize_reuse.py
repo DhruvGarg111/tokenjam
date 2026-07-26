@@ -155,16 +155,16 @@ def test_cluster_surfaced_and_savings_math(db):
     # (reps - 1)): the first planning call had to happen, so the headline may
     # never charge for it. The script-replacement upper bound (avg cost x
     # reps) stays available per-cluster, never deleted, never the headline.
-    assert finding.estimated_recoverable_usd == pytest.approx(0.80)
-    assert finding.estimated_recoverable_tokens == c.cache_reuse_recoverable_tokens
-    assert finding.estimated_recoverable_usd < c.script_replacement_recoverable_usd
+    assert finding.past_overspend_usd == pytest.approx(0.80)
+    assert finding.past_overspend_tokens == c.cache_reuse_recoverable_tokens
+    assert finding.past_overspend_usd < c.script_replacement_recoverable_usd
 
 
 def test_below_repetition_threshold_dropped(db):
     _seed_cluster(db, count=MIN_REPETITIONS - 1, tool_names=["read"])
     finding = _run(db, _config(prompts=False))
     assert finding.clusters == []
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
     assert finding.min_repetitions == MIN_REPETITIONS
 
 
@@ -254,8 +254,8 @@ def test_mode2_prompt_prefix_splits_same_tool_signature(db):
 def test_empty_window_returns_clean_finding(db):
     finding = _run(db, _config(prompts=False))
     assert finding.clusters == []
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_usd is None
+    assert finding.past_overspend_tokens is None
 
 
 def test_estimate_basis_mentions_review(db):

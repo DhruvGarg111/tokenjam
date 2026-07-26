@@ -54,7 +54,7 @@ Rendering follows the same plan-tier-aware convention as the rest of `tj optimiz
 
 ## Estimate basis / confidence
 
-Candidate-only in v1 — `estimated_recoverable_usd` and `estimated_recoverable_tokens` are deliberately `None`; the analyzer surfaces the spend sitting in flagged subagents (`flagged_cost_usd`) rather than assert a guaranteed recovery. `estimate_confidence` is `"heuristic"` and `estimate_basis` reads:
+Candidate-only in v1 — `past_overspend_usd` and `past_overspend_tokens` are deliberately `None`; the analyzer surfaces the spend sitting in flagged subagents (`flagged_cost_usd`) rather than assert a guaranteed recovery. `estimate_confidence` is `"heuristic"` and `estimate_basis` reads:
 
 > spend concentrated in structurally-flagged subagents (premium model with little output, or large context with little output); review before re-dispatching — no guaranteed saving
 

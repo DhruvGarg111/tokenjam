@@ -31,7 +31,7 @@ source's content ever gets used downstream) is explicitly OUT of scope for
 this pass — see the spec's cut list.
 
 Dedup. A server's MCP-schema tax-table row is purely informational and never
-feeds ``DeadweightFinding.estimated_recoverable_tokens`` — only the C1
+feeds ``DeadweightFinding.past_overspend_tokens`` — only the C1
 dead-weight servers' own tax does, so a server's tax is never counted twice
 (see ``compute_deadweight_finding``'s dedup note).
 
@@ -658,15 +658,13 @@ class ServerDeadweight:
     #: rate — see the per-session multiplier in `compute_deadweight_finding`),
     #: never `estimated_tax_tokens_per_session x sessions_present` (that would
     #: silently substitute the average call count for every session's actual
-    #: one). NO projection folded in. A caller wanting a forward-looking
-    #: figure applies the shared, centrally-
-    #: computed 30-day-pace ratio (`cost_proposals.compute_projection_ratio`)
-    #: on top of this, exactly like every other cost analyzer's window field
-    #: (the "Recoverable-savings contract", CLAUDE.md). See #273: this field
-    #: used to fold a fixed 90-day projection in directly, which made it
-    #: incomparable to every other analyzer's window-scoped figure and
-    #: silently corrupted the Review-inbox rollup's basis when summed
-    #: alongside them.
+    #: one). NO projection folded in, and none may be applied downstream
+    #: either: this is a past-tense window observation, and the product states
+    #: no forward per-analyzer figure at all (see the field contract in the
+    #: repo `CLAUDE.md`). This field used to fold a fixed 90-day projection in
+    #: directly, which made it incomparable to every other analyzer's
+    #: window-scoped figure and silently corrupted the rollup's basis when
+    #: summed alongside them.
     estimated_tax_tokens_window:      int
     tax_construction:                 str
     fix:                              str
@@ -698,8 +696,8 @@ class DeadweightFinding:
     servers:                      list[ServerDeadweight] = field(default_factory=list)
     dead_servers:                 list[ServerDeadweight] = field(default_factory=list)
     tax_table:                    list[ContextTaxRow] = field(default_factory=list)
-    estimated_recoverable_tokens: int | None = None
-    estimated_recoverable_usd:    float | None = None
+    past_overspend_tokens: int | None = None
+    past_overspend_usd:    float | None = None
     estimate_basis:                str = ""
     estimate_confidence:            str = "estimated"
     caveat:                          str = DEADWEIGHT_HONESTY_CAVEAT
@@ -962,7 +960,7 @@ def compute_deadweight_finding(
     # but that row never feeds this sum — so a server's tax is never counted
     # twice between the tax table and a dead-weight proposal.
     if finding.dead_servers:
-        finding.estimated_recoverable_tokens = sum(
+        finding.past_overspend_tokens = sum(
             s.estimated_tax_tokens_window for s in finding.dead_servers
         )
         priced = [
@@ -977,7 +975,7 @@ def compute_deadweight_finding(
             f"never double-count into this total."
         )
         if priced:
-            finding.estimated_recoverable_usd = round(sum(priced), 6)
+            finding.past_overspend_usd = round(sum(priced), 6)
             basis += (
                 " Dollar figure priced per server through core/pricing.py "
                 "at the dominant model observed in that server's sessions "

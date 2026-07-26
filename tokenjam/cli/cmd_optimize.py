@@ -456,7 +456,7 @@ DE_MINIMIS_SHARE = 0.01
 
 # Findings that must NEVER be collapsed into the "Minor findings" pointer by
 # token share. `relearn` is a recurring-failure-cluster finding, not a
-# token-reclamation one — its `estimated_recoverable_tokens` is a soft
+# token-reclamation one — its `past_overspend_tokens` is a soft
 # occurrence×heuristic estimate for the Lens inbox, not a real fraction of the
 # window. Ranking it by that share let a heavy `--since 365d` window (huge
 # denominator) push real clusters below DE_MINIMIS_SHARE and hide them behind a
@@ -503,7 +503,7 @@ def _reclaimable_share(finding: Any, window_total_tokens: int) -> float | None:
     analyzer's own diagnostic empty-state message (e.g. "no tool spans in
     this window") behind a generic pointer.
     """
-    tokens = getattr(finding, "estimated_recoverable_tokens", None)
+    tokens = getattr(finding, "past_overspend_tokens", None)
     if tokens is None or window_total_tokens <= 0:
         return None
     return max(float(tokens), 0.0) / window_total_tokens
@@ -821,7 +821,7 @@ def _render_report(
     # nothing-burger could occupy the top numbered slot just because its
     # analyzer happened to run first — e.g. "① Model downgrade: 28% of
     # sessions match" when those sessions held ~0% of the window's tokens
-    # (#97). Rank by estimated_recoverable_tokens / window.total_tokens
+    # (#97). Rank by past_overspend_tokens / window.total_tokens
     # instead. Three buckets:
     #   major    — real, meaningful share: numbered slot, full render.
     #   unranked — no quantified estimate at all (disabled / no candidates):
@@ -1534,10 +1534,10 @@ def _render_cache_root_causes(
                 f"[dim]~{format_tokens(c.assumed_prefix_tokens)} assumed prefix[/dim]"
             )
             if pricing_mode == "api":
-                if c.estimated_recoverable_usd is not None:
+                if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
                         f"estimated recoverable over this window"
                     )
                 else:
@@ -1586,10 +1586,10 @@ def _render_cache_root_causes(
                     "prefix itself is likely changing between calls[/dim]"
                 )
             if pricing_mode == "api":
-                if c.estimated_recoverable_usd is not None:
+                if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
                         f"wasted writing this prefix over this window"
                     )
                 else:
@@ -1616,10 +1616,10 @@ def _render_cache_root_causes(
                 f"prior turn)[/dim]"
             )
             if pricing_mode == "api":
-                if c.estimated_recoverable_usd is not None:
+                if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
                         f"estimated recoverable over this window"
                     )
                 else:
@@ -1708,9 +1708,9 @@ def _render_cache_recommend(
         # show. On api, a candidate can still have no priced rate for its
         # model, in which case we say why rather than print a $0.00.
         if pricing_mode == "api":
-            if c.estimated_recoverable_usd is not None:
+            if c.past_overspend_usd is not None:
                 console.print(
-                    f"           [dim]≈[/dim] [green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                    f"           [dim]≈[/dim] [green]{format_cost(c.past_overspend_usd)}[/green] "
                     f"estimated over this window [dim](model {c.model})[/dim]"
                 )
             else:
@@ -1721,9 +1721,9 @@ def _render_cache_recommend(
         console.print(f"           [dim italic]{sample}[/dim italic]")
         _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
 
-    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+    if pricing_mode == "api" and finding.past_overspend_usd is not None:
         console.print(
-            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"     • [green]~{format_cost(finding.past_overspend_usd)}[/green] "
             f"estimated recoverable across these candidates [dim](reads after "
             f"the first occurrence, minus one cache write per prefix)[/dim]"
         )
@@ -2044,11 +2044,11 @@ def _render_subagent(
     # this finding its ranked slot. Dollars for api-billed users; the token quota
     # otherwise (same category discipline as the peer analyzers). Honest
     # "estimated recoverable" framing only; the caveat below still governs.
-    if finding.estimated_recoverable_tokens is not None:
-        if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
-            recov = format_cost(finding.estimated_recoverable_usd)
+    if finding.past_overspend_tokens is not None:
+        if pricing_mode == "api" and finding.past_overspend_usd is not None:
+            recov = format_cost(finding.past_overspend_usd)
         else:
-            recov = f"{format_tokens(finding.estimated_recoverable_tokens)} tokens"
+            recov = f"{format_tokens(finding.past_overspend_tokens)} tokens"
         console.print(
             f"     • [green]~{recov}[/green] estimated recoverable "
             f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
@@ -2174,7 +2174,7 @@ def _render_summarize(
     via `--json`.
 
     The per-file line is the one-time, per-CALL reduction (`file_reduction_
-    tokens`); `estimated_recoverable_tokens` and `estimated_recoverable_usd`
+    tokens`); `past_overspend_tokens` and `past_overspend_usd`
     are both per-WINDOW, because these files are always-on context and the
     reduction is realized on every session that loads them (see
     core/optimize/analyzers/summarize.py). The window line only appears
@@ -2197,8 +2197,8 @@ def _render_summarize(
         f"summarizable, ~[bold]{format_tokens(file_reduction_tokens)}[/bold] per call "
         f"[dim](aggregate {finding.reduction_pct}% prose reduction)[/dim]"
     )
-    recoverable_usd = getattr(finding, "estimated_recoverable_usd", None)
-    window_tokens = finding.estimated_recoverable_tokens or 0
+    recoverable_usd = getattr(finding, "past_overspend_usd", None)
+    window_tokens = finding.past_overspend_tokens or 0
     if recoverable_usd:
         savings = render_savings(
             recoverable_usd, window_tokens, Framing(pricing_mode=pricing_mode),
@@ -2391,9 +2391,9 @@ def _render_placement(
             f"       [dim]… and {len(finding.candidates) - 10} more.[/dim]"
         )
 
-    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+    if pricing_mode == "api" and finding.past_overspend_usd is not None:
         console.print(
-            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"     • [green]~{format_cost(finding.past_overspend_usd)}[/green] "
             f"estimated price difference over this window "
             f"[dim](the same work, billed at the Batch API's flat rate)[/dim]"
         )
@@ -2499,7 +2499,7 @@ def _render_resend(
     # repeat_share itself is measured against.
     framing = Framing(pricing_mode=pricing_mode, window_total_tokens=finding.prompt_tokens_total)
     recoverable = render_savings(
-        finding.estimated_recoverable_usd, finding.estimated_recoverable_tokens, framing,
+        finding.past_overspend_usd, finding.past_overspend_tokens, framing,
     )
     console.print()
     if recoverable != "—":

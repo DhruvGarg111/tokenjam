@@ -463,7 +463,7 @@ def test_cache_savings_honesty_framing(html):
     assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
     assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
     # the recoverable overlay is no longer wired into the cache chart
-    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" not in html
+    assert "fmtFramedDollar(cacheResp.past_overspend_usd" not in html
 
 
 def test_cache_savings_chart_is_best_effort(html):
@@ -2236,7 +2236,7 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     # The panel must never re-derive analysis in JS — it renders server-computed
     # measured vs estimated fields straight from the endpoint payload.
     assert "measured_recovered_tokens" in html
-    assert "estimated_recoverable_tokens" in html
+    assert "past_overspend_tokens" in html
 
 
 # --- cost proposals in the Review inbox (advise-only) ---------------------- #
@@ -2561,7 +2561,7 @@ def test_review_inbox_view_fetches_and_threads_excluded_from_the_rollup(html):
     view = html[html.index("function ReviewInboxView"):]
     end = view.index("function ", len("function ReviewInboxView"))
     view = view[:end]
-    assert "setCostExcluded((r.rollup && r.rollup.excluded) || {})" in view
+    assert "setCostExcluded((r.past_overspend && r.past_overspend.excluded) || {})" in view
     assert "excluded=${costExcluded}" in view
 
 
@@ -2616,7 +2616,7 @@ def test_old_pending_relearn_stat_line_replaced_by_the_combined_stat_tiles(html)
     # strategies" placeholder this test used to guard against is gone too.
     assert '<b style="color:var(--accent)">0</b> strategies' not in html
     assert "strategies" not in html
-    assert "estTokens: f.estimated_recoverable_tokens" not in html
+    assert "estTokens: f.past_overspend_tokens" not in html
     assert "~${fmtTokens(d.estTokens)} tok</b> recoverable" not in html
     assert "function InboxStatTiles" in html
 

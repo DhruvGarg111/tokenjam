@@ -157,9 +157,9 @@ def test_over_powered_subagent_carries_quantified_estimate():
         #   input  80_000 @ $1.00/Mtok  = 0.08
         #   output    100 @ $5.00/Mtok  = 0.0005
         # alt_cost = 0.0805; delta = 0.60 − 0.0805 = 0.5195.
-        assert f.estimated_recoverable_usd == pytest.approx(0.5195, abs=1e-6)
+        assert f.past_overspend_usd == pytest.approx(0.5195, abs=1e-6)
         # Recoverable tokens = the quota sitting in the priced over_powered rows.
-        assert f.estimated_recoverable_tokens == 80_100
+        assert f.past_overspend_tokens == 80_100
         assert f.estimate_confidence == "heuristic"
         assert "review" in f.estimate_basis.lower()
     finally:
@@ -188,8 +188,8 @@ def test_over_provisioned_only_subagent_has_no_estimate():
         f = ctx.report.findings["subagent"]
 
         assert f.flagged[0].flags == ["over_provisioned"]
-        assert f.estimated_recoverable_usd is None
-        assert f.estimated_recoverable_tokens is None
+        assert f.past_overspend_usd is None
+        assert f.past_overspend_tokens is None
     finally:
         db.close()
 
@@ -234,8 +234,8 @@ def test_over_provisioned_estimate_prices_context_excess_over_cohort_median():
         expected_tokens = 70_000
         expected_usd = expected_tokens / 1_000_000 * rates.cache_read_per_mtok
 
-        assert f.estimated_recoverable_tokens == expected_tokens
-        assert f.estimated_recoverable_usd == pytest.approx(expected_usd, abs=1e-9)
+        assert f.past_overspend_tokens == expected_tokens
+        assert f.past_overspend_usd == pytest.approx(expected_usd, abs=1e-9)
         assert "cohort" in f.estimate_basis.lower()
     finally:
         db.close()

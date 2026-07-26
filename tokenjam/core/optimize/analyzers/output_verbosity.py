@@ -147,8 +147,8 @@ class VerbosityFinding:
     caveat: str = VERBOSITY_HONESTY_CAVEAT
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when no candidate cleared the threshold.
-    estimated_recoverable_usd: float | None = None
-    estimated_recoverable_tokens: int | None = None
+    past_overspend_usd: float | None = None
+    past_overspend_tokens: int | None = None
     estimate_basis: str = ""
     estimate_confidence: str = "heuristic"
     # The effective cohort-size bar this run applied (config-overridable, see
@@ -345,8 +345,8 @@ def run(ctx: AnalyzerContext) -> None:
     candidates.sort(key=lambda c: c.over_baseline_tokens, reverse=True)
     finding.total_candidates = len(candidates)
     finding.candidates = candidates[:MAX_EXAMPLES]
-    finding.estimated_recoverable_tokens = total_recoverable_tokens
-    finding.estimated_recoverable_usd = (
+    finding.past_overspend_tokens = total_recoverable_tokens
+    finding.past_overspend_usd = (
         round(total_recoverable_usd, 6) if have_any_usd else None
     )
     # Suggested max_tokens cap = the median cohort baseline (the point most

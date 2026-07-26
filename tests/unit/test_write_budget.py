@@ -500,8 +500,8 @@ def _reuse_finding(tokens, usd):
         example_session_ids=["s1"], skeleton_session_id="s1",
     )
     return ReuseFinding(
-        clusters=[cluster], estimated_recoverable_usd=usd,
-        estimated_recoverable_tokens=tokens, estimate_basis="reuse basis",
+        clusters=[cluster], past_overspend_usd=usd,
+        past_overspend_tokens=tokens, estimate_basis="reuse basis",
     )
 
 
@@ -516,8 +516,8 @@ def test_a_cost_write_reports_net_of_its_own_standing_cost():
     assert p.apply_capable is True
     assert p.gross_recoverable_tokens == 2_000_000
     assert p.standing_cost_tokens_per_session > 0
-    assert p.estimated_recoverable_tokens < p.gross_recoverable_tokens
-    assert p.estimated_recoverable_usd < p.gross_recoverable_usd
+    assert p.past_overspend_tokens < p.gross_recoverable_tokens
+    assert p.past_overspend_usd < p.gross_recoverable_usd
     assert p.standing_cost_basis
 
 
@@ -535,8 +535,8 @@ def test_write_budget_suppresses_net_negative_cost_write():
     assert p.write_offered is False
     assert p.apply_capable is False and p.advise_only is True
     assert p.proposed_fix == "" and p.suggestion       # the fix is still copyable
-    assert p.estimated_recoverable_tokens == 0
-    assert p.estimated_recoverable_usd == 0.0
+    assert p.past_overspend_tokens == 0
+    assert p.past_overspend_usd == 0.0
     assert p.gross_recoverable_tokens == 900           # inspectable, not hidden
 
 
@@ -558,7 +558,7 @@ def test_cost_writes_stop_when_the_agent_files_are_pathologically_large():
     assert p.write_offered is False
     assert p.write_blocked_reason == wb.REASON_CEILING_REACHED
     # Deferred, not denied: the saving is real, so the net claim stands.
-    assert p.estimated_recoverable_tokens > 0
+    assert p.past_overspend_tokens > 0
 
 
 def test_a_non_write_cost_card_is_left_completely_untouched():
@@ -572,11 +572,11 @@ def test_a_non_write_cost_card_is_left_completely_untouched():
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
-        estimated_recoverable_usd=3.0, estimated_recoverable_tokens=90_000,
+        past_overspend_usd=3.0, past_overspend_tokens=90_000,
         percent_of_tokens=35.0, estimate_basis="downsize basis",
     )
     p = next(p for p in cost_proposals_from_report(report) if p.analyzer == "downsize")
-    assert p.estimated_recoverable_usd == 3.0
-    assert p.estimated_recoverable_tokens == 90_000
+    assert p.past_overspend_usd == 3.0
+    assert p.past_overspend_tokens == 90_000
     assert p.standing_cost_tokens == 0
     assert p.gross_recoverable_tokens is None       # never entered the pass
