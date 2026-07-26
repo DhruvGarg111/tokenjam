@@ -163,6 +163,57 @@ class TestProviderPatchStamping:
         finally:
             integ.uninstall()
 
+    def test_langchain_tool_run_stamps_ambient_attribution(self):
+        """Regression guard: both LangChain TOOL wrappers (`BaseTool.run`/
+        `.arun`) used to omit attribution stamping entirely, unlike the LLM
+        wrappers a few lines above them in the same integration -- a tool
+        call span carried no tenant/feature even inside an `attribution()`
+        block."""
+        pytest.importorskip("langchain_core")
+        from langchain_core.tools import BaseTool
+
+        from tokenjam.sdk.integrations.langchain import LangChainIntegration
+
+        tracer, spans = _recording_tracer()
+        integ = LangChainIntegration()
+        integ.install(tracer)
+        try:
+            integ._original_tool_run = lambda _self, *a, **kw: "tool result"
+            fake_tool = types.SimpleNamespace(name="my-tool")
+            with attribution(tenant_id="acme-corp", feature="support-triage"):
+                BaseTool.run(fake_tool)
+            attrs = spans[0].attributes
+            assert attrs[TjAttributes.TENANT_ID] == "acme-corp"
+            assert attrs[TjAttributes.FEATURE] == "support-triage"
+        finally:
+            integ.uninstall()
+
+    async def test_langchain_tool_arun_stamps_ambient_attribution(self):
+        pytest.importorskip("langchain_core")
+        from langchain_core.tools import BaseTool
+
+        from tokenjam.sdk.integrations.langchain import LangChainIntegration
+
+        tracer, spans = _recording_tracer()
+        integ = LangChainIntegration()
+        integ.install(tracer)
+        try:
+            if integ._original_tool_arun is None:
+                pytest.skip("this langchain_core version has no BaseTool.arun")
+
+            async def _fake_arun(_self, *a, **kw):
+                return "tool result"
+
+            integ._original_tool_arun = _fake_arun
+            fake_tool = types.SimpleNamespace(name="my-tool")
+            with attribution(tenant_id="acme-corp", feature="support-triage"):
+                await BaseTool.arun(fake_tool)
+            attrs = spans[0].attributes
+            assert attrs[TjAttributes.TENANT_ID] == "acme-corp"
+            assert attrs[TjAttributes.FEATURE] == "support-triage"
+        finally:
+            integ.uninstall()
+
     def test_openai_patch_stamps_ambient_attribution(self):
         pytest.importorskip("openai")
         from openai.resources.chat.completions import Completions

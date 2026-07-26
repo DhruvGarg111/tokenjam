@@ -99,6 +99,7 @@ class LangChainIntegration:
         def patched_tool_run(self_tool, *args, **kwargs):
             span = integration._tracer.start_span(GenAIAttributes.SPAN_TOOL_CALL)
             span.set_attribute(GenAIAttributes.TOOL_NAME, self_tool.name)
+            stamp_span_attribution(span)
             try:
                 result = integration._original_tool_run(self_tool, *args, **kwargs)
                 span.set_status(trace.Status(trace.StatusCode.OK))
@@ -118,6 +119,7 @@ class LangChainIntegration:
             async def patched_tool_arun(self_tool, *args, **kwargs):
                 span = integration._tracer.start_span(GenAIAttributes.SPAN_TOOL_CALL)
                 span.set_attribute(GenAIAttributes.TOOL_NAME, self_tool.name)
+                stamp_span_attribution(span)
                 try:
                     result = await integration._original_tool_arun(self_tool, *args, **kwargs)
                     span.set_status(trace.Status(trace.StatusCode.OK))
