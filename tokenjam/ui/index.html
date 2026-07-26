@@ -1476,6 +1476,11 @@ code.md-code {
    MODAL is deliberately not covered: it renders outside the card and is a reading
    surface, so 74ch is still correct there. */
 .inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }
+/* A snippet is the row's payload and stays visible, but it must not decide the
+   row's height: a six-line downsize fix made that row 2.5x a relearn row. Capped
+   with its own scroll rather than collapsed, so the fix is still readable in place
+   and `CopySnippetButton` still copies the full text either way. */
+.inbox-row .sz-copybox { max-height: 104px; }
 /* Uniform collapsed height for a row's prose, so the LIST can be scanned rather
    than read. Row descriptions come straight from the analyzers and their lengths
    are wildly uneven: `resend` concatenates evidence + advise_text + caveat into
@@ -1489,7 +1494,7 @@ code.md-code {
      * Nothing is destroyed: `.is-open` lifts the clamp in place.
    `-webkit-line-clamp` is the load-bearing property (Chromium + WebKit + Firefox
    all honour it); the unprefixed `line-clamp` is listed after it for the future. */
-.inbox-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; min-height: calc(3 * 1.55 * 13px); }
+.inbox-desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-height: calc(2 * 1.55 * 13px); }
 .inbox-desc.is-open { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; min-height: 0; }
 /* The expander. A link rather than a button: it reveals text in place, it is not
    an action on the proposal, and the row's real actions are the buttons below. */
@@ -8178,34 +8183,62 @@ function InboxLoadingNote({ scanning, sessionsScanned }) {
 // row components use it, and the collapsed tail and the below-the-fold group
 // render through those, so the rhythm holds inside them too.
 //
-// THREE lines, not two. Two was the starting point and reads as too tight now the
-// block is full card width (the width fix landed first): a cost row's first
-// sentence is its evidence and its second is what to do about it, and two lines
-// cut the second one mid-clause on most rows. Three lands the whole "what we saw
-// plus what to do" pair on the majority of rows, which is what makes the
-// collapsed state useful rather than merely tidy.
+// Trimmed TEXTUALLY, at a sentence boundary, not merely clipped by CSS. A pure
+// line clamp made every row the same height but cut the prose mid-clause, and the
+// founder asked for the collapsed state to read as a short, complete thought. So
+// the UI SELECTS the opening sentences and holds the remainder behind "Read more".
 //
-// The expander renders ONLY when the text is actually clipped, MEASURED from the
-// DOM rather than guessed from a character count: the same string clips at one
-// card width and not another, so a guess leaves dead "Show more" links on short
-// rows and hides real overflow on long ones.
-function ClampedDescription({ children }) {
-  const ref = useRef(null);
+// The server's strings are never rewritten here, only split: these are the
+// analyzers' own words, and paraphrasing them in the UI would put a second,
+// drifting copy of every claim on screen.
+const INBOX_LEAD_CHARS = 200;
+
+// `{ lead, rest }` where `lead` is whole sentences up to the budget. Two rules:
+//   * never cut mid-sentence, so the boundary is punctuation FOLLOWED BY
+//     whitespace. That is what keeps "$1,842.56 of that cost" and "claude-4.7"
+//     intact: the period there is followed by a digit, not a space.
+//   * never cut mid-word. Text with no sentence boundary at all (a raw error dump
+//     from a relearn example) falls back to a word-boundary cut, which is the only
+//     honest option left when the content has no sentences to respect.
+// Returns `{ lead, full, more }`. `full` is the whole normalised text, which is
+// what the expanded state renders; `more` says whether anything was withheld.
+// Deliberately NOT `{ lead, rest }` to be concatenated on expand: the word-
+// boundary fallback appends an ellipsis to the lead, so lead + rest would have put
+// "…" in the middle of the expanded sentence.
+function splitLead(text, budget = INBOX_LEAD_CHARS) {
+  const full = String(text || '').replace(/\s+/g, ' ').trim();
+  if (full.length <= budget) return { lead: full, full, more: false };
+  const re = /[^.!?]+[.!?]+(?:\s+|$)/g;
+  let lead = '';
+  let m;
+  while ((m = re.exec(full)) !== null) {
+    if (lead && (lead + m[0]).trim().length > budget) break;
+    lead += m[0];
+    if (lead.trim().length >= budget) break;
+  }
+  lead = lead.trim();
+  if (!lead) {
+    const cut = full.lastIndexOf(' ', budget);
+    lead = (cut > 0 ? full.slice(0, cut) : full.slice(0, budget)).trim() + '…';
+  }
+  return { lead, full, more: lead !== full };
+}
+
+// The description block: a short lead, and "Read more" only where there is
+// genuinely more. The CSS clamp stays as a hard ceiling so a narrow viewport
+// cannot let a long single sentence break the height band; on a normal width the
+// lead already fits inside it, so the clamp never actually bites.
+function TrimmedDescription({ text }) {
   const [open, setOpen] = useState(false);      // per row, local, never persisted
-  const [clipped, setClipped] = useState(false);
-  useEffect(() => {
-    const el = ref.current;
-    // While open the element cannot overflow, so measuring here would clear the
-    // flag and take the "Show less" link away with it. The value measured before
-    // opening is the one that stays true.
-    if (!el || open) return;
-    setClipped(el.scrollHeight - el.clientHeight > 1);
-  });
+  const { lead, full, more } = splitLead(text);
+  if (!full) return null;
   return html`
     <div>
-      <div class=${'inbox-desc' + (open ? ' is-open' : '')} ref=${ref}>${children}</div>
-      ${clipped ? html`
-        <div class="sz-link inbox-more" onClick=${() => setOpen(o => !o)}>${open ? 'Show less' : 'Show more'}</div>` : null}
+      <div class=${'inbox-desc' + (open ? ' is-open' : '')}>
+        <div class="sz-note">${open ? full : lead}</div>
+      </div>
+      ${more ? html`
+        <div class="sz-link inbox-more" onClick=${() => setOpen(o => !o)}>${open ? 'Read less' : 'Read more'}</div>` : null}
     </div>`;
 }
 
@@ -8323,40 +8356,17 @@ function pastWindowLabel(days) {
   return 'the last ' + (Number.isInteger(n) ? n : n.toFixed(0)) + ' days';
 }
 
-// --- Span disclosure: the asymmetry a merged ranking would otherwise hide --
+// A `inboxSpan(item, spans)` helper used to live here, naming per row the span its
+// figure was observed over: a cost proposal sees a bounded `window_days`, a relearn
+// cluster sees all retained history. It is GONE because the per-row amount caption
+// that carried it was removed on founder instruction, which retired the per-row
+// span disclosure with it.
 //
-// The two ledgers on this list do NOT observe the same period, and both report
-// their figure under the name `past_overspend`. A cost proposal observes a
-// BOUNDED window (`window_days`, 30 today). A relearn cluster scans every
-// session tokenjam still retains, which is a different and usually longer span
-// (`corpus_basis` on the finding says exactly what it read, and `window_days`
-// there is the measured occurrence span, not a setting).
-//
-// While those two lived on separate tabs, each tab could state its own span
-// once and be done. Ranking them together makes the reader compare an all-time
-// figure against a 30-day one, so the span has to travel with every row or the
-// ordering is quietly comparing different periods. It is disclosed QUIETLY, in
-// the figure's own caption, because it qualifies the number rather than
-// competing with it.
-//
-// This deliberately does NOT unify the spans. Putting every analyzer on one
-// observed corpus span is real work with its own correctness questions and is
-// tracked separately; pretending they already agree by hiding the difference is
-// the one option that is not honest.
-function inboxSpan(item, spans) {
-  if (item && item.kind === 'relearn') {
-    const days = Number((spans && spans.corpusWindowDays) || 0);
-    return {
-      text: days ? 'over ' + days.toFixed(0) + ' days of scanned history' : 'over the scanned history',
-      title: (spans && spans.corpusBasis)
-        || 'Scanned across every session tokenjam still retains, not a fixed window.',
-    };
-  }
-  return {
-    text: 'over ' + pastWindowLabel(spans && spans.costWindowDays),
-    title: 'Observed over this bounded analysis window. A recurring-mistake row on this list is measured over all retained history instead, so the two spans differ.',
-  };
-}
+// The asymmetry itself is REAL and did not go away: the ranking still orders a
+// 30-day cost figure against an all-time recurrence figure. `corpus_basis` and
+// `window_days` are still on the finding for whoever states it next, and the
+// headline tile still names its own window. Putting every analyzer on one observed
+// corpus span remains separate, tracked work.
 
 // The SECOND past-tense sentence, rendered ONLY where the total observed COST
 // and the avoidable figure are genuinely different quantities — today `resend`
@@ -8403,16 +8413,14 @@ function PastOverspendTile({ block }) {
   const causes = block.proposal_count || 0;
   if (!causes && !toks) return null;
   const win = pastWindowLabel(block.window_days);
-  const cost = block.observed_cost_usd;
-  // Everything the removed prose used to state, kept intact as the figure's
-  // own hover text so no disclosure is lost with the layout.
-  const derivation = [
-    block.basis, block.disclosure,
-    cost != null
-      ? `Those same behaviours cost ${fmtUsd(cost)} in total over ${win}. That is cost, not waste: the rest of it was not shown to be avoidable, so it is reported separately and never added to the figure above.`
-      : '',
-    block.cost_disclosure,
-  ].filter(Boolean).join('\n\n');
+  // The derivation the figure carries on hover. `observed_cost_usd` is NOT part of
+  // it any more: the rollup's total covers 2 of its 13 proposals, so printing it
+  // beside a 13-proposal avoidable figure attached a two-proposal denominator to
+  // "13 causes" and invited a part-of-whole reading the numbers do not support
+  // (summarize alone contributes ~4,811 of avoidable from a proposal with no
+  // observed cost at all). Removed rather than reworded, on founder call. The
+  // field's removal from the rollup itself is separate, tracked work.
+  const derivation = [block.basis, block.disclosure].filter(Boolean).join('\n\n');
   return html`
     <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
       <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">
@@ -8422,13 +8430,13 @@ function PastOverspendTile({ block }) {
       ${/* Past tense in the figure's own caption, not only in the label: a
             screenshot of this tile has to carry its own tense. */ ''}
       <div style="font-size:24px;font-weight:600;margin-top:4px" title=${derivation}>${usd != null ? fmtUsd(usd) : '—'}</div>
+      ${/* All three parts read from the SAME population, which is why this
+            version is honest where the old one was not: `window_days`,
+            `past_overspend_tokens` and `proposal_count` are each summed over the
+            same 13 proposals. Rendered from the block, never hardcoded. */ ''}
       <div class="dim" style="font-size:12px;margin-top:2px">
-        was avoidable over ${win}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''}${causes ? ' · ' + causes + ' cause' + (causes === 1 ? '' : 's') : ''}
+        over ${win}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''}${causes ? ' · ' + causes + ' cause' + (causes === 1 ? '' : 's') : ''}
       </div>
-      ${cost != null ? html`
-        <div class="dim" style="font-size:11px;margin-top:2px" title=${block.cost_disclosure || ''}>
-          of ${fmtUsd(cost)} total cost — that is cost, not waste
-        </div>` : null}
     </div>`;
 }
 
@@ -8496,6 +8504,21 @@ function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, 
 // user vocabulary, never internal jargon ("relearn", "rung 2") as the
 // primary label. `family_key`/`rung` stay available in the row's title
 // attribute for anyone who wants the internal detail.
+// One sentence answering "what is this" for a relearn cluster, which carries no
+// analyzer prose of its own. The failure TEXT is the answer: it is what actually
+// recurred, it exists on every cluster, and it is not duplicated anywhere else on
+// the collapsed row (the fix goes in the copy box or behind Approve; the examples
+// live in the modal).
+//
+// Falls back through `proposed_fix` to `title` so the block is never empty, and
+// derives nothing it cannot read off the cluster. `splitLead` handles the fact
+// that an error dump has no sentence boundaries.
+function relearnDescription(cluster) {
+  if (!cluster) return '';
+  const firstSnippet = ((cluster.examples || []).find(e => e && e.snippet) || {}).snippet;
+  return String(firstSnippet || cluster.proposed_fix || cluster.title || '').trim();
+}
+
 const RELEARN_BADGE_BY_RUNG = { 1: 'PROMPT TWEAK', 2: 'SNIPPET', 3: 'GUARDRAIL', 4: 'GUARDRAIL', 5: 'GUARDRAIL' };
 function relearnBadge(cluster) {
   if (cluster.advise_only) return 'ADVISE ONLY';
@@ -8517,7 +8540,7 @@ function relearnBadge(cluster) {
 // the bulk review queue can drive (see `bulkRelearn` in ReviewInboxView) — an
 // unselectable-looking row that a bulk action can still reach is the ambiguity
 // the scoping rule exists to remove.
-function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDismiss, suppressed }) {
+function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, suppressed }) {
   // Observed first, projection second (see `relearnObservedFigure`). `observed`
   // is null only for a pre-observed-fields cache, in which case the forward
   // figure renders instead — under its own "est. / mo" caption, never
@@ -8540,7 +8563,6 @@ function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDi
   const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
   const canApply = inboxCanApply(cluster);
   const hasSnippet = inboxHasSnippet(cluster);
-  const span = inboxSpan(cluster, spans);
   const fixText = String(cluster.proposed_fix || '').trim();
   // The FULL reason tokenjam will not write this one, not the compressed label.
   // The short form (`writeGateNote`, still used nowhere else) existed because
@@ -8573,14 +8595,12 @@ function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDi
         <span class="badge badge-warning" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
         <${MechanismTags} item=${cluster} />
         <span style="margin-left:auto;text-align:right">
-          ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
-                asserted "estimated", stacking four lines in this column. Matches
-                the cost cards' single caption so every row on the list reads
-                alike. The basis stays on hover, and the SPAN the figure was
-                observed over is named in the caption (see `inboxSpan`) because
-                this row's span is not the cost rows' span. */ ''}
+          ${/* The figure alone. Both row shapes carry exactly this, so the
+                right-hand column reads identically down the list. The basis stays
+                on hover. */ ''}
+          ${/* Figure only; the caption line was removed on founder instruction,
+                the same removal the cost card got. */ ''}
           <span class="po-amount" title=${(observed ? cluster.past_overspend_basis : cluster.monthly_rate_basis) || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate; review before applying'}>${headline.big}</span>
-          <div class="dim" style="font-size:10px" title=${span.title}>${observed ? 'already cost ' + span.text : 'est. / mo'}${headline.sub ? ' · ' + headline.sub : ''}</div>
         </span>
       </div>
       ${/* THE DESCRIPTION BLOCK, the same clamp the cost card uses, so the two
@@ -8599,17 +8619,28 @@ function RecurringMistakeRow({ cluster, spans, checked, onToggle, onExpand, onDi
             rather than a one-line refusal, the mechanism tag already says the row
             has no writer, and the fix block below carries the recommendation the
             reader acts on. */ ''}
+      ${/* A DESCRIPTION, in words, before any counts. A relearn cluster carries no
+            analyzer prose, so it used to render nothing but "Recurred in N
+            sessions" and read as a different species of row from a cost card.
+            `relearnDescription` derives the sentence from what the cluster
+            actually has: the failure text itself, which is the one thing that
+            answers "what is this" for every cluster, applyable or not, and is not
+            duplicated anywhere else on the collapsed row. */ ''}
       <div style="margin-top:8px">
-        <${ClampedDescription}>
-          <div class="dim" style="font-size:12px">Recurred ${cluster.occurrences} time${cluster.occurrences === 1 ? '' : 's'} across ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
-          ${showForward ? html`<div class="dim" style="font-size:11px;margin-top:4px">~${est.big} / mo if fixed</div>` : null}
-          ${cannotApplyReason || payback ? html`
-            <div class="sz-note" style="font-size:12px;margin-top:6px">
-              ${cannotApplyReason || ''}
-              ${payback ? html`<div class="dim" style="margin-top:4px">${payback} This is a modelled comparison, not an observed one; it does not count what the rule might save by preventing the failure.</div>` : null}
-            </div>` : null}
-        <//>
+        <${TrimmedDescription} text=${relearnDescription(cluster)} />
       </div>
+      ${/* Counts are METADATA and follow the description, no longer standing in
+            for it. */ ''}
+      <div class="dim" style="font-size:11.5px;margin-top:6px">Recurred ${cluster.occurrences} time${cluster.occurrences === 1 ? '' : 's'} across ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}${showForward ? ' · ~' + est.big + ' / mo if fixed' : ''}</div>
+      ${/* Why tokenjam will not write it, in the budget's own words. Its own
+            disclosure, collapsed: it is a paragraph of write economics, and the
+            mechanism tag above already says the row has no writer. */ ''}
+      ${cannotApplyReason || payback ? html`
+        <details class="po-basis">
+          <summary>Why there is no permanent fix on offer</summary>
+          ${cannotApplyReason ? html`<p>${cannotApplyReason}</p>` : null}
+          ${payback ? html`<p>${payback} This is a modelled comparison, not an observed one; it does not count what the rule might save by preventing the failure.</p>` : null}
+        </details>` : null}
 
       ${/* The two fix facts are rendered INDEPENDENTLY, mirroring how the cost
             card has always rendered its own two. A relearn cluster happens never
@@ -8995,13 +9026,7 @@ const APPLY_KIND_COPY = {
   mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
 };
 
-// `spans` carries BOTH ledgers' spans (see `inboxSpan`) and replaced a
-// `windowDays` prop that carried only this card's own: while the two ledgers had
-// separate tabs, a cost card only ever needed its own window. On one list the
-// row has to be able to say how its span differs from its neighbour's, so the
-// span is threaded as one object from one source rather than as a per-card
-// scalar each caller re-reads.
-function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
+function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
   // Headline figure is the card's own PAST OVERSPEND: what this behaviour
   // already cost over the analyzed window, read straight off the payload
   // (`past_overspend_usd`/`_tokens`, stamped server-side by
@@ -9092,7 +9117,6 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
   // card that renders both, which `deadweight`'s mcp_remove proposal does.
   const canApply = inboxCanApply(prop);
   const hasSnippet = inboxHasSnippet(prop);
-  const span = inboxSpan(prop, spans);
 
   // WHY tokenjam cannot apply this one, in the server's own words. Never
   // paraphrased here: `apply_blocked_reason` is stamped by the adapter that
@@ -9121,12 +9145,15 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
         <${MechanismTags} item=${prop} />
         ${/* Body-coloured, never accent-blue: the accent on this page belongs
-              to figures a fix returns, and this one is money already gone.
-              The caption names the SPAN, and its hover states that the spans on
-              this list are not all the same (see `inboxSpan`). */ ''}
+              to figures a fix returns, and this one is money already gone. */ ''}
+        ${/* Figure only. The caption under it ("avoidable over the last 30 days ·
+              ~12.3B tok") was removed on founder instruction, which also retires
+              the per-row span disclosure: the spans still differ between the two
+              ledgers, but the page no longer states it per row. The derivation
+              stays reachable through the amount's own hover and the
+              "How this number was derived" expander below. */ ''}
         <span style="margin-left:auto;text-align:right">
           <span class="po-amount" title=${prop.past_overspend_basis || ''}>${est.big}</span>
-          <div class="dim" style="font-size:10px" title=${span.title}>${est.noAvoidable ? 'no avoidable figure on this card' : ('avoidable ' + span.text + (est.sub ? ' · ' + est.sub : ''))}</div>
         </span>
       </div>
       ${/* THE DESCRIPTION BLOCK. Every prose line the card carries lives inside
@@ -9143,12 +9170,22 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
             coverage note that says why the gap is unanalysed rather than
             unavoidable. */ ''}
       <div style="margin-top:8px">
-        <${ClampedDescription}>
-          <div class="sz-note">${description}</div>
-          ${observedCost ? html`<div class="sz-note" style="margin-top:4px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
-          ${prop.coverage_note ? html`<div class="dim" style="font-size:11px;margin-top:4px">${prop.coverage_note}</div>` : null}
-        <//>
+        <${TrimmedDescription} text=${description} />
       </div>
+      ${/* The second past-tense COST sentence: short, and true of THIS row, so it
+            stays visible rather than going behind Read more. */ ''}
+      ${observedCost ? html`<div class="sz-note" style="margin-top:6px" title=${prop.observed_cost_basis || ''}>${observedCost}</div>` : null}
+      ${/* COVERAGE keeps its own disclosure rather than being folded into the
+            description's Read more: it answers a different question (what was NOT
+            analysed, never what was unavoidable) and that sentence is the whole
+            point of it. It is collapsed by default because on `resend` it is a
+            five-line block, which is what made that row four times its
+            neighbours' height. */ ''}
+      ${prop.coverage_note ? html`
+        <details class="po-basis">
+          <summary>What this figure does and does not cover</summary>
+          <p>${prop.coverage_note}</p>
+        </details>` : null}
       ${/* OUTSIDE the clamp, deliberately. The refusal is not explanatory prose,
             it is the row's operative fact: it names what tokenjam cannot do and,
             in the server's own wording, what the reader can do instead. A reader
@@ -9197,15 +9234,12 @@ function CostProposalCard({ prop, mechanism, spans, busy, focused, onMark, onDis
                 per-project, so say so and give the two real exits instead of
                 an empty box that only errors on Apply. */ ''}
           ${!prop.target_path ? html`
-            <div class="sz-note" style="margin-top:6px;font-size:12px">
-              tokenjam doesn't know this project's path yet, so it can't choose the <code>CLAUDE.md</code> for you. Two ways forward:
-              <div style="margin-top:4px">1. paste the project's <code>CLAUDE.md</code> path below and apply it directly, or</div>
-              <div style="margin-top:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                <span>2. register the project once so tokenjam fills it in for you: run this from that repo</span>
-                <span style="display:inline-flex;align-items:center;gap:6px">
-                  <code>tj onboard --add-project</code><${CopySnippetButton} text="tj onboard --add-project" />
-                </span>
-              </div>
+            ${/* One sentence, not a numbered list. It carried the same two exits
+                  over four stacked lines and was the single largest non-snippet
+                  contributor to row height; nothing was dropped, only unstacked. */ ''}
+            <div class="sz-note" style="margin-top:6px;font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span>tokenjam doesn't know this project's path, so paste its <code>CLAUDE.md</code> below, or register it once with</span>
+              <code>tj onboard --add-project</code><${CopySnippetButton} text="tj onboard --add-project" />
             </div>
           ` : null}
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -9439,12 +9473,9 @@ function ReviewInboxView({ params }) {
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
         clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
         failuresExamined: f.failures_examined,
-        // The relearn SPAN, for the per-row disclosure (`inboxSpan`). Both come
-        // off the finding, not off a cluster: the corpus is a property of the
-        // run. `window_days` here is the measured occurrence span, not a
-        // configured window, and `corpus_basis` is the server's own sentence
-        // naming what was actually read, so this surface cannot invent a
-        // second description of the scan.
+        // Kept on the finding state even though the per-row span caption was
+        // removed: `sessionsScanned` feeds the loading note, and these two are the
+        // scan's own description of its corpus, which the header still reports.
         windowDays: f.window_days,
         corpusBasis: f.corpus_basis,
       });
@@ -9608,15 +9639,6 @@ function ReviewInboxView({ params }) {
   // that, it never invents a dollar figure where none exists.
   const suppressed = false;
 
-  // The SPANS the two ledgers observed, threaded to every row (`inboxSpan`).
-  // One object from one source, so a row cannot state a span the page's own
-  // headline disagrees with.
-  const spans = {
-    corpusWindowDays: d.windowDays,
-    corpusBasis: d.corpusBasis,
-    costWindowDays: costPastOverspend && costPastOverspend.window_days,
-  };
-
   // --- ONE open list -------------------------------------------------------
   //
   // The two ledgers are merged here and then treated identically. Rows are
@@ -9693,11 +9715,11 @@ function ReviewInboxView({ params }) {
   // the top rows, the collapsed tail and the unobserved group cannot drift into
   // three slightly different row treatments.
   const renderRow = (i) => (i.kind === 'relearn'
-    ? html`<${RecurringMistakeRow} key=${'r:' + i.signature} cluster=${i} spans=${spans}
+    ? html`<${RecurringMistakeRow} key=${'r:' + i.signature} cluster=${i}
         checked=${checked.has(i.signature)} onToggle=${() => toggle(i.signature)}
         onExpand=${() => startReview([i.signature])}
         onDismiss=${() => dismissOne(i.signature)} suppressed=${suppressed} />`
-    : html`<${CostProposalCard} key=${'c:' + i.signature} prop=${i} spans=${spans}
+    : html`<${CostProposalCard} key=${'c:' + i.signature} prop=${i}
         busy=${marking === i.signature} focused=${i.analyzer === analyzerFocus}
         onMark=${markCostApplied} onDismiss=${dismissOne}
         onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`);

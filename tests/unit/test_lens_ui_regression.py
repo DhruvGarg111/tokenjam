@@ -2334,7 +2334,11 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "useState(prop.target_path || '')" in row
     # The guidance is gated on there being no resolved path, and names both exits.
     assert "!prop.target_path ? html`" in row
-    assert "paste the project's" in row
+    # Both exits are still named; the wording was unstacked from a numbered list to
+    # one sentence, because four stacked lines were the largest non-snippet
+    # contributor to row height.
+    assert "paste its <code>CLAUDE.md</code> below" in row
+    assert "register it once with" in row
     # The register-command is one-click copyable, not just prose.
     assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
     # Smarter UX: "no path yet" is not an error. The buttons are disabled until
@@ -2915,7 +2919,11 @@ def test_relearn_rows_never_offer_mark_applied(html):
     # A non-applyable row states the budget's REAL reason, not a compressed label,
     # so the reader learns what to do instead of just that a gate fired.
     assert "cluster.advise_only_reason" in row
-    assert "${cannotApplyReason || ''}" in row
+    # It now lives in its own collapsed disclosure rather than an inline paragraph:
+    # it is a paragraph of write economics, and the mechanism tag already says the
+    # row has no writer.
+    assert "<summary>Why there is no permanent fix on offer</summary>" in row
+    assert "<p>${cannotApplyReason}</p>" in row
     # The compressed one-liner is gone from the UI. Asserted on the DEFINITION
     # and the string it produced, not on the bare name: a tombstone comment
     # deliberately still names the removed helper and points at its surviving
@@ -3050,33 +3058,49 @@ def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
     #
     # Clamped on LINES, so the collapsed height does not depend on how the text
     # happens to wrap at the current width.
-    assert "-webkit-line-clamp: 3" in html
+    assert "-webkit-line-clamp: 2" in html
     assert ".inbox-desc.is-open" in html
     assert "-webkit-line-clamp: unset" in html
     # min-height matches the clamp, which is the half that stops the raggedness
     # simply MOVING to the short rows: a row with little or no prose has to occupy
     # the same space as one with a wall of it.
-    assert "min-height: calc(3 * 1.55 * 13px)" in html
+    assert "min-height: calc(2 * 1.55 * 13px)" in html
     assert ".inbox-desc.is-open" in html and "min-height: 0" in html
 
-    # The expander is measured from the DOM, never guessed from a character count:
-    # the same string clips at one card width and not another.
-    fn_start = html.index("function ClampedDescription({ children })")
-    fn = html[fn_start:html.index("// The collapse/floor labels", fn_start)]
-    assert "el.scrollHeight - el.clientHeight > 1" in fn
-    # Measuring while open would clear the flag and remove the "Show less" link.
-    assert "if (!el || open) return;" in fn
+    # The prose is trimmed TEXTUALLY at a sentence boundary, not merely clipped:
+    # a pure CSS clamp gave equal heights but cut mid-clause, and the founder asked
+    # for the collapsed state to read as a short complete thought.
+    split = html[html.index("function splitLead(text, budget"):]
+    split = split[:split.index("\n// The description block")]
+    # Boundary is punctuation FOLLOWED BY whitespace, which is what keeps
+    # "$1,842.56 of that cost" and "claude-4.7" from being treated as sentence ends.
+    assert "/[^.!?]+[.!?]+(?:\\s+|$)/g" in split
+    # Never mid-word either: text with no sentence boundary at all (a raw error
+    # dump) falls back to a word-boundary cut.
+    assert "full.lastIndexOf(' ', budget)" in split
+    # The expanded state renders the WHOLE text, never lead + rest concatenated,
+    # because the fallback lead carries a trailing ellipsis.
+    assert "return { lead, full, more: lead !== full }" in split
+
+    fn = html[html.index("function TrimmedDescription({ text })"):]
+    fn = fn[:fn.index("\n}")]
+    assert "${open ? full : lead}" in fn
+    assert "${more ? html`" in fn
     # Per row, local, not persisted, not expanded by default.
     assert "useState(false)" in fn
     assert "localStorage" not in fn and "sessionStorage" not in fn
-    assert "'Show less' : 'Show more'" in fn
+    assert "'Read less' : 'Read more'" in fn
+
+    # The server's strings are split, never rewritten: a paraphrase in the UI would
+    # be a second drifting copy of the analyzer's claim.
+    assert "splitLead(text)" in fn
 
     # Both row shapes wrap their prose in it, so the collapsed tail and the
     # below-the-fold group inherit the rhythm through the same components.
     row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
-    assert "<${ClampedDescription}>" in row
-    assert "<${ClampedDescription}>" in card
+    assert "<${TrimmedDescription} text=${relearnDescription(cluster)} />" in row
+    assert "<${TrimmedDescription} text=${description} />" in card
 
     # A relearn cluster has no analyzer prose, so its block leads with the facts it
     # does have (requirement: give every row a first line worth reading).
@@ -3088,10 +3112,15 @@ def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
     # Matched on the RENDERED markup, not the phrase: a comment above the
     # component explains the same rule in prose and would match first, making the
     # ordering check compare a comment against the clamp.
-    blocked_at = card.index(">tokenjam cannot apply this one: ${blockedReason}<")
-    clamp_close = card.index("<//>")
-    assert blocked_at > clamp_close, "the blocker reason must not be inside the clamp"
-    assert card.index("<summary>How this number was derived</summary>") > clamp_close
+    desc_at = card.index("<${TrimmedDescription} text=${description} />")
+    assert card.index(">tokenjam cannot apply this one: ${blockedReason}<") > desc_at, \
+        "the blocker reason must not be inside the trimmed description"
+    assert card.index("<summary>How this number was derived</summary>") > desc_at
+    # COVERAGE keeps its OWN disclosure rather than being folded into Read more: it
+    # answers what was NOT analysed, which is the whole point of it, and on resend it
+    # is a five-line block, the reason that row was four times its neighbours' height.
+    assert "<summary>What this figure does and does not cover</summary>" in card
+    assert card.index("<summary>What this figure does and does not cover</summary>") > desc_at
 
 
 def test_a_row_tj_cannot_apply_states_the_servers_own_blocker_reason(html):
@@ -3147,36 +3176,59 @@ def test_bulk_mark_applied_can_never_post_a_relearn_row_to_the_cost_ledger(html)
     assert "props.filter(x => x.kind !== 'relearn' && !x.apply_capable)" in fn
 
 
-def test_every_row_discloses_the_span_its_figure_was_observed_over(html):
-    # The two ledgers do NOT observe the same period and both report under the
-    # name `past_overspend`: a cost proposal sees a bounded window, a relearn
-    # cluster sees all retained history. While they had separate tabs each tab
-    # could state its span once. Ranked together, an undisclosed span means the
-    # order is quietly comparing a 30-day figure against an all-time one.
-    start = html.index("function inboxSpan(item, spans)")
-    end = html.index("\n}", start)
-    fn = html[start:end]
-    # Relearn reads the server's own corpus sentence, never a locally invented
-    # description of the scan.
-    assert "spans.corpusBasis" in fn
-    assert "days of scanned history" in fn
-    # Cost reads its bounded window through the shared label helper.
-    assert "pastWindowLabel(spans && spans.costWindowDays)" in fn
-    # The spans come off the finding / the past-overspend block, in one place.
+def test_the_per_row_amount_caption_is_gone(html):
+    # INVERTED (was test_every_row_discloses_the_span_its_figure_was_observed_over).
+    # The caption under each row's dollar figure ("avoidable over the last 30 days ·
+    # ~12.3B tok") was removed on founder instruction, which retires the per-row
+    # span disclosure with it. Its RETURN is the regression now.
+    assert "function inboxSpan" not in html
+    assert "spans=${spans}" not in html
+    assert "avoidable ' + span.text" not in html
+    assert "'already cost ' + span.text" not in html
+    # Both row shapes keep the figure itself and nothing under it.
+    for comp, end in (("function RecurringMistakeRow", "function RelearnApplyModal"),
+                      ("function CostProposalCard", "function InboxStatTiles")):
+        block = html[html.index(comp):html.index(end)]
+        assert 'class="po-amount"' in block
+        assert 'style="font-size:10px"' not in block, "the caption line must not come back"
+
+    # The asymmetry the caption used to disclose is real and did not go away, so the
+    # scan's own description of its corpus stays on the payload state for whoever
+    # states it next.
     view = html[html.index("function ReviewInboxView"):]
-    assert "corpusWindowDays: d.windowDays" in view
-    assert "corpusBasis: d.corpusBasis" in view
-    assert "costWindowDays: costPastOverspend && costPastOverspend.window_days" in view
     assert "windowDays: f.window_days" in view
     assert "corpusBasis: f.corpus_basis" in view
-    # Both row shapes render it in the figure's own caption.
-    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
-    assert "'already cost ' + span.text" in row
-    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
-    assert "'avoidable ' + span.text" in card
-    # The per-card `windowDays` prop is gone: two props carrying the same fact
-    # from two sources is the drift this consolidation removes.
-    assert "windowDays=${costPastOverspend" not in html
+
+
+def test_the_headline_tile_caption_reads_one_population(html):
+    # The tile's caption used to read "was avoidable over the last 30 days · ~21.9B
+    # tok · 13 causes of $7,653.24 total cost — that is cost, not waste". The
+    # total-cost clause was FALSE as rendered: `observed_cost_usd` covers 2 of the
+    # 13 proposals (resend + relearn), so it attached a two-proposal denominator to
+    # "13 causes", and summarize alone contributes ~4,811 of avoidable from a
+    # proposal carrying no observed cost at all.
+    tile = html[html.index("function PastOverspendTile"):html.index("// A `writeGateNote")
+                if "// A `writeGateNote" in html else html.index("function PastOverspendTile") + 3000]
+    tile = html[html.index("function PastOverspendTile"):]
+    tile = tile[:tile.index("\nfunction ")]
+    # Survives: window, tokens and cause count, all summed over the same proposals.
+    assert "over ${win}" in tile
+    assert "fmtTokens(toks)" in tile
+    assert "causes + ' cause'" in tile
+    # Gone: the leading "was avoidable" wording and the whole total-cost clause.
+    assert "was avoidable over" not in tile
+    assert "total cost" not in tile
+    assert "block.observed_cost_usd" not in tile
+    assert "cost_disclosure" not in tile, "no orphaned disclosure for a removed figure"
+    # Not hardcoded. Scoped to the RETURNED markup: the surrounding comment quotes
+    # the real figures to explain why the old caption was false, and a whole-function
+    # literal check matches the explanation instead of the render.
+    markup = tile[tile.index("return html`"):]
+    for lit in ("21.9", "7,653", "6163", "13 cause"):
+        assert lit not in markup
+    # The figure and its OBSERVED treatment stay.
+    assert "po-observed-tag" in tile
+    assert "fmtUsd(usd)" in tile
 
 
 def test_the_ordering_key_cannot_reach_a_projection(html):

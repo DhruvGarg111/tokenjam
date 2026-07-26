@@ -742,21 +742,37 @@ def test_the_observed_figure_renders_from_the_server_block_only(ui):
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
     band = ui[ui.index("function PastOverspendTile"):]
     band = band[:band.index("\n}")]
-    # The headline is the AVOIDABLE amount, and says so — it is no longer
-    # labelled as everything the behaviour cost.
+    # The headline is the AVOIDABLE amount, and the tile's own label says so.
     assert "What you could have avoided" in band
-    assert "was avoidable" in band
     assert "recoverable" not in band
     assert "could save" not in ui
     # No ratio framing ("recovering $X of a $Y problem") anywhere.
     assert "recovering $" not in ui
-    # The cost line survived the band's removal: still present, still past
-    # tense, still worded as COST rather than waste. It is terser and its long
-    # form moved into the figure's hover text, but rule 30's disclosure is not
-    # something a layout change is allowed to drop.
-    assert "total cost" in band
-    assert "that is cost, not waste" in band.lower()
-    assert "That is cost, not waste" in band
+
+    # INVERTED, and this half used to assert the DEFECT. The tile rendered
+    # "... 13 causes of $7,653.24 total cost — that is cost, not waste", and this
+    # test required both the "was avoidable" wording and that whole clause to be
+    # present. Measured on the live block, the clause was false as rendered:
+    # `past_overspend_usd` sums 13 proposals while `observed_cost_usd` covers 2
+    # (resend + relearn), so it attached a two-proposal denominator to "13 causes".
+    # It is also not the part-of-a-whole relationship `cost_disclosure` claimed:
+    # summarize alone contributes ~4,811 of avoidable from a proposal with NO
+    # observed cost, so most of the avoidable total lies outside the 7,653 entirely.
+    #
+    # Rule 30's disclosure is not being dropped, it is being made unnecessary: with
+    # no companion total on the tile there is no adjacency to misread. The
+    # PER-ROW disclosure is a different quantity, true of a single proposal, and is
+    # asserted intact below.
+    assert "was avoidable" not in band
+    assert "total cost" not in band
+    assert "cost, not waste" not in band.lower()
+    # Scoped to the RETURNED markup: the comment above the render names the removed
+    # field to explain why it went, and a whole-function check matches that
+    # explanation instead of the render.
+    markup = band[band.index("return html`"):]
+    assert "observed_cost_usd" not in markup
+    # And no orphaned disclosure describing a figure the tile no longer shows.
+    assert "cost_disclosure" not in markup
     fn = ui[ui.index("function observedCostSentence"):]
     fn = fn[:fn.index("\n}")]
     assert "this behaviour cost " in fn
