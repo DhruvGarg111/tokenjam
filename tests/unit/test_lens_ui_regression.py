@@ -275,23 +275,40 @@ def test_overview_fetches_in_parallel(html):
     assert "await Promise.all([" in html
 
 
+def _dashboard_src(html: str) -> str:
+    """Just DashboardView's own body, for assertions about what this page fetches."""
+    start = html.index("function DashboardView")
+    return html[start:html.index("// Two lenses, one router", start)]
+
+
 def test_overview_error_handling_is_asymmetric(html):
     # /cost is load-bearing: NO .catch, so its failure surfaces the error state.
     # The other panels still degrade individually so one failing panel never
     # blanks the Dashboard. Don't unify these (#124 review).
     assert "api('/cost', { since, group_by: 'day' }).catch" not in html  # no catch on /cost
-    assert "api('/cost', { since, group_by: 'day' })," in html           # bare, inside Promise.all
-    assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
+    assert "api('/cost', { since, group_by: 'day' })," in html
+    # /cost/compare is no longer fetched by this page at all. It fed `d.compare`,
+    # which nothing rendered (the run-rate comparison it was added for now comes
+    # from the explorer's own kpi_deltas), so once the shared batch was split into
+    # one read per source there was nowhere left to put a read whose result was
+    # never displayed. On a page where every request costs tens of seconds of DB
+    # time, a per-poll read nothing renders is not worth keeping.
+    assert "api('/cost/compare'" not in _dashboard_src(html)
     # How they degrade changed: a read that feeds a tile making a factual claim
     # is settled into a tagged {ok, data} outcome rather than an empty default,
     # because an empty default let a failed read publish a zero and its
     # reassuring caption ("0 unread alerts / all clear"). See
     # test_lens_dashboard_states.py for the rule and the behavioural tests.
-    assert "settled(api('/drift'))" in html
-    assert "const settled = (p) => p.then(data => ({ ok: true, data }), error => ({ ok: false, error }));" in html
-    # And the slow analyzer sweep is no longer a member of this batch at all:
-    # a Promise.all resolves on its slowest member, and this one is minutes long.
+    #
+    # There is no longer a shared batch at all: each read settles on its own
+    # useTriageRead, whose ('loading' | 'ready' | 'error', data) pair is the
+    # contract every panel renders from. That replaced BOTH the empty-default
+    # fallbacks and the Promise.all, since a batch resolves only when its slowest
+    # member does and these members range from 13s to several minutes.
+    assert "const driftRead = useTriageRead(() => api('/drift'), []);" in html
+    assert "function useTriageRead(run, deps) {" in html
     assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" not in html
+    assert "api('/drift').catch(() => ({ agents: [] }))" not in html
 
 
 def test_overview_empty_gate_considers_historical_cost(html):
@@ -300,32 +317,30 @@ def test_overview_empty_gate_considers_historical_cost(html):
     # A DB whose sessions are all >24h old (e.g. a user upgrading to review past
     # spend) has 0 active agents but a full cost history, so the default landing
     # screen falsely read empty while Cost/Analytics/Optimize rendered fine.
-    ov_start = html.index("const setWin = v => navigate('dashboard'")
-    ov_end = html.index("const winPicker = html`", ov_start)
-    ov = html[ov_start:ov_end]
+    # Sliced to the whole view: the empty gate now sits with the other derived
+    # values, below the window picker it used to precede.
+    ov = _dashboard_src(html)
 
     # Buggy pattern GONE: empty was gated purely on active-agent count with an
     # early return before /cost was fetched.
     assert "if (!status.agents || status.agents.length === 0) {" not in ov
     assert "const status = await api('/status');" not in ov  # /status no longer fetched first + serially
 
-    # Fix pattern PRESENT: /cost is fetched in the parallel fan-out, and the
-    # empty gate considers historical cost/tokens (not just agents/traces).
-    assert "const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;" in ov
-    # The gate has since been tightened further: its /status and /traces inputs
-    # must have actually ANSWERED before it may claim there is no telemetry, so a
-    # failed read can no longer show "No data yet" to a user with a full history.
-    assert (
-        "const empty = !hasCost && status.ok && !agents.length "
-        "&& traces.ok && !traceList.length;"
-    ) in ov
-    # /cost stays load-bearing (no .catch) inside the fan-out.
-    assert "api('/cost', { since, group_by: 'day' })," in ov
-    # /status is still degradable and still inside the parallel fetch; it just
-    # degrades to a tagged outcome now instead of `{ agents: [] }`, so its
-    # failure can no longer be read as "this user has no agents".
-    assert "settled(api('/status'))" in ov
+    # Fix pattern PRESENT: the empty gate considers historical cost/tokens (not
+    # just agents/traces), and /cost is read independently rather than serially.
+    assert "const hasCost = !!costData && ((cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0);" in ov
+    assert "const costRead = useTriageRead(() => api('/cost', { since, group_by: 'day' }), [since]);" in ov
+    # The gate has since been tightened twice more. First, all three of its
+    # inputs must have actually ANSWERED before it may claim there is no
+    # telemetry, so a failed or outstanding read can no longer show "No data yet"
+    # to a user with a full history. Second, the reads are independent, so
+    # "answered" is checked per read rather than off one shared load flag.
+    assert "const emptyKnown = !!costData && !!statusRead.data && !!tracesRead.data;" in ov
+    assert "const isEmpty = emptyKnown && !hasCost && !statusAgents.length && !traceList.length;" in ov
+    # None of them degrades to an empty default any more, so a failure can no
+    # longer be read as "this user has no agents / no traces".
     assert "api('/status').catch(() => ({ agents: [] }))" not in ov
+    assert "api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] }))" not in ov
 
 
 # --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
@@ -931,7 +946,11 @@ def test_analytics_alias_preserves_query_params_and_deep_links_to_explore(html):
 def test_dashboard_spend_deduped(html):
     # Spend shown ONCE (explorer's Spend KPI tile + chart); the old separate
     # run-rate headline chart is gone, folded into a caption under the KPI row.
-    assert "const kpiCaption = (!d.loading && !d.empty && !d.error && projection" in html
+    # The caption's gate moved onto the /cost read's own answer when the page's
+    # single load flag was split into one read per source; `projection` is null
+    # until `costData` exists, so the caption still cannot be built from an
+    # unanswered read.
+    assert "const kpiCaption = (projection && projection !== '—')" in html
     assert 'class="kpi-caption"' in html
 
 

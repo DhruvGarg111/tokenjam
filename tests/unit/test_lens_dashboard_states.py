@@ -182,13 +182,53 @@ def test_recoverable_tiles_are_derived_only_from_an_answer_we_hold(html):
     assert "recoverableTiles(d.opt)" not in html
 
 
-def test_the_slow_sweep_is_not_inside_the_triage_batch(html):
-    # A Promise.all resolves on its slowest member, so folding a minutes-long
-    # analyzer sweep in there held the whole band (both columns) hostage.
-    dash = html.index("function DashboardView")
-    start = html.index("const load = useCallback(async () => {", dash)
-    end = html.index("// ---- The recoverable-waste read", start)
-    assert "'/optimize'" not in html[start:end]
+def _dashboard(html: str) -> str:
+    start = html.index("function DashboardView")
+    end = html.index("// Two lenses, one router", start)
+    return html[start:end]
+
+
+def test_no_panel_waits_on_another_panel_s_endpoint(html):
+    # There is no shared batch left. A Promise.all resolves only when its SLOWEST
+    # member does, and these members range from ~13.6s (/traces, /status) through
+    # 27.0s (/cost) to 356s (the /optimize sweep) on a real 794MB corpus, so one
+    # batch made every panel as slow as the worst of them and left the page with
+    # nothing on it in the meantime.
+    dash = _dashboard(html)
+    assert "await Promise.all([" not in dash
+    for read in (
+        "const costRead = useTriageRead(",
+        "const statusRead = useTriageRead(",
+        "const alertsRead = useTriageRead(",
+        "const driftRead = useTriageRead(",
+        "const tracesRead = useTriageRead(",
+        "const relearnRead = useTriageRead(",
+    ):
+        assert read in dash
+
+
+def test_no_read_stacks_queries_behind_itself(html):
+    # A 30s poll in front of a 27-second endpoint would otherwise keep opening new
+    # queries against a DB the previous one still holds.
+    assert "if (inFlight.current) return;" in html      # useTriageRead
+    assert "if (optInFlight.current) return;" in html   # the sweep
+
+
+def test_the_poll_interval_is_installed_once(html):
+    # Listing the six refresh callbacks as effect deps would tear the timer down
+    # and reinstall it on every window change, so a 30s timer could keep being
+    # reset before it ever fired.
+    dash = _dashboard(html)
+    assert "const tick = () => { if (document.visibilityState === 'visible') pollRef.current(); };" in dash
+    assert "document.addEventListener('visibilitychange', tick);" in dash
+
+
+def test_a_window_change_drops_the_previous_window_s_answer(html):
+    # Last window's figures under this window's label would be a fresh lie rather
+    # than a stale truth, so a deps change clears the held answer.
+    hook = html[html.index("function useTriageRead(run, deps) {"):]
+    hook = hook[:hook.index("function readStatus")]
+    assert "setSt({ phase: 'loading', data: null, error: null });" in hook
 
 
 def test_the_band_has_a_bounded_wait_that_clears_the_measured_worst_case(html):
@@ -243,11 +283,48 @@ def test_every_health_tile_declares_the_status_of_its_source(html):
 
 def test_the_front_door_empty_card_requires_its_inputs_to_have_answered(html):
     # "No data yet. TokenJam is listening." is a claim about the user's history;
-    # a failed /status or /traces means "could not check", not "nothing there".
-    assert (
-        "const empty = !hasCost && status.ok && !agents.length "
-        "&& traces.ok && !traceList.length;"
-    ) in html
+    # an outstanding or failed /cost, /status or /traces means "could not check",
+    # not "nothing there".
+    assert "const emptyKnown = !!costData && !!statusRead.data && !!tracesRead.data;" in html
+    assert "const isEmpty = emptyKnown && !hasCost && !statusAgents.length && !traceList.length;" in html
+    assert "${isEmpty ? html`" in html
+
+
+def test_a_cost_failure_no_longer_blanks_the_panels_it_does_not_feed(html):
+    # It used to replace the whole triage row with "Couldn't load triage", which
+    # threw away five health tiles whose reads have nothing to do with /cost.
+    dash = _dashboard(html)
+    assert "Couldn't load triage" not in dash
+    assert "Couldn't load spend for this window." in dash
+    assert "everything else on this page is unaffected" in dash
+
+
+# --- skeletons hold final positions ---------------------------------------- #
+def test_the_kpi_row_holds_its_position_while_its_numbers_are_unknown(html):
+    # The row used to not exist until /analytics answered, so the chart below it
+    # jumped down the page tens of seconds after first paint.
+    assert "const KPI_SKELETON_TILES = [0, 1, 2, 3];" in html
+    assert "${!error && !kpis ? html`" in html
+    assert '<div class="kpi-row" aria-hidden="true">' in html
+
+
+def test_the_chart_placeholder_matches_the_chart_height(html):
+    # 200px standing in for a 220px chart is a 20px jump on every first paint.
+    assert 'loading && !resp ? html`<div class="shimmer" style="height:220px"></div>`' in html
+
+
+def test_the_pricing_qualifier_holds_its_slot_while_unknown(html):
+    # It appeared 27 seconds in and shoved both triage bands down the page.
+    assert 'class="qualifier qualifier-skel"' in html
+
+
+def test_no_panel_is_gated_on_a_page_wide_load_flag(html):
+    # The single `d` state object is what coupled them; every panel now reads its
+    # own useTriageRead result.
+    dash = _dashboard(html)
+    assert "const [d, setD] = useState(" not in dash
+    assert "d.loading" not in dash
+    assert "d.empty" not in dash
 
 
 def test_the_anonymous_whole_band_shimmer_is_gone(html):
