@@ -8013,48 +8013,31 @@ function inboxHasSnippet(item) {
   return String(item.suggestion || '').trim() !== '';
 }
 
-function inboxNothingActionable(item) {
-  return !inboxCanApply(item) && !inboxHasSnippet(item);
-}
-
-// A stable string for the row's `data-mechanism` attribute: debuggable from the
-// console and greppable from a test, and it reports the OVERLAP ("apply
-// snippet") rather than collapsing it, so the attribute cannot drift from what
-// the two predicates decided.
+// A `MechanismTags` component and its `MECHANISM_TAG_COPY` map used to render up
+// to two badges here (TJ CAN APPLY / COPY THE FIX / NO FIX YET). Both are GONE, on
+// founder call, and the reasoning is worth keeping because it generalises: THE
+// ACTION BUTTON ALREADY SAYS WHAT PRESSING IT DOES. "Approve & write", "Remove
+// entry", "Apply note", "Mark applied" and "Review in Summarize" are each
+// unambiguous, so a badge restating them was chrome, and on the two rows that
+// showed TJ CAN APPLY and then demanded a pasted path before the button would do
+// anything, it was actively over-promising. With no label there is only one promise
+// on the row and it is the button, which is wired to the real capability, so that
+// whole class of mismatch cannot recur.
+//
+// `inboxNothingActionable` went with them: it existed only to pick the third badge
+// and had no consumer in the render, so it is deleted rather than left stranded.
+// The two predicates below still drive BEHAVIOUR (which button, whether the copy
+// box renders) and are the reason removing the labels is safe.
+//
+// `inboxMechanismTag` survives, feeding only the row's `data-mechanism` attribute:
+// a test and console hook, never anything a reader sees. It reports the OVERLAP
+// ("apply snippet") rather than collapsing it, so the attribute cannot drift from
+// what the two predicates decided.
 function inboxMechanismTag(item) {
   const parts = [];
   if (inboxCanApply(item)) parts.push('apply');
   if (inboxHasSnippet(item)) parts.push('snippet');
   return parts.length ? parts.join(' ') : 'none';
-}
-
-// The tags, in the reader's vocabulary rather than ours: what happens next, not
-// which internal flag was set ("advise_only" and "apply_capable" are our words
-// for our plumbing). Up to TWO render, because up to two are true.
-const MECHANISM_TAG_COPY = {
-  apply: {
-    label: 'TJ CAN APPLY',
-    title: 'tokenjam can make this change for you; you confirm the target first.',
-  },
-  snippet: {
-    label: 'COPY THE FIX',
-    title: 'The exact change is on the row. Copy it and apply it where it belongs.',
-  },
-  none: {
-    label: 'NO FIX YET',
-    title: 'tokenjam has no ready-made change for this one. The row says what the next step is instead.',
-  },
-};
-
-function MechanismTags({ item }) {
-  const canApply = inboxCanApply(item);
-  const hasSnippet = inboxHasSnippet(item);
-  // Neutral badge class on purpose: the mechanism is a routing fact, not a
-  // severity. The money figure is what ranks a row, and the accent on this page
-  // belongs to figures and to typeable actions.
-  const tag = k => html`<span class="badge" title=${MECHANISM_TAG_COPY[k].title}>${MECHANISM_TAG_COPY[k].label}</span>`;
-  if (!canApply && !hasSnippet) return tag('none');
-  return html`${canApply ? tag('apply') : null}${hasSnippet ? tag('snippet') : null}`;
 }
 
 // --- Ordering: observed money, and nothing that merely resembles it --------
@@ -8593,7 +8576,6 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
               wall of links. */ ''}
         <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
         <span class="badge badge-warning" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
-        <${MechanismTags} item=${cluster} />
         <span style="margin-left:auto;text-align:right">
           ${/* The figure alone. Both row shapes carry exactly this, so the
                 right-hand column reads identically down the list. The basis stays
@@ -9143,7 +9125,6 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
-        <${MechanismTags} item=${prop} />
         ${/* Body-coloured, never accent-blue: the accent on this page belongs
               to figures a fix returns, and this one is money already gone. */ ''}
         ${/* Figure only. The caption under it ("avoidable over the last 30 days ·

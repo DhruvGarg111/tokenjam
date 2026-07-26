@@ -19,6 +19,26 @@ def html() -> str:
     return _UI.read_text(encoding="utf-8")
 
 
+def _no_comments(text: str) -> str:
+    """`text` with `//` line comments stripped, for absence assertions.
+
+    This file is heavily commented BY DESIGN: the UI records why each decision was
+    made, including the wording of strings that were deliberately removed. A plain
+    `assert "X" not in html` therefore matches the explanation and fails on correct
+    code. That trap bit seven separate assertions during the inbox redesign before
+    this helper existed, each time costing a debug cycle to rediscover.
+
+    Deliberately naive: it drops from `//` to end of line only when `//` is the
+    first non-whitespace on the line, so a `//` inside a URL or a regex literal is
+    left alone. Block comments and JSX-style `${/* ... */ ''}` interpolations are
+    NOT stripped, so keep using markup-shaped assertions where those are in play.
+    """
+    return "\n".join(
+        "" if line.lstrip().startswith("//") else line
+        for line in text.splitlines()
+    )
+
+
 def test_traces_window_select_exposes_longer_supported_windows(html):
     # Traces honors these URL/API windows already; keep the filter dropdown in sync
     # so #/traces?since=30d and #/traces?since=90d render selected options.
@@ -2826,9 +2846,9 @@ def test_the_mechanism_axis_is_two_orthogonal_facts_not_one_enum(html):
     # necessarily misreports that row. Two booleans cannot.
     can_start = html.index("function inboxCanApply(item)")
     snip_start = html.index("function inboxHasSnippet(item)")
-    none_start = html.index("function inboxNothingActionable(item)")
+    tomb_start = html.index("// A `MechanismTags` component")
     can_fn = html[can_start:snip_start]
-    snip_fn = html[snip_start:none_start]
+    snip_fn = html[snip_start:tomb_start]
 
     # Each predicate reads exactly the flags its own fix block is gated on.
     assert "!item.advise_only && item.write_offered !== false" in can_fn
@@ -2840,13 +2860,28 @@ def test_the_mechanism_axis_is_two_orthogonal_facts_not_one_enum(html):
     assert "inboxHasSnippet" not in can_fn
     assert "inboxCanApply" not in snip_fn
 
-    # "Nothing actionable" is DERIVED from both being false, not a peer value.
-    derived = html[none_start:html.index("function inboxMechanismTag", none_start)]
-    assert "!inboxCanApply(item) && !inboxHasSnippet(item)" in derived
+    # "Nothing actionable" is DERIVED from both being false where it is needed, never
+    # stored as a peer value. Both rows gate their no-action copy on it inline.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "!canApply && !hasSnippet" in row
 
-    # The retired enum must not come back.
-    for dead in ("MECH_WRITE", "MECH_SNIPPET", "MECH_NONE", "MechanismBadge", "inboxMechanism("):
-        assert dead not in html, f"the three-valued enum must not return: {dead}"
+    # Neither the retired enum nor the retired BADGES may come back. The action
+    # button is the row's only promise now; a label restating it over-promised on
+    # every row that still needed a pasted path first.
+    for dead in ("MECH_WRITE", "MECH_SNIPPET", "MECH_NONE", "MechanismBadge",
+                 "inboxMechanism(", "MechanismTags", "MECHANISM_TAG_COPY",
+                 "inboxNothingActionable"):
+        assert dead not in _no_comments(html), f"must not be reintroduced: {dead}"
+    # The badge labels are gone from the CODE, though the tombstone comment still
+    # names them to record why. Checked against comment-stripped source.
+    code = _no_comments(html)
+    for label in ("TJ CAN APPLY", "COPY THE FIX", "NO FIX YET"):
+        assert label not in code, f"badge label must not be rendered again: {label}"
+    # One category badge per row, no mechanism tag beside it.
+    for comp, end in (("function RecurringMistakeRow", "function RelearnApplyModal"),
+                      ("function CostProposalCard", "function InboxStatTiles")):
+        block = html[html.index(comp):html.index(end)]
+        assert block.count('class="badge') == 1, "one category badge per row, no mechanism tag"
 
     # Never keyed on analyzer identity: the day a downsize proposal becomes
     # apply-capable its rows gain the apply control with no edit here.
@@ -2854,11 +2889,11 @@ def test_the_mechanism_axis_is_two_orthogonal_facts_not_one_enum(html):
         assert analyzer not in can_fn + snip_fn, f"must not be keyed on {analyzer}"
 
 
-def test_a_row_that_is_both_apply_capable_and_snippet_bearing_reports_both(html):
-    # deadweight's mcp_remove proposal is exactly this row. The tag component
-    # renders up to TWO badges rather than choosing one, and the `data-mechanism`
-    # attribute reports the overlap as "apply snippet" rather than collapsing it,
-    # so the attribute cannot drift from what the predicates decided.
+def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html):
+    # deadweight's mcp_remove proposal is exactly this row: `apply_capable` AND a
+    # `suggestion`. The two facts are orthogonal, so BOTH affordances must render.
+    # This used to assert two BADGES; the badges are gone (the action button says
+    # what it does), so it now asserts the behaviour the badges only described.
     tag_start = html.index("function inboxMechanismTag(item)")
     tag_fn = html[tag_start:html.index("\n}", tag_start)]
     assert "if (inboxCanApply(item)) parts.push('apply')" in tag_fn
@@ -2867,13 +2902,8 @@ def test_a_row_that_is_both_apply_capable_and_snippet_bearing_reports_both(html)
     # No early return that would make the two mutually exclusive.
     assert "else" not in tag_fn
 
-    comp_start = html.index("function MechanismTags({ item })")
-    comp = html[comp_start:html.index("\n}", comp_start)]
-    assert "${canApply ? tag('apply') : null}${hasSnippet ? tag('snippet') : null}" in comp
-    # Only the neither-case short-circuits to a single tag.
-    assert "if (!canApply && !hasSnippet) return tag('none')" in comp
-
-    # And the cost card's two blocks stay independent conditionals, not a chain.
+    # The card's two blocks are independent conditionals, not a chain, which is what
+    # lets one row show a copy box AND a confirm-target apply control together.
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
     assert "${prop.suggestion ? html`" in card
     assert "${canApply ? (hasApplyKind ? html`" in card
