@@ -38,6 +38,22 @@ def test_no_daemon_points_at_tj_serve_first(capsys):
     assert "#/review" in out
 
 
+def test_no_daemon_never_claims_tj_is_already_watching(capsys):
+    """Regression guard: the relearn job that watches sessions only runs
+    under `tj serve` -- under `--no-daemon` nothing is watching yet, and
+    claiming otherwise would contradict the very next line telling the user
+    to start the server."""
+    cmd_onboard._print_review_inbox_pointer(port=7391, want_daemon=False)
+    out = capsys.readouterr().out
+    assert "keeps watching your sessions" not in out
+
+
+def test_daemon_running_does_claim_tj_is_already_watching(capsys):
+    cmd_onboard._print_review_inbox_pointer(port=7391, want_daemon=True)
+    out = capsys.readouterr().out
+    assert "keeps watching your sessions" in out
+
+
 def test_pointer_never_prompts(monkeypatch, capsys):
     """The blocking "Enable this fix now?" ask is gone; onboard must not
     consult click.confirm from this tail at all."""

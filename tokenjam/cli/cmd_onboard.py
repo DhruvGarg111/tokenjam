@@ -1013,10 +1013,20 @@ def _print_review_inbox_pointer(*, port: int, want_daemon: bool) -> None:
     the ask also means onboard has one fewer blocking question.
     """
     console.print()
-    console.print(
-        "[heading]Recurring mistakes:[/heading] tj keeps watching your sessions "
-        "in the background."
-    )
+    if want_daemon:
+        console.print(
+            "[heading]Recurring mistakes:[/heading] tj keeps watching your sessions "
+            "in the background."
+        )
+    else:
+        # The relearn job that produces this only runs under `tj serve` --
+        # under `--no-daemon` nothing is watching anything yet, and claiming
+        # otherwise would contradict the next line telling the user to start
+        # the server.
+        console.print(
+            "[heading]Recurring mistakes:[/heading] tj will watch your sessions "
+            "in the background once the server is running."
+        )
     console.print(
         f"[muted]  Review and apply fixes in the web dashboard:[/muted] "
         f"[url]{_review_inbox_url(port, want_daemon=want_daemon)}[/url]"
