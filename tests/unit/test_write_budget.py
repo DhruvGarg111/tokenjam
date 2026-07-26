@@ -685,3 +685,23 @@ def test_a_below_floor_family_does_not_consume_a_write_slot():
 def test_the_floor_has_a_short_label_so_it_never_renders_generic():
     assert wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR) != "no permanent fix offered"
     assert "5" in wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR)
+
+
+def test_the_floor_applies_to_the_combined_family_value_not_one_members_share():
+    """Regression guard: several clusters sharing one write family collapse
+    onto ONE block (`_decide_family`), so the floor must compare against the
+    family's COMBINED net, not just the representative member's own share.
+    Two members at $3 each are individually below MIN_NET_WRITE_USD, but
+    their combined $6 clears it -- the shared rule must still be offered."""
+    candidates = [
+        _candidate("a", family="combofam", tokens=1_000_000, usd=3.0),
+        _candidate("b", family="combofam", tokens=1_000_000, usd=3.0),
+    ]
+    decisions = wb.allocate_writes(
+        candidates,
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )
+    rep_decision = next(d for d in decisions.values() if d.reason != wb.REASON_FAMILY_MERGED)
+    assert rep_decision.offered is True
+    assert rep_decision.net_usd is not None and rep_decision.net_usd > wb.MIN_NET_WRITE_USD

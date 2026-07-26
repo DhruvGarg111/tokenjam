@@ -569,18 +569,32 @@ def _decide_family(
             )
             for c in ordered[1:]
         ]
+    # The family's gross is the SUM across every member, not just the
+    # representative's own — siblings carry no standing cost of their own
+    # (the block is written once for the whole family), but their savings
+    # still count toward whether that ONE shared write is worth keeping.
+    # Netting only `rep.gross_*` understates a multi-member family and can
+    # withhold the write even when the family's COMBINED return clears the
+    # value floor below.
+    family_gross_tokens = sum(c.gross_tokens for c in ordered)
     per_session = standing_tokens_per_session(rep.rung, rep.artifact_text)
     exposure = max(
         rep.exposure_sessions if rep.exposure_sessions is not None else basis.sessions, 0,
     )
     standing = per_session * exposure
+    # Priced at the REPRESENTATIVE's own implied rate (its `gross_usd` is the
+    # only figure guaranteed present, since the unpriceable branch above
+    # already returned early otherwise), then applied to the family total so
+    # every member's dollars are converted at one consistent rate rather than
+    # summing separately-derived per-candidate USD figures.
     rate = _rate_per_token(rep.gross_usd, rep.gross_tokens)
+    family_gross_usd = family_gross_tokens * rate if rate is not None else None
     standing_usd = standing * rate if rate is not None else None
-    net_tokens = rep.gross_tokens - standing
-    net_usd = (rep.gross_usd - standing_usd) if (
-        rep.gross_usd is not None and standing_usd is not None
-    ) else rep.gross_usd
-    payback = (rep.gross_tokens / standing) if standing > 0 else None
+    net_tokens = family_gross_tokens - standing
+    net_usd = (family_gross_usd - standing_usd) if (
+        family_gross_usd is not None and standing_usd is not None
+    ) else family_gross_usd
+    payback = (family_gross_tokens / standing) if standing > 0 else None
     net_negative = net_tokens <= 0
     clamped_net_usd = None if net_usd is None else max(net_usd, 0.0)
 
@@ -593,7 +607,7 @@ def _decide_family(
         payback_ratio=payback, net_negative=net_negative, exposure_sessions=exposure,
         claimed_tokens=0 if net_negative else max(net_tokens, 0),
         claimed_usd=(
-            None if rep.gross_usd is None
+            None if family_gross_usd is None
             else (0.0 if net_negative else (clamped_net_usd or 0.0))
         ),
         claim_suppressed=net_negative, basis=STANDING_COST_BASIS,
