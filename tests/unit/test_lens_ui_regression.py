@@ -2906,12 +2906,14 @@ def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html)
     # lets one row show a copy box AND a confirm-target apply control together.
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
     assert "${prop.suggestion ? (canApply ? html`" in card
-    assert "${canApply ? (hasApplyKind ? html`" in card
+    # Three apply shapes now, so the chain leads with the register-then-apply one.
+    assert "${canApply ? (needsSourcePath ? html`" in card
+    assert "hasApplyKind ? html`" in card
     # The snippet block is gated on `prop.suggestion` ALONE — `canApply` only picks
     # which of the two shapes it takes, so an apply control can never suppress it.
     # Asserted structurally rather than on the outer conditional's exact text,
     # because that text is what changed when the second shape was added.
-    snippet_block = card[card.index("${prop.suggestion ? (canApply"):card.index("${canApply ? (hasApplyKind")]
+    snippet_block = card[card.index("${prop.suggestion ? (canApply"):card.index("${canApply ? (needsSourcePath")]
     assert snippet_block.count("<${CopySnippetButton} text=${prop.suggestion} />") == 2
     assert snippet_block.count('<div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>') == 2
     # On a row that offers BOTH, the manual command is the secondary exit and sits
@@ -3519,3 +3521,44 @@ def test_optimize_view_and_recoverable_tiles_read_same_payload_field(html):
     # disagree about which analyzers a persona can act on.
     assert html.count("persona_disabled_analyzers") >= 2
     assert "const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);" in html
+
+
+def test_a_model_swap_row_asks_for_the_path_instead_of_offering_mark_applied(html):
+    """The design bar: "Mark applied" is the exception, not the default.
+
+    Ten live `downsize` model-swap rows carried a measured, deterministic fix and
+    offered nothing but a copy box and a "Mark applied" that recorded the user
+    doing it by hand. The cause was a single missing input — where the agent's
+    source lives — which tokenjam will not infer (`config.AgentConfig.source_path`
+    is opt-in by design). A missing input is a question, so the row asks it.
+    """
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+
+    # Checked BEFORE `hasApplyKind`, because such a row deliberately carries no
+    # apply_kind yet: with no registered path there is no deterministic edit, so
+    # it must not reach the endpoint that assumes one.
+    assert "${canApply ? (needsSourcePath ? html`" in card
+    assert card.index("needsSourcePath ? html`") < card.index("hasApplyKind ? html`")
+    assert "const needsSourcePath = !!prop.needs_source_path;" in card
+
+    # It ASKS: an input, a preview that writes nothing, and an apply.
+    assert "/relearn/cost-proposals/register-source-path" in card
+    assert "registerSourcePath(false)" in card and "registerSourcePath(true)" in card
+    assert "Apply swap →" in card
+    # Never pre-filled: the whole premise is that nothing here knows the path, and
+    # a plausible default would be tokenjam inferring it by another name.
+    assert "useState('')" in card
+    assert "prop.needs_source_path ? prop.target_path" not in card
+
+    # A precheck failure AFTER the path is given is stated on the row, in the
+    # server's own words, rather than failing silently.
+    assert "setSpErr(e.message || String(e))" in card
+
+    # THE CAVEAT IS OUTSIDE THE COLLAPSED DESCRIPTION. A one-click write makes it
+    # easier to lose the distinction between "the cost delta is measured" and "the
+    # cheaper model is as good" (Critical Rule 14), and a caveat behind a
+    # "Read more" does not count as visible.
+    desc_at = card.index("<${TrimmedDescription} text=${description} />")
+    caveat_at = card.index("${prop.apply_caveat ? html`")
+    assert caveat_at > desc_at
+    assert '<div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>' in card

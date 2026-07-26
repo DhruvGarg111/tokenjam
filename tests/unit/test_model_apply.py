@@ -225,10 +225,33 @@ def test_model_swap_apply_revert_round_trip(cfg, tmp_path):
     assert source.read_text() == original
 
 
-def test_model_swap_refuses_unregistered_path():
+def test_model_swap_flags_the_unregistered_path_as_the_answerable_gate():
+    """The first gate is the ONLY one a reader can clear by answering a question,
+    so it is flagged separately from every other. The rest report something about
+    the repo (not a git repo, the model id in several files, the target dirty) that
+    no question fixes, and those rows stay advise-only.
+
+    Callers must branch on the FLAG, never on the reason string: two gates sharing
+    one prose channel is how they come to be treated as one condition, and the
+    consequence here would be an Apply button that fails on the click.
+    """
     check = ma.model_swap_precheck("", "claude-opus-4-8")
     assert check["ok"] is False
-    assert "no local source path is registered" in check["reason"]
+    assert check[ma.MODEL_SWAP_NEEDS_SOURCE_PATH] is True
+    assert check["reason"] == ma.MODEL_SWAP_NO_SOURCE_PATH_REASON
+    assert "has not been told where" in check["reason"]
+
+
+def test_no_other_precheck_gate_claims_to_be_answerable(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "agent.py").write_text('M = "claude-opus-4-8"\n', encoding="utf-8")
+    for check in (
+        ma.model_swap_precheck(str(tmp_path / "nope"), "claude-opus-4-8"),
+        ma.model_swap_precheck(str(plain), "claude-opus-4-8"),
+    ):
+        assert check["ok"] is False
+        assert not check.get(ma.MODEL_SWAP_NEEDS_SOURCE_PATH)
 
 
 def test_model_swap_refuses_zero_matches(tmp_path):

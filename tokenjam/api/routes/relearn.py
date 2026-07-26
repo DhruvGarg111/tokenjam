@@ -691,6 +691,130 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     return {"applied": applied, "cost_record": cost_record}
 
 
+class RegisterSourcePathRequest(BaseModel):
+    """A named STORED cost proposal plus the ONE fact only the user can supply:
+    where the flagged agent's source lives.
+
+    Same split as its siblings — everything about WHAT is written comes off the
+    store; the caller supplies only where the agent's checkout is, plus the
+    go/force confirmations.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id:  str
+    source_path:  str = ""
+    scope:        str = "project"
+    go:           bool = False
+    force:        bool = False
+
+
+@router.post("/relearn/cost-proposals/register-source-path", dependencies=_WRITE_AUTH)
+def post_register_source_path(
+    request: Request, body: RegisterSourcePathRequest,
+) -> dict[str, Any]:
+    """Register an agent's source path, then apply its model swap.
+
+    The gap this closes: eleven live ``downsize`` model-swap proposals carried a
+    real fix snippet and ``apply_capable: false``, for one reason — nobody had
+    ever told tokenjam where those agents' source lives, and tokenjam refuses to
+    scan a filesystem looking for it (``config.AgentConfig.source_path``: opt-in,
+    never inferred). So the fix was deterministic, the target was one grep away
+    from a path the user knows, and the row still offered nothing but a copy box.
+
+    ``go=false`` previews: it resolves the path, re-runs every
+    ``model_swap_precheck`` gate against it, and returns the diff it WOULD write,
+    changing nothing on disk or in the config. ``go=true`` registers the path in
+    the user's own config and then performs the swap through the existing
+    ``relearn_apply`` machinery — backup, git commit, ledger, revert — with no
+    second discipline invented here.
+
+    **The write still reads its target out of the config, not out of this body.**
+    That is the safety property that made ``source_path`` config-only in the first
+    place (see ``relearn_proposals.APPLY_CLUSTER_FIELDS``), and registration does
+    not weaken it: a caller cannot aim an edit at an arbitrary repo, it can only
+    ask the user's config to be changed — deliberately, from their own machine,
+    durably, and inspectably afterwards.
+
+    Registration is per AGENT, so one answer unlocks every other proposal for the
+    same agent at the next recompute. Several of the eleven share an ``agent_id``.
+
+    403 outside home; 409 on any refusal (a path that is not a directory, not in
+    a git repo, a model id in several files, a dirty target, a live session in
+    the repo unless ``force``); 404 on an unknown ``proposal_id``.
+    """
+    from tokenjam.core.optimize import model_apply
+
+    _reject_target_outside_home(body.source_path)
+    config = _config(request)
+    stored = _stored_cost_proposal(request, body.proposal_id)
+    if not stored.get("needs_source_path"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"stored proposal {body.proposal_id} is not waiting on a "
+                   f"source path. Refresh the cost proposals and use the apply "
+                   f"path its own card offers.",
+        )
+    agent_id = str(stored.get("agent_id") or "")
+    current_model = str(stored.get("current_model") or "")
+    proposed_model = str(stored.get("proposed_model") or "")
+
+    # Resolve and gate BEFORE touching the config, so a preview never leaves a
+    # registration behind and a refused apply never leaves a path pointing at a
+    # repo the swap turned out not to be possible in.
+    try:
+        resolved = model_apply.resolve_source_path(body.source_path)
+        check = model_apply.model_swap_precheck(resolved, current_model)
+        if not check["ok"]:
+            raise relearn_apply.RelearnApplyRefused(check["reason"])
+        if not body.go:
+            return {
+                "applied": model_apply.preview_model_swap(
+                    check["target_path"], current_model, proposed_model,
+                ),
+                "cost_record": None,
+                "target_path": check["target_path"],
+                "source_path": resolved,
+            }
+        model_apply.register_agent_source_path(config, agent_id, resolved)
+        # The cluster is projected from the STORE plus the now-REGISTERED path,
+        # never from the request body — the same rule `cluster_for_apply` states.
+        cluster = {
+            "signature": str(stored.get("signature") or ""),
+            "title": str(stored.get("title") or ""),
+            "proposed_fix": str(stored.get("proposed_fix") or ""),
+            "apply_kind": model_apply.APPLY_KIND_MODEL_SWAP,
+            "current_model": current_model,
+            "proposed_model": proposed_model,
+            "source_path": str(
+                getattr(config.agents.get(agent_id), "source_path", "") or ""
+            ),
+            "rung": int(stored.get("rung") or 1),
+            "sessions": 0,
+            "repos": [],
+            "examples": [],
+        }
+        applied = relearn_apply.apply_relearn_fix(
+            config, cluster, target_path=check["target_path"], scope=body.scope,
+            go=True, conn=_conn(request), force=body.force,
+        )
+    except relearn_apply.RelearnApplyRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    db = getattr(request.app.state, "db", None)
+    cost_record = None
+    if db is not None:
+        try:
+            cost_record = cost_apply.mark_applied(db, config, stored)
+        except cost_apply.CostApplyRefused:
+            cost_record = None
+    return {
+        "applied": applied,
+        "cost_record": cost_record,
+        "target_path": check["target_path"],
+        "source_path": resolved,
+    }
+
+
 @router.get("/relearn/cost-applied", dependencies=[Depends(require_api_key)])
 def get_cost_applied(request: Request) -> dict[str, Any]:
     """Every applied (and reverted) cost fix, plus the plan-tier ``framing``

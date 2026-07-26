@@ -299,6 +299,20 @@ class CostProposal:
     proposed_model:       str  = ""
     source_path:          str  = ""
     target_path:          str  = ""
+    #: ``apply_capable`` but not yet applyable: the fix is a deterministic edit
+    #: and the one missing input is WHERE, which only the user can answer (see
+    #: ``_model_swap_plumbing``). A row carrying this asks for the path and then
+    #: applies, rather than falling back to "Mark applied" — which records that
+    #: the user did something by hand and is the weakest thing the inbox can
+    #: offer. ``apply_kind`` stays unset while this is true.
+    needs_source_path:    bool = False
+    #: The caveat that must stay VISIBLE beside an Apply control, never folded
+    #: into the collapsed description with the rest of the prose. Set only where
+    #: an apply is on offer and the fix carries a risk the measurement does not
+    #: cover — today the model swap, whose cost delta is measured and whose
+    #: quality equivalence is never claimed (Critical Rule 14). An Apply button
+    #: must not imply the change is free of judgement.
+    apply_caveat:         str  = ""
     # Why the direct apply is not on offer, when it is not. Rendered on the card
     # next to the one-paste fix so a fallback is never silent.
     apply_blocked_reason: str  = ""
@@ -612,16 +626,52 @@ def _agent_arithmetic_line(row: Any) -> str:
     return window
 
 
+#: The one sentence an Apply button on a model swap must never be allowed to
+#: drown out (Critical Rule 14). The token-cost delta IS measured; quality
+#: equivalence is never claimed, and a one-click write makes that distinction
+#: easier to lose, not harder. Spliced into ``advise_text`` AND carried on its own
+#: ``apply_caveat`` field from this ONE constant, so the sentence beside the button
+#: and the sentence in the prose cannot drift into two different strengths of
+#: claim — and so the card can render it OUTSIDE the collapsed description, where
+#: a caveat behind a "Read more" would not have counted as visible.
+MODEL_SWAP_QUALITY_CAVEAT = (
+    "The price difference is arithmetic on this agent's own measured tokens. "
+    "Whether the cheaper model answers as well is NOT measured here, so review "
+    "the example sessions before applying."
+)
+
+
 def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
     """Whether this agent's swap can be written directly, and where.
 
-    The direct write is offered only when the user registered a local source
-    path for the agent and every precondition in
-    ``model_apply.model_swap_precheck`` holds. Otherwise the card keeps its
-    one-paste artifact and states the reason.
+    Three outcomes, not two. The middle one is the point of this docstring.
+
+    **Applyable now.** A registered source path and every precondition in
+    ``model_apply.model_swap_precheck`` holding: the card carries ``apply_kind``
+    and the resolved ``target_path``, and Apply writes.
+
+    **Applyable once answered** (``needs_source_path``). The ONLY thing missing
+    is that nobody ever told tokenjam where this agent's source lives — and
+    tokenjam will not go looking, by design (``config.AgentConfig.source_path``:
+    opt-in, never inferred, because scanning a filesystem for an agent's source
+    is not a thing this product does). That is a QUESTION, so the row asks it
+    instead of degrading to "Mark applied". ``apply_capable`` is true and
+    ``apply_kind`` is deliberately UNSET: with no registered path there is no
+    deterministic edit yet, so the row must not route to the apply endpoint that
+    assumes one. It routes to the register-then-apply endpoint, which persists
+    the answer to the user's config and re-runs every gate below against it.
+
+    **Not applyable.** Any later gate fails — not a git repo, the model id in
+    several files, the file dirty. None of those is answerable from a card, so
+    the row stays advise-only with its one-paste artifact and says why.
+
+    Branching on ``needs_source_path`` rather than on the reason string is
+    load-bearing: two gates that report through one prose channel eventually get
+    treated as one condition.
     """
     from tokenjam.core.optimize.model_apply import (
         APPLY_KIND_MODEL_SWAP,
+        MODEL_SWAP_NEEDS_SOURCE_PATH,
         model_swap_precheck,
     )
 
@@ -629,6 +679,15 @@ def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
     agent_cfg = agents.get(row.agent_id) if hasattr(agents, "get") else None
     source_path = str(getattr(agent_cfg, "source_path", "") or "")
     check = model_swap_precheck(source_path, row.model)
+    if not check["ok"] and check.get(MODEL_SWAP_NEEDS_SOURCE_PATH):
+        return {
+            "apply_capable": True,
+            # No apply_kind and no target_path until the user supplies the path.
+            "needs_source_path": True,
+            "current_model": row.model,
+            "proposed_model": row.alt_model,
+            "apply_blocked_reason": "",
+        }
     if not check["ok"]:
         return {"apply_capable": False, "apply_blocked_reason": check["reason"]}
     return {
@@ -677,12 +736,21 @@ def _downsize_agent_proposals(
         )
         advise = (
             f"Route {row.agent_id}'s flagged structural-shaped work from "
-            f"{row.model} to {row.alt_model}. The price difference above is "
-            f"arithmetic on this agent's measured tokens, given the switch; "
-            f"whether the cheaper model answers as well is not measured here, "
-            f"so review the example sessions first."
+            f"{row.model} to {row.alt_model}. " + MODEL_SWAP_QUALITY_CAVEAT
         )
-        if plumbing.get("apply_capable"):
+        if plumbing.get("needs_source_path"):
+            # Asks, rather than announcing a target it does not have. The
+            # honesty caveat above is untouched: nothing here claims the cheaper
+            # model answers as well, only that the substitution can be made.
+            advise += (
+                f" tokenjam can make this exact substitution for you, committed "
+                f"and revertable in one call, once you point it at "
+                f"{row.agent_id}'s local checkout below. After it is applied "
+                f"you must redeploy or restart the agent: measurement starts at "
+                f"the first call that runs on {row.alt_model}, not at the "
+                f"moment of the write."
+            )
+        elif plumbing.get("apply_capable"):
             advise += (
                 f" tokenjam can make this exact substitution in "
                 f"{plumbing['target_path']}, with the change committed and "
@@ -743,6 +811,12 @@ def _downsize_agent_proposals(
             current_model=str(plumbing.get("current_model", "")),
             proposed_model=str(plumbing.get("proposed_model", "")),
             apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
+            needs_source_path=bool(plumbing.get("needs_source_path")),
+            # Only where an Apply is actually on offer. On an advise-only row the
+            # sentence is already in the prose and there is no button to qualify.
+            apply_caveat=(
+                MODEL_SWAP_QUALITY_CAVEAT if plumbing.get("apply_capable") else ""
+            ),
         ))
     return proposals
 

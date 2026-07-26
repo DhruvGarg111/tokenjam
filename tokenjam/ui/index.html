@@ -9048,7 +9048,15 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   // already paid costs them no trust to accept, and a forward figure depends
   // on how many sessions they run next month, which nothing here can know.
   const est = pastOverspendFigure(prop);
-  // Two apply-capable shapes, routed through two different endpoints:
+  // THREE apply-capable shapes, routed through three endpoints:
+  //  - `needs_source_path`: a deterministic model-id swap whose one missing input
+  //    is WHERE the agent's source lives. tokenjam will not go looking for it
+  //    (`config.AgentConfig.source_path` is opt-in and never inferred), so the row
+  //    ASKS -> /relearn/cost-proposals/register-source-path, which registers the
+  //    answer in the user's own config and then applies. Checked FIRST because
+  //    such a row deliberately carries no apply_kind yet: with no registered path
+  //    there is no deterministic edit, so it must not reach an endpoint that
+  //    assumes one.
   //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
   //    is a workspace surface an orchestrator reads, not a value tokenjam can
   //    edit outright -> /relearn/cost-proposals/apply-workspace (unchanged).
@@ -9058,6 +9066,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   //    cluster_for_apply already projects apply_kind/agent_name/source_path/
   //    current_model/proposed_model off the stored cost proposal, so this
   //    needs no server-side change.
+  const needsSourcePath = !!prop.needs_source_path;
   const hasApplyKind = !!prop.apply_kind;
 
   // Workspace-apply state (subagent rubric / script / reuse / verbosity): a
@@ -9118,6 +9127,34 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   };
 
   const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
+
+  // Register-then-apply state. Starts EMPTY and is never pre-filled by guessing:
+  // the whole reason this row exists is that nothing here knows the path, and a
+  // plausible-looking default would be tokenjam inferring an agent's source
+  // location by another name.
+  const [spTarget, setSpTarget] = useState('');
+  const [spBusy, setSpBusy] = useState(false);
+  const [spErr, setSpErr] = useState(null);
+  const [spPreview, setSpPreview] = useState(null);
+  const [spResolved, setSpResolved] = useState('');
+
+  const registerSourcePath = async (go) => {
+    if (!spTarget.trim()) return;
+    setSpBusy(true); setSpErr(null);
+    try {
+      const r = await apiPostOrDetail('/relearn/cost-proposals/register-source-path',
+        { proposal_id: prop.proposal_id, source_path: spTarget.trim(), scope: prop.scope || 'project', go });
+      setSpResolved(r.target_path || '');
+      if (go) { onChanged && onChanged(); }
+      else { setSpPreview((r.applied && r.applied.diff) || '(no changes)'); }
+    } catch (e) {
+      // The precheck's later gates land here: not a git repo, the model id in
+      // several files, the target dirty. Shown ON THE ROW in the server's own
+      // words rather than failing silently, because each names something the
+      // reader can go and fix.
+      setSpErr(e.message || String(e));
+    } finally { setSpBusy(false); }
+  };
 
   // The two independent fix facts, on the same axis a relearn row uses (see
   // `inboxCanApply` / `inboxHasSnippet`). `canApply` is `prop.apply_capable` and
@@ -9237,7 +9274,51 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         </div>
       `) : null}
 
-      ${canApply ? (hasApplyKind ? html`
+      ${canApply ? (needsSourcePath ? html`
+        ${/* ASKS for the one thing only the user knows, then applies. What this
+              replaces is the weakest row the inbox had: a measured, deterministic
+              model swap with a copy box and a "Mark applied" that recorded the
+              user doing it by hand. Eleven live rows read that way, all for the
+              same reason — no registered source path.
+
+              The path is not pre-filled and not guessed. Preview resolves it and
+              re-runs every precheck gate without writing anything, including the
+              config; Apply registers it and writes in one call. Registration is
+              per AGENT, so answering once unlocks the other rows for the same
+              agent at the next recompute. */ ''}
+        <div class="opt-section" style="margin:10px 0 0">
+          <div class="opt-title" style="font-size:12.5px">Apply the model swap <span class="dim" style="font-weight:400">· point tokenjam at this agent's checkout once; the edit is committed and revertable</span></div>
+          ${/* Spaces around the inline <code> elements are written EXPLICITLY.
+                htm collapses the newline between a text node and an interpolated
+                element to nothing, so a line break before `<code>` rendered
+                "checkout forclaude-code-observer-sessions" on every one of these
+                rows. Measured in the DOM, not inferred from the template. */ ''}
+          <div class="sz-note" style="margin-top:6px;font-size:12px">
+            <span>tokenjam doesn't scan your disk for an agent's source, so it needs the local checkout for${' '}</span>
+            <code>${prop.agent_id || 'this agent'}</code>
+            <span>${' '}once. It then swaps${' '}</span>
+            <code>${prop.current_model}</code>
+            <span>${' '}for${' '}</span>
+            <code>${prop.proposed_model}</code>
+            <span>${' '}in the one file that sets it, and remembers the path for this agent's other rows.</span>
+          </div>
+          ${/* OUTSIDE the collapsed description, always visible, in the server's
+                own words. A one-click write makes it easier to lose the
+                distinction between "the cost delta is measured" and "the cheaper
+                model is as good", not harder (Critical Rule 14). */ ''}
+          ${prop.apply_caveat ? html`
+            <div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>` : null}
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            <input class="rename-input" style="flex:1;min-width:280px" value=${spTarget}
+              placeholder="/absolute/path/to/the/agent/checkout" onInput=${e => setSpTarget(e.target.value)} />
+            <button class="cur-btn" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(false)}>${spBusy ? 'working…' : 'Preview'}</button>
+            <button class="cur-btn primary" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(true)}>Apply swap →</button>
+          </div>
+          ${spResolved ? html`<div class="dim" style="font-size:11.5px;margin-top:4px">would edit ${spResolved}</div>` : null}
+          ${spPreview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${spPreview}</pre>` : null}
+          ${spErr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${spErr}</div>` : null}
+        </div>
+      ` : hasApplyKind ? html`
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px">${akCopy.title} <span class="dim" style="font-weight:400">· ${akCopy.hint}</span></div>
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
