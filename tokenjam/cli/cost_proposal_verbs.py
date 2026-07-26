@@ -144,19 +144,24 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
 
     if open_proposals:
-        from tokenjam.core.optimize.cost_proposals import estimated_recoverable_rollup
-        rollup = estimated_recoverable_rollup(open_proposals)
+        from tokenjam.core.optimize.cost_proposals import (
+            DEFAULT_COST_WINDOW_DAYS,
+            past_overspend_rollup,
+        )
+        rollup = past_overspend_rollup(open_proposals)
         headline = render_savings(
-            rollup.get("estimated_recoverable_usd"),
-            rollup.get("estimated_recoverable_tokens"),
+            rollup.get("past_overspend_usd"),
+            rollup.get("past_overspend_tokens"),
             framing,
         )
         if headline != "—":
             console.print(
-                f"[bold green]~{headline}[/bold green] estimated recoverable across "
+                f"[bold green]~{headline}[/bold green] already overspent across "
                 f"{rollup.get('proposal_count', 0)} of "
                 f"{rollup.get('deduplicated_proposal_count', 0)} open proposal(s) "
-                f"[dim](estimated, correlational)[/dim]\n"
+                f"[dim](observed over the last "
+                f"{rollup.get('window_days', DEFAULT_COST_WINDOW_DAYS)} days; "
+                f"estimated, correlational)[/dim]\n"
             )
 
     for i, p in enumerate(proposals, start=1):
@@ -194,12 +199,12 @@ def _render_cost_proposal(
         console.print(f"     {p['evidence']}")
 
     savings = render_savings(
-        p.get("estimated_recoverable_usd"), p.get("estimated_recoverable_tokens"), framing,
+        p.get("past_overspend_usd"), p.get("past_overspend_tokens"), framing,
     )
     if savings != "—":
         console.print(
-            f"     [green]~{savings}[/green] estimated recoverable "
-            f"[dim](estimate: {p.get('estimate_basis') or 'correlational'})[/dim]"
+            f"     [green]~{savings}[/green] already overspent, observed "
+            f"[dim](basis: {p.get('estimate_basis') or 'correlational'})[/dim]"
         )
 
     if p.get("advise_text"):

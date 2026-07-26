@@ -193,8 +193,8 @@ def test_render_resend_no_dollar_figure_when_no_priced_example(db, capsys):
 
     _seed_heavy_resend(db, cache_ratio=1.0)
     _, finding = _run(db)
-    assert finding.estimated_recoverable_usd is None
-    assert finding.estimated_recoverable_tokens
+    assert finding.past_overspend_usd is None
+    assert finding.past_overspend_tokens
 
     _render_resend(finding, pricing_mode="api", marker="①")
     out = capsys.readouterr().out

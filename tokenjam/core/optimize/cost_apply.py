@@ -50,8 +50,8 @@ class CostAppliedRecord:
     agent_id:       str
     applied_at:     str                    # the fix marker (Expectation.created_at)
     baseline:       dict[str, Any]
-    estimated_recoverable_usd:    float | None
-    estimated_recoverable_tokens: int | None
+    past_overspend_usd:    float | None
+    past_overspend_tokens: int | None
     estimate_basis: str
     state:          str = "applied"        # applied | reverted
     reverted_at:    str | None = None
@@ -153,8 +153,8 @@ def mark_applied(
         agent_id=agent_id or "",
         applied_at=exp.created_at.isoformat() if exp.created_at else "",
         baseline=dict(proposal.get("baseline") or {}),
-        estimated_recoverable_usd=proposal.get("estimated_recoverable_usd"),
-        estimated_recoverable_tokens=proposal.get("estimated_recoverable_tokens"),
+        past_overspend_usd=proposal.get("past_overspend_usd"),
+        past_overspend_tokens=proposal.get("past_overspend_tokens"),
         estimate_basis=str(proposal.get("estimate_basis") or ""),
     )
     records = _load_ledger(config)

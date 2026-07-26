@@ -62,7 +62,7 @@ def _downsize_finding(agent_id="svc-a"):
         candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
         alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
         examples=[], suggestions={"claude-opus-4-8": "claude-haiku-4-5"},
-        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        past_overspend_usd=3.0, percent_of_tokens=35.0,
         estimate_basis="downsize basis", per_agent=_price_rows(agent_id),
     )
 
@@ -110,8 +110,8 @@ def test_per_agent_cards_replace_the_aggregate_card(tmp_path):
     downsize = [p for p in props if p.analyzer == "downsize"]
     assert [p.signature for p in downsize] == ["cost:downsize:svc-a"]
     row = _price_rows()[0]
-    assert downsize[0].estimated_recoverable_usd == row.delta_usd
-    assert downsize[0].estimated_recoverable_tokens == row.total_tokens
+    assert downsize[0].past_overspend_usd == row.delta_usd
+    assert downsize[0].past_overspend_tokens == row.total_tokens
     # Both sides of the comparison are printed, not just the difference.
     assert "claude-opus-4-8" in downsize[0].evidence
     assert "claude-haiku-4-5" in downsize[0].evidence
@@ -197,7 +197,7 @@ def _subagent_finding(sub_agent_id="explore"):
         sessions_with_subagents=1, total_subagents=1, subagent_cost_usd=1.2,
         subagent_tokens=92_500, window_cost_usd=2.0, percent_of_cost=0.6,
         flagged_cost_usd=1.2, rows=[row], flagged=[row],
-        estimated_recoverable_usd=0.9, estimated_recoverable_tokens=92_500,
+        past_overspend_usd=0.9, past_overspend_tokens=92_500,
     )
 
 
@@ -266,7 +266,7 @@ def _placement_finding():
             cost_usd=6.0, tokens=15_000, estimated_batch_saving_usd=3.0,
         )],
         window_cost_usd=12.0, candidate_cost_usd=6.0, percent_of_window_cost=50.0,
-        estimated_recoverable_usd=3.0, estimated_recoverable_tokens=15_000,
+        past_overspend_usd=3.0, past_overspend_tokens=15_000,
     )
 
 
@@ -280,7 +280,7 @@ def test_placement_card_states_the_discount_and_the_friction(tmp_path):
     assert card.signature == "cost:placement:batch"
     assert card.advise_only is True
     assert card.apply_capable is False
-    assert card.estimated_recoverable_usd == 3.0
+    assert card.past_overspend_usd == 3.0
     assert "50%" in card.advise_text
     assert "architectural change" in card.advise_text
     assert "no human turn" in card.evidence
@@ -303,7 +303,7 @@ def test_placement_card_suppresses_dollars_on_subscription(tmp_path):
         )
         if p.analyzer == "placement"
     ][0]
-    assert card.estimated_recoverable_usd is None
+    assert card.past_overspend_usd is None
     assert "no dollar figure is shown for this plan" in card.advise_text
     assert "$3.00" not in card.advise_text
     # Token-level evidence (the workload shape) is still shown either way.
@@ -318,7 +318,7 @@ def test_placement_card_suppresses_dollars_on_local(tmp_path):
         )
         if p.analyzer == "placement"
     ][0]
-    assert card.estimated_recoverable_usd is None
+    assert card.past_overspend_usd is None
 
 
 def test_recompute_cost_proposals_resolves_pricing_mode_from_sessions(tmp_path):
@@ -351,7 +351,7 @@ def test_recompute_cost_proposals_resolves_pricing_mode_from_sessions(tmp_path):
         proposals = cp.recompute_cost_proposals(db, _cfg(tmp_path), window_days=30)
         placement = [p for p in proposals if p.analyzer == "placement"]
         assert placement, "expected a placement card from the cadence-regular sessions"
-        assert placement[0].estimated_recoverable_usd is None
+        assert placement[0].past_overspend_usd is None
         assert "no dollar figure is shown for this plan" in placement[0].advise_text
     finally:
         db.close()
@@ -384,7 +384,7 @@ def test_card_copy_has_no_em_dash_and_never_says_quota(tmp_path, field):
 
 
 def test_cards_carry_the_fields_the_rollup_sums(tmp_path):
-    # The rollup reads signature, analyzer, title and estimated_recoverable_usd
+    # The rollup reads signature, analyzer, title and past_overspend_usd
     # generically, with no analyzer allowlist, so each card must fill all four
     # and no two may share a signature.
     cards = _all_cards(tmp_path)
@@ -392,8 +392,8 @@ def test_cards_carry_the_fields_the_rollup_sums(tmp_path):
     assert len(signatures) == len(set(signatures))
     for card in cards:
         assert card.signature and card.analyzer and card.title
-        assert card.estimated_recoverable_usd is not None
-        assert card.estimated_recoverable_usd > 0
+        assert card.past_overspend_usd is not None
+        assert card.past_overspend_usd > 0
 
 
 def test_an_agent_the_swap_would_not_save_on_gets_no_card(tmp_path):
@@ -407,7 +407,7 @@ def test_an_agent_the_swap_would_not_save_on_gets_no_card(tmp_path):
 
 def test_every_dollar_figure_is_tagged_and_has_a_construction_footnote(tmp_path):
     for card in _all_cards(tmp_path):
-        if card.estimated_recoverable_usd is None:
+        if card.past_overspend_usd is None:
             continue
         assert card.estimate_confidence in ("estimated", "measured")
         assert card.estimate_basis, f"{card.signature} prints a figure with no footnote"

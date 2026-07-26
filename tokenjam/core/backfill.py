@@ -834,12 +834,23 @@ def ingest_claude_code(
     # in the set can only be a stale-scheme orphan, so drop it. Scoped to
     # (session_id, source) -> never touches live-ingested spans or other sessions.
     # Runs BEFORE recompute so the reconciled sums exclude the purged rows.
-    # Skipped under the `max_sessions` quickstart cap: that path stops mid-session
-    # (bounded preview), so its per-session keep-set may be incomplete and a
-    # DELETE could drop valid spans; the full `tj backfill claude-code` path
-    # (used by onboard) does the self-healing.
+    #
+    # Only ever runs on an UNBOUNDED pass, because the DELETE is only safe when
+    # `keep_by_session[sid]` really is the session's COMPLETE span set:
+    #   * `max_sessions` (the quickstart cap) stops mid-walk, so a session's
+    #     later files may never be parsed.
+    #   * `since` filters files by mtime AND by parsed `ended_at`, so a session
+    #     straddling the window boundary — a long-running conversation whose main
+    #     transcript is still being appended while its `subagents/` files finished
+    #     days ago — yields only its in-window files. The out-of-window siblings'
+    #     already-ingested spans would then look like stale-scheme orphans and be
+    #     DELETED. Verified: a two-file session re-ingested with `--since 2d`
+    #     after the subagent file aged out lost that file's span.
+    # The full `tj backfill claude-code` path (also used by onboard) is
+    # unwindowed and still does the self-healing.
     reconcile = getattr(db, "reconcile_backfill_spans", None)
-    if reconcile is not None and max_sessions is None and keep_by_session:
+    windowed = since is not None or max_sessions is not None
+    if reconcile is not None and not windowed and keep_by_session:
         try:
             purged = reconcile(keep_by_session, _CLAUDE_CODE_SOURCE)
             result.spans_stale_purged = purged

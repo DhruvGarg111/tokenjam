@@ -128,6 +128,36 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
 
     scheduler.add_job(_cost_proposals_job, "interval", hours=6)
 
+    # Continuous transcript ingestion. Claude Code's OTLP exporter has no retry
+    # and no buffer, so the live path silently drops any session whose shell
+    # lacked the telemetry env vars, or that ran while this daemon was down or
+    # while the shell's baked-in endpoint pointed at a dead port. Until now
+    # nothing ever reconciled that: the ONLY remedy was a human running
+    # `tj backfill claude-code`, and every un-ingested session becomes
+    # unrecoverable when Claude Code prunes its transcript ~30 days later.
+    #
+    # Backfill is idempotent (deterministic span ids + a batched anti-join), so
+    # a re-run over an overlapping window costs a re-parse and inserts only the
+    # genuinely-missing spans.
+    from datetime import timedelta as _timedelta
+    from tokenjam.core import transcript_sync
+
+    ingest_cfg = config.ingest
+
+    def _catch_up_job(lookback) -> None:
+        # Resolved through the module (not a from-import) so the scheduled and
+        # startup passes share one patchable seam.
+        transcript_sync.start_catch_up(
+            lambda: DuckDBBackend(config.storage), config=config, lookback=lookback,
+        )
+
+    if ingest_cfg.auto_catch_up:
+        scheduler.add_job(
+            lambda: _catch_up_job(_timedelta(hours=ingest_cfg.lookback_hours)),
+            "interval",
+            minutes=ingest_cfg.interval_minutes,
+        )
+
     # ~/.local/share/tj/server.state lets other subcommands (e.g. `tj onboard
     # --codex`) find the config this server is using regardless of CWD. We
     # write it from the lifespan so it only happens after uvicorn binds the
@@ -164,6 +194,12 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         # thread via trigger_background_cost_recompute) — a fresh install's
         # Cost-advisories tab shouldn't sit on "never_run" for up to 6h either.
         _cost_proposals_job()
+        # Catch up on anything the live path missed while this daemon was down.
+        # Wider window than the interval job: a startup pass has to cover
+        # however long we were off, not just one interval. Runs on its own
+        # thread with its own connection, so it never delays the bind.
+        if ingest_cfg.auto_catch_up:
+            _catch_up_job(_timedelta(days=ingest_cfg.startup_lookback_days))
         # Stamp unknown sessions from declared [budget.*].plan on startup so
         # historical/backfilled rows match config without a separate onboard pass.
         from tokenjam.core.framing import apply_declared_plans_to_sessions
@@ -202,6 +238,11 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
 
     console.print(f"[bold]tj serve[/bold] starting on http://{bind_host}:{bind_port}")
     console.print(f"  API docs:    http://{bind_host}:{bind_port}/docs")
+    if ingest_cfg.auto_catch_up:
+        console.print(
+            f"  Transcript catch-up: on startup, then every "
+            f"{ingest_cfg.interval_minutes}m"
+        )
     if config.export.prometheus.enabled:
         console.print(f"  Metrics:     http://{bind_host}:{bind_port}/metrics")
     if config.proxy.enabled:

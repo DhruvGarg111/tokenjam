@@ -23,10 +23,10 @@ class _FakeDB:
 def _report(*, downgrade_usd=None, finding_usd=None):
     findings = {}
     if finding_usd is not None:
-        findings["cache"] = SimpleNamespace(estimated_recoverable_usd=finding_usd)
+        findings["cache"] = SimpleNamespace(past_overspend_usd=finding_usd)
     downgrade = None
     if downgrade_usd is not None:
-        downgrade = SimpleNamespace(estimated_recoverable_usd=downgrade_usd)
+        downgrade = SimpleNamespace(past_overspend_usd=downgrade_usd)
     return SimpleNamespace(downgrade=downgrade, findings=findings)
 
 

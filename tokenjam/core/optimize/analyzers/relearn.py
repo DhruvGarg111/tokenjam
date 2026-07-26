@@ -37,6 +37,22 @@ Pipeline (validated 2026-07-12 against the full local corpus, see
      intervention ladder) and a scope (project vs user-global, by how many
      distinct repos the cluster's sessions span).
 
+THE HORIZON IS TOKENJAM'S ARCHIVE, NOT CLAUDE CODE'S ROTATION. Step 1 above
+reads on-disk transcripts, which Claude Code rotates on its own schedule
+(``cleanupPeriodDays``), so a transcript-only detector can never accumulate the
+long-horizon recurrence that is this module's entire premise. Sessions whose
+transcript has been rotated away are recovered from tokenjam's retained spans
+instead — see ``compute_relearn_finding``'s THREE LANES note. The two lanes are
+disjoint by session id, so no failure is extracted twice.
+
+TWO KINDS OF NUMBER, never conflated. ``estimated_*`` is a FORWARD claim: only
+clusters with a real fix, netted against what that fix costs to keep. The
+``past_overspend_*`` fields are a BACKWARD observation: what the recurrence
+already cost, reported for every cluster including the ones no fix template
+matches and the ones whose rule is uneconomic. "We have no action for this" is
+not "this was unavoidable", and no future maintenance cost is ever netted out of
+money already spent.
+
 Never raises: a single unreadable transcript, a distill failure, or a missing
 CLAUDE.md is skipped, not fatal — this runs unattended on a schedule.
 """
@@ -106,12 +122,22 @@ DISTILL_MODEL = "haiku"
 COMPACTION_PROMPT_DROP_RATIO = 0.5
 
 ESTIMATE_BASIS = (
-    "occurrences x a conservative per-turn token cost (one re-issued tool "
-    "call + re-narration) — never the inflated whole-session footprint — "
-    "then x the occurrence's own re-read tail: a failure's text is re-sent on "
-    "every later call that still carries it, billed at the cache-read rate, so "
-    "one occurrence is worth 1 + cache_read_ratio x tail input-token "
-    "equivalents. The tail is truncated at the first compaction (a prompt-size "
+    "occurrences x the MEASURED cost of one extra assistant turn in the "
+    "sessions the cluster actually occurred in (median billed cost per call, "
+    "divided back through those sessions' own input rate) — never the inflated "
+    "whole-session footprint, and never a fixed guess: a failed tool call "
+    "forces the model to emit a recovery turn a successful call would not have "
+    "needed, and in a coding session a turn re-sends the whole context. That "
+    "forced turn is the CLAIM, and it is the part no other analyzer prices: "
+    "the context re-send analyzer measures redundant context inside calls that "
+    "had to happen, whereas this measures a call that should not have happened "
+    "at all. Observed here but NOT claimed here: the error text's own re-read "
+    "tail, priced at ~1,500 tokens (the size of a block of error text) x the "
+    "occurrence's tail, billed at the cache-read rate. Those are re-sent "
+    "context tokens the context re-send analyzer already prices in full, so "
+    "they are shown on this card as part of what the recurrence cost and left "
+    "out of what this card claims, rather than counted twice. The tail is "
+    "truncated at the first compaction (a prompt-size "
     "collapse), not run to end-of-session, and the cluster takes the MEDIAN of "
     "its occurrences' multipliers rather than the mean — a handful of very long "
     "uncompacted sessions otherwise dominate. Reported NET of what the proposed "
@@ -119,6 +145,33 @@ ESTIMATE_BASIS = (
     "hook is not); a cluster with no derived fix claims nothing at all. Review "
     "the example sessions before applying a fix"
 )
+#: The basis behind the PAST-TENSE figure, which is a different quantity from
+#: `ESTIMATE_BASIS` above and must never be described with it: that one is a
+#: forward, netted, gated CLAIM; this is a backward, ungated OBSERVATION.
+PAST_OVERSPEND_BASIS = (
+    "observed occurrences x the MEASURED cost of one extra assistant turn in "
+    "the sessions the cluster occurred in (the recovery turn a failed call "
+    "forces and a successful one does not), PLUS the error text's own measured "
+    "re-read tail, priced at the rate the contributing sessions actually "
+    "billed at. "
+    "Accumulated over the scanned corpus, NOT paced to 30 days. Deliberately "
+    "ungated: a cluster with no fix template in our library and a cluster "
+    "whose rule is uneconomic to keep both still cost this, and no future "
+    "maintenance cost is netted out of it. The re-read share is broken out "
+    "as past_reread_* — a COMPONENT of this figure, not an addend — because "
+    "that share is re-sent context, which the context re-send analyzer prices "
+    "in full; the two overlap there and must never be added together"
+)
+
+#: Why the recurrence gate's residue is counted but never claimed.
+BELOW_THRESHOLD_BASIS = (
+    "failures observed but seen in fewer than the recurrence threshold's "
+    "distinct sessions, so they never became a cluster. Priced on the same "
+    "per-occurrence basis and reported so that 'no action for this' is never "
+    "shown as 'this was free'. Not claimable and not rolled up: a one-off "
+    "failure is not a relearn"
+)
+
 HONESTY_CAVEAT = (
     "Structural failure-signature clustering, not a quality judgment. "
     "Review the example sessions and the proposed fix before applying it."
@@ -517,6 +570,49 @@ def _recurring(clusters: dict[str, _RawCluster], min_sessions: int) -> list[_Raw
     return list(kept.values())
 
 
+def _below_threshold_residue(
+    clusters: dict[str, _RawCluster],
+    kept: list[_RawCluster],
+    conn: Any | None,
+) -> dict[str, Any]:
+    """What the recurrence gate threw away, counted and priced.
+
+    The gate is right to exist — a failure seen once is not a *re*-learn, so it
+    gets no cluster, no fix and no claim. It is NOT right to let that read as
+    "this was free": those occurrences burned real tokens. So the residue is
+    reported as its own explicitly-named quantity rather than silently dropped,
+    on the same head-term basis as ``past_overspend_tokens`` (see
+    ``BELOW_THRESHOLD_BASIS``). One rate lookup for the whole residue, not one
+    per cluster: it is a single aggregate figure, never a per-card one.
+    """
+    kept_signatures = {c.signature for c in kept}
+    dropped = [c for sig, c in clusters.items() if sig not in kept_signatures]
+    if not dropped:
+        return {"clusters": 0, "occurrences": 0, "tokens": 0, "usd": None}
+    occurrences = sum(len(c.failures) for c in dropped)
+    sessions = {f.session_id for c in dropped for f in c.failures}
+    profile = blended_rate_profile(conn, session_ids=sessions)
+    # The SAME head basis the kept clusters use -- the measured cost of the
+    # recovery turn these occurrences forced, not the error text's size. This
+    # has to move whenever the head term moves or the docstring's "same
+    # head-term basis" promise silently becomes false, and the residue starts
+    # understating itself by the same ~15-20x the head term used to.
+    turn_tokens = (
+        _measured_turn_tokens(conn, sessions, profile)
+        or GROUNDED_TOKENS_PER_OCCURRENCE
+    )
+    tokens = occurrences * turn_tokens
+    return {
+        "clusters": len(dropped),
+        "occurrences": occurrences,
+        "tokens": tokens,
+        "usd": (
+            round(tokens * profile.input_rate_per_token, 6)
+            if profile is not None else None
+        ),
+    }
+
+
 # --- Distill pass over the residual (non-family) bucket -----------------------
 
 def _distill_cache_dir() -> Path:
@@ -817,6 +913,11 @@ class RelearnCluster:
     proposed_fix:                str
     examples:                    list[RelearnExample] = field(default_factory=list)
     estimated_recoverable_tokens: int = 0
+    #: The same claim in dollars, on the same accumulated corpus basis as the
+    #: token field beside it (never the 30-day one below). Priced at the
+    #: cluster's own blended rate, so tokens/USD always divide back to a real
+    #: price band (CLAUDE.md rule 28). ``None`` when nothing could be priced.
+    estimated_recoverable_usd:    float | None = None
     confidence:                   str = "heuristic"
     novel:                        bool = True
     # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
@@ -877,6 +978,34 @@ class RelearnCluster:
     #: rewrite cost, this cost recurs, so the session count cancels out.
     payback_ratio:                    float | None = None
     net_negative:                     bool = False
+    # PAST OVERSPEND — what this recurrence ALREADY COST, observed, before any
+    # gate touches it. Structurally separate from every `estimated_*` field
+    # above and NEVER netted, suppressed or zeroed:
+    #
+    #   * a cluster with no fix template still cost real money. "We have no
+    #     fix for this" is a gap in OUR library, not a property of the waste;
+    #   * a rule that is uneconomic to keep does not retroactively make the
+    #     failures free. "Is codifying this worth it?" and "did this cost
+    #     anything?" are different questions and get different fields;
+    #   * a fix's FUTURE standing cost is never subtracted from money ALREADY
+    #     spent. Netting is legitimate for a forward "should I do this"
+    #     decision (the `estimated_*` fields) and illegitimate here.
+    #
+    # The FULL observed cost: the re-issued turns plus their measured re-read
+    # tail, in input-token equivalents at the cluster's own blended rate. It is
+    # never smaller than what any forward claim off the same cluster can be,
+    # which is what keeps a card from ever reading "cost you $14, of which $29
+    # was avoidable".
+    past_overspend_tokens:            int = 0
+    past_overspend_usd:               float | None = None
+    past_overspend_basis:             str = ""
+    #: The re-read tail's share OF the figure above (a component, not an
+    #: addend): what the failure text cost on every later call that still
+    #: carried it. Broken out because it is re-sent CONTEXT, the quantity
+    #: `analyzers/context_resend.py` prices in full — so a caller comparing the
+    #: two analyzers can see exactly which part overlaps rather than guessing.
+    past_reread_tokens:               int = 0
+    past_reread_usd:                  float | None = None
     # Whether a PERMANENT artifact is actually on offer for this cluster, and
     # why not when it isn't (placeholder fix, net-negative payback, budget
     # exhausted, or merged into the family's single block). A suppressed write
@@ -884,6 +1013,11 @@ class RelearnCluster:
     # lane renders it with this reason in place of the generic OTel one.
     write_offered:                    bool = True
     write_blocked_reason:             str = ""
+    #: The same verdict as a short label, for a dense list where the sentence
+    #: above would be a paragraph per row. Derived from the reason by
+    #: `write_budget.short_reason`, never phrased locally, so the CLI list and
+    #: the Review inbox row cannot name one flag two ways.
+    write_blocked_short:              str = ""
 
 
 @dataclass
@@ -894,6 +1028,10 @@ class RelearnFinding:
     distilled_clusters:   int = 0
     dropped_codified:     int = 0
     estimated_recoverable_tokens: int | None = None
+    #: The same accumulated claim in dollars — see
+    #: ``RelearnCluster.estimated_recoverable_usd``. Distinct from
+    #: ``estimated_monthly_usd`` below, which is the 30-day basis.
+    estimated_recoverable_usd: float | None = None
     estimate_basis:        str = ESTIMATE_BASIS
     estimate_confidence:   str = "heuristic"
     caveat:                 str = HONESTY_CAVEAT
@@ -917,6 +1055,38 @@ class RelearnFinding:
     # not (CLAUDE.md anti-pattern #22). Clusters with no derived fix contribute
     # nothing here by construction: they claim zero on every basis.
     estimated_monthly_usd: float | None = None
+    # PAST OVERSPEND, summed across EVERY cluster — including the ones with no
+    # fix template and the ones whose write is uneconomic. See
+    # `RelearnCluster.past_overspend_tokens` for why none of those gates may
+    # zero an observed cost. This is the figure the Review inbox card leads
+    # with; the `estimated_*` totals above stay the (smaller, forward, netted)
+    # claim.
+    past_overspend_tokens: int = 0
+    past_overspend_usd:    float | None = None
+    past_overspend_basis:  str = ""
+    #: The re-read tail across every cluster, reported alongside and never
+    #: summed into a rollup (`analyzers/context_resend.py` prices re-sent
+    #: context in full).
+    past_reread_tokens:    int = 0
+    past_reread_usd:       float | None = None
+    # The recurrence gate's OWN residue: failures real enough to observe but
+    # not spread across `min_sessions` distinct sessions, so they never become
+    # a cluster. They still cost money. Counted and priced here — on the same
+    # head-term basis as `past_overspend_tokens` — rather than silently
+    # dropped, so "this analyzer has no action for it" never reads as "this
+    # was free". Never claimable and never rolled up: a one-off failure is not
+    # a relearn, which is precisely why it gets a count and not a card.
+    below_threshold_clusters:      int = 0
+    below_threshold_occurrences:   int = 0
+    below_threshold_past_overspend_tokens: int = 0
+    below_threshold_past_overspend_usd:    float | None = None
+    # Which lanes fed this run, and how many sessions each contributed. The
+    # archive lane (sessions tokenjam retains telemetry for but Claude Code has
+    # already rotated the transcript away) is the whole reason relearn can
+    # accumulate history at all — see `compute_relearn_finding`.
+    transcript_sessions_scanned: int = 0
+    archived_sessions_scanned:   int = 0
+    corpus_basis:                str = ""
 
 
 def _snippet(failure: FailureEpisode) -> str:
@@ -929,18 +1099,31 @@ def _scope_for(repos: set[str]) -> str:
     return "project" if len(repos) <= 1 else "user-global"
 
 
+#: Anything stamped before this year is a SENTINEL, not an observation. Ingest
+#: writes `1970-01-01` (a zero epoch) when a span/session carries no usable
+#: timestamp, and the DB holds thousands of them. A single sentinel reaching
+#: `_corpus_window_days`'s MIN would stretch the observed span to ~56 years and
+#: crush every monthly figure to zero, which is exactly how a horizon widened
+#: from Claude's transcripts to tokenjam's archive would have broken. Treated as
+#: unparseable — the same "don't invent a window from missing data" rule the
+#: rest of this module already applies.
+MIN_PLAUSIBLE_TS_YEAR = 2000
+
+
 def _parse_failure_ts(ts: str | None) -> Any:
     """Best-effort ISO-8601 parse of a failure's timestamp. Returns ``None``
-    on anything unparseable — never raises; a bad/missing timestamp just
-    doesn't contribute to the window span."""
+    on anything unparseable OR on a pre-``MIN_PLAUSIBLE_TS_YEAR`` sentinel —
+    never raises; a bad/missing/sentinel timestamp just doesn't contribute to
+    the window span."""
     if not ts:
         return None
     from datetime import datetime as _dt
 
     try:
-        return _dt.fromisoformat(str(ts).replace("Z", "+00:00"))
+        parsed = _dt.fromisoformat(str(ts).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+    return None if parsed.year < MIN_PLAUSIBLE_TS_YEAR else parsed
 
 
 def _corpus_window_days(failures: list[FailureEpisode]) -> float | None:
@@ -986,6 +1169,71 @@ def _monthly_scale(window_days: float | None) -> float:
     if not window_days or window_days <= 0:
         return 1.0
     return 30.0 / window_days
+
+
+def _measured_turn_tokens(
+    conn: Any, session_ids: set[str], profile: RateProfile | None,
+) -> int | None:
+    """What ONE extra assistant turn actually cost in these sessions, in
+    input-token equivalents. ``None`` when it cannot be measured.
+
+    This is the head term's basis, and it replaces a guess. A failed tool call
+    forces a retry: the harness hands the error back to the model, the model
+    has to emit another turn to recover. A SUCCESSFUL call would not have
+    needed that turn, so it is the marginal cost of the failure, and it is one
+    whole round trip -- not the ~1,500 tokens of error text that ride along in
+    it.
+
+    Measured from ``cost_usd``, the rate the contributing sessions were
+    actually billed at, then divided back through the cluster's own input rate
+    so the result lands in the same input-token-equivalent unit every other
+    figure here uses. Going through the billed cost rather than summing token
+    columns means the cache-read / cache-write / output rate mix is whatever
+    those calls really paid, with no ratio assumed locally.
+
+    The MEDIAN, never the mean: per-call cost in a coding corpus is heavily
+    right-skewed (a handful of near-context-limit calls dwarf the rest), and a
+    mean would let those set the price of every occurrence.
+    """
+    if conn is None or not session_ids or profile is None:
+        return None
+    if not profile.input_rate_per_token:
+        return None
+    ids = sorted(session_ids)
+    placeholders = ", ".join(f"${i + 1}" for i in range(len(ids)))
+    try:
+        row = conn.execute(
+            f"SELECT median(cost_usd), "
+            f"median(COALESCE(input_tokens, 0) "
+            f"       + COALESCE(cache_tokens, 0) * {profile.cache_read_ratio}) "
+            f"FROM spans WHERE session_id IN ({placeholders}) "
+            f"AND name = 'gen_ai.llm.call'",
+            ids,
+        ).fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    billed, from_tokens = row[0], row[1]
+    if billed:
+        # Preferred: the rate these calls were ACTUALLY billed at, divided back
+        # through the cluster's input rate so the result is an input-token
+        # equivalent. Assumes no rate mix locally -- the bill already knows it.
+        tokens = float(billed) / profile.input_rate_per_token
+    elif from_tokens:
+        # Fallback for a corpus with no cost recorded (a partial ingest): the
+        # prompt's own size in input-token equivalents, on the same
+        # `input + cache_read x ratio` convention `_prompt_timelines` uses.
+        # Conservative -- it counts the re-sent prompt and not the output.
+        tokens = float(from_tokens)
+    else:
+        return None
+    if tokens <= 0:
+        return None
+    # Floor at the text constant: a measured turn is always the larger of the
+    # two, and a pathologically cheap corpus must never price a forced retry
+    # BELOW the error text it carries.
+    return max(int(round(tokens)), GROUNDED_TOKENS_PER_OCCURRENCE)
 
 
 def _prompt_timelines(conn: Any, session_ids: set[str]) -> dict[str, list[tuple[Any, int]]]:
@@ -1120,7 +1368,11 @@ def build_proposals(
     is unaffected either way — only the apply path is.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
-    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER, is_placeholder_fix
+    from tokenjam.core.optimize.write_budget import (
+        REASON_PLACEHOLDER,
+        is_placeholder_fix,
+        short_reason,
+    )
 
     repo_cwd_map = repo_cwd_map or {}
     write_offered = persona in {"claude-code", "mixed"}
@@ -1172,22 +1424,21 @@ def build_proposals(
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
 
-        # A cluster with no derived fix claims NOTHING, on any basis. 1387 of
-        # 2311 occurrences in a real corpus match no known family and fall back
-        # to the generic "review examples" text — attaching a dollar figure to
-        # those would put a number on a card whose fix the user cannot apply,
-        # which is the "would this be a quiet lie in the user's favour?" test
-        # (CLAUDE.md anti-pattern #22) failing outright. The write budget
-        # already refuses to WRITE a placeholder; this is the same verdict
-        # applied to the CLAIM, so it holds for every persona rather than only
-        # for the windows that reach the write path at all.
+        # A cluster with no derived fix CLAIMS nothing — there is no fix to
+        # claim, and a forward "you could recover $X" off a fix the user cannot
+        # apply is the "quiet lie in the user's favour" test (CLAUDE.md
+        # anti-pattern #22) failing outright.
+        #
+        # It still COST something, and that is a different field. The absence of
+        # a fix template is a gap in OUR library, not evidence the waste was
+        # unavoidable; the observed cost is computed for every cluster below,
+        # placeholder or not, and reported on the `past_overspend_*` fields.
         has_real_fix = not is_placeholder_fix(fix)
 
-        # A placeholder cluster is priced at the bare per-occurrence cost with
-        # no tail — the raw observation stays inspectable on the `gross_*`
-        # fields, and the two round-trip queries the tail needs are skipped for
-        # a cluster that will claim nothing anyway.
-        profile = blended_rate_profile(conn, session_ids=sessions) if has_real_fix else None
+        # Priced for EVERY cluster now, not only the ones with a fix: the tail
+        # is part of what the recurrence actually cost, and a cluster that will
+        # claim nothing still has to be able to say what it cost.
+        profile = blended_rate_profile(conn, session_ids=sessions)
         timelines = _prompt_timelines(conn, sessions) if profile is not None else {}
         multiplier, median_tail = _tail_multiplier(cluster.failures, timelines, profile)
 
@@ -1195,14 +1446,67 @@ def build_proposals(
         # re-read at the cache-read rate, expressed on the head's basis so the
         # token and dollar figures stay proportional. See the constants above.
         scale = _monthly_scale(window_days)
-        gross_tokens = round(occurrences * GROUNDED_TOKENS_PER_OCCURRENCE * multiplier)
+        # TWO DIFFERENT QUANTITIES, two different bases. They used to share the
+        # `GROUNDED_TOKENS_PER_OCCURRENCE` constant, which is right for one and
+        # wrong for the other by a measured ~15-20x:
+        #
+        #   HEAD -- the forced retry. A failed call makes the model emit a turn
+        #     it would not have emitted had the call succeeded. That turn costs
+        #     a whole round trip, and in a coding session a round trip re-sends
+        #     the entire context (this product's own central measurement). On
+        #     this corpus a real turn measured ~24k input-token equivalents
+        #     against the 1,500 that were being charged.
+        #   TAIL -- the error TEXT, re-sent on every later call that still
+        #     carries it. ~1,500 tokens IS the right size for a block of error
+        #     text, so the constant stays exactly where it was earned.
+        #
+        # Conflating them priced the retry as though it were the text.
+        turn_tokens = _measured_turn_tokens(conn, sessions, profile)
+        head_tokens = occurrences * (turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE)
+        # `multiplier - 1` is the tail's own share (`cache_read_ratio x tail`),
+        # kept on the TEXT basis rather than rescaled by the head.
+        text_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+        gross_tokens = head_tokens + round(text_tokens * max(multiplier - 1.0, 0.0))
         gross_monthly_tokens = round(gross_tokens * scale)
         gross_monthly_usd = (
             round(gross_monthly_tokens * profile.input_rate_per_token, 6)
             if profile is not None else None
         )
-        # The CLAIM, as distinct from the observation above.
-        recoverable_tokens = gross_tokens if has_real_fix else 0
+        # THE OBSERVATION. Accumulated over the whole scanned corpus, never
+        # paced to 30 days, never netted against a fix's standing cost, never
+        # zeroed by a gate. The re-read tail is broken out as a COMPONENT (not
+        # an addend) so a reader can see which part of the figure overlaps the
+        # re-sent context `analyzers/context_resend.py` prices in full.
+        reread_tokens = max(gross_tokens - head_tokens, 0)
+        past_overspend_usd = (
+            round(gross_tokens * profile.input_rate_per_token, 6)
+            if profile is not None else None
+        )
+        past_reread_usd = (
+            round(reread_tokens * profile.input_rate_per_token, 6)
+            if profile is not None else None
+        )
+        # The CLAIM, as distinct from the observation above -- and deliberately
+        # the HEAD ONLY, which is what makes it disjoint from `resend`.
+        #
+        # THE LINE BETWEEN THE TWO ANALYZERS:
+        #   `resend` targets context re-sent across calls that HAD to happen.
+        #     Its fix makes each necessary call carry less.
+        #   `relearn` targets calls that should never have happened at all.
+        #     Its fix stops the failure, so the retry turn never occurs.
+        #
+        # The head is a turn that would not exist if the pothole were fixed, so
+        # eliminating it takes its whole cost with it and no other analyzer is
+        # claiming that. The tail is re-sent context inside calls that happen
+        # regardless -- that is `resend`'s population by definition, and
+        # claiming it here would price the same tokens on two cards
+        # (CLAUDE.md rule 27). So the tail stays in the OBSERVED figure, broken
+        # out as `past_reread_*`, and is claimed by `resend` alone.
+        recoverable_tokens = head_tokens if has_real_fix else 0
+        recoverable_usd = (
+            round(recoverable_tokens * profile.input_rate_per_token, 6)
+            if profile is not None else None
+        )
         monthly_tokens = gross_monthly_tokens if has_real_fix else 0
         monthly_usd = gross_monthly_usd if has_real_fix else None
         rate_basis = "" if profile is None else (
@@ -1222,6 +1526,7 @@ def build_proposals(
             proposed_fix=fix,
             examples=examples,
             estimated_recoverable_tokens=recoverable_tokens,
+            estimated_recoverable_usd=recoverable_usd,
             novel=True,
             repo_cwd=repo_cwd,
             suggested_target=suggested_target,
@@ -1237,8 +1542,16 @@ def build_proposals(
             gross_recoverable_tokens=gross_tokens,
             gross_monthly_tokens=gross_monthly_tokens,
             gross_monthly_usd=gross_monthly_usd,
+            past_overspend_tokens=gross_tokens,
+            past_overspend_usd=past_overspend_usd,
+            past_overspend_basis=PAST_OVERSPEND_BASIS,
+            past_reread_tokens=reread_tokens,
+            past_reread_usd=past_reread_usd,
             write_offered=has_real_fix,
             write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
+            write_blocked_short=(
+                "" if has_real_fix else short_reason(REASON_PLACEHOLDER)
+            ),
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -1366,6 +1679,11 @@ def _apply_write_budget(
         out.append(replace(
             p,
             estimated_recoverable_tokens=decision.claimed_tokens,
+            # Same rate the gross figure was priced at, so the netted token and
+            # dollar fields keep dividing back to a real price band (rule 28).
+            estimated_recoverable_usd=(
+                round(decision.claimed_tokens * rate, 6) if rate is not None else None
+            ),
             estimated_monthly_tokens=net_monthly_tokens,
             estimated_monthly_usd=net_monthly_usd,
             standing_cost_tokens_per_session=decision.standing_tokens_per_session,
@@ -1375,6 +1693,7 @@ def _apply_write_budget(
             net_negative=decision.net_negative,
             write_offered=decision.offered,
             write_blocked_reason=decision.reason,
+            write_blocked_short=wb.short_reason(decision.reason),
             # A suppressed write has no apply path, which is exactly what
             # `advise_only` already means to every surface. Reusing that flag
             # (rather than teaching each renderer a second one) makes the
@@ -1441,6 +1760,7 @@ def analyze_relearns(
 
     raw_clusters = cluster_failures(all_failures)
     recurring = _recurring(raw_clusters, min_sessions)
+    residue = _below_threshold_residue(raw_clusters, recurring, conn)
     distilled = apply_distill_to_residual(
         recurring, cache_dir=distill_cache_dir, enabled=distill_enabled,
     )
@@ -1475,9 +1795,20 @@ def analyze_relearns(
         sessions_by_repo=sessions_by_repo,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
+    claim_priced = [
+        p.estimated_recoverable_usd for p in proposals
+        if p.estimated_recoverable_usd is not None
+    ]
     total_monthly_tokens = sum(p.estimated_monthly_tokens for p in proposals) if proposals else None
     priced = [p.estimated_monthly_usd for p in proposals if p.estimated_monthly_usd is not None]
     total_monthly_usd = round(sum(priced), 6) if priced else None
+
+    # The past-tense totals sum EVERY cluster, gated or not — that is the whole
+    # point of the field. `estimated_*` above sums the (smaller) claim.
+    past_tokens = sum(p.past_overspend_tokens for p in proposals)
+    past_priced = [p.past_overspend_usd for p in proposals if p.past_overspend_usd is not None]
+    reread_tokens = sum(p.past_reread_tokens for p in proposals)
+    reread_priced = [p.past_reread_usd for p in proposals if p.past_reread_usd is not None]
 
     return RelearnFinding(
         clusters=proposals,
@@ -1486,10 +1817,22 @@ def analyze_relearns(
         distilled_clusters=distilled_count,
         dropped_codified=dropped,
         estimated_recoverable_tokens=total_tokens if proposals else None,
+        estimated_recoverable_usd=(
+            round(sum(claim_priced), 6) if claim_priced else None
+        ),
         min_sessions=min_sessions,
         window_days=window_days,
         estimated_monthly_tokens=total_monthly_tokens,
         estimated_monthly_usd=total_monthly_usd,
+        past_overspend_tokens=past_tokens,
+        past_overspend_usd=round(sum(past_priced), 6) if past_priced else None,
+        past_overspend_basis=PAST_OVERSPEND_BASIS if proposals else "",
+        past_reread_tokens=reread_tokens,
+        past_reread_usd=round(sum(reread_priced), 6) if reread_priced else None,
+        below_threshold_clusters=residue["clusters"],
+        below_threshold_occurrences=residue["occurrences"],
+        below_threshold_past_overspend_tokens=residue["tokens"],
+        below_threshold_past_overspend_usd=residue["usd"],
     )
 
 
@@ -1511,6 +1854,69 @@ def _repo_map_from_db(conn) -> dict[str, str]:
             repo = repo[len("claude-code-"):]
         out[str(session_id)] = repo
     return out
+
+
+def _retention_cutoff(retention_days: int | None) -> Any:
+    """The oldest timestamp tokenjam still keeps, or ``None`` for unbounded.
+
+    The archive lane's horizon. Deliberately derived from the STORE's retention
+    rather than the report window: relearn's whole premise is that it sees
+    further back than one window, and re-imposing a 30-day filter here is the
+    exact defect the archive lane exists to remove.
+    """
+    if not retention_days or retention_days <= 0:
+        return None
+    from datetime import timedelta
+
+    from tokenjam.utils.time_parse import utcnow
+
+    return utcnow() - timedelta(days=int(retention_days))
+
+
+def _archived_session_ids(
+    conn: Any, on_disk: set[str], since: Any = None,
+) -> set[str]:
+    """Coding sessions tokenjam retains but Claude Code has already rotated.
+
+    The archive lane's population: every session id the ``sessions`` table knows
+    that has NO ``.jsonl`` left on disk. Subtracting ``on_disk`` is what keeps
+    the two lanes disjoint, so a failure is never extracted twice.
+
+    Best-effort — an unreadable table yields an empty set, which degrades the
+    run to exactly today's transcript-only behaviour rather than failing it.
+    """
+    sql = "SELECT DISTINCT session_id FROM sessions"
+    params: list[Any] = []
+    if since is not None:
+        sql += " WHERE started_at >= $1"
+        params.append(since)
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception:
+        return set()
+    return {str(r[0]) for r in rows if r[0] and str(r[0]) not in on_disk}
+
+
+def _corpus_basis(
+    transcript_sessions: int,
+    archived_sessions: int,
+    window_days: float | None,
+    retention_days: int | None,
+) -> str:
+    """One sentence naming what the run actually scanned, so a reader can tell
+    an empty result from an un-scanned one — and can see that the horizon is
+    tokenjam's retention, not Claude Code's transcript rotation."""
+    span = f"{window_days:.1f} days" if window_days else "an undetermined span"
+    kept = (
+        f"bounded by tokenjam's {retention_days}-day retention"
+        if retention_days else "unbounded by tokenjam's retention settings"
+    )
+    return (
+        f"{transcript_sessions} session(s) read from on-disk transcripts plus "
+        f"{archived_sessions} whose transcript Claude Code has already rotated "
+        f"away, recovered from retained telemetry ({kept}); occurrences span "
+        f"{span}."
+    )
 
 
 def _repo_cwd_map_for(
@@ -1551,13 +1957,13 @@ def compute_relearn_finding(
     transcript_cache_dir: Path | None = None,
     persona: str = "unknown",
     existing_agent_file_tokens: int | None = None,
+    retention_days: int | None = None,
 ) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
     used by the serve-time background cache job (``api/routes/relearn.py``)
-    and by tests. ``conn`` is an OPTIONAL DuckDB connection used only for
-    repo-name enrichment (``sessions.agent_id``); pass ``None`` and every
-    session falls back to a ``"unknown"`` repo label — clustering itself needs
-    no DB at all, it's a pure filesystem scan.
+    and by tests. ``conn`` is an OPTIONAL DuckDB connection; without it the run
+    degrades to the transcript lane alone (weaker repo labels, and NO archive —
+    see below), which is the only thing a filesystem-only scan can offer.
 
     ``persona`` (default ``"unknown"``, the conservative no-write default —
     see ``build_proposals``) is forwarded to gate the rung-1/rung-2 write.
@@ -1565,18 +1971,38 @@ def compute_relearn_finding(
     re-deriving it here, so a report never carries two different persona
     classifications for the same window.
 
-    Full-corpus by design: enumerates every on-disk Claude Code transcript
-    (not window-scoped like the other analyzers — a relearn recurring across
-    months of history is exactly the signal this detector exists to find),
-    optionally pre-filtered to ``since`` when the caller wants an incremental
-    scan. Heavy (tens of seconds over a full local corpus) — callers that
-    serve this over HTTP MUST cache the result, not compute it per-request.
+    THE HORIZON IS TOKENJAM'S ARCHIVE, NOT CLAUDE'S ROTATION. This is the whole
+    premise of the analyzer and it used to be false. relearn is the one detector
+    whose signal is long-horizon recurrence, and it read Claude Code's on-disk
+    ``.jsonl`` transcripts — which Claude Code itself rotates
+    (``cleanupPeriodDays``, default 30). Measured on a real corpus the scanned
+    span was 37.4 days against a DuckDB holding 120, so relearn was structurally
+    incapable of accumulating history however long tokenjam ran: the one
+    analyzer that needed the archive was wired to the source the archive exists
+    to outlive.
 
-    TWO LANES. On-disk transcripts cover the workspace agents; when ``conn`` is
-    given, failing spans from NON-coding agents are folded into the same
-    clustering pass so SDK/OTel services are no longer invisible to the
-    detector (``core/optimize/relearn_otel.py``). Their clusters come back
-    ``advise_only``: detect and advise, never apply.
+    THREE LANES, disjoint by construction so nothing is counted twice:
+
+    1. **Transcript** — every session Claude Code still has a ``.jsonl`` for.
+       Richest signatures (raw tool error text + the method-spine move), so it
+       stays the fast path for recent history.
+    2. **Archive** — coding sessions tokenjam still holds telemetry for whose
+       transcript has already been rotated away. Their failures come from the
+       ``spans`` table (``relearn_otel.extract_archived_coding_failures``);
+       coarser signatures, but the alternative is that they vanish. This lane is
+       what makes the horizon tokenjam's retention rather than Claude's.
+    3. **OTel** — failing spans from NON-coding agents, which never had a
+       transcript at all. Marked ``advise_only``: detect and advise, never
+       apply.
+
+    ``retention_days`` bounds lanes 2 and 3 to what tokenjam actually keeps
+    (``storage.retention_days``); ``None`` means unbounded, which is correct for
+    a store the caller has already scoped. ``since`` still pre-filters the
+    transcript lane by mtime for an explicitly incremental scan — but note that
+    passing a 30-day window here re-imposes exactly the horizon this design
+    removes, so ``run(ctx)`` deliberately does NOT pass the report window.
+    Heavy (tens of seconds over a full local corpus) — callers that serve this
+    over HTTP MUST cache the result, not compute it per-request.
 
     ``transcript_cache_dir``, when given, transparently caches each session's
     parsed transcript on disk (``core.transcript_cache``) so a re-run over an
@@ -1587,6 +2013,7 @@ def compute_relearn_finding(
     """
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
+    archive_since = _retention_cutoff(retention_days)
 
     # The OTel lane. Best-effort: a failure here must never sink the (already
     # working) transcript scan.
@@ -1599,7 +2026,7 @@ def compute_relearn_finding(
                 non_coding_agent_ids,
             )
 
-            span_failures = extract_span_failures(conn, since)
+            span_failures = extract_span_failures(conn, archive_since or since)
             advise_only_repos = non_coding_agent_ids(conn)
         except Exception:
             span_failures = []
@@ -1619,6 +2046,25 @@ def compute_relearn_finding(
         session_id = path.stem
         sessions.append((session_id, repo_map.get(session_id, "unknown")))
 
+    # THE ARCHIVE LANE. Every coding session tokenjam still holds telemetry for
+    # whose transcript Claude Code has already rotated away. Without this the
+    # detector's horizon is Claude's `cleanupPeriodDays`, not tokenjam's
+    # retention, and no amount of running longer accumulates any history at all.
+    # Best-effort, exactly like the OTel lane above.
+    on_disk = {session_id for session_id, _repo in sessions}
+    archived_failures: list[FailureEpisode] = []
+    if conn is not None:
+        try:
+            from tokenjam.core.optimize.relearn_otel import (
+                extract_archived_coding_failures,
+            )
+
+            archived_failures = extract_archived_coding_failures(
+                conn, _archived_session_ids(conn, on_disk, archive_since), archive_since,
+            )
+        except Exception:
+            archived_failures = []
+
     doc_text = ""
     repo_cwd_map: dict[str, str] = {}
     try:
@@ -1629,13 +2075,25 @@ def compute_relearn_finding(
     except Exception:
         doc_text = ""
 
-    return analyze_relearns(
+    finding = analyze_relearns(
         sessions, projects_root=root, codified_doc_text=doc_text,
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
-        extra_failures=span_failures, advise_only_repos=advise_only_repos,
+        extra_failures=span_failures + archived_failures,
+        advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
         conn=conn, persona=persona,
         existing_agent_file_tokens=existing_agent_file_tokens,
+    )
+    archived_sessions = len({f.session_id for f in archived_failures})
+    from dataclasses import replace as _replace
+
+    return _replace(
+        finding,
+        transcript_sessions_scanned=len(sessions),
+        archived_sessions_scanned=archived_sessions,
+        corpus_basis=_corpus_basis(
+            len(sessions), archived_sessions, finding.window_days, retention_days,
+        ),
     )
 
 
@@ -1648,6 +2106,13 @@ def run(ctx: AnalyzerContext) -> None:
     Passes the resolved persistent parse cache dir (``core.transcript_cache.
     default_cache_dir``) so a re-run over an unchanged corpus skips
     re-parsing every session it already has a fresh cache entry for.
+
+    Deliberately does NOT forward ``ctx.since``. Every OTHER analyzer is
+    window-scoped; relearn is the one whose entire signal is recurrence across
+    history, so scoping it to the report window would cap its horizon at the
+    window the user happened to ask about. Its horizon is
+    ``storage.retention_days`` — what tokenjam actually kept — which is the
+    point of keeping it.
     """
     from tokenjam.core.transcript_cache import default_cache_dir
 
@@ -1655,6 +2120,8 @@ def run(ctx: AnalyzerContext) -> None:
     min_sessions = getattr(
         optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
     )
+    storage_cfg = getattr(ctx.config, "storage", None)
+    retention_days = getattr(storage_cfg, "retention_days", None)
     # The write budget's headroom comes from the `summarize` analyzer's own
     # measurement of the agent files these proposals would append to. It runs
     # ahead of relearn in ANALYZER_ORDER, so its finding is already on the
@@ -1665,7 +2132,8 @@ def run(ctx: AnalyzerContext) -> None:
     from tokenjam.core.optimize.write_budget import measured_agent_file_tokens
 
     ctx.report.findings["relearn"] = compute_relearn_finding(
-        ctx.conn, ctx.since, min_sessions=min_sessions,
+        ctx.conn, min_sessions=min_sessions,
+        retention_days=retention_days,
         transcript_cache_dir=default_cache_dir(ctx.config),
         persona=ctx.persona,
         existing_agent_file_tokens=measured_agent_file_tokens(

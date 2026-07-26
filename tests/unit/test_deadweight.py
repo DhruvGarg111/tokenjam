@@ -168,7 +168,7 @@ def test_no_configured_servers_is_a_no_op(tmp_path):
 
     assert finding.configured_servers == 0
     assert finding.dead_servers == []
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_tokens is None
 
 
 def test_detects_dead_server_at_threshold(tmp_path):
@@ -187,8 +187,8 @@ def test_detects_dead_server_at_threshold(tmp_path):
     assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
     assert dead.invocations == 0
     assert dead.estimated_tax_tokens_per_session == FULL_SCHEMA_TAX_TOKENS
-    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_window
-    assert finding.estimated_recoverable_tokens > 0
+    assert finding.past_overspend_tokens == dead.estimated_tax_tokens_window
+    assert finding.past_overspend_tokens > 0
 
 
 def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
@@ -212,7 +212,7 @@ def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
         dead.estimated_tax_tokens_per_session / 1_000_000 * rates.input_per_mtok, 6,
     )
     assert dead.estimated_tax_usd_window > 0
-    assert finding.estimated_recoverable_usd == dead.estimated_tax_usd_window
+    assert finding.past_overspend_usd == dead.estimated_tax_usd_window
     assert "Priced at claude-opus-4-8's input rate" in dead.tax_construction
 
 
@@ -234,7 +234,7 @@ def test_no_priced_model_leaves_usd_none(tmp_path):
     assert dead.priced_model == ""
     assert dead.estimated_tax_usd_per_session is None
     assert dead.estimated_tax_usd_window is None
-    assert finding.estimated_recoverable_usd is None
+    assert finding.past_overspend_usd is None
     assert "No dollar estimate" in dead.tax_construction
 
 
@@ -249,7 +249,7 @@ def test_below_threshold_is_not_flagged_dead(tmp_path):
 
     assert finding.configured_servers == 1
     assert finding.dead_servers == []
-    assert finding.estimated_recoverable_tokens is None
+    assert finding.past_overspend_tokens is None
     assert finding.notes  # the "no server cleared the bar" note fires
 
 
@@ -673,7 +673,7 @@ def test_dead_server_tax_not_double_counted_between_table_and_total(tmp_path):
     # The tax table's own MCP row and the recoverable total both derive from
     # the SAME per-server figure, but the total must equal exactly the dead
     # servers' sum -- never (tax table total) + (recoverable total).
-    assert finding.estimated_recoverable_tokens == dead.estimated_tax_tokens_window
+    assert finding.past_overspend_tokens == dead.estimated_tax_tokens_window
     assert mcp_row.total_tokens_window == dead.estimated_tax_tokens_per_session * dead.sessions_present
 
 

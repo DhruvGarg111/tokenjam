@@ -5,8 +5,8 @@ Unlike the other analyzers, this one reasons over the **filesystem**, not
 telemetry: it runs the read-only, catalog-default summarize scan
 (`core/summarize/candidates.list_candidates`) and reports the prompt-token
 reduction available by summarizing those files' prose, priced over the
-analyzed window (see below) so `estimated_recoverable_tokens` and
-`estimated_recoverable_usd` are on the same basis. It carries the #111
+analyzed window (see below) so `past_overspend_tokens` and
+`past_overspend_usd` are on the same basis. It carries the #111
 recoverable-savings contract so the Overview waste band and the
 `/cost/components` overlay pick it up with no UI change (registry-driven).
 
@@ -72,7 +72,7 @@ SUMMARIZE_ESTIMATE_BASIS = (
     "Read-only filesystem scan of catalog prompt files (CLAUDE.md / AGENTS.md / "
     "globals); prose is summarized, structure kept verbatim. These files are "
     "ALWAYS-ON context, so the reduction is realized repeatedly, not once: "
-    "`estimated_recoverable_tokens` and `estimated_recoverable_usd` are on the "
+    "`past_overspend_tokens` and `past_overspend_usd` are on the "
     "SAME basis — both price reduction x (sessions that load the file) x (first "
     "call at the input rate + each later call in that session at the cache-read "
     "rate), on the same window basis as the other cost analyzers; the tokens "
@@ -123,7 +123,7 @@ class SummarizeCandidate:
 class SummarizeFinding:
     """Filesystem-derived summarize opportunity, on the #111 recoverable contract.
 
-    ``estimated_recoverable_tokens`` and ``estimated_recoverable_usd`` are on
+    ``past_overspend_tokens`` and ``past_overspend_usd`` are on
     the SAME basis: both price the reduction over the analyzed window
     (removed on every read, across every loading session), so a rollup that
     sums tokens across analyzers and one that sums dollars across analyzers
@@ -135,8 +135,8 @@ class SummarizeFinding:
 
     candidates: list[SummarizeCandidate] = field(default_factory=list)
     files: int = 0
-    estimated_recoverable_usd: float | None = None
-    estimated_recoverable_tokens: int | None = None
+    past_overspend_usd: float | None = None
+    past_overspend_tokens: int | None = None
     #: One-time sum of every candidate's ``est_tokens_saved`` — the aggregate
     #: per-call prose reduction, independent of how many sessions/calls
     #: actually reread it. Feeds the curate/diff UI and ``reduction_pct``;
@@ -152,7 +152,7 @@ class SummarizeFinding:
     #   avg_reduction_pct = mean of the per-file reduction %s
     reduction_pct: int | None = None
     avg_reduction_pct: int | None = None
-    # The observed inputs behind `estimated_recoverable_usd`, carried so the
+    # The observed inputs behind `past_overspend_usd`, carried so the
     # figure is inspectable rather than a black box: how many sessions the
     # window held, how many calls each made on average (every one of which
     # re-sends these files), and which models the rate blend came from.
@@ -420,8 +420,8 @@ def run(ctx: AnalyzerContext) -> None:
         # "compressing them is worth nothing" (anti-pattern #22). Applies
         # symmetrically to tokens and dollars now that both are window-priced
         # — a candidate contributes to either both sums or neither.
-        finding.estimated_recoverable_tokens = sum(window_tokens) if window_tokens else None
-        finding.estimated_recoverable_usd = round(sum(priced), 6) if priced else None
+        finding.past_overspend_tokens = sum(window_tokens) if window_tokens else None
+        finding.past_overspend_usd = round(sum(priced), 6) if priced else None
         if profile is not None:
             finding.sessions_examined = profile.sessions_total
             finding.calls_per_session = round(profile.calls_per_session, 2)
