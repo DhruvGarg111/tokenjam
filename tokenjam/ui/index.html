@@ -5651,16 +5651,39 @@ function buildCacheSeries(resp, useTokens) {
   return { data: [xs, sav], hitSpark, hitRate, bucket, coarsened: grid.coarsened };
 }
 
+// Attribution (multi-tenant cost) dimensions the Cost view can group/filter
+// by, beyond the original total/model/agent (#SDK dashboard shape). Keyed the
+// same as the `group_by` query param / API value. `label` drives the dropdown
+// option text + the table's leading column header.
+const COST_ATTRIBUTION_DIMS = [
+  ['tenant', 'By tenant'],
+  ['feature', 'By feature'],
+  ['environment', 'By environment'],
+  ['prompt_version', 'By prompt version'],
+];
+const COST_GROUP_BY_LABELS = {
+  day: 'Date', agent: 'Agent', model: 'Model',
+  tenant: 'Tenant', feature: 'Feature', environment: 'Environment',
+  prompt_version: 'Prompt version',
+};
+
 function CostView({ params }) {
   const DEFAULTS = { since: '7d', group_by: 'total', agent_id: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const groupBy = readParam(params, 'group_by', DEFAULTS.group_by,
-    v => ['total', 'model', 'agent'].includes(v));
+    v => ['total', 'model', 'agent', ...COST_ATTRIBUTION_DIMS.map(d => d[0])].includes(v));
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
   const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
+  // The chart's stacked-series data only ever splits by model/agent (the
+  // /cost `series` field carries no tenant/feature/environment/prompt_version
+  // breakdown) — an attribution dim's chart falls back to a single Total line
+  // so it stays accurate rather than mislabeling an agent/model split as the
+  // requested dimension (see buildCostSeries).
+  const isAttributionDim = COST_ATTRIBUTION_DIMS.some(d => d[0] === groupBy);
 
   const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
     totalTokens: 0, framing: null, costResp: null, compare: null, cacheResp: null });
+  const [tenants, setTenants] = useState({ loading: true, data: null });
 
   const load = useCallback(async (opts = {}) => {
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
@@ -5689,12 +5712,27 @@ function CostView({ params }) {
     }
   }, [since, groupBy, agentId]);
 
+  // Top-tenants-by-spend concentration panel (#SDK dashboard shape) — its own
+  // fetch, independent of the table's group_by, so switching "group by" away
+  // from tenant doesn't blank this panel. Best-effort: a failure renders the
+  // panel's own error text, never the whole Cost screen.
+  const loadTenants = useCallback(async (opts = {}) => {
+    setTenants(s => ({ ...s, loading: true }));
+    try {
+      const d = await api('/cost/tenants', { since, agent_id: agentId || undefined, top_n: 10 }, opts);
+      setTenants({ loading: false, data: d });
+    } catch (e) {
+      setTenants({ loading: false, data: null, error: e.message || String(e) });
+    }
+  }, [since, agentId]);
+  useEffect(() => { loadTenants(); }, [loadTenants]);
+
   // Poll bypasses the GET cache so the 30s refresh always hits the network.
   useEffect(() => { load(); const t = setInterval(() => load({ noCache: true }), 30000); return () => clearInterval(t); }, [load]);
 
   const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
-  const series = buildCostSeries(costResp, groupBy, useTokens);
+  const series = buildCostSeries(costResp, isAttributionDim ? 'total' : groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
   const cacheSeries = buildCacheSeries(cacheResp, useTokens);
 
@@ -5735,6 +5773,7 @@ function CostView({ params }) {
         <option value="total">Total</option>
         <option value="model">By model</option>
         <option value="agent">By agent</option>
+        ${COST_ATTRIBUTION_DIMS.map(([v, label]) => html`<option value=${v}>${label}</option>`)}
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
@@ -5753,6 +5792,7 @@ function CostView({ params }) {
       <div class="chart-card">
         <div class="chart-head">
           <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
+          ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line — the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
           <div class="chart-meta">
             <span class="chart-total">${totalDisplay}</span>
             <${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />
@@ -5798,10 +5838,21 @@ function CostView({ params }) {
       </div>
     ` : null}
 
+    ${!error && !loading && isAttributionDim && rows.length === 0 ? html`
+      <div class="chart-card">
+        <div class="empty" style="padding:24px 0">
+          No ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()} data in this window.
+          ${costResp && costResp.attribution_coverage && !costResp.attribution_coverage[groupBy].has_data
+            ? html`Set <code class="mono">${costResp.attribution_coverage[groupBy].attribute}</code> at the call site (an OTel span or resource attribute) to see spend broken down by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}.`
+            : html`No spend in this window carried a ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()} value.`}
+        </div>
+      </div>
+    ` : null}
+
     ${!error && !loading && rows.length > 0 ? html`
       <div class="table-wrap"><table>
         <thead><tr>
-          <th>${tableMode === 'day' ? 'Date' : tableMode === 'agent' ? 'Agent' : 'Model'}</th>
+          <th>${COST_GROUP_BY_LABELS[tableMode] || 'Group'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
           <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
@@ -5830,6 +5881,52 @@ function CostView({ params }) {
         </tbody>
       </table></div>
     ` : null}
+
+    ${!error ? html`<${TopTenantsPanel} tenants=${tenants} framing=${framing} />` : null}
+  `;
+}
+
+// Top-N tenants by spend (#SDK dashboard shape): the concentration view that
+// answers "which customers are driving the bill". Degrades honestly (Critical
+// Rule 14): renders a "set tokenjam.tenant_id" empty state — never a blank or
+// misleading chart — when no span in the window carries a tenant_id.
+function TopTenantsPanel({ tenants, framing }) {
+  const { loading, data } = tenants;
+  return html`
+    <div class="chart-card">
+      <div class="chart-head">
+        <div class="chart-title">Top tenants by spend</div>
+      </div>
+      ${loading ? html`<div class="shimmer" style="height:120px"></div>` : (!data || !data.has_data) ? html`
+        <div class="empty" style="padding:24px 0">
+          No tenant data in this window. Set <code class="mono">${(data && data.attribute) || 'tokenjam.tenant_id'}</code>
+          at the call site (an OTel span attribute, or via <code class="mono">tokenjam.sdk.attribution.attribution(tenant_id=...)</code>
+          for auto-instrumented calls) to see spend concentration by customer/tenant.
+        </div>
+      ` : html`
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>Tenant</th><th>Cost</th><th>Share of total</th><th>Calls</th><th>Trend</th>
+          </tr></thead>
+          <tbody>
+            ${data.rows.map(r => html`
+              <tr>
+                <td class="mono">${r.tenant_id}</td>
+                <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
+                <td>${r.share_of_total != null ? (r.share_of_total * 100).toFixed(1) + '%' : '-'}</td>
+                <td>${fmtTokens(r.call_count)}</td>
+                <td>${r.delta_pct != null
+                  ? html`<${TrendChip} pct=${r.delta_pct} prevThin=${false} />`
+                  : html`<span class="dim">new</span>`}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table></div>
+        ${data.unattributed_cost_usd > 0 ? html`
+          <div class="chart-foot"><span class="dim">${fmtFramedDollar(data.unattributed_cost_usd, framing)} of spend in this window has no tenant set and isn't included above.</span></div>
+        ` : null}
+      `}
+    </div>
   `;
 }
 
@@ -7406,6 +7503,9 @@ const ANALYTICS_DIMENSIONS = [
   ['model', 'Model'], ['agent', 'Agent'], ['provider', 'Provider'], ['tool', 'Tool'],
   ['tool_category', 'Tool category'], ['kind', 'Span kind'], ['request_type', 'Request type'],
   ['day', 'Day'],
+  // SDK cost-attribution dimensions (#SDK dashboard shape).
+  ['tenant', 'Tenant'], ['feature', 'Feature'], ['environment', 'Environment'],
+  ['prompt_version', 'Prompt version'],
 ];
 const ANALYTICS_CHARTS = [['bar', 'Bars'], ['line', 'Lines'], ['hbar', 'Leaderboard']];
 // Built-in presets (close #214 leaderboard + #216 multi-series as preset views).

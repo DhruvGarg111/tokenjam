@@ -118,6 +118,29 @@ class NormalizedSpan:
     # spawns. Transient on the span; persisted on the session for the run tree.
     parent_session_id: str | None   = None
 
+    # -- SDK cost-attribution dimensions (multi-tenant cost breakdown) --
+    # Indexed directly on `spans` (not session-only, unlike service_namespace):
+    # the Cost view groups/filters at span granularity, so these need to be
+    # queryable per-span. All nullable — absent on any producer that doesn't
+    # set them, including every existing Claude Code / OTLP span (no backfill
+    # required, no behavior change for spans that never carry them).
+    #
+    # tenant_id / feature: tj-specific (no OTel convention exists for a
+    # billing-tenant or an application "feature" label). environment /
+    # service_version / commit_sha: standard OTel resource-attribute names
+    # (deployment.environment.name / service.version / vcs.ref.head.revision)
+    # — see otel/semconv.py::ResourceAttributes for the exact wire names and
+    # the deprecated-fallback note for commit_sha.
+    tenant_id:       str | None = None
+    feature:         str | None = None
+    environment:     str | None = None
+    service_version: str | None = None
+    commit_sha:      str | None = None
+    # Prompt/template identity pair (tj-specific — no gen_ai.* convention
+    # exists). template_id names the prompt; template_version is its revision.
+    prompt_template_id:      str | None = None
+    prompt_template_version: str | None = None
+
 
 @dataclass
 class SessionRecord:
@@ -424,7 +447,15 @@ class CostFilters:
     agent_id:  str | None   = None
     since:     datetime | None = None
     until:     datetime | None = None
-    group_by:  str          = "day"   # agent | model | day | tool
+    # agent | model | day | tool | tenant | feature | environment | prompt_version
+    group_by:  str          = "day"
+    # Equality filters for the new cost-attribution dimensions (#SDK dashboard
+    # shape). Independent of group_by — e.g. group_by="model" + tenant_id="acme"
+    # scopes a per-model breakdown to one tenant's spend.
+    tenant_id:      str | None = None
+    feature:        str | None = None
+    environment:    str | None = None
+    prompt_version: str | None = None
 
 
 @dataclass

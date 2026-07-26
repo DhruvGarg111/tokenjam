@@ -13,6 +13,7 @@ from typing import Any
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class LangChainIntegration:
             span.set_attribute(GenAIAttributes.PROVIDER_NAME, "langchain")
             model = getattr(self_llm, "model_name", None) or getattr(self_llm, "model", "unknown")
             span.set_attribute(GenAIAttributes.REQUEST_MODEL, model)
+            stamp_span_attribution(span)
             try:
                 result = integration._original_generate(self_llm, prompts, *args, **kwargs)
                 if hasattr(result, "llm_output") and result.llm_output:
@@ -77,6 +79,7 @@ class LangChainIntegration:
                 span.set_attribute(GenAIAttributes.PROVIDER_NAME, "langchain")
                 model = getattr(self_llm, "model_name", None) or getattr(self_llm, "model", "unknown")
                 span.set_attribute(GenAIAttributes.REQUEST_MODEL, model)
+                stamp_span_attribution(span)
                 try:
                     result = await integration._original_agenerate(self_llm, prompts, *args, **kwargs)
                     span.set_status(trace.Status(trace.StatusCode.OK))

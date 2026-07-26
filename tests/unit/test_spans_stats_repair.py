@@ -37,7 +37,8 @@ def _insert_minimal_span(conn, *, trace_id: str, span_id: str) -> None:
     now = dt.datetime.now(dt.timezone.utc)
     conn.execute(
         "INSERT INTO spans VALUES "
-        "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
+        "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
+        "$29,$30,$31,$32,$33,$34,$35)",
         [
             span_id, trace_id, None, "session-1",
             "test-agent", "test-span", "internal", "ok",
@@ -50,6 +51,13 @@ def _insert_minimal_span(conn, *, trace_id: str, span_id: str) -> None:
             None,  # request_params (migration 7)
             None,  # request_tools (migration 7)
             None,  # sub_agent_id (migration 14)
+            None,  # tenant_id (migration 17)
+            None,  # feature (migration 17)
+            None,  # environment (migration 17)
+            None,  # service_version (migration 17)
+            None,  # commit_sha (migration 17)
+            None,  # prompt_template_id (migration 17)
+            None,  # prompt_template_version (migration 17)
         ],
     )
 

@@ -13,6 +13,7 @@ from typing import Any
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_anthropic_completion,
     record_completion_content,
@@ -64,6 +65,10 @@ class AnthropicIntegration:
             # Prompt content (#320). Set unconditionally; stripped at ingest
             # unless [capture] prompts is on. Same serialization as litellm.
             record_prompt_content(span, kwargs.get("messages"))
+            # Cost-attribution dimensions from the ambient sdk.attribution
+            # context, if a caller declared one (#SDK dashboard shape) — this
+            # patched client call has no per-call kwarg for tenant_id/feature.
+            stamp_span_attribution(span)
             # Inherit agent_id from parent span (set by @watch())
             parent_span = trace.get_current_span()
             if parent_span and parent_span.is_recording():
@@ -139,6 +144,7 @@ class AnthropicIntegration:
                 # path would need buffering the stream (the wrapper doesn't
                 # aggregate text) — out of scope; the request is captured here.
                 record_prompt_content(span, kwargs.get("messages"))
+                stamp_span_attribution(span)
                 parent_span = trace.get_current_span()
                 if parent_span and parent_span.is_recording():
                     agent_id = parent_span.attributes.get(GenAIAttributes.AGENT_ID)

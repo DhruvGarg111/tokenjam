@@ -49,6 +49,14 @@ _DIMENSION_EXPR: dict[str, str] = {
     "kind": "kind",
     "request_type": "request_type",
     "day": "__bucket__",  # sentinel: resolved to the time-bucket expression
+    # SDK cost-attribution dimensions (#SDK dashboard shape) — nullable spans
+    # columns from migration 17; a span that never set one simply groups under
+    # "(none)" (see the g1v/g2v None-coalescing below), same as any other
+    # sparsely-populated dimension here (e.g. request_type).
+    "tenant": "tenant_id",
+    "feature": "feature",
+    "environment": "environment",
+    "prompt_version": "prompt_template_version",
 }
 
 # Metric name -> (SQL aggregate, value unit). spend is the only dollar-bearing
@@ -70,6 +78,10 @@ _FILTER_COLUMN = {
     "provider": "provider",
     "model": "model",
     "tool": "tool_name",
+    "tenant_id": "tenant_id",
+    "feature": "feature",
+    "environment": "environment",
+    "prompt_version": "prompt_template_version",
 }
 
 _TOKENS_EXPR = "COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)), 0)"
@@ -102,6 +114,10 @@ async def get_analytics(
     provider: str | None = None,
     model: str | None = None,
     tool: str | None = None,
+    tenant_id: str | None = None,
+    feature: str | None = None,
+    environment: str | None = None,
+    prompt_version: str | None = None,
 ) -> dict:
     """Return a grouped series for (metric, group_by, optional stack_by, filters)."""
     if metric not in _METRIC_EXPR:
@@ -169,7 +185,10 @@ async def get_analytics(
     # the current window, the per-bucket KPI series, and the prior-period window.
     filter_pairs = [(_FILTER_COLUMN[p], v) for p, v in
                     (("agent_id", agent_id), ("provider", provider),
-                     ("model", model), ("tool", tool)) if v]
+                     ("model", model), ("tool", tool),
+                     ("tenant_id", tenant_id), ("feature", feature),
+                     ("environment", environment),
+                     ("prompt_version", prompt_version)) if v]
 
     def where_and_params(*, with_subtype: bool, lo, hi) -> tuple[str, list]:
         """Build a (where, params) over the filters + a [lo, hi) time window.

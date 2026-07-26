@@ -174,6 +174,8 @@ _SPAN_BULK_COLUMNS: tuple[str, ...] = (
     "input_tokens", "output_tokens", "cache_tokens", "cost_usd",
     "request_type", "conversation_id", "events", "billing_account",
     "cache_write_tokens", "request_params", "request_tools", "sub_agent_id",
+    "tenant_id", "feature", "environment", "service_version", "commit_sha",
+    "prompt_template_id", "prompt_template_version",
 )
 
 # read_json column -> type. Timestamps are read as VARCHAR and cast to TIMESTAMPTZ
@@ -191,6 +193,9 @@ _SPAN_BULK_READ_TYPES: dict[str, str] = {
     "conversation_id": "VARCHAR", "events": "JSON", "billing_account": "VARCHAR",
     "cache_write_tokens": "BIGINT", "request_params": "JSON",
     "request_tools": "JSON", "sub_agent_id": "VARCHAR",
+    "tenant_id": "VARCHAR", "feature": "VARCHAR", "environment": "VARCHAR",
+    "service_version": "VARCHAR", "commit_sha": "VARCHAR",
+    "prompt_template_id": "VARCHAR", "prompt_template_version": "VARCHAR",
 }
 
 # Columns that need a cast in the SELECT (read as VARCHAR, stored as TIMESTAMPTZ).
@@ -263,6 +268,13 @@ def _span_to_json_obj(span: NormalizedSpan) -> dict:
         "request_params": span.request_params,
         "request_tools": span.request_tools,
         "sub_agent_id": span.sub_agent_id,
+        "tenant_id": span.tenant_id,
+        "feature": span.feature,
+        "environment": span.environment,
+        "service_version": span.service_version,
+        "commit_sha": span.commit_sha,
+        "prompt_template_id": span.prompt_template_id,
+        "prompt_template_version": span.prompt_template_version,
     }
 
 
@@ -568,6 +580,24 @@ MIGRATIONS: list[tuple[int, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_expectation_runs_exp "
         "ON expectation_runs(expectation_id)"
     )),
+    # Migration 17: SDK cost-attribution dimensions on spans — the multi-tenant
+    # cost breakdown (which CUSTOMER/TENANT, FEATURE, ENVIRONMENT, and PROMPT
+    # VERSION is spending the money). All nullable; existing spans and every
+    # producer that doesn't set them are unaffected. tenant_id/feature are
+    # tj-specific extensions (no OTel convention exists for a billing tenant or
+    # an app "feature" label); environment/service_version/commit_sha carry
+    # standard OTel semantic-convention values (deployment.environment.name /
+    # service.version / vcs.ref.head.revision — see otel/semconv.py). See
+    # core/models.py::NormalizedSpan for the full field-by-field rationale.
+    (17, (
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS tenant_id                TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS feature                  TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS environment              TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS service_version          TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS commit_sha               TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_id       TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_version  TEXT"
+    )),
 ]
 
 
@@ -592,6 +622,13 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "cache_write_tokens", "BIGINT DEFAULT 0"),        # migration 12
     ("sessions", "run_id",             "TEXT"),                    # migration 13
     ("sessions", "parent_session_id",  "TEXT"),                    # migration 13
+    ("spans",    "tenant_id",               "TEXT"),               # migration 17
+    ("spans",    "feature",                 "TEXT"),               # migration 17
+    ("spans",    "environment",              "TEXT"),              # migration 17
+    ("spans",    "service_version",         "TEXT"),               # migration 17
+    ("spans",    "commit_sha",              "TEXT"),               # migration 17
+    ("spans",    "prompt_template_id",      "TEXT"),               # migration 17
+    ("spans",    "prompt_template_version", "TEXT"),               # migration 17
 ]
 
 
@@ -904,6 +941,13 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         billing_account=d.get("billing_account"),
         request_params=request_params,
         request_tools=request_tools,
+        tenant_id=d.get("tenant_id"),
+        feature=d.get("feature"),
+        environment=d.get("environment"),
+        service_version=d.get("service_version"),
+        commit_sha=d.get("commit_sha"),
+        prompt_template_id=d.get("prompt_template_id"),
+        prompt_template_version=d.get("prompt_template_version"),
     )
 
 
@@ -1321,9 +1365,12 @@ class DuckDBBackend:
                 "duration_ms, attributes, provider, model, tool_name, "
                 "input_tokens, output_tokens, cache_tokens, cost_usd, "
                 "request_type, conversation_id, events, billing_account, "
-                "cache_write_tokens, request_params, request_tools, sub_agent_id"
+                "cache_write_tokens, request_params, request_tools, sub_agent_id, "
+                "tenant_id, feature, environment, service_version, commit_sha, "
+                "prompt_template_id, prompt_template_version"
                 ") VALUES "
-                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
+                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
+                "$29,$30,$31,$32,$33,$34,$35)",
                 [
                     span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                     span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -1335,6 +1382,8 @@ class DuckDBBackend:
                     json.dumps(span.request_params) if span.request_params is not None else None,
                     json.dumps(span.request_tools) if span.request_tools is not None else None,
                     span.sub_agent_id,
+                    span.tenant_id, span.feature, span.environment, span.service_version,
+                    span.commit_sha, span.prompt_template_id, span.prompt_template_version,
                 ],
             )
 
@@ -1858,11 +1907,19 @@ class DuckDBBackend:
         return [_row_to_span(r, cols) for r in rows]
 
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
+        # SDK cost-attribution dimensions (tenant/feature/environment/prompt
+        # version) — added alongside agent/model/day/tool. All four are plain
+        # columns on `spans` (see migration 17).
+        attribution_dims = ("tenant", "feature", "environment", "prompt_version")
         group_col_map = {
             "day": "CAST(start_time AS DATE)",
             "agent": "agent_id",
             "model": "model",
             "tool": "tool_name",
+            "tenant": "tenant_id",
+            "feature": "feature",
+            "environment": "environment",
+            "prompt_version": "prompt_template_version",
         }
         group_expr = group_col_map.get(filters.group_by, "CAST(start_time AS DATE)")
 
@@ -1877,6 +1934,14 @@ class DuckDBBackend:
             "tool_name IS NOT NULL" if filters.group_by == "tool" else "model IS NOT NULL"
         )
         clauses: list[str] = [presence_clause]
+        # Attribution dims additionally require the dimension itself to be set
+        # (rather than folding NULL/unset spend into a misleading "(none)"
+        # bucket) — a caller wanting to see unattributed spend can compare this
+        # grouping's total against the ungrouped window total. This is the
+        # "degrade honestly" contract: an empty `rows` list here means the
+        # dimension was never set at the call site, not that spend was zero.
+        if filters.group_by in attribution_dims:
+            clauses.append(f"{group_expr} IS NOT NULL")
         params: list[object] = []
         idx = 1
         if filters.agent_id:
@@ -1890,6 +1955,25 @@ class DuckDBBackend:
         if filters.until:
             clauses.append(f"start_time <= ${idx}")
             params.append(filters.until)
+            idx += 1
+        # Equality filters for the attribution dimensions themselves — independent
+        # of group_by, so e.g. group_by="model" + tenant_id="acme" scopes a
+        # per-model breakdown to one tenant.
+        if filters.tenant_id:
+            clauses.append(f"tenant_id = ${idx}")
+            params.append(filters.tenant_id)
+            idx += 1
+        if filters.feature:
+            clauses.append(f"feature = ${idx}")
+            params.append(filters.feature)
+            idx += 1
+        if filters.environment:
+            clauses.append(f"environment = ${idx}")
+            params.append(filters.environment)
+            idx += 1
+        if filters.prompt_version:
+            clauses.append(f"prompt_template_version = ${idx}")
+            params.append(filters.prompt_version)
             idx += 1
         where = " AND ".join(clauses)
 
@@ -1923,6 +2007,16 @@ class DuckDBBackend:
                 + f"FROM spans WHERE {where} "
                 f"GROUP BY grp "
                 f"ORDER BY COUNT(*) DESC"
+            )
+        elif filters.group_by in attribution_dims:
+            # Biggest spender first — the whole point of this grouping is
+            # concentration (which tenant/feature/environment/prompt version is
+            # driving spend), so cost order is the useful default.
+            sql = (
+                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
+                + f"FROM spans WHERE {where} "
+                f"GROUP BY grp "
+                f"ORDER BY COALESCE(SUM(cost_usd), 0.0) DESC"
             )
         else:
             # day: group only by the primary expression to avoid cross-product

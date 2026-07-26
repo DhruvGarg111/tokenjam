@@ -442,6 +442,108 @@ def test_get_cost_summary_by_tool(db):
     assert "None" not in groups
 
 
+# -- SDK cost-attribution dimensions (#SDK dashboard shape) --
+
+def test_get_cost_summary_by_tenant(db):
+    """`group_by="tenant"` sums spend per tenant_id, biggest spender first, and
+    excludes spans that never set tenant_id (degrade-honestly contract — an
+    unattributed span must not fold into a misleading bucket)."""
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=5.0, tenant_id="acme-corp",
+        session_id=session.session_id,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=1.0, tenant_id="small-co",
+        session_id=session.session_id,
+    ))
+    # No tenant_id set — must be excluded from the grouping, not folded into
+    # a "(none)" bucket.
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=100.0,
+        session_id=session.session_id,
+    ))
+
+    results = db.get_cost_summary(CostFilters(group_by="tenant"))
+    groups = {r.group: r.cost_usd for r in results}
+    assert set(groups) == {"acme-corp", "small-co"}
+    assert abs(groups["acme-corp"] - 5.0) < 0.001
+    assert abs(groups["small-co"] - 1.0) < 0.001
+    # Biggest spender first.
+    assert results[0].group == "acme-corp"
+
+
+def test_get_cost_summary_by_feature_environment_prompt_version(db):
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=2.0,
+        feature="support-triage", environment="production",
+        prompt_template_version="3",
+        session_id=session.session_id,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=1.0,
+        feature="onboarding", environment="staging",
+        prompt_template_version="1",
+        session_id=session.session_id,
+    ))
+
+    by_feature = {r.group: r.cost_usd for r in db.get_cost_summary(CostFilters(group_by="feature"))}
+    assert abs(by_feature["support-triage"] - 2.0) < 0.001
+    assert abs(by_feature["onboarding"] - 1.0) < 0.001
+
+    by_env = {r.group: r.cost_usd for r in db.get_cost_summary(CostFilters(group_by="environment"))}
+    assert abs(by_env["production"] - 2.0) < 0.001
+    assert abs(by_env["staging"] - 1.0) < 0.001
+
+    by_version = {r.group: r.cost_usd for r in db.get_cost_summary(CostFilters(group_by="prompt_version"))}
+    assert abs(by_version["3"] - 2.0) < 0.001
+    assert abs(by_version["1"] - 1.0) < 0.001
+
+
+def test_get_cost_summary_tenant_equality_filter(db):
+    """The tenant_id/feature/environment/prompt_version equality filters scope
+    the summary independently of group_by (e.g. a per-model breakdown for one
+    tenant's spend)."""
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=3.0, tenant_id="acme-corp",
+        session_id=session.session_id,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=7.0, tenant_id="other-co",
+        session_id=session.session_id,
+    ))
+
+    results = db.get_cost_summary(CostFilters(group_by="model", tenant_id="acme-corp"))
+    assert len(results) == 1
+    assert abs(results[0].cost_usd - 3.0) < 0.001
+    assert results[0].model == "claude-haiku-4-5"
+
+
+def test_get_cost_summary_returns_empty_when_dimension_never_set(db):
+    """An attribution dim with zero data in the window returns an EMPTY list —
+    never a misleading '(none)' bucket — so the API/UI can render an honest
+    empty state distinct from 'zero spend'."""
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=9.0, session_id=session.session_id,
+    ))
+
+    assert db.get_cost_summary(CostFilters(group_by="tenant")) == []
+
+
 # -- InMemoryBackend resets --
 
 def test_in_memory_backend_resets_between_tests():
