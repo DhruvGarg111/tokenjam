@@ -1389,7 +1389,7 @@ async def test_status_session_labels(tmp_path):
         # instance.id on the wire -> durable label
         pipeline.process(make_llm_span(
             agent_id="claude-code-harness", session_id="wired", conversation_id="w",
-            service_instance_id="founder-os"))
+            service_instance_id="dev-box"))
         # manual config prefix label only
         pipeline.process(make_llm_span(
             agent_id="claude-code-harness", session_id="manual-123", conversation_id="m"))
@@ -1409,7 +1409,7 @@ async def test_status_session_labels(tmp_path):
         assert resp.status_code == 200
         by = {a["session_id"]: a for a in resp.json()["agents"]
               if a["agent_id"] == "claude-code-harness"}
-        assert by["wired"]["label"] == "founder-os"      # from instance.id
+        assert by["wired"]["label"] == "dev-box"          # from instance.id
         assert by["manual-123"]["label"] == "harness"    # from config prefix
         assert by["ovr-9"]["label"] == "config-wins"     # config beats instance.id
         assert by["plain"]["label"] is None              # no label
@@ -2471,9 +2471,9 @@ async def test_workmap_launched_run_inferred(tmp_path):
             agent_id="cc", session_id="gov-sess", status="active", plan_tier="api"))
         _write_launcher_transcript(tmp_path, "gov-sess", run_id)
         # Three worker sessions tagged with the announced run id.
-        for sid, cost, tools in (("ticket-137", 5.0, 100),
-                                 ("ticket-138", 6.0, 120),
-                                 ("ticket-144", 5.86, 142)):
+        for sid, cost, tools in (("task-137", 5.0, 100),
+                                 ("task-138", 6.0, 120),
+                                 ("task-144", 5.86, 142)):
             db.upsert_session(make_session(
                 agent_id="cc", session_id=sid, run_id=run_id,
                 total_cost_usd=cost, tool_call_count=tools,
@@ -2493,7 +2493,7 @@ async def test_workmap_launched_run_inferred(tmp_path):
         assert round(run["total_cost_usd"], 2) == 16.86
         assert run["tool_call_count"] == 362
         member_ids = {s["session_id"] for s in run["sessions"]}
-        assert member_ids == {"ticket-137", "ticket-138", "ticket-144"}
+        assert member_ids == {"task-137", "task-138", "task-144"}
         # The launcher is not itself a member of the run roster.
         assert all(s["is_self"] is False for s in run["sessions"])
     finally:

@@ -185,7 +185,7 @@ class ResourceAttributes:
     # project tile (e.g. all `Aquanodeio/*` repos -> namespace "aquanode").
     SERVICE_NAMESPACE = "service.namespace"
     # Per-instance identifier (one process / terminal). tj uses it as the
-    # human label for a session's terminal (e.g. "founder-os") when set at
+    # human label for a session's terminal (e.g. "dev-box") when set at
     # launch via OTEL_RESOURCE_ATTRIBUTES.
     SERVICE_INSTANCE_ID = "service.instance.id"
 

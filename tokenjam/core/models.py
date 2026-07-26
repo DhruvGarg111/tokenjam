@@ -108,7 +108,7 @@ class NormalizedSpan:
     # persisted on the session it creates so the dashboard can group by it.
     service_namespace: str | None  = None
     # OTel service.instance.id — the per-terminal/process label (e.g.
-    # "founder-os"). Persisted on the session for use as its display name.
+    # "dev-box"). Persisted on the session for use as its display name.
     service_instance_id: str | None = None
     # Cross-session run grouping (tokenjam.run_id resource attribute). One id
     # per fan-out harness run, shared by all its workers. Transient on the
@@ -169,7 +169,7 @@ class SessionRecord:
     # rolls up under (e.g. repo `Aquanodeio/harness` -> namespace "aquanode").
     # Drives dashboard grouping. None when the telemetry carried no namespace.
     service_namespace: str | None = None
-    # OTel service.instance.id — the per-terminal label (e.g. "founder-os").
+    # OTel service.instance.id — the per-terminal label (e.g. "dev-box").
     # Used as the session's display name when set; None otherwise.
     service_instance_id: str | None = None
     # Cross-session run grouping. `run_id` ties this session to all the other
