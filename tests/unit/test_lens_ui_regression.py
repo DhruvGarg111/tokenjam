@@ -2506,11 +2506,19 @@ def test_dollars_suppressed_reads_the_server_display_rule(html):
 # might return. A past figure is checkable against a bill the user already
 # paid; a forward one asks them to trust a projection of a month that has not
 # happened, and trust is the scarce resource.
-def test_inbox_headline_is_the_past_overspend_band(html):
+def test_inbox_headline_is_the_past_overspend_tile(html):
+    # 2026-07-26 founder call: the full-width band was removed and this figure
+    # now occupies the compact tile slot beside "Fixes applied". The TENSE
+    # decision above is unchanged -- only the shape moved.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "<${PastOverspendBand} block=${pastOverspend}" in tile
+    assert "<${PastOverspendTile} block=${pastOverspend}" in tile
+    # It sits IN the tile row, beside the applied tile -- not on its own row
+    # above it, which is what made it read as a heavy banner.
+    row = tile[tile.index('display:flex;gap:14px'):]
+    assert "<${PastOverspendTile}" in row
+    assert "Fixes applied" in row
     # The old forward-looking headline and its vocabulary are gone from here.
     assert ">Estimated recoverable " not in tile
     assert "est./mo" not in tile
@@ -2529,17 +2537,21 @@ def test_inbox_headline_number_comes_from_the_payload_not_a_client_side_sum(html
     assert "priceable.length * 2 >= openItems.length" not in tile
 
 
-def test_past_overspend_band_hides_when_nothing_is_open(html):
-    # Nothing open means no observed figure to state, so the band hides rather
+def test_past_overspend_tile_hides_when_nothing_is_open(html):
+    # Nothing open means no observed figure to state, so the tile hides rather
     # than rendering a fabricated zero — but the excluded-waste line still has
-    # to render, so it gets a bare band of its own.
+    # to render, which is why it now lives BELOW the tile row rather than
+    # inside the tile that can disappear.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
     assert "hasOpenOverspend ? html`" in tile
-    band_start = html.index("function PastOverspendBand")
+    band_start = html.index("function PastOverspendTile")
     band = html[band_start:html.index("\n}", band_start)]
     assert "if (!causes && !toks) return null;" in band
+    # The note is not nested inside the conditional tile.
+    note_at = tile.index("<${ExcludedWasteNote}")
+    assert "hasOpenOverspend" not in tile[note_at - 200:note_at]
 
 
 # --- #326: excluded waste (summarize) is stated + linked, never summed ----- #
@@ -2549,7 +2561,10 @@ def test_inbox_stat_tiles_renders_the_excluded_cross_reference(html):
     block = html[start:end]
     # Rendered inside InboxStatTiles, not just defined standalone.
     assert "<${ExcludedWasteNote} excluded=${excluded} />" in block
-    assert block.count("<${ExcludedWasteNote} excluded=${excluded} />") == 2
+    # Once, not twice: it used to render both inside the band's `note` slot and
+    # again in a bare fallback band. With the band gone it has ONE home, below
+    # the tile row, where it renders whether or not the tile does.
+    assert block.count("<${ExcludedWasteNote} excluded=${excluded} />") == 1
     # Never folded into the blue tile's own dollar figure — only ever a
     # separate stated line with a link out.
     assert "not summed above" in block
@@ -2629,7 +2644,7 @@ def test_select_all_checkbox_sits_beside_the_bulk_dismiss_button(html):
     # checked" rather than inside a <thead><th>.
     assert "function SelectAllCheckbox" in html
     assert (
-        "<${SelectAllCheckbox} total=${visible.length} "
+        "<${SelectAllCheckbox} total=${shownRelearn.length} "
         "selected=${selectedCount} onToggle=${toggleAll} />"
     ) in html
     # The per-row checkbox is still present, just inside a flat row now.
@@ -2657,7 +2672,7 @@ def test_select_all_toggles_off_when_everything_is_selected(html):
     assert "else next.add(sig)" in fn
     # The component delegates to it over the RENDERED row set.
     assert (
-        "nextSelectAllSelection(visible.map(c => c.signature), prev)"
+        "nextSelectAllSelection(shownRelearn.map(c => c.signature), prev)"
     ) in html
 
 
@@ -2669,8 +2684,8 @@ def test_select_all_applies_only_to_the_rendered_rows(html):
     start = html.index("const selectedVisible =")
     end = html.index("const modalCluster =", start)
     block = html[start:end]
-    assert "visible.filter(c => checked.has(c.signature))" in block
-    assert "visible.map(c => c.signature)" in block
+    assert "shownRelearn.filter(c => checked.has(c.signature))" in block
+    assert "shownRelearn.map(c => c.signature)" in block
     assert "d.clusters" not in block
     # The filter that makes `visible` a strict subset is still in place. This
     # previously pinned the `!appliedSigs.has(...)` form verbatim, which meant
@@ -2714,7 +2729,7 @@ def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
     start = html.index("const dismissChecked =")
     end = html.index("const modalCluster =", start)
     fn = html[start:end]
-    assert "visible.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
     assert "...checked]" not in fn
 
 

@@ -708,7 +708,7 @@ def test_ui_renders_the_observed_figure_at_all(ui):
     # token class, wrote an honesty basis for it, shipped it on the payload,
     # and handed it to a dashboard that referenced it zero times.
     assert ui.count("past_overspend_usd") > 0
-    assert "PastOverspendBand" in ui
+    assert "PastOverspendTile" in ui
 
 
 def test_ui_never_derives_a_past_overspend_figure_client_side(ui):
@@ -721,11 +721,14 @@ def test_ui_never_derives_a_past_overspend_figure_client_side(ui):
         assert forbidden not in ui, f"UI derives its own figure: {forbidden}"
 
 
-def test_both_headline_surfaces_read_the_same_server_block(ui):
-    # The Dashboard hero and the Review inbox headline render the SAME
-    # component over the SAME payload key, so they cannot disagree on basis,
-    # window, or number.
-    assert ui.count("<${PastOverspendBand}") == 2
+def test_the_observed_figure_renders_from_the_server_block_only(ui):
+    # 2026-07-26 founder call: the Dashboard hero band was removed and the
+    # inbox band became a compact tile, so this figure now has exactly ONE
+    # render site. The guarantee that survives is the one that mattered: it is
+    # read from the server's `past_overspend` block, never reduced client-side,
+    # so what renders cannot drift from what the endpoint computed.
+    assert ui.count("<${PastOverspendTile}") == 1
+    assert "PastOverspendBand" not in ui, "the removed band must not linger"
     assert "setCostPastOverspend(r.past_overspend || null)" in ui
     assert "setHeroPast((r && r.past_overspend) || null)" in ui
     # The hero fetches on its OWN effect rather than inside the Dashboard's
@@ -737,7 +740,7 @@ def test_both_headline_surfaces_read_the_same_server_block(ui):
 
 
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
-    band = ui[ui.index("function PastOverspendBand"):]
+    band = ui[ui.index("function PastOverspendTile"):]
     band = band[:band.index("\n}")]
     # The headline is the AVOIDABLE amount, and says so — it is no longer
     # labelled as everything the behaviour cost.
@@ -747,8 +750,12 @@ def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
     assert "could save" not in ui
     # No ratio framing ("recovering $X of a $Y problem") anywhere.
     assert "recovering $" not in ui
-    # The cost line is present, past tense, and worded as COST — never waste.
-    assert "cost ${fmtUsd(cost)} in total" in band
+    # The cost line survived the band's removal: still present, still past
+    # tense, still worded as COST rather than waste. It is terser and its long
+    # form moved into the figure's hover text, but rule 30's disclosure is not
+    # something a layout change is allowed to drop.
+    assert "total cost" in band
+    assert "that is cost, not waste" in band.lower()
     assert "That is cost, not waste" in band
     fn = ui[ui.index("function observedCostSentence"):]
     fn = fn[:fn.index("\n}")]
