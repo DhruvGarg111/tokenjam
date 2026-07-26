@@ -12,9 +12,8 @@ if TYPE_CHECKING:
 
 @click.group(
     invoke_without_command=True,
-    epilog="Upgrade with: pipx upgrade tokenjam "
-           "(then `tj stop && tj serve &` to reload the daemon). "
-           "Verify with `tj --version`.",
+    epilog="Upgrade with: tj upgrade (installs the new package AND "
+           "restarts the daemon). Verify with `tj --version`.",
 )
 @click.version_option(package_name="tokenjam")
 @click.option("--config", "config_path", default=None, envvar="TJ_CONFIG",
@@ -64,7 +63,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     no_db_commands = {
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
-        "statusline",
+        "statusline", "upgrade",
         # `ping` emits a test span through the SDK (which resolves its own
         # HTTP-vs-direct path); it must not take the CLI's DuckDB lock (#80).
         "ping",
@@ -123,6 +122,7 @@ from tokenjam.cli.cmd_tools import cmd_tools  # noqa: E402
 from tokenjam.cli.cmd_export import cmd_export  # noqa: E402
 from tokenjam.cli.cmd_serve import cmd_serve  # noqa: E402
 from tokenjam.cli.cmd_stop import cmd_stop  # noqa: E402
+from tokenjam.cli.cmd_upgrade import cmd_upgrade  # noqa: E402
 from tokenjam.cli.cmd_uninstall import cmd_uninstall  # noqa: E402
 from tokenjam.cli.cmd_reset import cmd_reset  # noqa: E402
 from tokenjam.cli.cmd_doctor import cmd_doctor  # noqa: E402
@@ -156,6 +156,7 @@ cli.add_command(cmd_tools, name="tools")
 cli.add_command(cmd_export, name="export")
 cli.add_command(cmd_serve, name="serve")
 cli.add_command(cmd_stop, name="stop")
+cli.add_command(cmd_upgrade, name="upgrade")
 cli.add_command(cmd_uninstall, name="uninstall")
 cli.add_command(cmd_reset, name="reset")
 cli.add_command(cmd_doctor, name="doctor")
