@@ -174,17 +174,77 @@ class TestRestartDaemon:
 
     def test_stop_serve_fallback_stops_then_relaunches_via_resolved_binary(self, tmp_path, monkeypatch):
         monkeypatch.setattr(upgrade_mod.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(upgrade_mod.time, "sleep", lambda *_: None)
         stop_mock = MagicMock(return_value=(True, ["PID 123"]))
-        popen_mock = MagicMock()
+        popen_mock = MagicMock(return_value=MagicMock(poll=MagicMock(return_value=None)))
         with patch.object(upgrade_mod, "stop_tj_serve", stop_mock), \
              patch("tokenjam.cli.cmd_onboard._resolve_tj_binary", return_value="/usr/local/bin/tj"), \
              patch.object(upgrade_mod.subprocess, "Popen", popen_mock):
-            success, detail = upgrade_mod._restart_via_stop_serve()
+            success, detail = upgrade_mod._restart_via_stop_serve(None)
         assert success is True
         stop_mock.assert_called_once_with(quiet=True)
         popen_args = popen_mock.call_args.args[0]
         assert popen_args == ["/usr/local/bin/tj", "serve"]
         assert popen_mock.call_args.kwargs.get("start_new_session") is True
+
+    def test_stop_serve_fallback_passes_original_config_path_through(self, tmp_path, monkeypatch):
+        """Regression guard: a daemon started with `tj --config <path> serve`
+        (or `TJ_CONFIG`) must come back up against the SAME config, not
+        whatever `tj serve` resolves by default -- otherwise the replacement
+        can load a different database/address/port than the one the caller
+        polls for version verification afterward."""
+        monkeypatch.setattr(upgrade_mod.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(upgrade_mod.time, "sleep", lambda *_: None)
+        stop_mock = MagicMock(return_value=(True, ["PID 123"]))
+        popen_mock = MagicMock(return_value=MagicMock(poll=MagicMock(return_value=None)))
+        with patch.object(upgrade_mod, "stop_tj_serve", stop_mock), \
+             patch("tokenjam.cli.cmd_onboard._resolve_tj_binary", return_value="/usr/local/bin/tj"), \
+             patch.object(upgrade_mod.subprocess, "Popen", popen_mock):
+            success, detail = upgrade_mod._restart_via_stop_serve("/home/user/.tj/config.toml")
+        assert success is True
+        popen_args = popen_mock.call_args.args[0]
+        assert popen_args == ["/usr/local/bin/tj", "--config", "/home/user/.tj/config.toml", "serve"]
+
+    def test_restart_daemon_passes_state_config_path_to_stop_serve_fallback(self):
+        state = ServerState(pid=123, port=7391, config_path="/etc/tj/config.toml")
+        fallback_mock = MagicMock(return_value=(True, "restarted"))
+        with patch.object(upgrade_mod, "is_pid_alive", return_value=True), \
+             patch.object(upgrade_mod, "is_serve_process", return_value=True), \
+             patch.object(upgrade_mod, "_launchd_loaded", return_value=False), \
+             patch.object(upgrade_mod, "_restart_via_stop_serve", fallback_mock):
+            upgrade_mod.restart_daemon(state)
+        fallback_mock.assert_called_once_with("/etc/tj/config.toml")
+
+    def test_stop_serve_fallback_refuses_to_launch_a_second_daemon_when_stop_fails(self, tmp_path, monkeypatch):
+        """If `stop_tj_serve` cannot confirm the old daemon actually exited,
+        launching a replacement anyway would run two daemons against the
+        same port/DB -- the fallback must refuse rather than double up."""
+        monkeypatch.setattr(upgrade_mod.Path, "home", lambda: tmp_path)
+        stop_mock = MagicMock(return_value=(False, []))
+        popen_mock = MagicMock()
+        with patch.object(upgrade_mod, "stop_tj_serve", stop_mock), \
+             patch.object(upgrade_mod.subprocess, "Popen", popen_mock):
+            success, detail = upgrade_mod._restart_via_stop_serve(None)
+        assert success is False
+        assert "could not" in detail.lower()
+        popen_mock.assert_not_called()
+
+    def test_stop_serve_fallback_reports_failure_when_relaunched_child_dies_immediately(self, tmp_path, monkeypatch):
+        """A `Popen` call succeeding only means the OS accepted the exec, not
+        that the process is still alive a moment later -- a bad config or a
+        port already in use exits almost immediately, and that must surface
+        as a restart failure, not a false 'restarted' report that later
+        shows up as a misleading version mismatch."""
+        monkeypatch.setattr(upgrade_mod.Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(upgrade_mod.time, "sleep", lambda *_: None)
+        stop_mock = MagicMock(return_value=(True, ["PID 123"]))
+        popen_mock = MagicMock(return_value=MagicMock(poll=MagicMock(return_value=1)))
+        with patch.object(upgrade_mod, "stop_tj_serve", stop_mock), \
+             patch("tokenjam.cli.cmd_onboard._resolve_tj_binary", return_value="/usr/local/bin/tj"), \
+             patch.object(upgrade_mod.subprocess, "Popen", popen_mock):
+            success, detail = upgrade_mod._restart_via_stop_serve(None)
+        assert success is False
+        assert "exited immediately" in detail
 
 
 # -- post-restart version verification

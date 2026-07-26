@@ -62,6 +62,12 @@ _VERSION_POLL_TIMEOUT_S = 15.0
 _VERSION_POLL_INTERVAL_S = 0.5
 _VERSION_HTTP_TIMEOUT_S = 2.0
 
+# How long to wait after relaunching `tj serve` before checking whether the
+# child is still alive -- long enough for an immediate failure (bad config,
+# port already in use) to have exited, short enough not to meaningfully
+# delay the CLI for the common case of a healthy restart.
+_RESTART_CHILD_CHECK_S = 0.5
+
 
 @dataclass(frozen=True)
 class UpgradePlan:
@@ -206,16 +212,41 @@ def _restart_via_launchd() -> tuple[bool, str]:
     return True, f"restarted via `launchctl kickstart -k {target}`"
 
 
-def _restart_via_stop_serve() -> tuple[bool, str]:
+def _restart_via_stop_serve(config_path: str | None) -> tuple[bool, str]:
     """Fallback for installs not supervised by launchd: reuse `stop_tj_serve`
     (cmd_stop.py) to stop the current daemon, then relaunch `tj serve` as a
     detached background process -- deliberately NOT re-implementing either
-    command's own logic."""
+    command's own logic.
+
+    `config_path` is the ORIGINAL daemon's config (from the `ServerState`
+    read before this restart), so a daemon started with `tj --config <path>
+    serve` or `TJ_CONFIG` comes back up against the same config, not
+    whatever `tj --config` would resolve by default (a different DB/address/
+    port than the one the caller polls afterward).
+
+    `stop_tj_serve`'s result is honored, not discarded: if the old daemon
+    could not be confirmed stopped, launching a replacement anyway would run
+    two daemons against the same port/DB, so this refuses rather than
+    silently doubling up. The relaunched child's exit status is also
+    checked after a short delay -- a `Popen` call succeeding only means the
+    OS accepted the exec, not that the process is still alive a moment
+    later (a bad config or a port already in use exits almost immediately),
+    and reporting that as a successful restart would surface as a
+    misleading version mismatch instead of the real cause.
+    """
     from tokenjam.cli.cmd_onboard import _resolve_tj_binary
 
-    stop_tj_serve(quiet=True)
+    stopped, stopped_via = stop_tj_serve(quiet=True)
+    if not stopped:
+        detail = "; ".join(stopped_via) if stopped_via else "no confirmation of shutdown"
+        return False, f"could not confirm the running daemon stopped ({detail}) -- refusing to start a second one alongside it"
 
     tj_bin = _resolve_tj_binary()
+    argv = [tj_bin]
+    if config_path:
+        argv += ["--config", config_path]
+    argv += ["serve"]
+
     log_dir = Path.home() / ".local" / "share" / "tj"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -224,8 +255,8 @@ def _restart_via_stop_serve() -> tuple[bool, str]:
     except OSError as exc:
         return False, str(exc)
     try:
-        subprocess.Popen(
-            [tj_bin, "serve"],
+        proc = subprocess.Popen(
+            argv,
             stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
@@ -234,7 +265,15 @@ def _restart_via_stop_serve() -> tuple[bool, str]:
     finally:
         out_f.close()
         err_f.close()
-    return True, f"restarted via `{tj_bin} serve` in the background"
+
+    time.sleep(_RESTART_CHILD_CHECK_S)
+    if proc.poll() is not None:
+        return False, (
+            f"`{' '.join(argv)}` exited immediately (code {proc.returncode}) -- "
+            f"see {log_dir / 'serve-restart.err'}"
+        )
+
+    return True, f"restarted via `{' '.join(argv)}` in the background"
 
 
 def restart_daemon(state: ServerState | None) -> tuple[str, bool, str]:
@@ -257,7 +296,7 @@ def restart_daemon(state: ServerState | None) -> tuple[str, bool, str]:
         success, detail = _restart_via_launchd()
         return "launchd", success, detail
 
-    success, detail = _restart_via_stop_serve()
+    success, detail = _restart_via_stop_serve(state.config_path if state else None)
     return "stop-serve", success, detail
 
 
