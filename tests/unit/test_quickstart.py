@@ -998,6 +998,66 @@ def test_overspend_analyzer_set_drops_only_relearn():
     assert selected == [n for n in COST_ANALYZERS if n != "relearn"]
 
 
+def test_overspend_analyzer_set_keeps_deadweight_when_not_capped():
+    """`deadweight` scans every matching transcript on disk regardless of
+    `--max-sessions`, but when the ingest was NOT truncated its population
+    is identical to what got ingested — no reason to drop it."""
+    from tokenjam.cli.cmd_quickstart import _overspend_analyzers
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    selected = _overspend_analyzers(COST_ANALYZERS, population_capped=False)
+
+    assert "deadweight" in selected
+
+
+def test_overspend_analyzer_set_drops_deadweight_when_population_capped():
+    """When quickstart's session ingest actually truncated at the cap,
+    `deadweight`'s own disk scan reasons over strictly MORE sessions than the
+    ones ingested and rendered — a population mismatch the magnitude ceiling
+    alone can't catch (a smaller out-of-population figure still clears it).
+    Excluding the analyzer, not rescaling its figure, is the only honest
+    move here."""
+    from tokenjam.cli.cmd_quickstart import _overspend_analyzers
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    selected = _overspend_analyzers(COST_ANALYZERS, population_capped=True)
+
+    assert "deadweight" not in selected
+    assert "relearn" not in selected
+    assert selected == [n for n in COST_ANALYZERS if n not in ("relearn", "deadweight")]
+
+
+def test_past_overspend_excludes_deadweight_from_the_report_when_population_capped(monkeypatch):
+    """`_compute_past_overspend(population_capped=True)` must not even ASK
+    `build_report` to run `deadweight` — filtering its proposal out after
+    the fact would still let evidence/cost from out-of-window sessions leak
+    into the report object."""
+    import tokenjam.core.optimize as opt
+    from tokenjam.cli.cmd_quickstart import _compute_past_overspend
+
+    captured: dict = {}
+
+    def _fake_build_report(**kwargs):
+        captured["findings"] = kwargs.get("findings")
+        return _StubReport(1000.0)
+
+    monkeypatch.setattr(opt, "build_report", _fake_build_report)
+    import tokenjam.core.optimize.cost_proposals as cp
+    monkeypatch.setattr(cp, "cost_proposals_from_report", lambda *a, **k: [])
+
+    _compute_past_overspend(
+        object(), _NOW - timedelta(days=30), _NOW, population_capped=True,
+    )
+
+    assert "deadweight" not in captured["findings"]
+
+    _compute_past_overspend(
+        object(), _NOW - timedelta(days=30), _NOW, population_capped=False,
+    )
+
+    assert "deadweight" in captured["findings"]
+
+
 def test_quickstart_reads_no_config_and_opens_no_ondisk_db(tmp_path, monkeypatch):
     """The zero-setup promise, now that the run also builds an optimize report:
     the analyzers get an in-memory `TjConfig()` default, so no config file is

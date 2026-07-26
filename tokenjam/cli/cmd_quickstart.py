@@ -171,7 +171,10 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
 
     # Computed only on the human path: `--json` must stay byte-clean AND fast,
     # and the analyzers are the one materially expensive step after ingest.
-    overspend = _compute_past_overspend(db, since_dt, until_dt)
+    overspend = _compute_past_overspend(
+        db, since_dt, until_dt,
+        population_capped=max_sessions is not None and result.limit_reached,
+    )
 
     _render(diag, timeline, since=since,
             limit_reached=result.limit_reached, max_sessions=max_sessions,
@@ -266,10 +269,30 @@ def _strip_money_suffix(title: str) -> str:
 # helper and pass `COST_ANALYZERS` whole.
 _OVERSPEND_SKIP_ANALYZERS = frozenset({"relearn"})
 
+#: Analyzers that reason over the raw on-disk transcript tree directly
+#: (`root.rglob(...)`), never `ctx.conn` — so their population is NOT bounded
+#: by `--max-sessions`/`DEFAULT_MAX_SESSIONS`. `deadweight` is the one in
+#: `COST_ANALYZERS` that does this (`compute_deadweight_finding` walks every
+#: matching transcript under the projects root for the window). When
+#: quickstart's ingest actually truncated at the session cap
+#: (`result.limit_reached`), a disk-scan analyzer's figure covers strictly
+#: MORE sessions than the ones ingested into the DB and rendered on screen —
+#: a population mismatch the existing magnitude ceiling (`_over_ceiling`)
+#: cannot catch, since a SMALLER out-of-population figure still clears it.
+#: Excluded outright rather than rescaled: there is no honest way to shrink
+#: an unbounded-population figure down to the capped one without inventing a
+#: number nothing measured.
+_POPULATION_UNBOUNDED_ANALYZERS = frozenset({"deadweight"})
 
-def _overspend_analyzers(names: tuple[str, ...]) -> list[str]:
-    """`names` minus the analyzers that cannot produce a past-overspend figure."""
-    return [n for n in names if n not in _OVERSPEND_SKIP_ANALYZERS]
+
+def _overspend_analyzers(names: tuple[str, ...], *, population_capped: bool = False) -> list[str]:
+    """`names` minus the analyzers that cannot produce a past-overspend figure,
+    and — only when the session ingest was actually capped — minus the ones
+    whose own population isn't bounded by that cap either."""
+    skip = _OVERSPEND_SKIP_ANALYZERS
+    if population_capped:
+        skip = skip | _POPULATION_UNBOUNDED_ANALYZERS
+    return [n for n in names if n not in skip]
 
 
 def _usable_advice(text: str | None) -> str:
@@ -287,7 +310,7 @@ def _usable_advice(text: str | None) -> str:
 
 
 def _compute_past_overspend(
-    db, since: datetime, until: datetime,
+    db, since: datetime, until: datetime, *, population_capped: bool = False,
 ) -> PastOverspendCallout | None:
     """The largest single `past_overspend_usd` finding over the ingested window.
 
@@ -295,6 +318,11 @@ def _compute_past_overspend(
     priced or token-bearing finding, or anything at all raised. Never raises
     and never fabricates a figure, so a corpus with nothing to report simply
     renders no callout.
+
+    `population_capped` is True only when the ingest itself truncated at the
+    session cap (`result.limit_reached`) — see `_POPULATION_UNBOUNDED_ANALYZERS`
+    for why that also has to drop any analyzer whose own data source ignores
+    the cap.
 
     The config is an in-memory `TjConfig()` default: quickstart reads and
     writes NO config file and NO on-disk DB, and that must stay true.
@@ -312,7 +340,7 @@ def _compute_past_overspend(
         config = TjConfig(version="1")
         report = build_report(
             db=db, config=config, since=since, until=until,
-            findings=_overspend_analyzers(COST_ANALYZERS),
+            findings=_overspend_analyzers(COST_ANALYZERS, population_capped=population_capped),
         )
         window_days = max((until - since).total_seconds() / 86400.0, 1.0)
         proposals = cost_proposals_from_report(
