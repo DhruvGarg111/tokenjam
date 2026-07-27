@@ -2736,6 +2736,19 @@ function RestoreButton({ sessionId }) {
   </button>`;
 }
 
+// The coding-zone archive is capped server-side (ARCHIVE_LIMIT,
+// api/routes/status.py) — 50 most-recent, most-active terminal/stale
+// sessions, not the whole archive. Rendering the cap's own length with no
+// qualifier ("50 archived") reads as a complete count against a much larger
+// real total. `total` is /status's own `archived_total` (the count before
+// the cap); it is best-effort — a sibling backend change may not have
+// landed yet — so an absent/non-numeric total falls back to wording that
+// makes no total claim at all, never "of undefined" or a fabricated "of 0".
+function archivedCountLabel(shown, total) {
+  if (typeof total !== 'number' || !Number.isFinite(total)) return String(shown);
+  return shown + ' of ' + total.toLocaleString('en-US');
+}
+
 // ============================
 // Status View
 // ============================
@@ -2897,7 +2910,7 @@ function StatusView({ params }) {
       <div class="zone-head">
         <span class="zone-title">Coding sessions</span>
         <span class="zone-sub">bounded work · active → idle → stale → closed</span>
-        <span class="zone-count">${codingAgents.length} active · ${codingArchived.length} archived</span>
+        <span class="zone-count">${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived</span>
       </div>
       ${codingAgents.length ? groupKeys.map(key => html`
         ${(showHeadings || groupOverflow(key) > 0) ? html`
@@ -2916,7 +2929,7 @@ function StatusView({ params }) {
           <summary>
             <span class="tw">▶</span>
             <span>Archived</span>
-            <span class="a-count">(closed / stale) · ${codingArchived.length}</span>
+            <span class="a-count">(closed / stale) · ${archivedCountLabel(codingArchived.length, data.archived_total)}</span>
             <span class="a-hint">keyed on ended-at · method still openable</span>
           </summary>
           <div class="table-wrap"><table class="archive-list">

@@ -1415,6 +1415,24 @@ def test_status_coding_archive_renders_in_coding_zone(html):
     assert "viewMode" not in view
 
 
+def test_status_archive_count_renders_the_real_total_honestly(html):
+    """ARCHIVE_LIMIT caps the archive list at 50 server-side (api/routes/
+    status.py); the zone-header count and the <details> summary's count used
+    to render codingArchived.length with no qualifier, so a capped 50 read
+    as the complete archive. Both sites now route through
+    archivedCountLabel(shown, data.archived_total), which states the real
+    total when the backend supplies it and falls back to a no-total-claim
+    wording when it does not (see test_archived_count_label_* in
+    test_lens_dashboard_states.py for the function's own behaviour)."""
+    start = html.index("function StatusView")
+    end = html.index("function TracesListView", start)
+    view = html[start:end]
+    assert "${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived" in view
+    assert "${archivedCountLabel(codingArchived.length, data.archived_total)}</span>" in view
+    assert "${codingArchived.length} archived" not in view
+    assert "(closed / stale) · ${codingArchived.length}" not in view
+
+
 # --- #306: right-click to rename a session card ----------------------------- #
 def test_status_card_right_click_rename_wiring(html):
     # The coding-session card title is right-click-renamable: an onContextMenu

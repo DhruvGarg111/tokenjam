@@ -455,6 +455,48 @@ def test_fmt_dash_usd_never_exceeds_two_decimal_places():
     assert _dash_usd(1234567.891) == "$1,234,567.89"
 
 
+def _archived_count_label_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function archivedCountLabel(shown, total)")
+    end = src.index("\n}\n", start) + 2
+    return src[start:end]
+
+
+def _archived_label(shown, total):
+    total_js = "undefined" if total is None else json.dumps(total)
+    script = (
+        _archived_count_label_source()
+        + "\nconsole.log(JSON.stringify(archivedCountLabel(%d, %s)));" % (shown, total_js)
+    )
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+@_node
+def test_archived_count_label_states_the_real_total_when_present():
+    # ARCHIVE_LIMIT caps the archive list at 50 server-side (api/routes/
+    # status.py); rendering that cap's own length with no qualifier reads as
+    # a complete archive against a much larger real total. `archived_total`
+    # (a sibling backend change, best-effort from this UI's side) is the true
+    # count before the cap.
+    assert _archived_label(50, 6577) == "50 of 6,577"
+    assert _archived_label(3, 3) == "3 of 3"
+
+
+@_node
+def test_archived_count_label_makes_no_total_claim_when_absent():
+    # Code defensively: the sibling backend change may not have landed when
+    # this UI change does. Absent/null/non-numeric never renders "of
+    # undefined" or a fabricated "of 0" -- it falls back to a wording with no
+    # total claim at all.
+    assert _archived_label(50, None) == "50"
+    assert _archived_label(50, 0) == "50 of 0"  # a real, known total of 0 is honest
+    assert _archived_label(50, None) != "50 of undefined"
+
+
 @_node
 def test_fmt_dash_usd_never_prints_a_real_cost_as_free():
     # A genuine zero still renders honestly as "$0.00". A nonzero sub-cent
