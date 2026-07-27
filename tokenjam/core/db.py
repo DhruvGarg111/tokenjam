@@ -883,6 +883,61 @@ def ensure_expected_columns(conn: duckdb.DuckDBPyConnection) -> list[str]:
     return added
 
 
+# A session whose stored total differs from its spans' sum by less than this is
+# treated as agreeing. Both sides are float sums over per-span figures rounded to
+# 8dp, so a long session accumulates real floating-point residue; a tenth of a
+# cent is far below anything a surface renders and far above that residue.
+SESSION_COST_DRIFT_TOLERANCE_USD = 0.001
+
+
+def session_cost_drift(
+    conn: duckdb.DuckDBPyConnection,
+    tolerance_usd: float = SESSION_COST_DRIFT_TOLERANCE_USD,
+    limit: int = 20,
+) -> tuple[int, float, list[tuple[str, float, float]]]:
+    """Find sessions whose ``total_cost_usd`` disagrees with ``SUM(spans.cost_usd)``.
+
+    ``recompute_session_totals_from_spans`` documents the span sum as the source
+    of truth, so any gap is a stale session row — written by a path that moved
+    one side without the other (a pre-priced span the cost hook re-priced, a
+    per-file backfill upsert that replaced rather than accumulated, a repricing
+    pass that never touched sessions). Two figures the UI can show side by side
+    then differ, which is the defect: a published total that excludes rows it
+    should include.
+
+    Returns ``(session_count, total_abs_drift_usd, worst)`` where ``worst`` is up
+    to ``limit`` ``(session_id, stored_usd, span_sum_usd)`` triples ordered by
+    absolute drift, largest first.
+
+    A NULL ``total_cost_usd`` is NOT drift when the session's spans carry no cost
+    either: sessions whose spans are all tool/marker spans (or LLM calls with no
+    usage attached) genuinely have nothing to price, and ``SUM`` over an
+    all-NULL column is itself NULL. ``COALESCE`` on both sides makes the
+    comparison treat NULL and 0.0 as the same "no priced spans" statement, which
+    is also how ``recompute_session_totals_from_spans`` writes it.
+    """
+    rows = conn.execute(
+        """
+        SELECT s.session_id,
+               COALESCE(s.total_cost_usd, 0.0)  AS stored,
+               COALESCE(agg.span_cost, 0.0)     AS span_sum
+        FROM sessions AS s
+        LEFT JOIN (
+            SELECT session_id, SUM(cost_usd) AS span_cost
+            FROM spans
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id
+        ) AS agg ON agg.session_id = s.session_id
+        WHERE ABS(COALESCE(agg.span_cost, 0.0) - COALESCE(s.total_cost_usd, 0.0)) > $1
+        ORDER BY ABS(COALESCE(agg.span_cost, 0.0) - COALESCE(s.total_cost_usd, 0.0)) DESC
+        """,
+        [tolerance_usd],
+    ).fetchall()
+    total = sum(abs(float(r[2]) - float(r[1])) for r in rows)
+    worst = [(str(r[0]), float(r[1]), float(r[2])) for r in rows[:limit]]
+    return len(rows), total, worst
+
+
 def run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     """Apply unapplied migrations, then reconcile the schema. Idempotent."""
     conn.execute(

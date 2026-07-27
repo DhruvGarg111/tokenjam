@@ -108,7 +108,9 @@ def test_per_agent_cards_replace_the_aggregate_card(tmp_path):
         _report(downgrade=_downsize_finding()), config=_cfg(tmp_path),
     )
     downsize = [p for p in props if p.analyzer == "downsize"]
-    assert [p.signature for p in downsize] == ["cost:downsize:svc-a"]
+    assert [p.signature for p in downsize] == [
+        "cost:downsize:svc-a:anthropic:claude-opus-4-8:claude-haiku-4-5"
+    ]
     row = _price_rows()[0]
     assert downsize[0].past_overspend_usd == row.delta_usd
     assert downsize[0].past_overspend_tokens == row.total_tokens
