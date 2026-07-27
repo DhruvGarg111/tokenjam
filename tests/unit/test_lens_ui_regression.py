@@ -3040,3 +3040,80 @@ def test_cost_view_tenants_panel_shares_refresh_and_poll_cadence(html):
     # callback that reaches BOTH load and loadTenants -- never `load` alone.
     assert "onClick=${load}>Refresh" not in fn
     assert "load(opts);" in fn and "loadTenants(opts);" in fn
+
+
+# --- Analyzer scan: cold must never render as zero or an absence claim ----- #
+# Every analyzer-fed surface now reads a STORED report (no route runs an
+# analyzer). That makes a fourth state possible on screen -- "never computed"
+# -- and collapsing it into "found nothing" is this product's worst failure
+# mode: zero reads as reassurance. These pin the distinction in the render
+# layer, where a static grep is the only guard CI can run.
+
+def test_recoverable_tiles_yield_nothing_on_a_cold_scan(html):
+    fn_start = html.index("function recoverableTiles(opt)")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+    # A cold store must short-circuit BEFORE any tile is built, so no caller
+    # can render a zeroed grid off a scan that never ran.
+    assert "!opt.report_available" in fn
+
+
+def test_scan_state_separates_cold_computing_and_ready(html):
+    fn_start = html.index("function scanState(opt)")
+    fn_end = html.index("\n// What a surface renders", fn_start)
+    fn = html[fn_start:fn_end]
+    for field in ("cold", "computing", "known", "fetchFailed", "computedAt"):
+        assert field in fn, f"scanState must expose `{field}`"
+    # `cold` is derived from whether a result EXISTS, never from whether the
+    # findings list happens to be empty.
+    assert "cold: !known" in fn
+
+
+def test_dashboard_recoverable_band_gates_its_empty_state_on_the_scan(html):
+    """`No recoverable candidates.` may only render when a scan actually
+    completed. Before this it rendered whenever the tile list was empty, which
+    included the never-scanned case."""
+    idx = html.index("No recoverable candidates.")
+    window = html[idx - 1400:idx]
+    assert "scan.cold ?" in window, (
+        "the empty-state string must sit on the NOT-cold branch of a scan check"
+    )
+    assert "Not computed yet" in window
+
+
+def test_budgets_at_risk_tile_shows_a_dash_not_zero_on_a_cold_scan(html):
+    idx = html.index('label="Budgets at risk"')
+    window = html[idx:idx + 400]
+    assert "scan.known ? budgetAttn : '—'" in window
+    # The attention flag must not fire off an unknown value either.
+    assert "attention=${scan.known && budgetAttn > 0}" in window
+
+
+def test_every_analyzer_surface_carries_a_rescan_control(html):
+    # The Dashboard band and the Optimize view both mount the shared ScanBar,
+    # so provenance and the re-run control travel together rather than one
+    # surface silently rendering undated figures.
+    assert html.count("<${ScanBar}") >= 2
+    assert "async function rescanAnalyzers() { return apiPost('/optimize/rescan', {}); }" in html
+
+
+def test_auto_rescan_is_visibility_gated_and_killable(html):
+    fn_start = html.index("function useAutoRescan(scan, rescan)")
+    fn_end = html.index("\nfunction recoverableTiles", fn_start)
+    fn = html[fn_start:fn_end]
+    # A hidden tab must never ask the daemon to scan.
+    assert "document.visibilityState === 'visible'" in fn
+    # 0 seconds (or scan_enabled=false) turns it off entirely -- the kill switch.
+    assert "scan.scanEnabled ? scan.pollSeconds : 0" in fn
+    assert "if (!seconds || seconds <= 0) return undefined;" in fn
+
+
+def test_optimize_view_renders_a_cold_state_instead_of_empty_cards(html):
+    fn_start = html.index("function OptimizeView({ params })")
+    fn_end = html.index("\n// Two lenses, one router", fn_start)
+    fn = html[fn_start:fn_end]
+    # The analyzer cards render only when a completed scan exists...
+    assert "${!st.loading && scan.known && st.opt ? html`" in fn
+    # ...and the cold branch says so explicitly rather than showing nothing.
+    assert "No analyzer scan has completed yet." in fn
+    assert "this is not a report of zero waste" in fn

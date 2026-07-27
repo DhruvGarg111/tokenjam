@@ -6630,8 +6630,96 @@ function classifyFinding(name, fd, skipped) {
 // can't act on, and the tile that survives at rank 0 is guaranteed to carry
 // a real lever. An older payload lacking the field falls back to an empty
 // set (show everything) rather than reintroducing a hardcoded list.
+// --- Analyzer scan state (shared by EVERY analyzer-consuming surface) ------
+// No route runs an analyzer any more. `tj serve` computes the report in the
+// background — at boot, on a schedule, or from the Rescan control below — and
+// every surface reads the stored result plus its `computed_at`
+// (core/optimize/report_store.py). Ingestion is unaffected: traces, spans,
+// sessions, maps, approach and timeline still update live.
+//
+// The states below are NOT interchangeable and must never collapse into one:
+//
+//   cold (never_run / error)  Nothing has ever been computed. Render "not
+//                             computed yet" — never `0`, never `$0.00`, never
+//                             "no candidates". A zero here reads as
+//                             reassurance the data cannot support, which is
+//                             this product's worst failure mode.
+//   computing                 A scan is in flight. Keep rendering the LAST
+//                             completed result with a scanning indicator.
+//                             Never blank the panel mid-scan.
+//   ready                     A scan completed. This is the ONLY state in
+//                             which an empty-state string ("No recoverable
+//                             candidates") is an honest thing to say.
+//
+// `fetchFailed` is a fourth, separate thing: we don't know the scan state at
+// all because the request failed. It is not evidence of anything about the
+// data.
+function scanState(opt) {
+  const fetchFailed = opt == null;
+  const status = (opt && opt.status) || 'never_run';
+  const known = !!(opt && opt.report_available);
+  return {
+    status, known, fetchFailed,
+    cold: !known,
+    computing: status === 'computing',
+    computedAt: (opt && opt.computed_at) || null,
+    windowDays: (opt && opt.window_days) || null,
+    degraded: !!(opt && opt.degraded),
+    lastError: (opt && opt.last_error) || null,
+    // How often a surface re-reads the store / asks for a rescan. 0 disables.
+    pollSeconds: (opt && typeof opt.ui_poll_seconds === 'number') ? opt.ui_poll_seconds : 0,
+    scanEnabled: !(opt && opt.scan_enabled === false),
+  };
+}
+
+// What a surface renders IN PLACE OF a figure when there is no figure. Never
+// a number, never an absence claim.
+function scanColdLabel(scan) {
+  if (scan.fetchFailed) return 'Unavailable';
+  if (scan.computing) return 'Scanning…';
+  if (scan.status === 'error') return 'Scan failed';
+  return 'Not computed yet';
+}
+
+// Start a background scan. The server owns the rails — an overlap guard (a
+// second press while one runs is a no-op) and a rate limit — so this can be
+// called freely, including from the auto-rescan below.
+async function rescanAnalyzers() { return apiPost('/optimize/rescan', {}); }
+
+// Provenance + the control that re-runs it, side by side: a reader can always
+// see WHEN the figures on this panel were computed, and re-run them.
+function ScanBar({ scan, busy, onRescan }) {
+  const when = scan.fetchFailed ? 'scan state unavailable'
+    : scan.computedAt
+      ? 'computed ' + fmtAgo(scan.computedAt) + (scan.windowDays ? ' · ' + scan.windowDays + 'd window' : '')
+      : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
+  return html`<span style="display:inline-flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+    <span class="dim" style="font-size:11px">${when}</span>
+    <span class="sz-link" onClick=${onRescan}>⟳ ${(busy || scan.computing) ? 'scanning…' : 'Rescan'}</span>
+    ${scan.degraded ? html`<span style="font-size:11px;color:var(--error)" title=${scan.lastError || ''}>last refresh failed</span>` : null}
+  </span>`;
+}
+
+// Auto-rescan on a short interval, visibility-gated so a hidden tab never
+// asks the daemon to scan. The cadence is the server's (`[optimize]
+// scan_ui_poll_seconds`); 0 — or `scan_enabled = false` — turns it off, which
+// is the kill switch for automatic scanning from the browser side.
+function useAutoRescan(scan, rescan) {
+  const seconds = scan.scanEnabled ? scan.pollSeconds : 0;
+  useEffect(() => {
+    if (!seconds || seconds <= 0) return undefined;
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') rescan();
+    }, seconds * 1000);
+    return () => clearInterval(timer);
+  }, [seconds, rescan]);
+}
+
 function recoverableTiles(opt) {
-  if (!opt) return [];
+  // A cold store yields NO tiles and, crucially, no zeroed ones — the caller
+  // must render "not computed yet" rather than an empty grid, which would
+  // read as "nothing to recover".
+  if (!opt || !opt.report_available) return [];
   const disabled = new Set(opt.persona_disabled_analyzers || []);
   const out = [];
   const skipped = new Set(opt.skipped_analyzers || []);
@@ -6957,6 +7045,18 @@ function OptimizeView({ params }) {
     if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); el.classList.add('opt-focus'); }
   }, [focus, st.loading, st.opt]);
 
+  // Scan provenance for every analyzer-fed panel on this screen. `st.opt` is
+  // deliberately kept across a reload (`loading: !s.opt` above), so a rescan
+  // in flight keeps the last completed findings on screen instead of blanking.
+  const scan = scanState(st.opt);
+  const [rescanning, setRescanning] = useState(false);
+  const doRescan = useCallback(async () => {
+    setRescanning(true);
+    try { await rescanAnalyzers(); } catch (e) { /* surfaced by the next load()'s status */ }
+    setTimeout(() => { setRescanning(false); load(); }, 1500);
+  }, [load]);
+  useAutoRescan(scan, doRescan);
+
   const framing = st.opt ? st.opt.framing : null;
   // relearn and summarize are deliberately excluded here — relearn has its
   // own full surface in the Review inbox, summarize its own bespoke box
@@ -7016,12 +7116,29 @@ function OptimizeView({ params }) {
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
+      <${ScanBar} scan=${scan} busy=${rescanning} onRescan=${doRescan} />
     </div>
+    ${/* The window picker above selects the SPEND window; the analyzer figures
+          come from the stored scan's own window, which the bar states. Saying
+          so beats letting a 7d picker imply the findings were measured over 7
+          days. */ ''}
+    ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px">Analyzer findings were computed over the last ${scan.windowDays} days by the background scan; the picker above scopes the spend chart.</div>` : null}
 
     ${st.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
     ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
+    ${/* Cold scan: no findings exist to render, and an empty analyzer grid
+          would read as "we looked and found nothing". Say what is actually
+          true — nothing has been computed — and offer the rescan. */ ''}
+    ${!st.loading && !st.error && scan.cold ? html`
+      <div class="chart-card">
+        <div style="font-size:13px">${scan.computing ? 'Scanning for optimization candidates…'
+          : scan.status === 'error' ? html`The last analyzer scan failed${scan.lastError ? ': ' + scan.lastError : ''}. Nothing has been measured yet — this is not a report of zero waste.`
+          : scan.fetchFailed ? "Couldn't read the analyzer scan."
+          : 'No analyzer scan has completed yet. tj serve runs one at startup and on a schedule.'}</div>
+        <div style="margin-top:10px"><button class="btn" onClick=${doRescan} disabled=${rescanning || scan.computing}>${rescanning || scan.computing ? 'Scanning…' : 'Rescan now'}</button></div>
+      </div>` : null}
 
-    ${!st.loading && st.opt ? html`
+    ${!st.loading && scan.known && st.opt ? html`
       ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
       ${waste ? html`
         <div class="chart-card">
@@ -9633,6 +9750,16 @@ function DashboardView({ params }) {
     return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
   }, [load]);
 
+  // Rescan: ask the daemon to re-run the analyzers in the background, then
+  // re-read. The panels below keep rendering the LAST completed result the
+  // whole time — a scan in flight never blanks them and never zeroes them.
+  const [rescanning, setRescanning] = useState(false);
+  const doRescan = useCallback(async () => {
+    setRescanning(true);
+    try { await rescanAnalyzers(); } catch (e) { /* surfaced by the next load()'s status */ }
+    setTimeout(() => { setRescanning(false); load(); }, 1500);
+  }, [load]);
+
   const winPicker = html`
     <select value=${since} onChange=${e => setWin(e.target.value)}>
       <option value="24h">Last 24h</option>
@@ -9656,8 +9783,13 @@ function DashboardView({ params }) {
   }
 
   const tiles = (!d.loading && !d.empty && !d.error) ? recoverableTiles(d.opt) : [];
-  const budgets = (d.opt && d.opt.budgets) || [];
+  // Both analyzer-fed panels on this screen (recoverable waste, budgets at
+  // risk) read the SAME stored scan, so they can never disagree about how
+  // fresh they are or whether anything has been computed at all.
+  const scan = scanState(d.opt);
+  const budgets = (scan.known && d.opt.budgets) || [];
   const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
+  useAutoRescan(scan, doRescan);
   const driftN = driftSignalCount(d.drift);
   const errTraces = (d.traces || []).filter(t => t.status_code === 'error').length;
 
@@ -9702,9 +9834,22 @@ function DashboardView({ params }) {
           : html`
             <div class="dash-triage">
               <div class="dash-col">
-                <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+                <div class="band-label" style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+                  <span>Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></span>
+                  <${ScanBar} scan=${scan} busy=${rescanning} onRescan=${doRescan} />
+                </div>
                 <div class="tile-grid compact">
-                  ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
+                  ${/* Three distinct states, deliberately not collapsed. A cold
+                        scan renders "not computed yet" and NEVER an empty grid
+                        or a zero: "no recoverable candidates" off a scan that
+                        never ran is a reassurance the data can't support. A
+                        scan in flight keeps whatever the last one produced. */ ''}
+                  ${scan.cold ? html`<div class="empty">${scan.fetchFailed
+                      ? "Couldn't read the analyzer scan."
+                      : scan.computing ? 'Scanning for recoverable waste…'
+                      : scan.status === 'error' ? html`The last analyzer scan failed${scan.lastError ? ': ' + scan.lastError : ''}. Nothing has been measured yet. <span class="sz-link" onClick=${doRescan}>Try again</span>.`
+                      : html`Not computed yet. tj serve scans in the background; <span class="sz-link" onClick=${doRescan}>rescan now</span>.`}</div>`
+                    : tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
                     : tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
                       // Route straight to the analyzer's own detail card on
@@ -9739,8 +9884,14 @@ function DashboardView({ params }) {
                     href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
                     sub=${driftN ? 'review baselines' : 'within baseline'} />
-                  <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
-                    sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
+                  ${/* Budget-at-risk is analyzer-fed (budget-projection), so a
+                        cold scan must show a dash, not a `0`. "0 budgets at
+                        risk" off a scan that never ran is the same false
+                        reassurance the recoverable band guards against. */ ''}
+                  <${HealthTile} label="Budgets at risk" value=${scan.known ? budgetAttn : '—'}
+                    attention=${scan.known && budgetAttn > 0} href="#/budget"
+                    sub=${!scan.known ? scanColdLabel(scan).toLowerCase()
+                      : budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
                   <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
                     sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
                 </div>

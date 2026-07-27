@@ -1770,7 +1770,12 @@ def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatc
     cfg = _reuse_config(completions=True)
     _seed_reuse_cluster(db, count=3, completions=True)
 
-    # Capture the real endpoint payload (exercises the route handler).
+    # Capture the real endpoint payload (exercises the route handler). The
+    # route serves the STORED analyzer report, so warm the store first —
+    # `tj serve` does this at boot and on its schedule.
+    from tokenjam.core.optimize import report_store
+    report_store.recompute_now(db, cfg)
+
     app = create_app(config=cfg, db=db, ingest_pipeline=IngestPipeline(db=db, config=cfg))
 
     async def _fetch():
