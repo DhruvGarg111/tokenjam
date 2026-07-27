@@ -467,6 +467,17 @@ table.archive-list .a-id { color: var(--text); }
   font-size: 12px;
 }
 .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
+/* Secondary caption line under a filter row or summary header (Traces' "Showing
+   N of M traces" + the outlier-rule note beneath it; the trace detail view's
+   costliest-spans line). This class had no rule at all, so it fell through to
+   the body's default sans-serif font at the browser's default size/line-height
+   instead of the app's small monospace caption style — and a caller-supplied
+   negative top margin meant to sit flush under a same-size sibling instead
+   pulled a much taller line up and over it. Declaring the class gives every
+   .meta instance the right font AND restores a real margin-bottom for a
+   negative margin-top to collapse against, so two adjoining .meta lines end
+   up flush (net 0 gap) rather than overlapping. */
+.meta { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
 /* Analytics explorer (#210) — labelled controls, KPI tiles, leaderboard. */
 .ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; }
 .preset-row { margin-top: -6px; }
@@ -5155,7 +5166,6 @@ function TracesListView({ params }) {
 
   const [traces, setTraces] = useState([]);
   const [totalCount, setTotalCount] = useState(0);
-  const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
   // Window-level cost distribution behind the outlier badge (Tukey's-fence
   // rule) -- carried from the server so the plain-language explanation always
@@ -5182,7 +5192,6 @@ function TracesListView({ params }) {
     const nextTraces = td.traces || [];
     setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
     setTotalCount(td.total_count ?? nextTraces.length);
-    setFraming(td.framing || null);
     setOutlierRule(td.outlier_rule || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
@@ -5194,33 +5203,22 @@ function TracesListView({ params }) {
 
   // Plain-language statement of the outlier rule, with the actual numbers for
   // this window (never just a bare badge) -- conservative wording, no claim
-  // of more rigor than a box-plot rule actually provides. The rule itself is
-  // computed server-side on real cost_usd regardless of plan tier (it's the
-  // same magnitude signal as the token totals), but the DOLLAR figures in the
-  // copy must still respect plan-tier framing (#187/#249) -- a subscription
-  // or local install never gets a bare $ in the explanation, only the flag.
-  const outlierDollarsShown = !perItemUsesTokens(framing);
+  // of more rigor than a box-plot rule actually provides. Traces always show
+  // TOKEN totals on this page -- a display convention for how traces are
+  // presented, not a consequence of plan tier -- so this states the rule in
+  // those terms for every account, never the server's own internal $
+  // thresholds (the rule is still computed server-side on cost_usd; this page
+  // just never surfaces that figure).
   const outlierNote = (() => {
     if (!outlierRule) return null;
     if (outlierRule.threshold_usd == null) {
       return `Cost outliers need at least ${outlierRule.min_sample} priced traces in this window to measure a reliable range; this window has ${outlierRule.sample_size}, so none are flagged.`;
     }
-    if (!outlierDollarsShown) {
-      return `Traces marked "outlier" cost far more than the rest of this window's traces: above the top of the typical range (a box-plot style rule over ${outlierRule.sample_size} priced traces), not a fraud or error signal. Dollar amounts aren't shown on your plan; compare the token totals instead.`;
-    }
-    return `Traces marked "outlier" cost more than ${fmtCost(outlierRule.threshold_usd)}: above the top of the typical cost range for this window (Q1 ${fmtCost(outlierRule.q1_usd)} to Q3 ${fmtCost(outlierRule.q3_usd)}, plus 1.5x that range, over ${outlierRule.sample_size} priced traces). This is a box-plot style rule, not a fraud or error signal.`;
+    return `Traces marked "outlier" cost far more than the rest of this window's traces: above the top of the typical range (a box-plot style rule over ${outlierRule.sample_size} priced traces), not a fraud or error signal.`;
   })();
   const outlierTooltip = () => {
     if (!outlierRule || outlierRule.threshold_usd == null) return 'Cost outlier for this window';
-    if (!outlierDollarsShown) {
-      return 'Cost outlier for this window: above the top of the typical range (box-plot rule), based on ' + outlierRule.sample_size + ' priced traces. Dollar amounts aren\'t shown on your plan.';
-    }
-    return [
-      'Cost outlier for this window.',
-      'Above the typical range: Q1 ' + fmtCost(outlierRule.q1_usd) + ' to Q3 ' + fmtCost(outlierRule.q3_usd) + ', plus 1.5x that range.',
-      'Threshold: above ' + fmtCost(outlierRule.threshold_usd) + '.',
-      'Based on ' + outlierRule.sample_size + ' priced traces in this window.',
-    ].join('\n');
+    return 'Cost outlier for this window: above the top of the typical range (box-plot rule), based on ' + outlierRule.sample_size + ' priced traces.';
   };
 
   return html`
@@ -5253,7 +5251,7 @@ function TracesListView({ params }) {
     ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
       : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
-        <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th>Spans</th><th></th></tr></thead>
+        <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Cost (tokens) <span class="info-btn">i<span class="info-tip">Input + output tokens for this trace.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th>Spans</th><th></th></tr></thead>
         <tbody>
           ${dedup(traces).map(t => {
             const st = agentStatus[t.agent_id];
@@ -5263,7 +5261,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}${t.is_outlier ? html`<span class="badge badge-warning" style="margin-left:6px" title=${outlierTooltip()}>outlier</span>` : null}</td>
+              <td>${fmtTokens(_costVal(t, true) || 0)} tok${t.is_outlier ? html`<span class="badge badge-warning" style="margin-left:6px" title=${outlierTooltip()}>outlier</span>` : null}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>

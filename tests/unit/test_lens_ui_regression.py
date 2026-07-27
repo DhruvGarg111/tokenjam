@@ -431,14 +431,41 @@ def test_cost_table_cells_route_through_framing(html):
     assert "${useTokens ? fmtTokens(totalTokens) : fmtFramedDollar(total, framing)}" in html
 
 
-def test_traces_list_cost_routes_through_framing(html):
-    # Traces list COST column must consume the framing block, not raw fmtCost.
-    # Per #249 it now goes through fmtPerItemCost (per-item → tokens for
-    # subscription/local), not the window-aggregate fmtFramedDollar "% of cycle".
-    assert "<td>${fmtCost(t.cost_usd)}</td>" not in html
-    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html
-    # The screen actually pulls the framing block off the /traces response.
-    assert "setFraming(td.framing || null)" in html
+def test_traces_list_cost_column_is_unconditionally_tokens(html):
+    """Product decision: the Traces list's Cost column always shows token
+    totals, for every account -- a display convention for how traces are
+    presented, not a consequence of plan tier. It used to route through
+    fmtPerItemCost(..., framing), which chose tokens-vs-dollars per
+    subscription/local/api framing (#249); that conditional is gone from this
+    screen, so the column no longer reads `framing` at all, and TracesListView
+    no longer fetches/stores it either."""
+    view_start = html.index("function TracesListView")
+    view_end = html.index("function dedup", view_start)
+    view = html[view_start:view_end]
+    assert "<td>${fmtCost(t.cost_usd)}</td>" not in view
+    assert "fmtPerItemCost(" not in view
+    assert "${fmtTokens(_costVal(t, true) || 0)} tok" in view
+    assert "framing" not in view
+    assert "Cost (tokens) " in view
+
+
+def test_traces_outlier_explanation_never_mentions_plan(html):
+    """The outlier note/tooltip used to branch on `outlierDollarsShown`
+    (`!perItemUsesTokens(framing)`): a token-only explanation for
+    subscription/local, or the rule's own $ Q1/Q3/threshold figures for
+    api/unknown. Now that the Cost column is unconditionally tokens for every
+    account (see test_traces_list_cost_column_is_unconditionally_tokens), the
+    explanation must match it for every account too -- no more "Dollar
+    amounts aren't shown on your plan" (that attributes token display to plan,
+    which is exactly the differentiation being removed), and no more
+    plan-conditional $ branch either."""
+    view_start = html.index("function TracesListView")
+    view_end = html.index("function dedup", view_start)
+    view = html[view_start:view_end]
+    assert "Dollar amounts" not in view
+    assert "your plan" not in view
+    assert "outlierDollarsShown" not in view
+    assert "not a fraud or error signal." in view
 
 
 def test_traces_list_surfaces_pagination(html):
@@ -447,6 +474,30 @@ def test_traces_list_surfaces_pagination(html):
     assert "Load more" in html
     assert "load({ append: true })" in html
     assert "offset" in html
+
+
+def test_meta_caption_class_is_defined(html):
+    """`.meta` (the "Showing N of M traces" line + the outlier-rule note
+    beneath it, and the trace detail view's costliest-spans line) used to have
+    NO matching CSS rule at all, so those divs fell through to the body's
+    default sans-serif font/size/line-height instead of the app's small
+    monospace caption style — a mismatch from every other caption on the page.
+    A second, unrelated bug compounded it: the outlier note's inline
+    `margin-top:-8px` assumed a same-size sibling with its own margin-bottom
+    to collapse against; with no such margin, the negative offset pulled the
+    (much taller, default-sized) note up and over the line above it, so
+    glyphs overlapped. Declaring `.meta` with `margin-bottom: 8px` gives the
+    negative top margin exactly 8px to collapse against — net 0 gap, flush
+    but never overlapping, regardless of how many lines either caption wraps
+    to at a narrow width."""
+    m = re.search(r"\.meta\s*\{([^}]*)\}", html)
+    assert m, ".meta has no CSS rule"
+    rule = m.group(1)
+    assert "font-family: 'Geist Mono', monospace" in rule
+    assert "margin-bottom: 8px" in rule
+    # The two Traces-list captions that were colliding.
+    assert '<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>' in html
+    assert '<div class="meta" style="margin-top:-8px">${outlierNote}</div>' in html
 
 
 def test_trace_detail_costs_route_through_framing(html):
