@@ -8921,9 +8921,10 @@ function TrimmedDescription({ text }) {
 
 // The collapse/floor labels used to be fixed plurals ("cost advisories"), which
 // was safe while each tab had its own noun and its own always-plural phrasing.
-// On the merged list the noun is generic and a group of one is common, so
-// "1 smaller items" is now reachable. Agreed here rather than at each of the
-// three call sites.
+// On the merged list the noun is generic and a group of one is common, so a
+// singular count is reachable. Agreed here rather than at each call site.
+// CollapsedTailRow no longer needs a noun at all ("Show N more"/"Show less"
+// don't inflect); BelowFloorNote still does ("N items under $5.00...").
 function pluralItems(n) {
   return n === 1 ? 'item' : 'items';
 }
@@ -9117,14 +9118,25 @@ function combinedObservedCost(items) {
 // `summary` is always supplied by the caller now — every group states its combined
 // figure in the past tense, off `combinedObservedCost` — so there is no
 // forward-basis default left to fall back to.
-function CollapsedTailRow({ tail, suppressed, itemLabel, summary, onDismissAll, onMarkAllApplied, renderItem }) {
+//
+// The label used to read "N smaller items", the same word BelowFloorNote uses
+// for items below the $5 noise floor — but this row's items are ranked below
+// the top 8 while still being worth $5+ each (still worth acting on), the
+// opposite of "smaller" meaning skippable. It is now the toggle control it
+// actually is: "Show N more" while collapsed, "Show less" once expanded — a
+// command that stays correct in both states, unlike a static description
+// that would still say "N more" after they are already on screen. No noun is
+// needed ("more"/"less" don't inflect), so the collapsed count reads
+// correctly whether N is 1 or many.
+function CollapsedTailRow({ tail, suppressed, summary, onDismissAll, onMarkAllApplied, renderItem }) {
   const [open, setOpen] = useState(false);
   if (tail.length === 0) return null;
+  const label = open ? 'Show less' : ('Show ' + tail.length + ' more');
   return html`
     <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span class="sz-link" onClick=${() => setOpen(o => !o)}>
-          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel}${summary ? ' · ' + summary : ''}
+          ${open ? '▾' : '▸'} ${label}${summary ? ' · ' + summary : ''}
         </span>
         <span style="margin-left:auto;display:flex;gap:14px">
           ${onMarkAllApplied ? html`<span class="sz-link" onClick=${onMarkAllApplied}>Mark all applied</span>` : null}
@@ -10637,7 +10649,7 @@ function ReviewInboxView({ params }) {
               collapse group (a subset only the client knows about, since the
               split point is a rendering decision); it never re-derives a
               figure, and the page's headline still comes from the server. */ ''}
-        <${CollapsedTailRow} tail=${tailOpen} suppressed=${suppressed} itemLabel=${pluralItems(tailOpen.length)}
+        <${CollapsedTailRow} tail=${tailOpen} suppressed=${suppressed}
           summary=${combinedObservedCost(tailOpen)}
           onDismissAll=${() => dismissMany(tailOpen.map(i => i.signature))}
           onMarkAllApplied=${tailOpen.some(i => i.kind !== 'relearn' && !i.apply_capable) ? () => markManyApplied(tailOpen) : null}
@@ -10648,7 +10660,7 @@ function ReviewInboxView({ params }) {
               fallback would put an unmeasured row above a measured one. Empty on
               every payload seen so far, which is why it renders nothing rather
               than an empty heading. */ ''}
-        <${CollapsedTailRow} tail=${unobserved} suppressed=${suppressed} itemLabel=${pluralItems(unobserved.length) + " with nothing measured yet"}
+        <${CollapsedTailRow} tail=${unobserved} suppressed=${suppressed}
           summary="not ranked: no observed figure to rank them by"
           onDismissAll=${() => dismissMany(unobserved.map(i => i.signature))}
           renderItem=${renderRow} />

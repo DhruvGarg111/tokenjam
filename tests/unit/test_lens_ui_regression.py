@@ -3657,6 +3657,47 @@ def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
     assert "already spent, combined" in fn
 
 
+def _collapsed_tail_row_src(html: str) -> str:
+    start = html.index("function CollapsedTailRow")
+    end = html.index("\n}\n", start) + 2
+    return html[start:end]
+
+
+def test_collapsed_tail_row_is_a_toggle_command_not_a_static_description(html):
+    """The collapse row used to read "N smaller items" in BOTH states (only
+    the ▸/▾ arrow changed), the same word BelowFloorNote uses for items below
+    the $5 noise floor -- but this row's items are ranked below the top 8
+    while still worth $5+ each, the opposite of "smaller" meaning skippable.
+    It is now the toggle CONTROL it actually is: "Show N more" while
+    collapsed, "Show less" once expanded, so it never claims there is more to
+    show once the items are already on screen. No noun/pluralization is
+    needed since "more"/"less" don't inflect."""
+    fn = _collapsed_tail_row_src(html)
+    assert "itemLabel" not in fn
+    assert "smaller" not in fn
+    assert "const label = open ? 'Show less' : ('Show ' + tail.length + ' more');" in fn
+    assert "${open ? '▾' : '▸'} ${label}${summary ? ' · ' + summary : ''}" in fn
+
+
+def test_collapsed_tail_row_callers_no_longer_pass_a_noun(html):
+    # Both call sites used to compute an itemLabel via pluralItems() (one with
+    # an extra " with nothing measured yet" suffix); CollapsedTailRow no
+    # longer takes or renders one, so neither caller needs to supply it.
+    # pluralItems() itself survives -- BelowFloorNote (the $5-floor line,
+    # deliberately unchanged) still calls it.
+    assert "itemLabel=${pluralItems(tailOpen.length)}" not in html
+    assert 'itemLabel=${pluralItems(unobserved.length) + " with nothing measured yet"}' not in html
+    assert "<${CollapsedTailRow} tail=${tailOpen} suppressed=${suppressed}" in html
+    assert "<${CollapsedTailRow} tail=${unobserved} suppressed=${suppressed}" in html
+    assert "label=${pluralItems(floorItems.length)}" in html  # BelowFloorNote, unchanged
+
+
+def test_below_floor_note_still_says_smaller_under_the_floor(html):
+    # The ONE line that should still carry a size claim: it states its own
+    # $5 threshold, which is what makes "smaller" unambiguous there.
+    assert "${items.length} smaller ${label} under ${fmtUsd(INBOX_MIN_USD)}" in html
+
+
 def test_fmt_tokens_renders_billion_scale_human_readable(html):
     # "~11268.0M tok" (an actual rendered figure from a real corpus) must
     # become "~11.3B tok" — fmtTokens needs a billion-scale branch above the
