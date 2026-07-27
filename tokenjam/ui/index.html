@@ -10866,6 +10866,18 @@ function DashboardView({ params }) {
   const costData = costRead.data;
   const cost = costData || {};
   const framing = costData ? (cost.framing || null) : null;
+  // The qualifier banner only needs the window-INDEPENDENT half of framing
+  // (qualifier_text/pricing_mode/plan_tier/display_rule) — the plan-mix scan
+  // that produces it is the same one /relearn/proposals already runs and
+  // caches, which answers in ~16ms against the same full-corpus mix, versus
+  // /cost's ~27s on a large corpus (#see the read-timing note above). Using
+  // it ONLY for the banner lets the qualifier appear immediately instead of
+  // waiting behind /cost. Never use this for a window-scoped figure: relearn's
+  // own window_total_tokens/window_total_cost_usd are hardcoded to 0, so any
+  // consumer that needs real window totals (the KPI run-rate caption, the
+  // "% of cycle tokens" branch in fmtFramedSavings) must keep reading `framing`
+  // (from costData) instead.
+  const earlyFraming = (relearnRead.data && relearnRead.data.framing) || framing;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   // Series only used to gate the run-rate projection (the chart itself is the
   // explorer's now — spend de-dup); window total drives the run-rate caption.
@@ -10936,14 +10948,17 @@ function DashboardView({ params }) {
       </div>
       <div class="filters" style="margin:0">${winPicker}</div>
     </div>
-    ${/* The pricing-mode caveat, and a placeholder holding its slot while /cost
-          is unknown. Without the placeholder this bar appeared 27 seconds after
-          first paint and shoved both triage bands down the page at that moment.
-          On a corpus with no caveat to state the slot collapses when the answer
-          lands, which is one shift either way; on the subscription-billed corpora
-          that do carry one (the common case) it is zero. */ ''}
-    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>`
-      : !costData ? html`<div class="qualifier qualifier-skel" aria-hidden="true">
+    ${/* The pricing-mode caveat, and a placeholder holding its slot while
+          neither /cost nor /relearn/proposals has answered yet. This used to
+          gate on /cost alone, which pays a full-corpus scan (~27s on a large
+          corpus) for a qualifier that is window-INDEPENDENT — /relearn/
+          proposals runs the identical plan-mix scan and caches it (~16ms),
+          so `earlyFraming` lets the caveat appear as soon as EITHER read
+          lands, without the placeholder shoving both triage bands down the
+          page for the length of the slower read. */ ''}
+    ${earlyFraming && earlyFraming.qualifier_text
+      ? html`<div class="qualifier">${earlyFraming.qualifier_text}</div>`
+      : (!costData && !relearnRead.data) ? html`<div class="qualifier qualifier-skel" aria-hidden="true">
           <div class="shimmer" style="height:11px;width:78%"></div>
           <div class="shimmer" style="height:11px;width:46%;margin-top:5px"></div>
         </div>` : null}
