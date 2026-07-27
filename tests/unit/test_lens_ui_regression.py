@@ -3758,6 +3758,74 @@ def test_no_row_renders_a_dead_end(html):
     assert "optimizeFindingHref(prop.analyzer)" in card
 
 
+def test_dismiss_uses_the_shared_action_row_treatment_on_every_card_kind(html):
+    # The MCP-remove card (`mcp_remove`'s "Remove this MCP server entry", the
+    # `hasApplyKind` branch below) used to render Dismiss as a bare blue link
+    # OUTSIDE the card's inner `opt-section` panel, on its own line underneath
+    # it, via one trailing `${canApply ? html\`<div ...>Dismiss</div>\` : null}`
+    # shared by all three apply-capable branches (needsSourcePath / hasApplyKind
+    # / the workspace-note fallback). Every other card kind already rendered
+    # Dismiss inline, beside its primary button, in `var(--text)` (white) rather
+    # than the `.sz-link` default brand blue. Fixed by giving each branch its
+    # own Dismiss in the same row as its primary button, using the identical
+    # treatment — so this asserts the shared treatment rather than one card's
+    # markup, to catch a future branch that reintroduces the divergence.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+
+    # The old outside-the-panel fallback must be gone.
+    assert "canApply ? html`<div style=\"margin-top:8px\">" not in card
+
+    # Every `onDismiss(prop.signature)` call site renders through the exact
+    # same white-text `.sz-link` markup — one shared treatment, not a
+    # per-branch reimplementation that could drift.
+    dismiss_calls = re.findall(r'<span class="sz-link".*?Dismiss</span>', card)
+    assert len(dismiss_calls) >= 6, "expected a Dismiss control on every card branch"
+    for call in dismiss_calls:
+        assert 'style="color:var(--text)"' in call, (
+            f"Dismiss must use the shared white treatment, not brand-blue: {call}"
+        )
+
+    # The three apply-capable branches (needsSourcePath, hasApplyKind incl.
+    # mcp_remove, and the workspace-note fallback) each carry Dismiss INSIDE
+    # their own action row, alongside Preview/Apply, not in a separate div.
+    for anchor in (
+        "registerSourcePath(true)}>Apply swap →</button>",
+        "applyKindFix(true)}>${akCopy.button} →</button>",
+        "applyWorkspace(true)}>Apply note →</button>",
+    ):
+        pos = card.index(anchor)
+        row_end = card.index("</div>", pos)
+        row_tail = card[pos:row_end]
+        assert "onDismiss(prop.signature)}>Dismiss</span>" in row_tail, (
+            f"Dismiss must sit in the same action row as: {anchor}"
+        )
+
+
+def test_review_inbox_action_rows_are_right_aligned(html):
+    # Every card-footer action row (primary button + Dismiss, and the Preview
+    # button where present) is right aligned within the card, not left aligned
+    # under the card body. Rows with a path input use the input's `flex:1` to
+    # push the buttons flush right instead of an explicit `justify-content`,
+    # since the input already claims the row's full width.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    for anchor in (
+        '<a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || \'#/optimize/summarize\'}>Review in Summarize →</a>',
+        "<button class=\"cur-btn primary\" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>",
+        '<a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>',
+    ):
+        row_start = card.rindex('<div style="display:flex', 0, card.index(anchor))
+        row_line_end = card.index(">", row_start)
+        assert "justify-content:flex-end" in card[row_start:row_line_end], (
+            f"action row for {anchor[:40]!r}... must be right aligned"
+        )
+
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    approve_anchor = "Approve & write →</button>"
+    row_start = row.rindex('<div style="display:flex', 0, row.index(approve_anchor))
+    row_line_end = row.index(">", row_start)
+    assert "justify-content:flex-end" in row[row_start:row_line_end]
+
+
 def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
     # Founder feedback on the running page: a row's description stopped well short
     # of the card edge, leaving a wide empty gutter with the amount stranded in the
