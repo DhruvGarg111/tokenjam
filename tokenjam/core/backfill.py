@@ -188,6 +188,78 @@ def _agent_id_from_cwd(cwd: str | None) -> str:
     return f"claude-code-{name}"
 
 
+#: ``taskKind`` values whose ``agentType`` is a caller-chosen, per-dispatch
+#: INSTANCE LABEL rather than a reusable agent-definition name.
+#:
+#: THE EMPTY RESULT HERE IS DELIBERATE — do not "fix" it. An
+#: ``in_process_teammate`` is spawned with an ad-hoc ``name`` ("worker-428",
+#: "fix-499") and Claude Code writes that name into ``agentType``, so the field
+#: is populated and looks perfectly usable. It is not: the label is minted per
+#: dispatch, so adopting it would reintroduce exactly the unclusterable
+#: one-session-per-identity property that ``sub_agent_type`` exists to remove,
+#: and it addresses no definition file. Leaving these spans at
+#: ``sub_agent_type = None`` reads like a gap in the extraction; recording them
+#: would instead be a silent mis-attribution, which is worse than a known gap.
+_PER_DISPATCH_TASK_KINDS = frozenset({"in_process_teammate"})
+
+
+def _subagent_type_for(path: Path) -> str | None:
+    """The dispatched agent TYPE for a Claude Code subagent transcript, or None.
+
+    SOURCE, AND WHY NOT THE OBVIOUS ONE. Claude Code writes an
+    ``agent-<agentId>.meta.json`` sidecar next to every subagent transcript,
+    carrying ``agentType`` — the ``subagent_type`` argument of the spawning
+    Task/Agent call, already resolved (a dispatch that omitted the argument
+    reads as the default it actually ran under, rather than as absent).
+
+    The natural-looking alternative is to join a sidechain to its dispatching
+    ``Task`` call and read ``subagent_type`` off the tool args — a real field,
+    which the next reader will find and assume is the source. Rejected because
+    that join is only as available as the PARENT transcript, and Claude Code
+    prunes transcripts on its own retention setting: wherever the parent has
+    aged out, the dispatch is unlinkable, and subagent transcripts outlive their
+    parents often enough that this is the common case rather than the edge. The
+    sidecar sits beside the child and shares its lifetime, so it is present
+    whenever the child is. The two were cross-checked against each other on real
+    transcripts and they agree; where they differ it is because the Task call
+    omitted the argument and the sidecar records the resolved default, so the
+    sidecar is the more correct of the pair, not merely the more available.
+
+    Sidechain records live ONLY under a ``subagents/`` directory, in
+    ``agent-<id>.jsonl`` files, one agentId per file (checked both ways on real
+    transcripts: no main-thread file carries an ``isSidechain`` record, and no
+    subagent file carries more than one distinct ``agentId``), so one per-file
+    lookup covers every span this file produces.
+
+    The directory is NOT always the immediate parent: a workflow dispatch nests
+    one level further, as ``subagents/workflows/<workflow-id>/agent-<id>.jsonl``.
+    Membership is therefore tested against the whole path. A predicate matching
+    only ``path.parent`` silently drops every workflow dispatch — silently
+    because a missing type is indistinguishable from a dispatch that legitimately
+    has none, so nothing raises and no count looks wrong locally. It surfaced
+    only as a disagreement between the number of typed spans in the DB and the
+    number of typed transcripts on disk.
+
+    Returns None for a main-thread transcript, a missing/garbled sidecar, and a
+    per-dispatch instance label (see ``_PER_DISPATCH_TASK_KINDS``).
+    """
+    if "subagents" not in path.parts or not path.name.startswith("agent-"):
+        return None
+    meta_path = path.with_suffix(".meta.json")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    if meta.get("taskKind") in _PER_DISPATCH_TASK_KINDS:
+        return None
+    agent_type = meta.get("agentType")
+    if not isinstance(agent_type, str) or not agent_type.strip():
+        return None
+    return agent_type.strip()
+
+
 def _parse_ts(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -301,6 +373,11 @@ def parse_claude_code_session(
     # attempted; `""` is a legitimate resolved outcome (no CLAUDE.md found).
     claude_md_text: str | None = None
 
+    # The STABLE subagent identity for this file, resolved once (it is a
+    # property of the transcript, not of a record — a subagents/agent-<id>.jsonl
+    # holds exactly one agentId). None for a main-thread transcript.
+    sub_agent_type = _subagent_type_for(path)
+
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -390,7 +467,14 @@ def parse_claude_code_session(
         # Records in <session>/subagents/agent-<id>.jsonl carry these; main-thread
         # records don't. Stamp every span from this turn so a session's cost can
         # be broken down per subagent. None on the main thread.
-        sub_agent_id = record.get("agentId") if record.get("isSidechain") else None
+        # `sub_agent_id` stays PER-DISPATCH (analyzers group on
+        # `(session_id, sub_agent_id)` to separate concurrent dispatches);
+        # `sub_agent_type` is the stable, cross-session identity that names an
+        # agent definition. Both are gated on the same isSidechain flag so a
+        # main-thread span can never pick up a type.
+        is_sidechain = bool(record.get("isSidechain"))
+        sub_agent_id = record.get("agentId") if is_sidechain else None
+        span_sub_agent_type = sub_agent_type if is_sidechain else None
 
         provider = _provider_for_model(model)
         cost = calculate_cost(
@@ -463,6 +547,7 @@ def parse_claude_code_session(
             duration_ms=None,
             agent_id=agent_id,
             sub_agent_id=sub_agent_id,
+            sub_agent_type=span_sub_agent_type,
             session_id=sid_str,
             provider=provider,
             model=model,
@@ -511,6 +596,7 @@ def parse_claude_code_session(
                     duration_ms=None,
                     agent_id=agent_id,
                     sub_agent_id=sub_agent_id,
+                    sub_agent_type=span_sub_agent_type,
                     session_id=sid_str,
                     tool_name=tool_name,
                     conversation_id=sid_str,
@@ -1225,7 +1311,11 @@ def _insert_session_idempotent(
     When `reingest` is True, spans that already exist are UPDATEd instead of
     being skipped — this backfills two things onto rows an older/leaner backfill
     wrote:
-      - `sub_agent_id` — re-tags history ingested before that column existed.
+      - `sub_agent_id`   — re-tags history ingested before that column existed.
+      - `sub_agent_type` — same, for the stable subagent identity (migration 19);
+        re-running over unchanged transcripts populates it on already-ingested
+        spans and is otherwise a no-op (the value is derived from the on-disk
+        sidecar, so an unchanged transcript always re-derives the same value).
       - `attributes`   — overlays freshly-parsed captured content
         (`gen_ai.prompt.content` / `gen_ai.completion.content` /
         `gen_ai.tool.input`) onto the stored row when `[capture]` was enabled
@@ -1283,9 +1373,10 @@ def _insert_session_idempotent(
                 parsed_attributes=span.attributes,
             )
             conn.execute(
-                "UPDATE spans SET sub_agent_id = $1, attributes = $2 "
-                "WHERE span_id = $3",
-                [span.sub_agent_id, json.dumps(merged_attrs), span.span_id],
+                "UPDATE spans SET sub_agent_id = $1, sub_agent_type = $2, "
+                "attributes = $3 WHERE span_id = $4",
+                [span.sub_agent_id, span.sub_agent_type,
+                 json.dumps(merged_attrs), span.span_id],
             )
             retagged += 1
 

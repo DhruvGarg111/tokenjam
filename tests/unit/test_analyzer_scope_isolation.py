@@ -338,3 +338,70 @@ def test_a_scoped_summarize_keeps_scanning_a_cwd_inside_its_root(
     assert any(str(project) in p for p in paths), (
         f"in-scope cwd was not scanned: {paths}"
     )
+
+
+# --- summarize: scope boundary vs session-derived population ----------------
+#
+# The summarize analyzer derives its project population from the working
+# directories the analysed sessions recorded, and confines that population with
+# the resolved scope. Two scoping systems that quietly disagree is the failure
+# these pin: a boundary applied when none was drawn silently collapses the
+# population back to one directory, and a boundary NOT applied when one was
+# drawn lets the scan reach past the root the caller asked for. Both produce a
+# figure that looks right.
+
+def _scope(source, home):
+    from tokenjam.core.optimize.scope import AnalyzerScope
+    return AnalyzerScope(
+        projects_root=home / ".claude" / "projects",
+        claude_home=home / ".claude",
+        home=home,
+        enabled=True,
+        source=source,
+    )
+
+
+def test_scan_boundary_is_none_when_no_root_was_drawn(tmp_path):
+    """An unscoped run draws no boundary.
+
+    The default projects root holds no source project, so filtering the
+    observed population against it would empty the scan rather than confine
+    it — restoring the single-directory population the enumeration replaced.
+    """
+    from tokenjam.core.optimize.analyzers.summarize import _scan_boundary
+
+    assert _scan_boundary(_scope("default", tmp_path)) is None
+
+
+def test_scan_boundary_is_the_scope_home_when_a_root_was_drawn(tmp_path):
+    from tokenjam.core.optimize.analyzers.summarize import _scan_boundary
+
+    for source in ("flag", "env"):
+        assert _scan_boundary(_scope(source, tmp_path)) == tmp_path
+
+
+def test_population_basis_distinguishes_confined_from_unobserved():
+    """"The scope excluded every recorded root" and "no session recorded one"
+    are different facts, and the basis may not print the second for the first
+    (root anti-pattern 22)."""
+    from tokenjam.core.optimize.analyzers.summarize import _population_basis
+    from tokenjam.core.summarize.repo_roots import ResolvedRoots
+
+    unobserved = _population_basis(ResolvedRoots(), 0)
+    confined = _population_basis(ResolvedRoots(recorded=3, out_of_scope=3), 0)
+
+    assert "No session in this window recorded" in unobserved
+    assert "No session in this window recorded" not in confined
+    assert "outside the filesystem scope" in confined
+
+
+def test_population_basis_discloses_a_partial_scope_exclusion():
+    from tokenjam.core.optimize.analyzers.summarize import _population_basis
+    from tokenjam.core.summarize.repo_roots import ResolvedRoots
+
+    basis = _population_basis(
+        ResolvedRoots(roots=(), recorded=5, out_of_scope=2), scanned=3,
+    )
+
+    assert "3 project root(s)" in basis
+    assert "2 recorded root(s) fall outside the filesystem scope" in basis

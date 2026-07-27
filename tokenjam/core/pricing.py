@@ -843,6 +843,53 @@ def get_rates(
     return rates
 
 
+def get_rates_in_range(
+    provider: str,
+    model: str,
+    since: datetime,
+    until: datetime,
+    *,
+    variant: str = STANDARD_VARIANT,
+) -> tuple[ModelRates, ...]:
+    """Every distinct rate that could legitimately have billed a call in
+    ``[since, until)`` — one entry when the price never moved, more when it did.
+
+    `get_rates` answers "what was the rate at ONE instant". This answers "what
+    were the rates across a WINDOW", which is the question anything reasoning
+    about a *range* of spans has to ask: an analyzer prices each span at its own
+    timestamp (see :mod:`tokenjam.core.optimize.span_pricing`), so the dollars
+    it emits for a window that straddles a rate change are a blend of two rates,
+    and a caller that assumes a single rate would be checking the wrong number.
+
+    Returned in chronological order of the boundary that produced them. Empty
+    when the provider/model is not in the table at all — the same "no data"
+    signal `get_rates` gives by returning None.
+    """
+    rows = _find_rate_rows(provider, model)
+    if rows is None:
+        return ()
+
+    since_utc, until_utc = as_utc(since), as_utc(until)
+    # The rate can only change at a row boundary, so sampling the window start
+    # plus every boundary strictly inside it visits every distinct rate exactly
+    # once — no scanning, and no dependence on the window's length.
+    boundaries = [since_utc]
+    for row in rows:
+        if row.valid_from is None:
+            continue
+        edge = as_utc(row.valid_from)
+        if since_utc < edge < until_utc:
+            boundaries.append(edge)
+    boundaries.sort()
+
+    resolved: list[ModelRates] = []
+    for edge in boundaries:
+        rates = _resolve_rows(rows, edge, variant)
+        if rates is not None and rates not in resolved:
+            resolved.append(rates)
+    return tuple(resolved)
+
+
 def _find_rate_rows(provider: str, model: str) -> tuple[RateRow, ...] | None:
     """The rate rows for a provider/model, applying the documented lookup order."""
     candidates = _lookup_candidates(model)
