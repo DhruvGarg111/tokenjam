@@ -187,25 +187,14 @@ def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
     }
 
 
-def _headline_window_days(cached: Any) -> int:
-    """The window the Review inbox headline is LABELLED with.
-
-    Read from the cost block's own ``cost_window_days`` (the window the stored
-    cost figures were observed over), falling back to the recompute default when
-    a cache predates the key or carries a zero. BOTH inbox endpoints resolve it
-    through this one function: the headline aggregate lives on
-    ``/relearn/cost-proposals`` while relearn's rows come from
-    ``/relearn/proposals``, and if the two resolved the window differently a row
-    would publish a contribution the headline never counted. Same key on both
-    payloads (``read_cache`` returns the raw file, ``read_cost_proposals`` a
-    projection of it), so one helper serves both.
-    """
-    raw = cached.get("cost_window_days") if isinstance(cached, dict) else None
-    try:
-        days = int(raw or 0)
-    except (TypeError, ValueError):
-        days = 0
-    return days or cost_proposals_mod.DEFAULT_COST_WINDOW_DAYS
+#: The window the Review inbox headline is LABELLED with. Both inbox
+#: endpoints (this one and ``/relearn/proposals``) resolve it through the
+#: SAME function so a row can never publish a contribution a headline built
+#: elsewhere never counted -- and so does the CLI's ``tj relearn
+#: cost-proposals`` (``cli/cost_proposal_verbs.py``), which is why the
+#: helper lives on the shared ``core/optimize/inbox_contribution.py`` module
+#: rather than staying private to this route.
+_headline_window_days = inbox_contribution.headline_window_days
 
 
 _NO_WINDOWED_FIGURES = (

@@ -81,6 +81,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Sequence
 
+from tokenjam.core.optimize import cost_proposals as _cost_proposals_mod
 from tokenjam.core.optimize.relearn_window import window_days
 
 #: The analyzer name a relearn contribution row carries into the rollup's
@@ -128,6 +129,28 @@ _EXCLUDED_BASIS = (
     "is stated here precisely because it could not be put on the headline's "
     "basis, and it is summed into no total on this block"
 )
+
+
+def headline_window_days(cached: Any) -> int:
+    """The window the Review inbox headline is LABELLED with.
+
+    Read from the cost block's own ``cost_window_days`` (the window the
+    stored cost figures were observed over), falling back to the recompute
+    default when a cache predates the key or carries a zero. EVERY surface
+    that builds the headline resolves it through this one function -- the
+    web ``/relearn/cost-proposals`` and ``/relearn/proposals`` routes and the
+    CLI's ``tj relearn cost-proposals`` alike -- so a row can never publish a
+    contribution a headline built elsewhere never counted. ``cached`` is
+    whatever ``relearn_store.read_cache``/``read_cost_proposals`` returned
+    (both carry the same ``cost_window_days`` key, one raw and one a
+    projection of it), so one helper serves every caller.
+    """
+    raw = cached.get("cost_window_days") if isinstance(cached, dict) else None
+    try:
+        days = int(raw or 0)
+    except (TypeError, ValueError):
+        days = 0
+    return days or _cost_proposals_mod.DEFAULT_COST_WINDOW_DAYS
 
 
 def exact_window_label(
