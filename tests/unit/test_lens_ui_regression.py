@@ -572,11 +572,79 @@ def test_budget_view_failure_does_not_blank_content_it_already_has(html):
     assert 'class="band-msg err"' in budget
     assert "Couldn't refresh budget data." in budget
     assert "setError(null);" in budget
-    # The per-agent and provider tables still render below the banner --
+    # The coding, SDK, and provider tables still render below the banner --
     # the banner never replaces them.
     banner_idx = budget.index('class="band-msg err"')
-    assert budget.index("Per-agent budget caps", banner_idx) > banner_idx
+    assert budget.index("Coding-tool budget caps", banner_idx) > banner_idx
+    assert budget.index("SDK workflow budget caps", banner_idx) > banner_idx
     assert budget.index("Provider spend forecast", banner_idx) > banner_idx
+
+
+def test_budget_view_has_two_daily_only_zones_no_session_column(html):
+    """The Budget-page redesign (api/routes/budget.py) splits the old single
+    "Per-agent budget caps" table into two zones -- coding-tool groups
+    (Claude Code / Codex, one row per TOOL) and SDK workflow agents (one row
+    per agent_id) -- and drops the per-session column from the page
+    entirely: a per-session cap on a coding agent has no reliable meaning at
+    session start, and it crowded one ceiling-per-tool into noisy
+    one-row-per-project rows. The backend still honors an already-configured
+    session_usd; this screen just never offers a way to set a new one."""
+    budget = _budget_src(html)
+
+    # Old single-zone heading + its false claim are gone.
+    assert "Per-agent budget caps" not in budget
+    assert "Fires a real-time alert the moment" not in budget
+
+    # Both new zone headings render.
+    assert "Coding-tool budget caps" in budget
+    assert "SDK workflow budget caps" in budget
+
+    # Enforcement is described accurately: session end, not the instant
+    # spend crosses the line.
+    assert "session end" in budget
+
+    # Per-session column and its handling are gone from BudgetView / its row
+    # component -- no sessionVal state, no session_usd sent on save (a
+    # comment may still name session_usd to explain why it's absent, but no
+    # payload field or JS binding does), no "Per-session (USD)" header.
+    assert "Per-session (USD)" not in budget
+    assert "sessionVal" not in budget
+    assert "session_usd:" not in budget
+    assert "session_usd,\n" not in budget
+
+    # Both zones read the coding/sdk superset, never the legacy top-level keys.
+    assert "data.coding.groups" in budget
+    assert "data.coding.defaults" in budget
+    assert "data.sdk.agents" in budget
+    assert "data.sdk.defaults" in budget
+    assert "data.agents" not in budget
+
+    # Coding zone posts group / defaults_coding scopes; SDK zone keeps
+    # posting plain agent_id / "defaults" scopes.
+    assert '"group:" + gid' in budget or "'group:' + gid" in budget
+    assert 'scope="defaults_coding"' in budget
+    assert 'scope="defaults"' in budget
+
+    # No em dashes in the new zone copy this redesign wrote (the untouched
+    # Provider spend forecast paragraph below it keeps its own pre-existing
+    # em dash and is out of scope here).
+    coding_idx = budget.index("Coding-tool budget caps")
+    sdk_end = budget.index("</div>", budget.index("SDK workflow budget caps"))
+    zones_copy = budget[coding_idx:sdk_end]
+    assert "—" not in zones_copy
+
+
+def test_budget_row_component_is_daily_only(html):
+    """DailyBudgetRow (the shared row for both zones) never renders a
+    per-session input -- only BudgetRow's replacement should exist."""
+    assert "function DailyBudgetRow(" in html
+    assert "function BudgetRow(" not in html
+    row_start = html.index("function DailyBudgetRow(")
+    row_end = html.index("\nfunction ", row_start + 1)
+    row = html[row_start:row_end]
+    assert "sessionVal" not in row
+    assert "session_usd" not in row
+    assert row.count("<input") == 1
 
 
 def test_overview_error_handling_is_asymmetric(html):
