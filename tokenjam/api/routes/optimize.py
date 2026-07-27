@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.cli.cmd_optimize import _rank_findings
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     agent_persona_mix,
@@ -169,5 +170,10 @@ def get_optimize(
             plan_tier_mix=payload["plan_tier_mix"],
         ),
     ).to_dict()
+
+    # `available_days` (core/data_span.py) so the Optimize window selector can
+    # derive its options from what the store actually holds, the same way the
+    # Dashboard's does — instead of a fixed 7d/30d/90d list.
+    payload["data_span"] = available_data_span(conn).to_dict()
 
     return payload

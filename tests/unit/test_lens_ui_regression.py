@@ -47,13 +47,21 @@ def _no_comments(text: str) -> str:
 
 
 def test_traces_window_select_exposes_longer_supported_windows(html):
-    # Traces honors these URL/API windows already; keep the filter dropdown in sync
-    # so #/traces?since=30d and #/traces?since=90d render selected options.
+    # Traces honors these URL/API windows already; the filter dropdown must stay
+    # in sync so #/traces?since=30d and #/traces?since=90d render as selected
+    # options. The dropdown no longer hardcodes them -- it derives from the
+    # store's real data span via the shared `windowOptionsWithCurrent` helper
+    # (see test_window_selectors_derive_from_data_span), but 1h is Traces' own
+    # always-offered floor (finer than the shared ladder's 24h) and must survive
+    # the refactor without becoming a second, duplicate "Last 1h" option.
     traces_start = html.index("function TracesListView")
     traces_end = html.index("function dedup", traces_start)
     traces_view = html[traces_start:traces_end]
-    assert '<option value="30d">Last 30d</option>' in traces_view
-    assert '<option value="90d">Last 90d</option>' in traces_view
+    assert '<option value="1h">Last 1h</option>' in traces_view
+    assert "windowOptionsWithCurrent(dataSpan ? dataSpan.available_days : null, since)" in traces_view
+    assert ".filter(w => w.value !== '1h')" in traces_view
+    assert '<option value="24h">Last 24h</option>' not in traces_view
+    assert '<option value="30d">Last 30d</option>' not in traces_view
 
 
 def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
@@ -65,17 +73,22 @@ def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
     assert 'label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"' not in html
 
 
-def test_dashboard_window_options_derive_from_data_span(html):
+def test_window_selectors_derive_from_data_span(html):
     # The Dashboard window selector used to be a fixed 24h/7d/30d/90d list with
     # no relation to how much telemetry the store actually holds -- offering
     # 90d over a two-month corpus, and unable to reach past 90d on a longer
-    # one. It must now derive from core/data_span.py's `available_days`
-    # (served on /drift and /relearn/proposals), not a hardcoded list.
-    const_start = html.index("const DASHBOARD_STANDARD_WINDOWS")
-    start = html.index("function dashboardWindowOptions")
-    end = html.index("function DashboardView", start)
+    # one. It derives from core/data_span.py's `available_days`, not a
+    # hardcoded list. That derivation (`standardWindowOptions` /
+    # `windowOptionsWithCurrent`) was Dashboard-only at first
+    # (`dashboardWindowOptions`/`DASHBOARD_STANDARD_WINDOWS`) and is now shared
+    # by Cost, Traces and Optimize too, each reading `data_span` off its own
+    # already-fetched payload (/cost, /traces, /optimize) rather than a fourth
+    # copy-pasted ladder or a second round-trip to /drift or /relearn.
+    const_start = html.index("const STANDARD_WINDOWS")
+    start = html.index("function standardWindowOptions")
+    with_current_end = html.index("\n}\n", html.index("function windowOptionsWithCurrent")) + 3
     consts = html[const_start:start]
-    fn = html[start:end]
+    fn = html[start:with_current_end]
 
     # The always-safe floor entry exists and is what an unknown span falls
     # back to.
@@ -83,25 +96,48 @@ def test_dashboard_window_options_derive_from_data_span(html):
 
     # Unknown span (not yet read) offers only the always-safe floor, never a
     # wrong option set asserted ahead of the data.
-    assert "if (availableDays == null) return [DASHBOARD_STANDARD_WINDOWS[0]];" in fn
+    assert "if (availableDays == null) return [STANDARD_WINDOWS[0]];" in fn
 
     # Known span: only windows at-or-under the available span, plus one final
     # option at the real span itself.
     assert "w.days <= availableDays" in fn
     assert "value: `${availableDays}d`" in fn
 
+    # `validSince` must accept that custom exact-span value, or selecting it
+    # gets silently reverted to the default on the very next render -- the
+    # dropdown would show the pick while the page queried a different window.
+    assert "const _CUSTOM_DAYS_RE = /^\\d+d$/;" in html
+    assert "_CUSTOM_DAYS_RE.test(v)" in html
+
     dash_start = html.index("function DashboardView")
     dash_end = html.index("function ", dash_start + 1)
     dash_view = html[dash_start:dash_end]
 
-    # Wired to the server-provided data_span, not re-derived client-side.
+    # Dashboard: wired to the server-provided data_span, not re-derived
+    # client-side. The old unconditional four-option list is gone from the
+    # picker itself.
     assert "driftRead.data.data_span" in dash_view
     assert "relearnRead.data.data_span" in dash_view
-    assert "dashboardWindowOptions(availableDays)" in dash_view
-
-    # The old unconditional four-option list is gone from the picker itself.
+    assert "windowOptionsWithCurrent(availableDays, since)" in dash_view
     assert '<option value="24h">Last 24h</option>\n      <option value="7d">Last 7d</option>' not in dash_view
-    assert "winOptionsWithCurrent.map(w => html`<option value=${w.value}>${w.label}</option>`)" in dash_view
+
+    cost_start = html.index("function CostView")
+    cost_end = html.index("\nfunction TopTenantsPanel", cost_start)
+    cost_view = html[cost_start:cost_end]
+    assert "costResp.data_span.available_days" in cost_view
+    assert 'value="24h">Last 24h</option>\n        <option value="7d">Last 7d' not in cost_view
+
+    traces_start = html.index("function TracesListView")
+    traces_end = html.index("function dedup", traces_start)
+    traces_view = html[traces_start:traces_end]
+    assert "dataSpan.available_days" in traces_view
+    assert "setDataSpan(td.data_span || null);" in traces_view
+
+    opt_start = html.index("function OptimizeView")
+    opt_end = html.index("function ", opt_start + 1)
+    opt_view = html[opt_start:opt_end]
+    assert "st.opt.data_span.available_days" in opt_view
+    assert 'value="7d">Last 7d</option>\n        <option value="30d">Last 30d' not in opt_view
 
 
 # --- #126: Downsize typed slot always rendered ----------------------------- #

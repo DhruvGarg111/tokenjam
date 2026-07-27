@@ -2024,7 +2024,16 @@ function getRoute() {
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
 const SINCE_VALUES = ['1h', '24h', '7d', '30d', '90d'];
 const _RANGE_RE = /^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/;
-function validSince(v) { return SINCE_VALUES.includes(v) || _RANGE_RE.test(v); }
+// A window selector derived from the store's real data span (standardWindowOptions
+// below) can offer an exact-span option outside the standard ladder (e.g. "67d"
+// on a corpus with 67 days of history) — the backend's own `parse_since` already
+// accepts any `\d+d` (see `_RELATIVE_PATTERN` in utils/time_parse.py). Without
+// this, selecting that exact-span option got silently reverted to the default:
+// `validSince` rejected it, `readParam` logged a warning and fell back, and the
+// URL kept showing the selection while the page silently queried a different
+// window than the one displayed as selected.
+const _CUSTOM_DAYS_RE = /^\d+d$/;
+function validSince(v) { return SINCE_VALUES.includes(v) || _RANGE_RE.test(v) || _CUSTOM_DAYS_RE.test(v); }
 
 // Read a filter from URL params with a default + optional validator. Bad /
 // unparseable values fall back to the default with a console.warn, never throw.
@@ -5223,6 +5232,11 @@ function TracesListView({ params }) {
   // matches the flags actually rendered. Null until the first fetch resolves,
   // or if the backend didn't ship the block (older server behind a newer UI).
   const [outlierRule, setOutlierRule] = useState(null);
+  // The window selector's own options, derived from the store's real data
+  // span (core/data_span.py) rather than a fixed list — same mechanism the
+  // Dashboard uses. Null until the first fetch answers, in which case the
+  // selector falls back to its always-safe floor via standardWindowOptions.
+  const [dataSpan, setDataSpan] = useState(null);
   const TRACE_PAGE_SIZE = 100;
   // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
   // until the first /traces fetch settles, show a loading shimmer rather than
@@ -5244,6 +5258,7 @@ function TracesListView({ params }) {
     setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
     setTotalCount(td.total_count ?? nextTraces.length);
     setOutlierRule(td.outlier_rule || null);
+    setDataSpan(td.data_span || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
@@ -5282,10 +5297,9 @@ function TracesListView({ params }) {
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
-        <option value="24h">Last 24h</option>
-        <option value="7d">Last 7d</option>
-        <option value="30d">Last 30d</option>
-        <option value="90d">Last 90d</option>
+        ${windowOptionsWithCurrent(dataSpan ? dataSpan.available_days : null, since)
+          .filter(w => w.value !== '1h')
+          .map(w => html`<option value=${w.value}>${w.label}</option>`)}
       </select>
       <select value=${result} onChange=${e => setFilter('result', e.target.value)}>
         <option value="">All results</option>
@@ -6090,10 +6104,8 @@ function CostView({ params }) {
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
-        <option value="24h">Last 24h</option>
-        <option value="7d">Last 7d</option>
-        <option value="30d">Last 30d</option>
-        <option value="90d">Last 90d</option>
+        ${windowOptionsWithCurrent(costResp && costResp.data_span ? costResp.data_span.available_days : null, since)
+          .map(w => html`<option value=${w.value}>${w.label}</option>`)}
       </select>
       <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
         <option value="total">Total</option>
@@ -7438,9 +7450,9 @@ function OptimizeView({ params }) {
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
-        <option value="7d">Last 7d</option>
-        <option value="30d">Last 30d</option>
-        <option value="90d">Last 90d</option>
+        ${windowOptionsWithCurrent(st.opt && st.opt.data_span ? st.opt.data_span.available_days : null, since)
+          .filter(w => w.value !== '24h')
+          .map(w => html`<option value=${w.value}>${w.label}</option>`)}
       </select>
       <select value=${compare} onChange=${e => setFilter('compare', e.target.value)}>
         <option value="">No comparison</option>
@@ -10873,35 +10885,52 @@ const OPTIMIZE_WAIT_MIN = Math.round(OPTIMIZE_WAIT_MS / 60000);
 // placeholder through to the answer.
 const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];
 
-// Candidate Dashboard windows, ascending. Only entries whose day count fits
-// within the store's actually-available data span (core/data_span.py,
-// `available_days` on the /drift and /relearn/proposals responses) are ever
-// offered -- a corpus with two months of data should not offer 90d (nothing
-// behind it), and a corpus with 120 days should be able to reach past 90d.
-const DASHBOARD_STANDARD_WINDOWS = [
+// Candidate windows, ascending, for every screen with a window selector. Only
+// entries whose day count fits within the store's actually-available data
+// span (core/data_span.py, `available_days` -- served on /drift,
+// /relearn/proposals, /cost, /traces and /optimize) are ever offered -- a
+// corpus with two months of data should not offer 90d (nothing behind it),
+// and a corpus with 120 days should be able to reach past 90d. Originally
+// Dashboard-only (`DASHBOARD_STANDARD_WINDOWS`/`dashboardWindowOptions`);
+// generalised so Cost, Traces and Optimize derive their own selectors from the
+// same one list instead of each hardcoding its own 24h/7d/30d/90d options —
+// which is what let those three screens offer a window the machine had no
+// data for while being unable to offer its actual full span.
+const STANDARD_WINDOWS = [
   { value: '24h', label: 'Last 24h', days: 1 },
   { value: '7d', label: 'Last 7d', days: 7 },
   { value: '30d', label: 'Last 30d', days: 30 },
   { value: '90d', label: 'Last 90d', days: 90 },
 ];
 
-// The Dashboard window <option> list, derived from the data span rather than
-// hardcoded. `availableDays` is null while the span hasn't been read yet --
-// in that not-yet-known state only the always-safe floor (24h) is offered,
+// The window <option> list for a selector, derived from the data span rather
+// than hardcoded. `availableDays` is null while the span hasn't been read yet
+// -- in that not-yet-known state only the always-safe floor (24h) is offered,
 // so the selector never asserts an option set it can't yet back up (the same
 // not-yet-known / known-and-empty / known-and-populated distinction the rest
 // of this file uses for other panels). Once known, every standard window at
 // or under the available span is offered, plus one final option at the real
 // span itself (e.g. 66 days of data -> 24h, 7d, 30d, 66d) unless a standard
 // window already lands on that exact day count.
-function dashboardWindowOptions(availableDays) {
-  if (availableDays == null) return [DASHBOARD_STANDARD_WINDOWS[0]];
-  const options = DASHBOARD_STANDARD_WINDOWS.filter(w => w.days <= availableDays);
+function standardWindowOptions(availableDays) {
+  if (availableDays == null) return [STANDARD_WINDOWS[0]];
+  const options = STANDARD_WINDOWS.filter(w => w.days <= availableDays);
   const largest = options[options.length - 1];
   if (!largest || largest.days !== availableDays) {
     options.push({ value: `${availableDays}d`, label: `Last ${availableDays}d`, days: availableDays });
   }
   return options;
+}
+
+// The currently-selected window (from the URL) may predate the span answer,
+// or may no longer fit a freshly-measured span -- always keep it selectable
+// so a <select> built from `standardWindowOptions` never silently snaps to a
+// different value out from under a read that already used it.
+function windowOptionsWithCurrent(availableDays, since) {
+  const options = standardWindowOptions(availableDays);
+  return options.some(w => w.value === since)
+    ? options
+    : options.concat([{ value: since, label: `Last ${since}` }]);
 }
 
 function DashboardView({ params }) {
@@ -11079,18 +11108,9 @@ function DashboardView({ params }) {
   const dataSpan = (driftRead.data && driftRead.data.data_span)
     || (relearnRead.data && relearnRead.data.data_span) || null;
   const availableDays = dataSpan ? dataSpan.available_days : null;
-  const winOptions = dashboardWindowOptions(availableDays);
-  // The currently-selected window (from the URL) may predate the span answer,
-  // or may no longer fit a freshly-measured span -- always keep it selectable
-  // so the <select> never silently snaps to a different value out from under
-  // the reads that already used it.
-  const winOptionValues = new Set(winOptions.map(w => w.value));
-  const winOptionsWithCurrent = winOptionValues.has(since)
-    ? winOptions
-    : winOptions.concat([{ value: since, label: `Last ${since}` }]);
   const winPicker = html`
     <select value=${since} onChange=${e => setWin(e.target.value)}>
-      ${winOptionsWithCurrent.map(w => html`<option value=${w.value}>${w.label}</option>`)}
+      ${windowOptionsWithCurrent(availableDays, since).map(w => html`<option value=${w.value}>${w.label}</option>`)}
     </select>`;
 
   // Everything derived from /cost is derived from the ANSWER, never from an empty
