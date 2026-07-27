@@ -9489,6 +9489,23 @@ function appliedEstimate(rec) {
 // labeled `est.`, NEVER a "verified" claim or chip (behavioral requirement
 // #7, REVISED — see the note above `appliedEstimate` and InboxStatTiles).
 // Enforcement enable/disable (rung 3-5) only ever applies to relearn fixes.
+// The applied row's loading placeholder, in the same geometry as the real row
+// (title line, metadata line, action line) so real content FILLS IN rather than
+// replacing a differently-shaped block. Kept immediately beside `AppliedItemRow`
+// so the two shapes are edited together; a skeleton that has drifted from the row
+// it stands in for causes exactly the layout jump it exists to prevent.
+function AppliedSkeletonRow() {
+  return html`
+    <div class="sz-runrow" aria-hidden="true" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px;width:100%">
+        <div class="shimmer" style="height:13px;width:38%"></div>
+        <div class="shimmer" style="height:13px;width:60px;margin-left:auto"></div>
+      </div>
+      <div class="shimmer" style="height:11px;width:64%"></div>
+      <div class="shimmer" style="height:11px;width:12%"></div>
+    </div>`;
+}
+
 function AppliedItemRow({ rec, onChanged, suppressed }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -10058,7 +10075,16 @@ function ExcludedWasteNote({ excluded }) {
     </div>`;
 }
 
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
+// `appliedKnown` is deliberately a SEPARATE parameter from `loading`, not derived
+// from it. The two tiles are fed by different reads with wildly different
+// latencies — the avoided figure is a cheap lookup of a stored block, while
+// `/relearn/applied` is the slowest of the four inbox reads (measured at 72.8s on
+// this corpus) — so one band-level flag cannot describe both. It did not: the band
+// stopped being a skeleton as soon as the cost read landed, and the applied tile
+// then printed "0" and "most recent unknown" for the next minute, which is a
+// settled claim of absence made before its own data existed. Absence is the most
+// dangerous thing to guess wrong, because it reads as reassurance.
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnown, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
   const appliedPriceable = appliedEstimates.filter(i => i.usd != null);
   const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
   const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.usd, 0);
@@ -10080,7 +10106,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
   // whole band appear only once data landed, so the tab bar and the list jumped
   // down the page at that moment. A placeholder cannot be mistaken for a figure,
   // whereas an absent tile plus a "0" count read as a clean inbox.
-  if (loading && openItems.length === 0 && appliedCount === 0 && !hasExcluded) {
+  if ((loading || !appliedKnown) && openItems.length === 0 && appliedCount === 0 && !hasExcluded) {
     return html`
       <div style="margin:10px 0 18px;display:flex;gap:14px;flex-wrap:wrap" aria-hidden="true">
         ${[0, 1].map(i => html`
@@ -10091,7 +10117,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
           </div>`)}
       </div>`;
   }
-  if (openItems.length === 0 && appliedCount === 0 && !hasExcluded) return null;
+  if (openItems.length === 0 && appliedKnown && appliedCount === 0 && !hasExcluded) return null;
   return html`
     <div style="margin:10px 0 18px">
     ${/* Both figures now sit in ONE tile row: what was avoidable (past tense,
@@ -10107,16 +10133,25 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
         ${/* The green belongs to the label, not the figure: the number reads as
               a plain fact, matching the blue tile where the figure is also
               body-coloured rather than tinted. */ ''}
-        <div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied — never re-measured afterward">${appliedBig}</div>
+        ${/* Skeleton, never a zero. Same geometry as the real figure so the tile
+              does not resize when the read lands. */ ''}
+        ${appliedKnown
+          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied — never re-measured afterward">${appliedBig}</div>`
+          : html`<div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>`}
         ${/* The sub-line never restates the number above it. When the big
               figure is an estimate, the line dates it to apply time (the same
               honesty the old "not re-measured" carried, without leading with a
               negation). When the big figure is only the count fallback there is
               no claim to qualify, so the line spends itself on recency instead
               of apologising for a missing estimate. */ ''}
-        <div class="dim" style="font-size:12px;margin-top:2px">${appliedBig === String(appliedCount)
-          ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
-          : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>
+        ${/* "most recent unknown" is a settled value too, and it was rendering
+              before the read that would have supplied the date. Held back with
+              the figure. */ ''}
+        ${appliedKnown
+          ? html`<div class="dim" style="font-size:12px;margin-top:2px">${appliedBig === String(appliedCount)
+              ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
+              : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>`
+          : html`<div class="shimmer" style="height:12px;width:66%;margin-top:6px"></div>`}
       </div>
     </div>
     ${/* Below the row, not inside a tile: this names waste the page's own
@@ -10176,6 +10211,9 @@ function ReviewInboxView({ params }) {
   // so a fresh page load looked like a fresh install.
   const [costLoaded, setCostLoaded] = useState(false);
   const [appliedLoaded, setAppliedLoaded] = useState(false);
+  // `/relearn/cost-applied` is the SECOND half of the applied count and had no
+  // flag of its own, so a count could be published over the relearn ledger alone.
+  const [costAppliedLoaded, setCostAppliedLoaded] = useState(false);
   const [marking, setMarking] = useState(null);            // signature currently being marked applied
 
   const load = useCallback(async () => {
@@ -10223,6 +10261,7 @@ function ReviewInboxView({ params }) {
       const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
     } catch (e) { /* degrade quietly */ }
+    finally { setCostAppliedLoaded(true); }
   }, []);
 
   useEffect(() => {
@@ -10377,7 +10416,10 @@ function ReviewInboxView({ params }) {
   // as wrong as a zero: it would be replaced a moment later, which is the layout
   // jump this rule exists to prevent.
   const openCountKnown = !firstLoad;
-  const appliedCountKnown = appliedLoaded;
+  // BOTH applied reads, because `combinedApplied` merges both ledgers. Gated on
+  // the reads themselves rather than on `firstLoad`: `/relearn/applied` is by far
+  // the slowest of the four, so a page-wide flag clears long before it answers.
+  const appliedCountKnown = appliedLoaded && costAppliedLoaded;
   // Nothing cached AND nothing to show yet: the only state that earns skeletons.
   // With cached rows in hand the list renders, whatever the scan is doing.
   const showSkeleton = openItems.length === 0 && (firstLoad || (scanning && d.status !== 'never_run'));
@@ -10463,7 +10505,7 @@ function ReviewInboxView({ params }) {
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
 
-    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} pastOverspend=${costPastOverspend} loading=${firstLoad} />
+    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} appliedKnown=${appliedCountKnown} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} pastOverspend=${costPastOverspend} loading=${firstLoad} />
 
     ${/* TWO tabs. The open list is one list; "Applied" answers a different
           question and keeps its own. */ ''}
@@ -10579,10 +10621,27 @@ function ReviewInboxView({ params }) {
             replacing it would have rebuilt the claim by accident.
             Worded as an estimate and a point in time. Never verified, measured,
             confirmed or realized. */ ''}
-      <div class="sz-note" style="margin:12px 0 10px">Each figure below is that row's own estimate from the moment it was applied. Nothing here is re-measured afterwards.</div>
+      ${/* It says "each figure below", so it only renders when there ARE figures
+            below: above a skeleton it points at nothing, and above an empty state
+            it qualifies a claim nobody made. Same rule as the empty state it sits
+            over, applied to a disclosure rather than to an absence. */ ''}
+      ${appliedCountKnown && combinedApplied.length > 0 ? html`
+        <div class="sz-note" style="margin:12px 0 10px">Each figure below is that row's own estimate from the moment it was applied. Nothing here is re-measured afterwards.</div>` : null}
       <div class="cur-listbox">
-        ${combinedApplied.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing applied yet.</div>` : null}
-        ${combinedApplied.map(rec => html`<${AppliedItemRow} key=${rec.kind + ':' + rec.id} rec=${rec} suppressed=${suppressed} onChanged=${() => { loadApplied(); loadCost(); }} />`)}
+        ${/* THREE distinguishable states, and the middle one was missing.
+              "Nothing applied yet." was gated on the array being empty and on
+              nothing else, so it rendered as a settled absence for as long as
+              `/relearn/applied` took to answer — the slowest of the four inbox
+              reads. An absence claim is the most dangerous thing to guess wrong
+              because it reads as reassurance, and the page KNEW it did not know:
+              the tab count beside it was already a shimmer.
+              Gated on both applied reads, never on a page-wide flag, since this
+              panel's data is the slow one. */ ''}
+        ${!appliedCountKnown
+          ? html`${[0, 1, 2].map(i => html`<${AppliedSkeletonRow} key=${i} />`)}`
+          : combinedApplied.length === 0
+            ? html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing applied yet.</div>`
+            : combinedApplied.map(rec => html`<${AppliedItemRow} key=${rec.kind + ':' + rec.id} rec=${rec} suppressed=${suppressed} onChanged=${() => { loadApplied(); loadCost(); }} />`)}
       </div>
     ` : null}
 

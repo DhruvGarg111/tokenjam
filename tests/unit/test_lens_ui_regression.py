@@ -3166,7 +3166,10 @@ def test_no_count_or_tile_is_rendered_before_the_page_knows_it(html):
     assert view.count('class="shimmer" style="display:inline-block;width:20px') == 2
 
     tile = html[html.index("function InboxStatTiles"):html.index("function ReviewInboxView")]
-    assert "if (loading && openItems.length === 0 && appliedCount === 0 && !hasExcluded)" in tile
+    # The band-level skeleton now also fires while the APPLIED read is outstanding,
+    # not only on the page-wide flag: the two tiles are fed by reads with wildly
+    # different latencies, and one flag could not describe both.
+    assert "if ((loading || !appliedKnown) && openItems.length === 0 && appliedCount === 0 && !hasExcluded)" in tile
     assert "loading=${firstLoad}" in view
 
     # Reused the app's existing shimmer primitive rather than inventing a loader,
@@ -3745,6 +3748,15 @@ def test_a_reverted_row_shows_reverted_where_its_amount_would_be(html):
     # The now-redundant mid-row chip is gone for the reverted case only: any other
     # non-default state has nowhere better to put it.
     assert "rec.state !== 'applied' && !isReverted ?" in row
+
+    # NOT an over-correction: a non-reverted row still renders its figure, both the
+    # dollar form and the token fallback, and still suppresses dollars for a
+    # subscription plan. Asserted because the live corpus cannot show it -- all five
+    # non-reverted records carry None for past_overspend_usd, past_overspend_tokens
+    # AND the legacy estimated_monthly_usd, so they rendered no amount before this
+    # change either. The only record with a figure is the reverted one.
+    assert "(usd != null || toks != null) ? html`" in row
+    assert "+${(!suppressed && usd != null) ? fmtUsd(usd) : (toks != null ? '~' + fmtTokens(toks) + ' tok' : fmtUsd(usd))}" in row
     # The revert REASON and the applied metadata are the genuinely useful parts and
     # must survive: they are what tell the reader why it came back.
     assert "${error}" in row
@@ -3777,3 +3789,84 @@ def test_the_applied_estimate_caveat_is_one_section_line_not_a_per_row_badge(htm
         assert banned not in line.lower()
     # No em dashes in user-facing copy.
     assert "—" not in line
+
+
+def test_no_inbox_empty_state_can_render_before_its_own_read_resolves(html):
+    """THE RULE, not a fourth patch. An absence claim may never render before the
+    read that would refute it, because absence reads as reassurance and is the most
+    dangerous thing on this page to guess wrong.
+
+    Three instances of this bug shipped: `Open (0)`, the bare "Loading…" that
+    replaced cached rows, and "Nothing applied yet." So this is written as a SWEEP
+    over every absence-claiming string in the inbox region rather than as a check
+    on the one just fixed, and it fails on a NEW ungated one.
+    """
+    view = html[html.index("function ReviewInboxView"):html.index("function DashboardView")]
+
+    # Every absence-claiming string the inbox can render, with the flag that has to
+    # gate it. `showSkeleton` covers the open list: it is true whenever there are no
+    # rows and the page has not had an answer, so it pre-empts both open-list empty
+    # states in the same conditional chain.
+    gated = {
+        "No scan has run yet.": "showSkeleton",
+        "Nothing open. The last scan found nothing worth a row": "showSkeleton",
+        "Nothing applied yet.": "appliedCountKnown",
+    }
+    for claim, flag in gated.items():
+        assert claim in view, f"the sweep is stale: {claim!r} is no longer rendered"
+        # The gate must appear in the same conditional chain, BEFORE the claim.
+        before = view[:view.index(claim)]
+        assert flag in before, f"{claim!r} renders without consulting {flag}"
+
+    # No NEW absence claim may appear ungated. Any future one has to be added to the
+    # map above with its gate, which is the point: the sweep is the rule.
+    import re as _re
+    found = {
+        m.group(1).strip()
+        for m in _re.finditer(r">(\s*(?:No |Nothing |None\b)[^<${]*)", _no_comments(view))
+    }
+    unknown = {f for f in found if not any(f.startswith(k[:18]) for k in gated)}
+    assert not unknown, f"ungated absence claim(s) in the inbox: {unknown}"
+
+
+def test_the_applied_panel_gates_on_its_own_read_not_a_page_wide_flag(html):
+    # `/relearn/applied` is the slowest of the four inbox reads, so a page-wide
+    # flag clears long before it answers -- which is exactly how the tile came to
+    # print "0 / most recent unknown" beside a tab count that was already a
+    # shimmer. Both applied reads count, because the number is a merge of the two
+    # ledgers and a count over half a population is as wrong as a zero.
+    view = html[html.index("function ReviewInboxView"):html.index("function DashboardView")]
+    assert "const appliedCountKnown = appliedLoaded && costAppliedLoaded;" in view
+    # `/relearn/cost-applied` had no loaded flag at all before this.
+    assert "setCostAppliedLoaded(true)" in view
+    assert "const [costAppliedLoaded, setCostAppliedLoaded] = useState(false);" in view
+    # Not derived from the page-wide flag, which is the mistake being prevented.
+    assert "appliedCountKnown = !firstLoad" not in view
+    assert "appliedKnown=${appliedCountKnown}" in view
+
+    # The tile holds BOTH its figure and its sub-line until then. "most recent
+    # unknown" is a settled value too, and it was rendering off a date the page did
+    # not have yet.
+    tile = html[html.index("function InboxStatTiles"):html.index("function ReviewInboxView")]
+    assert "appliedKnown" in tile.split("\n")[tile.split("\n").index(next(
+        l for l in tile.split("\n") if l.startswith("function InboxStatTiles")))]
+    assert "${appliedKnown\n          ? html`<div style=\"font-size:24px" in tile
+    assert "most recent ${daysAgoLabel(lastAppliedAt)" in tile
+    before_recent = tile[:tile.index("most recent ${daysAgoLabel(lastAppliedAt)")]
+    assert before_recent.count("appliedKnown") >= 2, \
+        "the sub-line must be held back with the figure, not rendered beside a shimmer"
+    # An unknown count may not be read as an empty band either, or the whole band
+    # disappears instead of shimmering.
+    assert "if (openItems.length === 0 && appliedKnown && appliedCount === 0" in tile
+
+    # The section disclosure says "each figure below", so it may not sit above a
+    # skeleton or above an empty state.
+    assert "${appliedCountKnown && combinedApplied.length > 0 ? html`" in view
+
+    # The skeleton mirrors the real row's geometry, so content fills in rather than
+    # replacing a differently-shaped block.
+    assert "function AppliedSkeletonRow()" in html
+    skel = html[html.index("function AppliedSkeletonRow()"):html.index("function AppliedItemRow(")]
+    assert 'class="sz-runrow"' in skel
+    assert 'aria-hidden="true"' in skel
+    assert skel.count("shimmer") == 4
