@@ -363,6 +363,8 @@ def hydrate_dataclass(cls: Any, d: Any) -> Any:
     import dataclasses
     import typing
 
+    import sys
+
     if d is None or not dataclasses.is_dataclass(cls):
         return d
     try:
@@ -370,18 +372,48 @@ def hydrate_dataclass(cls: Any, d: Any) -> Any:
     except Exception:
         hints = {}
 
+    # The namespace forward references resolve against. `get_type_hints` does
+    # NOT reliably resolve a reference written INSIDE a subscript
+    # (`list["UncachedAgentCandidate"]`): on Python 3.10 the inner argument
+    # comes back as the bare string `'UncachedAgentCandidate'`, while 3.11+
+    # returns the class. Without this namespace the string fails every
+    # is_dataclass check below and the value passes straight through as a raw
+    # dict — the field is present and correctly shaped, but the TYPE is gone,
+    # so the failure surfaces far away as `'dict' object has no attribute ...`.
+    # See `_resolve`.
+    ns = getattr(sys.modules.get(cls.__module__), "__dict__", {})
+
     kwargs: dict[str, Any] = {}
     for f in dataclasses.fields(cls):
         if f.name not in d:
             continue   # leave the dataclass default in place
-        kwargs[f.name] = _coerce(hints.get(f.name, f.type), d[f.name])
+        kwargs[f.name] = _coerce(hints.get(f.name, f.type), d[f.name], ns)
     # `is_dataclass(cls)` narrows to DataclassInstance for mypy, which it then
     # refuses to call; `cls` here is always the CLASS, never an instance.
     ctor: Any = cls
     return ctor(**kwargs)
 
 
-def _coerce(hint: Any, value: Any) -> Any:
+def _resolve(hint: Any, ns: dict) -> Any:
+    """Turn a forward reference into the class it names, if we can.
+
+    Needed because a quoted reference inside a builtin generic subscript is not
+    resolved uniformly across supported Pythons: `list["Candidate"]` yields the
+    string on 3.10 and the class on 3.11+. Everything downstream dispatches on
+    `is_dataclass`, which a string always fails, so an unresolved reference
+    silently degrades a nested dataclass to the raw dict it was serialized
+    from. Returning the hint unchanged when it cannot be resolved keeps an
+    unknown name behaving exactly as before rather than raising.
+    """
+    if isinstance(hint, str):
+        return ns.get(hint, hint)
+    forward_arg = getattr(hint, "__forward_arg__", None)   # typing.ForwardRef
+    if forward_arg is not None:
+        return ns.get(forward_arg, hint)
+    return hint
+
+
+def _coerce(hint: Any, value: Any, ns: dict | None = None) -> Any:
     """Coerce one serialized value back to what its type hint asks for."""
     import dataclasses
     import typing
@@ -389,25 +421,27 @@ def _coerce(hint: Any, value: Any) -> Any:
     if value is None:
         return None
 
+    ns = ns or {}
+    hint = _resolve(hint, ns)
     origin = typing.get_origin(hint)
     args = typing.get_args(hint)
 
     # Optional[X] / X | None -> coerce against the non-None member.
     if origin is typing.Union or (origin is not None and str(origin) == "|"):
         inner = [a for a in args if a is not type(None)]   # noqa: E721
-        return _coerce(inner[0], value) if len(inner) == 1 else value
+        return _coerce(inner[0], value, ns) if len(inner) == 1 else value
     try:
         import types as _types
         if isinstance(hint, _types.UnionType):        # PEP 604 `X | None`
             inner = [a for a in args if a is not type(None)]   # noqa: E721
-            return _coerce(inner[0], value) if len(inner) == 1 else value
+            return _coerce(inner[0], value, ns) if len(inner) == 1 else value
     except Exception:
         pass
 
     if origin in (list, tuple) and args:
-        return [_coerce(args[0], v) for v in value]
+        return [_coerce(args[0], v, ns) for v in value]
     if origin is dict and len(args) == 2:
-        return {k: _coerce(args[1], v) for k, v in value.items()}
+        return {k: _coerce(args[1], v, ns) for k, v in value.items()}
     if isinstance(hint, type) and issubclass(hint, datetime):
         return _parse_dt(value)
     if dataclasses.is_dataclass(hint) and isinstance(value, dict):
