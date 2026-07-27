@@ -181,21 +181,22 @@ def _recoverable_teaser(db, config) -> str | None:
             db=db, config=config, since=since_dt, until=until_dt,
             findings=list(COST_ANALYZERS),
         )
-        estimates: list[float] = []
+        estimates: list[tuple[float, int]] = []
         if report.downgrade is not None:
             usd = report.downgrade.past_overspend_usd
             if usd is not None:
-                estimates.append(usd)
+                estimates.append((usd, report.downgrade.past_overspend_tokens or 0))
         for finding in (report.findings or {}).values():
             usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:
-                estimates.append(usd)
-        largest = max(estimates, default=0.0)
+                estimates.append((usd, getattr(finding, "past_overspend_tokens", None) or 0))
+        largest_usd, largest_tokens = max(estimates, default=(0.0, 0))
 
-        if largest < _TEASER_MIN_USD:
+        if largest_usd < _TEASER_MIN_USD:
             return None
         return (
-            f"[dim]{format_cost(largest)} recoverable (largest single fix): run "
+            f"[dim]{format_cost(largest_usd)} / {format_tokens(largest_tokens)} tokens "
+            f"recoverable (largest single fix): run "
             f"[bold]tj optimize[/bold][/dim]"
         )
     except Exception:

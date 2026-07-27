@@ -2401,7 +2401,13 @@ class DuckDBBackend:
                    COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
                                      THEN cost_usd ELSE 0 END), 0.0) AS cur_cost,
                    COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
-                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost
+                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost,
+                   COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
+                                     THEN input_tokens + output_tokens + cache_tokens
+                                          + cache_write_tokens ELSE 0 END), 0) AS cur_tokens,
+                   COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
+                                     THEN input_tokens + output_tokens + cache_tokens
+                                          + cache_write_tokens ELSE 0 END), 0) AS prev_tokens
             FROM spans
             WHERE (start_time >= $3 AND start_time < $2)
               AND {group_col} IS NOT NULL
@@ -2415,7 +2421,9 @@ class DuckDBBackend:
         ).fetchall()
         return [
             {"group": r[0], "current_cost": float(r[1]), "previous_cost": float(r[2]),
-             "delta": float(r[1]) - float(r[2])}
+             "delta": float(r[1]) - float(r[2]),
+             "current_tokens": int(r[3] or 0), "previous_tokens": int(r[4] or 0),
+             "tokens_delta": int(r[3] or 0) - int(r[4] or 0)}
             for r in rows
         ]
 

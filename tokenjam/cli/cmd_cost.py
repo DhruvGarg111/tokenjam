@@ -345,6 +345,13 @@ def _render_diff(diff, framing=None) -> None:
 
     # Per-agent / per-model shifts are dollar-denominated, so they're suppressed
     # alongside the dollar deltas in flat-fee / local modes.
+    def _tokens_suffix(entry: dict) -> str:
+        delta = entry.get("tokens_delta")
+        if delta is None:
+            return ""
+        return f"  [dim]({format_tokens(entry.get('previous_tokens', 0))} → " \
+               f"{format_tokens(entry.get('current_tokens', 0))} tokens)[/dim]"
+
     if not suppress and diff.by_agent:
         console.print()
         console.print("  [bold]Top shifts by agent:[/bold]")
@@ -355,6 +362,7 @@ def _render_diff(diff, framing=None) -> None:
                 f"{format_cost(entry['current_cost'])}  "
                 f"[dim]({'+' if entry['delta'] >= 0 else ''}"
                 f"{format_cost(entry['delta'])})[/dim]"
+                f"{_tokens_suffix(entry)}"
             )
 
     if not suppress and diff.by_model:
@@ -367,6 +375,7 @@ def _render_diff(diff, framing=None) -> None:
                 f"{format_cost(entry['current_cost'])}  "
                 f"[dim]({'+' if entry['delta'] >= 0 else ''}"
                 f"{format_cost(entry['delta'])})[/dim]"
+                f"{_tokens_suffix(entry)}"
             )
 
     console.print()

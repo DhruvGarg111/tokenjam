@@ -1050,7 +1050,9 @@ def _render_downgrade(
     else:  # api
         console.print(
             f"     • Would have cost ~{format_cost(d.alternative_cost_usd)} on the "
-            f"smaller model vs {format_cost(d.actual_cost_usd)} actual (in window)"
+            f"smaller model vs {format_cost(d.actual_cost_usd)} actual (in window), "
+            f"{format_tokens(d.candidate_tokens)} of {format_tokens(d.window_total_tokens)} "
+            f"window tokens"
         )
         console.print(
             f"     • Projected savings if pattern holds: "
