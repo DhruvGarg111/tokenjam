@@ -957,14 +957,35 @@ def test_the_rollup_has_no_per_analyzer_side_channel():
     ``relearn_clusters=`` parameter, on its OWN 30-day basis, landing in a
     ``projected_usd_30d`` key that no other analyzer's window figure shared.
     Two time bases in one aggregate is exactly the ambiguity the field collapse
-    removed: every contribution now arrives as an ordinary proposal on the one
-    canonical field, or not at all.
+    removed: every contribution arrives as an ordinary row on the one canonical
+    field, or not at all. THAT is what this test guards, and it is unchanged.
 
-    relearn is the "or not at all" case today. Its one aggregate card carried
-    only the retired total-observed-cost field, so the card is deleted; its
-    per-cluster rows in the Review inbox are where its claim has always lived.
-    A proposal with no canonical figure therefore contributes nothing here, and
-    does not even earn a `by_analyzer` entry.
+    WHAT CHANGED, AND WHY IT IS NOT THE SHAPE ABOVE COMING BACK. relearn used to
+    be the "or not at all" case, and its money therefore sat outside the Review
+    inbox's headline while its rows sat inside the inbox's list. That made the
+    tail's combined figure and the below-floor "still counted in the total above"
+    note false for most of the money they described, so relearn is now the "as an
+    ordinary row" case: ``core/optimize/inbox_contribution.py`` turns each open
+    cluster into a plain row carrying ``past_overspend_usd``/``_tokens``, and the
+    route hands those rows to this function alongside the cost proposals.
+
+    Four properties are what make that the sanctioned path rather than the
+    retired one, and the assertions below pin all four:
+
+      1. **No parameter.** The relearn-shaped kwarg still raises ``TypeError``.
+         Nothing about relearn is known to this function; it sees rows.
+      2. **One time basis.** The row's figure is the detector's own bounded
+         bucket for the window this rollup is LABELLED with (a date filter over
+         the same occurrences at the same price, never a rescale), so the label
+         over the total stays true for every row under it.
+      3. **No second key.** The result grows no relearn-specific key, no paced
+         key and no second total. It is the same dict shape as before.
+      4. **Attributable, not smuggled.** The contribution shows up as an ordinary
+         ``by_analyzer`` entry, so a reader can see whose money it is instead of
+         finding an unexplained delta.
+
+    A row with no canonical figure still contributes nothing and earns no
+    ``by_analyzer`` entry, whichever producer it came from.
     """
     with pytest.raises(TypeError):
         past_overspend_rollup([], relearn_clusters=[{"signature": "relearn:a"}])  # type: ignore[call-arg]
@@ -974,13 +995,22 @@ def test_the_rollup_has_no_per_analyzer_side_channel():
          "past_overspend_usd": 3.0},
         {"signature": "cost:nothing", "analyzer": "hypothetical", "title": "t2",
          "past_overspend_usd": None, "past_overspend_tokens": None},
+        # An ordinary row that happens to come from relearn: the canonical field,
+        # nothing relearn-shaped about how it is passed or read.
+        {"signature": "relearn-window:cwd", "analyzer": "relearn", "title": "t3",
+         "past_overspend_usd": 2.0},
     ])
-    assert rollup["past_overspend_usd"] == 3.0
-    assert rollup["proposal_count"] == 1
-    assert [e["analyzer"] for e in rollup["by_analyzer"]] == ["downsize"]
+    assert rollup["past_overspend_usd"] == 5.0
+    assert rollup["proposal_count"] == 2
+    assert [e["analyzer"] for e in rollup["by_analyzer"]] == ["downsize", "relearn"]
     # No paced key survives anywhere on the block, and no second total either.
     assert not [k for k in rollup if "monthly" in k or "projected" in k]
     assert not [k for k in rollup if "observed_cost" in k or k == "cost_disclosure"]
+    # And nothing relearn-specific on the result: the retired mechanism's tell was
+    # a key of its own beside the canonical total.
+    assert not [k for k in rollup if "relearn" in k]
+    # One label over every row that fed the total.
+    assert rollup["window_days"] == 30
 
 
 def test_rollup_excluded_is_carried_through_never_summed():

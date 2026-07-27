@@ -9,10 +9,15 @@ retirements are still guarded by their own tests
 here, because this is a different operation:
 
   * the first retirement removed a SECOND TIME BASIS smuggled into a shared
-    aggregate through a relearn-only parameter. Nothing here touches
-    ``past_overspend_rollup``, adds a relearn proposal, or introduces a second
-    aggregate: the windowed figures live on relearn's own cluster and finding
-    and are summed only over each other.
+    aggregate through a relearn-only parameter. Nothing in THIS module touches
+    ``past_overspend_rollup`` or introduces a second aggregate: the windowed
+    figures live on relearn's own cluster and finding and are summed only over
+    each other (``sum_windowed``). A separate module, ``core/optimize/
+    inbox_contribution.py``, later reads a bounded bucket and hands it to the one
+    shared aggregate as an ordinary row on the canonical field, on the window
+    that aggregate is labelled with; see its own tests for why that is the
+    sanctioned path and not the retired parameter. Producing the bounded figure
+    and spending it are deliberately different modules.
   * the second retirement removed a RESCALE: a corpus observation multiplied by
     ``30 / window_days`` and published as a month's money that was never
     observed. This is a FILTER over the same observed occurrences, so it can
