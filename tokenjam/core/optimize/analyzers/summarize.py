@@ -20,9 +20,9 @@ activity.
 **The file POPULATION is the window's, not the process's.** The scan used to
 enumerate project-scope files from a single `Path.cwd()`, while the window it
 prices spans every repo the user worked in — so every repo except the one the
-process happened to sit in contributed exactly $0.00, and on a real corpus that
-hid the large majority of the true figure. The roots are now derived from the
-working directories the analysed sessions themselves recorded
+process happened to sit in contributed nothing at all, hiding most of the true
+figure. The roots are now derived from the working directories the analysed
+sessions themselves recorded
 (`core/summarize/repo_roots`), read off the same transcript pass that counts
 invocations. A recorded root that no longer exists on disk is counted and
 skipped, never reconstructed. Because a git worktree carries its repo's
@@ -675,13 +675,12 @@ def _copy_key(
 
     * NOT sufficient. A corpus-wide scan visits every repo the window worked
       in, and a git worktree is a copy of its repo, so one repo's `CLAUDE.md`
-      can appear dozens of times. Those copies DRIFT — measured on a real
-      corpus, 65 copies of one `CLAUDE.md` carried 25 distinct content hashes —
-      while `_sessions_loading` matches them all to the same repo by ancestor
-      name and so charges every one of them against the same sessions. Content
-      hashing would collapse the byte-equal ones and leave the drifted ones
-      multiplying a single file's cost, which is money the user cannot act on
-      (Critical Rule 22).
+      appears once per checkout — and those checkouts DRIFT, because each sits
+      on its own branch. `_sessions_loading` matches all of them to the same
+      repo by ancestor directory name and charges every one against the same
+      sessions. Content hashing collapses only the copies that happen to be
+      byte-equal right now and leaves every drifted one multiplying a single
+      file's cost, which is money the user cannot act on (Critical Rule 22).
     * NOT necessary. Two byte-identical files in repos with DIFFERENT session
       populations (a `CLAUDE.md` copied between two projects) genuinely are
       loaded twice and genuinely cost twice; content hashing would wrongly
@@ -815,10 +814,10 @@ def run(ctx: AnalyzerContext) -> None:
 
     try:
         # Project scope spans every repo the window actually worked in — not the
-        # one directory this process happens to sit in, which contributed $0.00
-        # for every other repo in the corpus. `project_roots=None` (no corpus, so
-        # no observed root) keeps the historical cwd scan rather than scanning
-        # nothing. Deliberately NOT passed as `path`: that widens the net to
+        # one directory this process happens to sit in, which left every other
+        # repo in the corpus contributing nothing. `project_roots=None` (no
+        # corpus, so no observed root) keeps the historical cwd scan rather than
+        # scanning nothing. Deliberately NOT passed as `path`: that widens the net to
         # every `*.md` in a directory and would price `README.md` / `CHANGELOG.md`
         # as if the harness auto-loaded them (Critical Rule 22).
         scan = list_candidates(  # read-only, never writes

@@ -239,12 +239,13 @@ def _read(path: Path) -> str | None:
 
 def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
                ratio: float, scan_root: Path | None = None) -> Candidate | None:
-    # A symlink is not a candidate, because the FIX refuses it: `session.prepare`
-    # and `apply` both call `_refuse_symlink` rather than rewrite through a link
-    # (the write could land outside where you expect). Listing one anyway offers
-    # a saving that can never be realized through the offered path — a figure the
-    # user cannot act on (Critical Rule 22). Measured on a real `~/.claude`:
-    # 10 of 16 candidates were symlinked skill files, ~19% of the claim.
+    # A symlink is not a candidate, and NOT because it might duplicate another
+    # file — because the FIX refuses it. `prepare`, `check`, `apply_staged` and
+    # `undo` all bail on a link rather than rewrite through it (the write could
+    # land outside where you expect), so a saving offered on one is unreachable
+    # by every path this product offers. Pricing it would claim money no fix can
+    # collect (Critical Rule 22). The link TARGET is still a fine candidate when
+    # a scan reaches it directly; it is the link that is refused, not the file.
     if path.is_symlink():
         return None
     text = _read(path)

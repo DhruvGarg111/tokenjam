@@ -4,9 +4,10 @@
 list` that root is the cwd, which is right: the user is asking about the repo
 they are standing in. For the optimize analyzer it is wrong — it prices a whole
 telemetry window that spans every repo the user touched, so a single-cwd scan
-leaves every other repo's always-resident `CLAUDE.md` contributing exactly $0.00
-while the same file is demonstrably re-sent at the head of every one of that
-repo's sessions.
+leaves every other repo's always-resident `CLAUDE.md` contributing nothing at
+all, while that same file is re-sent at the head of every one of its own repo's
+sessions. Which repo the analyzer's process happens to sit in is an accident of
+invocation; the window it prices is not.
 
 The roots are OBSERVED, not guessed: Claude Code records the working directory
 in each transcript, and `core/summarize/invocations` already reads every

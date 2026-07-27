@@ -40,9 +40,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: The reduction ASKED of the rewriter — prose to ~half its words. Feeds
-#: `session.prepare`'s prompt. NOT a claim about what a rewrite achieves; see
-#: the module docstring and :func:`observed_prose_ratio`.
+#: What the rewriter is INSTRUCTED to hit — `session.prepare` turns this into
+#: the word count in the model's prompt. It is an ask, not a prediction, and
+#: **nothing enforces it**: there is no retry and no gate on the achieved word
+#: count, since `check` gates on structure surviving and nothing else. So do not
+#: tune this as though it were a measurement of what rewrites deliver — changing
+#: it changes what the model is ASKED for. The measured counterpart is
+#: :func:`observed_prose_ratio`, which supersedes this the moment real staged
+#: results exist.
 DEFAULT_TARGET_RATIO = 0.5
 
 #: Minimum evidence before an observed ratio may replace the target. Both gates
