@@ -3414,3 +3414,38 @@ async def test_approach_cross_terminal_child_session_level_only(
     assert child_agents[0]["capture_completeness"] == "session_level"
     # No method -> nothing spliced into the spine list.
     assert body["cross_terminal"] == []
+
+
+async def test_post_budget_persists_to_the_path_the_config_was_loaded_from(db):
+    """A budget mutation must be serialized back to the file the DAEMON'S
+    config came from, not to a path rediscovered inside the request.
+
+    `tj serve --config PATH` puts an explicit path on the running app that no
+    rediscovery in this process can see: TJ_CONFIG and the search path point
+    somewhere else entirely. Re-deriving here overwrote that unrelated file
+    while leaving the config the daemon actually reads unchanged.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from tokenjam.core.config import SecurityConfig, TjConfig
+    from tokenjam.core.ingest import IngestPipeline
+
+    loaded_from = Path("/loaded/from/tj.toml")
+    cfg = TjConfig(version="1", security=SecurityConfig(ingest_secret=INGEST_SECRET))
+    cfg.config_path = loaded_from
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.resolve_config_path",
+               return_value="/rediscovered/elsewhere.toml"), \
+         patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget", json={"scope": "defaults", "daily_usd": 9.0}
+            )
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    assert Path(mock_write.call_args[0][1]) == loaded_from

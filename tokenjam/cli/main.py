@@ -85,6 +85,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
 
     if invoked in no_db_commands:
         ctx.obj["config"] = config
+        ctx.obj["config_path_override"] = config_path
         ctx.obj["db"] = None
         ctx.obj["output_json"] = output_json
         ctx.obj["no_color"] = no_color
@@ -115,6 +116,11 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
             raise
 
     ctx.obj["config"] = config
+    # The raw `--config` value, kept so any command that needs the config PATH
+    # (to write back to it, or to report it) resolves the same file this
+    # invocation read. An explicit override never reaches the environment, so
+    # a bare `resolve_config_path()` downstream would name a different file.
+    ctx.obj["config_path_override"] = config_path
     ctx.obj["db"] = db
     ctx.obj["output_json"] = output_json
     ctx.obj["no_color"] = no_color

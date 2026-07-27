@@ -568,6 +568,23 @@ def resolve_config_path(override: str | None = None) -> Path | None:
     return find_config_file(override)
 
 
+def active_config_path(config: "TjConfig | None") -> Path | None:
+    """The file this already-loaded config was actually read FROM, if known.
+
+    ``resolve_config_path`` answers "which file WOULD this process discover",
+    which is a different question once a per-invocation ``--config`` override
+    is in play: the override never reaches the environment, so a rediscovery
+    silently falls through to ``TJ_CONFIG`` or the search path and names some
+    other file. Every site that writes the config back — or reports which one
+    is live — must ask about the config it is holding, not re-run discovery.
+
+    Returns ``None`` when the config did not come from a file (defaults only,
+    or a caller-constructed object); the call site then falls back to
+    ``resolve_config_path()`` for the genuine no-config-yet case.
+    """
+    return getattr(config, "config_path", None)
+
+
 def load_config(path: str | None = None) -> TjConfig:
     """
     Load config from file, merge with defaults, return TjConfig.

@@ -514,7 +514,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # it, leaving the user with two configs and the wrong one still active
     # (TJ_CONFIG always wins at read time). Honoring TJ_CONFIG here instead
     # makes onboard correctly report "Config already exists" and no-op.
-    existing = resolve_config_path()
+    existing = resolve_config_path((ctx.obj or {}).get("config_path_override"))
     if existing and not force:
         # --reconfigure is only meaningful with --claude-code / --codex.
         # The bare onboard path writes a generic config and doesn't manage
@@ -839,7 +839,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
         persona = "claude_code" if claude_code else "codex"
         config_path: Path | None = global_path if global_path.exists() else None
     else:
-        found = resolve_config_path()
+        found = resolve_config_path((ctx.obj or {}).get("config_path_override"))
         config_path = Path(found) if found else None
         persona = "sdk"
 

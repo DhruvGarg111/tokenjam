@@ -28,7 +28,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     checks: list[dict] = []
 
     # 1. Config file found and valid
-    checks.append(_check_config())
+    checks.append(_check_config(ctx.obj.get("config_path_override")))
 
     # 2. DuckDB file writable
     checks.append(_check_db(config))
@@ -106,9 +106,16 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
         ctx.exit(0)
 
 
-def _check_config() -> dict:
+def _check_config(override: str | None = None) -> dict:
+    """Report which config file is live.
+
+    Takes the invocation's own `--config` value so `tj --config PATH doctor`
+    reports PATH: an explicit override never reaches the environment, so a
+    bare rediscovery here would name a different file while every other check
+    — which reads the config loaded from PATH — describes that one.
+    """
     try:
-        path = resolve_config_path()
+        path = resolve_config_path(override)
         if path is None:
             return {"name": "Config file", "level": "error",
                     "message": "No config file found. Run `tj onboard` to create one."}

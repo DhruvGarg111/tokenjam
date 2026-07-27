@@ -13,7 +13,7 @@ def test_config_path_message_collapses_home(monkeypatch, tmp_path):
     cfg.parent.mkdir(parents=True)
     cfg.write_text('version = "1"\n')
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("tokenjam.cli.cmd_doctor.resolve_config_path", lambda: cfg)
+    monkeypatch.setattr("tokenjam.cli.cmd_doctor.resolve_config_path", lambda *_a: cfg)
     monkeypatch.setattr("tokenjam.cli.cmd_doctor.load_config", lambda _p: None)
 
     check = _check_config()
