@@ -177,6 +177,46 @@ def test_over_powered_subagent_carries_quantified_estimate():
         db.close()
 
 
+def test_over_powered_estimate_prices_cache_write_on_both_sides():
+    """`_alt_cost_for_row` must price cache-write tokens on the ALTERNATIVE
+    side too, not just the actual side (`cost_usd` already bills cache-write
+    on the original model). This is the same asymmetry filed against
+    `model_downgrade._alt_unit_cost` — check it does not recur here.
+    Subagents are heavily cache-write-bearing (Task dispatch primes a fresh
+    cache), so a dropped cache-write class on the alt side would inflate this
+    card's numbers specifically."""
+    from tokenjam.core.pricing import get_rates
+
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=100.0)
+        db.insert_span(make_llm_span(
+            model="claude-opus-4-8", provider="anthropic",
+            input_tokens=1_000, output_tokens=100, cache_write_tokens=50_000,
+            cost_usd=1.0, session_id="s1", sub_agent_id="agentCW", start_time=now,
+        ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        rates = get_rates("anthropic", "claude-sonnet-5")
+        assert rates is not None
+        correct_alt_cost = (
+            1_000 / 1e6 * rates.input_per_mtok
+            + 100 / 1e6 * rates.output_per_mtok
+            + 50_000 / 1e6 * rates.cache_write_per_mtok
+        )
+        broken_alt_cost = (  # what it would be if cache-write were dropped
+            1_000 / 1e6 * rates.input_per_mtok
+            + 100 / 1e6 * rates.output_per_mtok
+        )
+        correct_delta = 1.0 - correct_alt_cost
+        broken_delta = 1.0 - broken_alt_cost
+        assert correct_delta < broken_delta
+        assert f.past_overspend_usd == pytest.approx(correct_delta, abs=1e-6)
+    finally:
+        db.close()
+
+
 def test_over_powered_flags_high_output_full_agent_loop_subagent():
     """The over_powered gate used to require output_tokens < 2_000 AND
     tool_calls <= 5, which made a Task subagent that ran as a full agent loop

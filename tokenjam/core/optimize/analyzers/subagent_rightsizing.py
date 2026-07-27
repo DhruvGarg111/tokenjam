@@ -45,6 +45,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core.cost import calculate_cost
 from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.registry import register
@@ -271,18 +272,22 @@ def _subagent_downgrade_target(provider: str, model: str) -> str | None:
 
 def _alt_cost_for_row(r: SubagentRow, alt_model: str) -> float | None:
     """Cost of ``r``'s exact token mix priced at ``alt_model``, or ``None`` when
-    the alternative has no pricing data. Prices EVERY token class the original
-    was billed for (input + output + cache read + cache write) so the delta
-    reflects only the rate difference — never an artificial saving from dropping
-    a token class the cheaper model would still be charged for."""
+    the alternative has no pricing data. Routes through
+    :func:`tokenjam.core.cost.calculate_cost` — the ONE place that prices all
+    four token classes (input + output + cache read + cache write) — rather
+    than hand-rolling the arithmetic here a second time (a second hand-rolled
+    pricer is exactly how `model_downgrade._alt_unit_cost` silently dropped
+    cache-write from its alternative side while pricing it on the actual
+    side). Every token class the original was billed for is priced on the
+    alternative side too, so the delta reflects only the rate difference —
+    never an artificial saving from dropping a token class the cheaper model
+    would still be charged for."""
     rates = get_rates(r.provider, alt_model)
     if rates is None:
         return None
-    return (
-        r.input_tokens / 1_000_000 * rates.input_per_mtok
-        + r.output_tokens / 1_000_000 * rates.output_per_mtok
-        + r.cache_tokens / 1_000_000 * rates.cache_read_per_mtok
-        + r.cache_write_tokens / 1_000_000 * rates.cache_write_per_mtok
+    return calculate_cost(
+        r.provider, alt_model, r.input_tokens, r.output_tokens,
+        cache_read_tokens=r.cache_tokens, cache_write_tokens=r.cache_write_tokens,
     )
 
 

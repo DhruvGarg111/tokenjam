@@ -63,6 +63,7 @@ from tokenjam.core.optimize.types import (
     OpusAuditExample,
     OpusQuotaAudit,
 )
+from tokenjam.core.cost import calculate_cost
 from tokenjam.core.pricing import get_rates
 
 # Structural heuristic thresholds for the SECONDARY tiny-session case. Sessions
@@ -109,17 +110,31 @@ OPUS_AUDIT_MAX_EXAMPLES = 5
 # Premium → cheaper alternative in the same provider family. Pricing for both
 # sides is resolved at runtime from pricing/models.toml; if either is missing
 # the candidate is silently skipped (we won't invent a savings number).
-# Premium-tier ladder: Fable → Sonnet and Opus → Haiku each drop two tiers, the
+# Premium-tier ladder (fable/mythos > opus > sonnet > haiku): Fable/Mythos and
+# Opus (4.x) each drop TWO tiers (to Sonnet and Haiku respectively), the
 # aggressive step justified because the quota audit only proposes these for
-# structurally tiny (Sonnet-shaped) sessions. Keep new premium families in sync
-# with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session has a
-# real routing target.
+# structurally tiny (Sonnet-shaped) sessions. `claude-opus-5` is the one
+# exception, mapped only ONE tier down to `claude-sonnet-5`: it is also the
+# swap target subagent_rightsizing.py prices its own over_powered candidates
+# against (a full agent loop, not a tiny session, so it earns the narrower
+# step) — keeping both consumers of "what does opus-5 downgrade to" in
+# agreement matters more than matching the opus-4.x precedent. `claude-sonnet-5`
+# itself downgrades to haiku, same as sonnet-4.x. Keep new premium families in
+# sync with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session
+# has a real routing target — NOTE: `claude-mythos-5` has a row here but is
+# NOT YET in PREMIUM_TIERS (no "mythos" entry in model_tiers.TIER_SUBSTRINGS),
+# so it is invisible to every premium-gated right-sizing flag; the row here
+# only helps the tiny-session secondary case below, which is NOT gated by
+# is_premium_tier.
 DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
     "anthropic": {
         "claude-fable-5":    "claude-sonnet-4-6",
+        "claude-mythos-5":   "claude-sonnet-5",
+        "claude-opus-5":     "claude-sonnet-5",
         "claude-opus-4-8":   "claude-haiku-4-5",
         "claude-opus-4-7":   "claude-haiku-4-5",
         "claude-opus-4-6":   "claude-haiku-4-5",
+        "claude-sonnet-5":   "claude-haiku-4-5",
         "claude-sonnet-4-6": "claude-haiku-4-5",
         "claude-sonnet-4-5": "claude-haiku-4-5",
     },
@@ -203,14 +218,33 @@ _lookup_downgrade = lookup_downgrade
 
 
 def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
-                   input_tokens: int, output_tokens: int, cache_tokens: int) -> float | None:
+                   input_tokens: int, output_tokens: int, cache_tokens: int,
+                   cache_write_tokens: int = 0) -> float | None:
+    """Cost of the given token mix priced at ``alt_model``, or ``None`` when the
+    alternative has no pricing data.
+
+    Routes through :func:`tokenjam.core.cost.calculate_cost` — the ONE place
+    that prices all four token classes (input, output, cache-read,
+    cache-write) — rather than hand-rolling the arithmetic here a second
+    time. The hand-rolled version used to price only input/output/cache-read,
+    silently dropping cache-write from the alternative side while the actual
+    side (the ``cost_usd`` column) already includes it; that asymmetry
+    inflated every savings figure derived from this function by the full
+    cache-write cost of the candidate. ``cache_write_tokens`` defaults to 0
+    for the one call site (the per-turn quota-audit counterfactual) whose
+    upstream aggregation does not carry a cache-write figure at all — that
+    is unchanged behaviour, not a new omission.
+
+    ``original_model`` is unused by the arithmetic (kept for call-site
+    readability / potential future per-model-pair overrides).
+    """
+    del original_model
     rates = get_rates(provider, alt_model)
     if rates is None:
         return None
-    return (
-        (input_tokens / 1_000_000) * rates.input_per_mtok
-        + (output_tokens / 1_000_000) * rates.output_per_mtok
-        + (cache_tokens / 1_000_000) * rates.cache_read_per_mtok
+    return calculate_cost(
+        provider, alt_model, input_tokens, output_tokens,
+        cache_read_tokens=cache_tokens, cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -537,7 +571,10 @@ def analyze_model_downgrade(
         ):
             continue
 
-        alt_unit = _alt_unit_cost(provider, model, alt, int(in_tok), int(out_tok), int(cache_tok))
+        alt_unit = _alt_unit_cost(
+            provider, model, alt, int(in_tok), int(out_tok), int(cache_tok),
+            int(cache_write_tok or 0),
+        )
         if alt_unit is None:
             # No pricing data for the alternative — refuse to invent a savings number.
             continue
