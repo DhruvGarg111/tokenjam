@@ -2531,6 +2531,38 @@ def test_review_inbox_ignores_dollar_suppression(html):
     assert html.count("dollarsSuppressed(") >= 2   # at least one other caller survives
 
 
+def _fmt_framed_savings_src(html: str) -> str:
+    start = html.index("function fmtFramedSavings(usd, tokens, framing)")
+    return html[start: html.index("\n}\n", start)]
+
+
+def test_fmt_framed_savings_never_renders_a_bare_dollar_when_framing_is_unknown(html):
+    """`framing == null` means "not yet known" (the read that would carry it
+    hasn't landed), NOT "no suppression needed". Before the fix,
+    dollarsSuppressed(null) returned false, so an unknown framing fell
+    through to a bare fmtCost(usd) — on a subscription-billed account that
+    reads as real money billed, exactly what framing exists to prevent
+    (root CLAUDE.md's "UI asserts more than its data supports" defect class).
+    """
+    fn = _fmt_framed_savings_src(html)
+    # The null/undefined guard must run BEFORE dollarsSuppressed() is even
+    # consulted, and must not fall through to fmtCost(usd).
+    assert "if (framing == null) {" in fn
+    guard_idx = fn.index("if (framing == null) {")
+    suppressed_idx = fn.index("if (dollarsSuppressed(framing)) {")
+    assert guard_idx < suppressed_idx
+    guard_body = fn[guard_idx: suppressed_idx]
+    assert "fmtCost(" not in guard_body
+    assert "fmtTokens(tokens) + ' tokens'" in guard_body
+
+    # Behaviour for a KNOWN framing (either branch) must be untouched: the
+    # suppressed path's tokens-only/percent-of-cycle fallback, and the
+    # show-with-qualifier path's plain fmtCost(usd), both still follow the
+    # null guard unchanged.
+    assert "return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';" in fn
+    assert "return usd == null ? '—' : fmtCost(usd);" in fn
+
+
 def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html):
     # The resend/TRIM card is the one documented exception to "always
     # dollars": its own evidence text discloses the figure is a structural
