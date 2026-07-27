@@ -2451,6 +2451,10 @@ def _render_deadweight(
             f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
             f"configured, so nothing is being injected.[/dim]"
         )
+        if finding.coverage_note:
+            console.print(
+                f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
+            )
         return
 
     if not finding.dead_servers:
@@ -2523,6 +2527,10 @@ def _render_deadweight(
 
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.coverage_note:
+        console.print(
+            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
+        )
     if finding.caveat:
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
@@ -2713,6 +2721,17 @@ def _render_resend(
         console.print(
             "     [dim]No dollar figure: no priced example session for the "
             "cache_control lever.[/dim]"
+        )
+    if recoverable == "—" and getattr(finding, "compaction_avoidable_tokens", None):
+        # The offload lever's token and dollar figures degrade together
+        # (Critical Rule 28 corollary a), so when the pair is absent this is
+        # the only token estimate left — and it prices a different, wider
+        # lever, which is why it is labelled as that lever rather than shown
+        # as the missing recoverable figure.
+        console.print(
+            f"     [dim]Compaction lever (separate estimate, no dollar figure): "
+            f"~{format_tokens(finding.compaction_avoidable_tokens)} tokens "
+            f"avoidable across every session with repeat volume.[/dim]"
         )
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")

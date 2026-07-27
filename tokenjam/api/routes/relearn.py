@@ -705,10 +705,13 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         if block is not None and block.get("cost_computed_at") else []
     )
     applied_sigs = {
-        rec.get("signature") for rec in cost_apply.list_applied(config)
+        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
         if rec.get("state") != "reverted"
     }
-    open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
+    open_proposals = [
+        p for p in proposals
+        if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
+    ]
     # The window this batch of proposals was actually computed over — stored
     # alongside them at recompute time, never re-derived here, so the window the
     # headline names is the window the figures were observed over. Deliberately

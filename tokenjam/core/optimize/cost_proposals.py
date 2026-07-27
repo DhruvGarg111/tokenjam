@@ -1730,6 +1730,12 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     if finding is None:
         return []
     proposals: list[CostProposal] = []
+    # Whole-window blind spot (a recorded session cwd that no longer exists
+    # on disk, so this analyzer could not check that project's MCP config at
+    # all), not per-server -- same string on every server's card below, since
+    # deadweight emits N proposals (one per dead server) rather than the
+    # single card `resend`/`relearn` attach their own `coverage_note` to.
+    coverage_note = str(getattr(finding, "coverage_note", "") or "")
     for server in getattr(finding, "dead_servers", []) or []:
         evidence = (
             f"`{server.name}` MCP server ({server.scope} scope, configured at "
@@ -1779,6 +1785,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             past_overspend_tokens=server.estimated_tax_tokens_window or None,
             past_overspend_usd=server.estimated_tax_usd_window,
             estimate_basis=server.tax_construction,
+            coverage_note=coverage_note,
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
             apply_kind=str(plumbing.get("apply_kind", "")),
@@ -2255,6 +2262,14 @@ def _resend_to_proposals(
             "offloadable_share_median": getattr(finding, "offloadable_share_median", None),
             "offload_recoverable_usd": getattr(finding, "offload_recoverable_usd", None),
             "rightsize_recoverable_usd": getattr(finding, "rightsize_recoverable_usd", None),
+            # The token counts those two dollar terms were priced over, carried
+            # so the per-term implied rate is auditable off the card itself
+            # (Critical Rule 28), and the compaction lever's separate, wider
+            # token estimate — which is deliberately NOT part of
+            # `past_overspend_tokens` and must never be summed into a rollup.
+            "offload_recoverable_tokens": getattr(finding, "offload_recoverable_tokens", None),
+            "rightsize_recoverable_tokens": getattr(finding, "rightsize_recoverable_tokens", None),
+            "compaction_avoidable_tokens": getattr(finding, "compaction_avoidable_tokens", None),
             "rightsize_agent_name": rightsize.get("agent_name", ""),
             "rightsize_target_path": rightsize.get("target_path", ""),
             # The two figures' differing populations, carried machine-readable

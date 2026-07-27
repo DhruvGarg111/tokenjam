@@ -52,6 +52,7 @@ from typing import Any
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_projects_root
+from tokenjam.core.usage import AssistantUsage, assistant_message_key, parse_usage
 
 # --- Tunables ------------------------------------------------------------
 
@@ -702,6 +703,143 @@ class DeadweightFinding:
     estimate_confidence:            str = "estimated"
     caveat:                          str = DEADWEIGHT_HONESTY_CAVEAT
     notes:                            list[str] = field(default_factory=list)
+    #: Distinct recorded session cwds that no longer exist on disk (a deleted
+    #: worktree, typically) — `enumerate_configured_servers` silently
+    #: `continue`s past these, so a vanished repo was previously
+    #: indistinguishable, on this finding, from a live repo genuinely
+    #: carrying no MCP config. Counted here so that blind spot is visible
+    #: instead of silent (see `_unresolvable_coverage_note`).
+    unresolvable_paths:               int = 0
+    #: Sessions whose recorded cwd falls among `unresolvable_paths` above —
+    #: this analyzer could not check project-scoped MCP config for any of
+    #: them at all.
+    unresolvable_sessions:            int = 0
+    #: Total ACTUAL usage tokens (input+output+cache-read+cache-write, not
+    #: the MCP schema tax) across `unresolvable_sessions`, measured directly
+    #: off each session's transcript.
+    unresolvable_tokens:              int = 0
+    #: Dollar conversion of `unresolvable_tokens`, priced per session through
+    #: core/pricing.py at that session's dominant model. `None` when no
+    #: priced model was observed across ANY unresolvable session (never a
+    #: fabricated rate) — see `unresolvable_unpriced_sessions` for how many
+    #: of them are excluded from this sum.
+    unresolvable_usd:                 float | None = None
+    #: Of `unresolvable_sessions`, how many had no priced model observed and
+    #: are therefore excluded from `unresolvable_usd` (the token figure
+    #: above still includes them).
+    unresolvable_unpriced_sessions:   int = 0
+    #: Plain-language statement of the blind spot above, so a reader never
+    #: has to infer "vanished repo" vs. "genuinely no config" from silence.
+    #: Mirrors `context_resend._coverage_note` / `_relearn_coverage_note`.
+    coverage_note:                    str = ""
+
+
+# --- Unresolvable-path coverage (Defect 1: silence when a cwd is gone) ----
+
+def _session_usage_from_records(records: list[dict[str, Any]]) -> AssistantUsage:
+    """Total ACTUAL assistant usage over one already-parsed session,
+    last-wins deduped by message key — same dedup policy as
+    ``core.usage.session_usage``, just replayed over records this module
+    already parsed once rather than re-reading the raw lines a second time.
+
+    This is real usage (what the session actually cost), never to be
+    confused with ``FULL_SCHEMA_TAX_TOKENS``/``DEFERRED_SCHEMA_TAX_TOKENS``
+    above, which model the MCP schema-injection TAX, not actual spend.
+    """
+    by_key: dict[str, AssistantUsage] = {}
+    for line_no, record in enumerate(records, start=1):
+        if record.get("type") != "assistant":
+            continue
+        msg = record.get("message")
+        if not isinstance(msg, dict) or not msg.get("usage"):
+            continue
+        usage = parse_usage(msg.get("usage"))
+        if usage.total == 0:
+            continue
+        by_key[assistant_message_key(record, msg, line_no)] = usage
+    total = AssistantUsage()
+    for usage in by_key.values():
+        total = AssistantUsage(
+            total.input_tokens + usage.input_tokens,
+            total.output_tokens + usage.output_tokens,
+            total.cache_read_tokens + usage.cache_read_tokens,
+            total.cache_write_tokens + usage.cache_write_tokens,
+        )
+    return total
+
+
+def _session_actual_usd(usage: AssistantUsage, model: str) -> float | None:
+    """Real dollar cost of one session's ACTUAL usage, priced through
+    core/pricing.py at ``model`` — all four token buckets (input, output,
+    cache-read, AND cache-write; see root CLAUDE.md's "cache token types in
+    aggregates" note on why both cache buckets must be included or the total
+    is silently short). ``None`` when ``model`` is empty or unpriced — never
+    a fabricated rate.
+    """
+    if not model:
+        return None
+    from tokenjam.core.pricing import get_rates, provider_for_model
+
+    provider = provider_for_model(model) or "unknown"
+    rates = get_rates(provider, model)
+    if rates is None:
+        return None
+    usd = (
+        usage.input_tokens * rates.input_per_mtok
+        + usage.output_tokens * rates.output_per_mtok
+        + usage.cache_read_tokens * rates.cache_read_per_mtok
+        + usage.cache_write_tokens * rates.cache_write_per_mtok
+    ) / 1_000_000
+    return round(usd, 6)
+
+
+def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
+    """State, in words, the blind spot a vanished recorded cwd leaves on
+    this finding.
+
+    The defect this closes: ``enumerate_configured_servers`` silently
+    ``continue``s past a recorded session cwd that no longer exists on disk
+    (a deleted worktree, typically) — indistinguishable, on the finding, from
+    a live repo that genuinely carries no MCP config. Both used to read as
+    "nothing to flag" to a reader; only one of them was actually checked.
+    """
+    if finding.unresolvable_sessions <= 0:
+        return ""
+    parts = [
+        f"COVERAGE. {finding.unresolvable_sessions:,} of "
+        f"{finding.sessions_scanned:,} session(s) in this window recorded a "
+        f"working directory that no longer exists on disk "
+        f"({finding.unresolvable_paths:,} distinct path(s), typically a "
+        f"deleted worktree). This analyzer could not read that project's "
+        f"`.mcp.json` / `.claude/settings*.json` for any of them. Its "
+        f"silence there is NOT evidence the config was clean; it is "
+        f"evidence the analyzer never got to look."
+    ]
+    if finding.unresolvable_usd is not None:
+        parts.append(
+            f"${finding.unresolvable_usd:,.2f} of spend sits behind those "
+            f"sessions, priced per session through core/pricing.py at each "
+            f"session's dominant model."
+        )
+        if finding.unresolvable_unpriced_sessions:
+            parts.append(
+                f"{finding.unresolvable_unpriced_sessions:,} of those "
+                f"session(s) had no priced model observed and are excluded "
+                f"from that dollar sum (the token figure still includes "
+                f"them)."
+            )
+    elif finding.unresolvable_tokens:
+        parts.append(
+            f"~{finding.unresolvable_tokens:,} tok of usage sits behind "
+            f"those sessions; no priced model was observed across them, so "
+            f"no dollar figure is stated."
+        )
+    parts.append(
+        "A user-scoped server (global ~/.claude.json) is unaffected by "
+        "this: it resolves regardless of a session's cwd. Only "
+        "project-scoped detection is blind here."
+    )
+    return " ".join(parts)
 
 
 # --- Orchestration (pure, no ctx dependency — testable directly) ----------
@@ -769,6 +907,7 @@ def compute_deadweight_finding(
 
     per_session: dict[str, _SessionSignal] = {}
     session_cwds: dict[str, str] = {}
+    session_usages: dict[str, AssistantUsage] = {}
     for session_id, path in session_paths:
         try:
             records = read_records(path, cache_dir=cache_dir)
@@ -776,8 +915,43 @@ def compute_deadweight_finding(
             continue
         session_cwds[session_id] = _session_cwd(records)
         per_session[session_id] = _analyze_session(records)
+        session_usages[session_id] = _session_usage_from_records(records)
 
     repo_cwds = {c for c in session_cwds.values() if c}
+
+    # Unresolvable-path coverage (Defect 1): computed BEFORE the
+    # `if not configured: return` below, and before `configured` is even
+    # enumerated — the worst case (every recorded path gone) is exactly the
+    # one where `configured` comes back empty, so this must never sit behind
+    # that early return or it would go silent in precisely the case it
+    # exists to surface.
+    unresolvable_cwds = {c for c in repo_cwds if not Path(c).is_dir()}
+    if unresolvable_cwds:
+        unresolvable_tokens = 0
+        unresolvable_usd = 0.0
+        priced_any = False
+        unpriced_sessions = 0
+        unresolvable_session_count = 0
+        for session_id, cwd in session_cwds.items():
+            if cwd not in unresolvable_cwds:
+                continue
+            unresolvable_session_count += 1
+            usage = session_usages.get(session_id, AssistantUsage())
+            unresolvable_tokens += usage.total
+            model = _dominant_model(per_session[session_id].models)
+            usd = _session_actual_usd(usage, model)
+            if usd is None:
+                unpriced_sessions += 1
+            else:
+                unresolvable_usd += usd
+                priced_any = True
+        finding.unresolvable_paths = len(unresolvable_cwds)
+        finding.unresolvable_sessions = unresolvable_session_count
+        finding.unresolvable_tokens = unresolvable_tokens
+        finding.unresolvable_usd = round(unresolvable_usd, 6) if priced_any else None
+        finding.unresolvable_unpriced_sessions = unpriced_sessions
+        finding.coverage_note = _unresolvable_coverage_note(finding)
+
     configured = enumerate_configured_servers(repo_cwds)
     finding.configured_servers = len(configured)
     if not configured:

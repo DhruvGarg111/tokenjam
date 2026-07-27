@@ -37,16 +37,21 @@ def _user_prompt(text: str, cwd: str | None = None) -> dict:
     return record
 
 
-def _assistant(text: str | None, tools: list[dict] | None = None, cwd: str | None = None) -> dict:
+def _assistant(
+    text: str | None, tools: list[dict] | None = None, cwd: str | None = None,
+    model: str = "claude-opus-4-8", usage: dict | None = None, msg_id: str | None = None,
+) -> dict:
     content: list[dict] = []
     if text is not None:
         content.append({"type": "text", "text": text})
     for t in tools or []:
         content.append({"type": "tool_use", "id": t["id"], "name": t["name"], "input": t.get("input", {})})
-    record = {
-        "type": "assistant",
-        "message": {"role": "assistant", "model": "claude-opus-4-8", "content": content},
-    }
+    message: dict = {"role": "assistant", "model": model, "content": content}
+    if usage is not None:
+        message["usage"] = usage
+    if msg_id is not None:
+        message["id"] = msg_id
+    record = {"type": "assistant", "message": message}
     if cwd:
         record["cwd"] = cwd
     return record
@@ -690,7 +695,7 @@ def test_no_em_dash_or_quota_in_user_facing_strings(tmp_path):
 
     finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
 
-    strings = [finding.caveat, finding.estimate_basis, *finding.notes]
+    strings = [finding.caveat, finding.estimate_basis, finding.coverage_note, *finding.notes]
     for server in finding.servers:
         # `fix` embeds the config's on-disk source path, which under pytest is
         # the test's own tmp_path (and can coincidentally contain "quota" as a
@@ -702,6 +707,134 @@ def test_no_em_dash_or_quota_in_user_facing_strings(tmp_path):
     for s in strings:
         assert "—" not in s, f"em dash found in: {s!r}"
         assert "quota" not in s.lower(), f"'quota' found in: {s!r}"
+
+
+# --- Unresolvable-path coverage (Defect 1: silence when a cwd is gone) ------
+# `enumerate_configured_servers` silently `continue`s past a recorded session
+# cwd that no longer exists on disk -- indistinguishable, on the finding, from
+# a live repo genuinely carrying no MCP config. These tests cover the fix:
+# counting that blind spot and stating it in `coverage_note`.
+
+def test_unresolvable_path_is_counted_and_narrated(tmp_path):
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    # Never created on disk -- this is the "recorded but vanished" cwd.
+    for i in range(3):
+        _plain_session(root, "-gone-project", f"s{i}", str(gone))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.unresolvable_paths == 1
+    assert finding.unresolvable_sessions == 3
+    assert finding.coverage_note != ""
+    assert "no longer exist" in finding.coverage_note
+    assert "3 of 3 session(s)" in finding.coverage_note
+
+
+def test_unresolvable_coverage_survives_when_no_servers_configured(tmp_path):
+    """The exact defect: every recorded path is gone, so `configured` comes
+    back empty and the old code returned right there, before ever computing
+    the blind-spot figures. They must survive that early return."""
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    for i in range(3):
+        _plain_session(root, "-gone-project", f"s{i}", str(gone))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.configured_servers == 0
+    assert finding.unresolvable_sessions == 3
+    assert finding.coverage_note != ""
+
+
+def test_live_path_with_no_config_is_not_counted_as_unresolvable(tmp_path):
+    """A live repo that genuinely carries no MCP config is a real, correctly
+    evaluated zero -- not a blind spot. Only VANISHED paths count."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    project_dir.mkdir(parents=True)  # exists on disk, no .mcp.json written
+    for i in range(3):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.unresolvable_paths == 0
+    assert finding.unresolvable_sessions == 0
+    assert finding.coverage_note == ""
+
+
+def test_unresolvable_usd_priced_via_pricing_table(tmp_path):
+    """The blind-spot dollar figure is priced through core/pricing.py at the
+    session's dominant model -- asserted against the real rate, never a
+    hardcoded dollar amount (CLAUDE.md Critical Rule 28)."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    usage = {
+        "input_tokens": 1_000, "output_tokens": 500,
+        "cache_read_input_tokens": 200, "cache_creation_input_tokens": 100,
+    }
+    _write_transcript(root, "-gone-project", "s0", [
+        _user_prompt("say hi", cwd=str(gone)),
+        _assistant("hi", cwd=str(gone), usage=usage),
+    ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    expected = round(
+        (1_000 * rates.input_per_mtok + 500 * rates.output_per_mtok
+         + 200 * rates.cache_read_per_mtok + 100 * rates.cache_write_per_mtok)
+        / 1_000_000,
+        6,
+    )
+    assert finding.unresolvable_usd == expected
+    assert finding.unresolvable_tokens == 1_800
+    assert finding.unresolvable_unpriced_sessions == 0
+    assert f"${finding.unresolvable_usd:,.2f}" in finding.coverage_note
+
+
+def test_unresolvable_excludes_sessions_with_no_priced_model(tmp_path):
+    """A session behind a vanished path but on an unpriced/unknown model
+    still counts toward tokens, but is excluded from the dollar sum (never a
+    fabricated rate) -- and the note says so."""
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    usage = {"input_tokens": 1_000, "output_tokens": 100}
+    _write_transcript(root, "-gone-project", "s0", [
+        _user_prompt("say hi", cwd=str(gone)),
+        _assistant("hi", cwd=str(gone), model="some-unpriced-model-xyz", usage=usage),
+    ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.unresolvable_sessions == 1
+    assert finding.unresolvable_tokens == 1_100
+    assert finding.unresolvable_usd is None
+    assert finding.unresolvable_unpriced_sessions == 1
+    assert "no dollar figure is stated" in finding.coverage_note
+
+
+def test_render_deadweight_prints_coverage_note_with_no_configured_servers(tmp_path, capsys):
+    """The silent-scope defect's exact user-visible symptom: 'no MCP server
+    configured' read as 'you already fixed everything' when really the
+    analyzer never got to look. The renderer must say so."""
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+
+    root = tmp_path / "root"
+    gone = root / "-gone-project" / "does-not-exist"
+    for i in range(3):
+        _plain_session(root, "-gone-project", f"s{i}", str(gone))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.configured_servers == 0
+
+    _render_deadweight(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "no MCP server is" in out
+    assert "no longer exist" in out
 
 
 # --- Registration ------------------------------------------------------------
