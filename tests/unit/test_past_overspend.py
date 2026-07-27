@@ -829,8 +829,10 @@ def test_the_basis_is_reachable_from_the_card_not_only_on_hover(ui):
 def test_the_observed_figure_is_visually_separated_from_recoverable_tiles(ui):
     # Not the same colour treatment: every "what you could get back" surface is
     # accent-blue (.rec-amount) or success-green; this one renders in plain body
-    # text. Asserted over the rules that actually render — .po-amount carries
-    # the figure and .po-observed-tag its label.
+    # text. Asserted over the rule that actually renders it, `.po-amount`. The
+    # companion `.po-observed-tag` rule that used to sit in this range is gone
+    # with the chip it styled, so the range now covers `.po-amount` alone — which
+    # is the figure, and the figure is what must not be coloured like a claim.
     css = ui[ui.index(".po-amount {"):ui.index(".po-basis {")]
     assert "var(--accent)" not in css
     assert "var(--success)" not in css

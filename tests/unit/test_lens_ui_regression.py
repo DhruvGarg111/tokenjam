@@ -7,6 +7,7 @@ bug's fix so a future edit that reintroduces it fails here.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -28,11 +29,17 @@ def _no_comments(text: str) -> str:
     code. That trap bit seven separate assertions during the inbox redesign before
     this helper existed, each time costing a debug cycle to rediscover.
 
-    Deliberately naive: it drops from `//` to end of line only when `//` is the
-    first non-whitespace on the line, so a `//` inside a URL or a regex literal is
-    left alone. Block comments and JSX-style `${/* ... */ ''}` interpolations are
-    NOT stripped, so keep using markup-shaped assertions where those are in play.
+    Deliberately naive about `//`: it drops from `//` to end of line only when
+    `//` is the first non-whitespace on the line, so a `//` inside a URL or a
+    regex literal is left alone.
+
+    JSX-style `${/* ... */ \'\'}` interpolations ARE stripped, because that is
+    where the render's own tombstones live — the inbox records the exact wording of
+    labels it removed, inside the markup, right where they used to render. Without
+    this, a ban on a removed label matches its own explanation. Plain `/* */` block
+    comments outside an interpolation are left alone.
     """
+    text = re.sub(r"\$\{/\*.*?\*/\s*''\}", "", text, flags=re.S)
     return "\n".join(
         "" if line.lstrip().startswith("//") else line
         for line in text.splitlines()
@@ -3337,8 +3344,11 @@ def test_the_headline_tile_caption_reads_one_population(html):
     markup = tile[tile.index("return html`"):]
     for lit in ("21.9", "7,653", "6163", "13 cause"):
         assert lit not in markup
-    # The figure and its OBSERVED treatment stay.
-    assert "po-observed-tag" in tile
+    # The figure stays. The OBSERVED chip does NOT: removed on founder call
+    # because the tile's own past-tense title and its window-and-population
+    # caption already say what the chip restated, both of which are asserted
+    # above and are now the only things carrying the tense.
+    assert "po-observed-tag" not in tile
     assert "fmtUsd(usd)" in tile
 
 
@@ -3633,3 +3643,89 @@ def test_a_model_swap_row_asks_for_the_path_instead_of_offering_mark_applied(htm
     caveat_at = card.index("${prop.apply_caveat ? html`")
     assert caveat_at > desc_at
     assert '<div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>' in card
+
+
+def test_the_avoided_tile_carries_no_observed_chip(html):
+    # Removed on founder call: the chip restated what the surrounding copy already
+    # says. The tense now rests ENTIRELY on the title and the caption, so both are
+    # pinned here — the title must stay past tense and the caption must keep naming
+    # the window and the population, or the removal would have cost real
+    # provenance rather than just chrome.
+    tile = html[html.index("function PastOverspendTile"):html.index("function combinedObservedCost")]
+    # Scoped to the RETURNED markup: the comment above the render names the removed
+    # class to record why it went, and a whole-function check would match that
+    # explanation rather than the render.
+    markup = _no_comments(tile[tile.index("return html`"):])
+    assert "po-observed-tag" not in markup
+    assert "What you could have avoided" in tile
+    assert "over ${win}" in tile
+    assert "fmtTokens(toks)" in tile
+    assert "causes + ' cause'" in tile
+    # And the rule is gone too, not merely unused, since nothing else styled with it.
+    assert ".po-observed-tag {" not in html
+
+
+def test_applied_rows_carry_no_enforcement_label(html):
+    # Internal jargon, repeated identically on every enforcement row, earning none
+    # of the space it took. Removed rather than restyled or abbreviated.
+    row = html[html.index("function AppliedItemRow"):html.index("// ---- Cost proposals")]
+    # Scoped to the RENDERED markup for the same reason as the tile above: the
+    # tombstone comment quotes the label it replaced.
+    markup = _no_comments(row[row.index("return html`"):])
+    assert "enforcement ENABLED" not in markup
+    assert "ENABLED" not in markup
+    # The ACTIONABLE half is still stated, as a verb, where you act on it: the row
+    # offers "Disable enforcement" when it is on and "Enable enforcement…" when it
+    # is not, so the state stays legible without a constant label.
+    assert "Disable enforcement" in row
+    assert "Enable enforcement…" in row
+
+
+def test_a_reverted_row_shows_reverted_where_its_amount_would_be(html):
+    # A reverted fix saved nothing, so a green plus-signed figure on that row
+    # asserts a benefit that did not occur. It rendered "+$358.50 est." beside a
+    # REVERTED badge. The figure is not greyed or de-emphasised, it is NOT
+    # RENDERED: the slot answers "what did this yield" and the truthful answer for
+    # a reverted row is the word.
+    row = html[html.index("function AppliedItemRow"):html.index("// ---- Cost proposals")]
+    assert "const isReverted = rec.state === 'reverted';" in row
+    # The amount slot branches on it FIRST, so no amount can be reached.
+    assert "${isReverted ? html`" in row
+    amount_at = row.index("${isReverted ? html`")
+    plus_at = row.index("+${(!suppressed && usd != null)")
+    assert amount_at < plus_at, "the reverted branch must precede the amount"
+    # The now-redundant mid-row chip is gone for the reverted case only: any other
+    # non-default state has nowhere better to put it.
+    assert "rec.state !== 'applied' && !isReverted ?" in row
+    # The revert REASON and the applied metadata are the genuinely useful parts and
+    # must survive: they are what tell the reader why it came back.
+    assert "${error}" in row
+    assert "Applied ${daysAgoLabel(rec.applied_at)}" in row
+    assert "rec.target_path" in row and "rec.git_commit" in row
+
+
+def test_the_applied_estimate_caveat_is_one_section_line_not_a_per_row_badge(html):
+    # The founder asked for the per-row `est.` badge to go. Deleting it alone would
+    # have left bare green plus-signed figures, which read as measured savings --
+    # exactly the claim an earlier commit removed an unbounded verify layer to
+    # avoid. So the caveat moves to ONE line at the section header.
+    row = html[html.index("function AppliedItemRow"):html.index("// ---- Cost proposals")]
+    assert "estimated-tag" not in row, "no per-row estimate badge"
+    assert "est.<" not in row and ">est.</span>" not in row
+
+    view = html[html.index("function ReviewInboxView"):]
+    panel = view[view.index("${tab === 'applied' ? html`"):]
+    panel = panel[:panel.index("<${RelearnApplyModal}")]
+    line = "Each figure below is that row's own estimate from the moment it was applied. Nothing here is re-measured afterwards."
+    assert line in panel
+    # Stated in the markup, NOT hidden in a title attribute: a tooltip is a hidden
+    # disclosure and does not count as stating the caveat.
+    assert 'class="sz-note"' in panel[:panel.index(line)]
+    assert f'title="{line}"' not in panel
+    # Once for the section, not once per row.
+    assert panel.count(line) == 1
+    # And it may never be worded as a realized claim.
+    for banned in ("verified", "measured saving", "confirmed", "realized"):
+        assert banned not in line.lower()
+    # No em dashes in user-facing copy.
+    assert "—" not in line

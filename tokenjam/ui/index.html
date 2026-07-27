@@ -920,15 +920,14 @@ a.rec-tile.ok:hover { border-color: var(--success); }
    mistake this for a claimable number, the feature is net-negative — the
    colour separation is load-bearing, not decoration. */
 .po-amount { font-family: 'Geist Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text); }
-/* "Observed", never "estimated": distinct from .estimated-tag (amber), and
-   deliberately not success-green either — green was the removed verify
-   layer's vocabulary and this is not a realized-savings claim. Neutral on
-   purpose: an observation makes no claim that needs a colour. */
-.po-observed-tag {
-  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--text-dim); border: 1px solid var(--border);
-  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
-}
+/* A `.po-observed-tag` rule lived here, styling an "OBSERVED" chip beside the
+   avoided-tile's label. Element and rule are both GONE, on founder call: the
+   tile's own title is already past tense ("What you could have avoided") and its
+   caption already names the window and the population ("over the last 30 days ·
+   ~22.2B tok · 13 causes"), so the chip restated what the surrounding copy says.
+   Nothing else used the class.
+   The tense now rests entirely on that title and that caption, which is why
+   neither may be reworded forward-looking or shortened. */
 .po-basis { margin-top: 8px; font-size: 11.5px; color: var(--text-dim); }
 .po-basis > summary { cursor: pointer; color: var(--text-dim); }
 .po-basis p { margin: 6px 0 0; line-height: 1.5; }
@@ -8739,7 +8738,6 @@ function PastOverspendTile({ block }) {
     <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
       <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">
         What you could have avoided
-        <span class="po-observed-tag" title=${block.disclosure || ''}>observed</span>
       </div>
       ${/* Past tense in the figure's own caption, not only in the label: a
             screenshot of this tile has to carry its own tense. */ ''}
@@ -9229,6 +9227,9 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
   const isRelearn = rec.kind === 'relearn';
   const enforcement = rec.enforcement;
   const isEnforcement = isRelearn && ENFORCEMENT_RUNGS.has(rec.rung);
+  // A reverted fix yielded nothing, so it renders no figure at all — see the
+  // amount slot below.
+  const isReverted = rec.state === 'reverted';
   const est = appliedEstimate(rec);
   const usd = est.usd;
   const toks = est.tokens;
@@ -9241,20 +9242,39 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
       <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
         <span style="font-weight:500">${rec.title}</span>
         ${!isRelearn ? html`<span class="badge badge-info">${(COST_BADGE_BY_ANALYZER[rec.analyzer] || rec.analyzer || '').toUpperCase()}</span>` : null}
-        ${/* The chip only earns its space when the state is NOT the tab's own
-              default: every row here is applied, so "APPLIED" is noise, while
-              "REVERTED" is the one thing that distinguishes a row. */ ''}
-        ${rec.state !== 'applied' ? html`<span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>` : null}
-        ${/* NOT a restatement of "applied": applied means the hook file was
-              written, enabled means it is wired into settings.json and actually
-              intercepting tool calls. An applied-but-disabled hook is inert,
-              and this label is the only place that surfaces it — so the
-              disabled case gets the warn colour, being the surprising one. */ ''}
-        ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style=${'font-size:11px;margin-left:auto' + (enforcement && enforcement.enabled ? '' : ';color:var(--warn)')} title=${enforcement && enforcement.enabled ? 'wired into settings.json; intercepts matching tool calls' : 'the hook file exists but is not wired into settings.json, so it does nothing yet'}>enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
-        ${(usd != null || toks != null) ? html`
+        ${/* A mid-row state chip used to render here for any non-applied row.
+              For a REVERTED row it is now redundant: the amount slot on the right
+              carries the word instead, which is where the reader looks for "what
+              did this yield". A chip in both places said it twice.
+              Any OTHER non-default state keeps its chip here, since only the
+              reverted case has somewhere better to go. */ ''}
+        ${rec.state !== 'applied' && !isReverted ? html`<span class=${'rev-state applied'}>${rec.state}</span>` : null}
+        ${/* An "enforcement ENABLED / disabled" label used to sit here on every
+              enforcement row. REMOVED on founder call: it is internal jargon, it
+              repeated identically down the list, and it earned none of the space
+              it took.
+              The state is not lost, and it did not need a label to be legible:
+              the row's own action below is "Disable enforcement" when it is
+              enabled and "Enable enforcement…" when it is not, so the actionable
+              half is still stated, in a verb, exactly where you act on it. */ ''}
+        ${/* THE AMOUNT SLOT, and what a REVERTED row puts in it.
+              A reverted fix saved nothing, so a green plus-signed figure there is
+              a false claim about a benefit that did not occur. It rendered
+              "+$358.50 est." on a row whose own badge said REVERTED. The figure is
+              not de-emphasised or greyed, it is NOT RENDERED: the slot answers
+              "what did this yield" and for a reverted row the truthful answer is
+              the word, not a number.
+
+              The per-row `est.` badge is gone from the rows that DO show a figure
+              too, on founder call. It is not simply deleted — a bare green
+              plus-signed figure reads as a measured saving, and this product has a
+              standing decision never to make that claim. The caveat moves to ONE
+              line at the section header (see the Applied panel), which is the same
+              disclosure stated once instead of on every row. */ ''}
+        ${isReverted ? html`
+          <span class="rev-state reverted" style="margin-left:auto">reverted</span>` : (usd != null || toks != null) ? html`
           <span class="mono" style="margin-left:auto;color:var(--success);font-weight:600">
             +${(!suppressed && usd != null) ? fmtUsd(usd) : (toks != null ? '~' + fmtTokens(toks) + ' tok' : fmtUsd(usd))}
-            <span class="estimated-tag" title="a snapshot of the estimate at the moment this was applied — not a live re-measurement of what happened afterward">est.</span>
           </span>` : null}
       </div>
       <div class="dim" style="font-size:12px">Applied ${daysAgoLabel(rec.applied_at)}${rec.target_path ? html` · <code>${rec.target_path}</code>` : ''}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
@@ -10270,6 +10290,17 @@ function ReviewInboxView({ params }) {
     ` : null}
 
     ${tab === 'applied' ? html`
+      ${/* ONE disclosure for the whole section, replacing the per-row `est.`
+            badge that repeated it on every line.
+            It is not optional and it is not a tooltip. A green plus-signed dollar
+            figure with no qualifier reads as a measured saving; this product
+            removed an unbounded verify layer precisely because it was making
+            claims it could not support, and shipped this figure as estimates-only
+            with an explicit label as the replacement. Deleting the label without
+            replacing it would have rebuilt the claim by accident.
+            Worded as an estimate and a point in time. Never verified, measured,
+            confirmed or realized. */ ''}
+      <div class="sz-note" style="margin:12px 0 10px">Each figure below is that row's own estimate from the moment it was applied. Nothing here is re-measured afterwards.</div>
       <div class="cur-listbox">
         ${combinedApplied.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing applied yet.</div>` : null}
         ${combinedApplied.map(rec => html`<${AppliedItemRow} key=${rec.kind + ':' + rec.id} rec=${rec} suppressed=${suppressed} onChanged=${() => { loadApplied(); loadCost(); }} />`)}
