@@ -10019,7 +10019,7 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
         <div class="sz-note" style="font-size:12px;margin-top:10px">There is nothing to apply here yet. The example sessions are what we have.</div>
       ` : null}
 
-      <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+      <div style="display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px">
         ${canApply ? html`
           ${/* Plain ampersand, not `&amp;`: htm assigns text content rather than
                 parsing HTML entities, so an entity here renders literally. */ ''}
@@ -10684,11 +10684,16 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
                 model is as good", not harder (Critical Rule 14). */ ''}
           ${prop.apply_caveat ? html`
             <div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>` : null}
-          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
             <input class="rename-input" style="flex:1;min-width:280px" value=${spTarget}
               placeholder="/absolute/path/to/the/agent/checkout" onInput=${e => setSpTarget(e.target.value)} />
             <button class="cur-btn" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(false)}>${spBusy ? 'working…' : 'Preview'}</button>
             <button class="cur-btn primary" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(true)}>Apply swap →</button>
+            ${/* Same shared action-row treatment every other card kind uses: plain
+                  white text beside the primary button, not a stray blue link
+                  dropped below the panel. See the trailing `canApply` block this
+                  replaced, below. */ ''}
+            <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>
           ${spResolved ? html`<div class="dim" style="font-size:11.5px;margin-top:4px">would edit ${spResolved}</div>` : null}
           ${spPreview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${spPreview}</pre>` : null}
@@ -10698,11 +10703,15 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px;margin-bottom:2px">${akCopy.title}</div>
           <div style="font-size:12.5px;margin:0 0 4px"><span class="dim" style="font-weight:400">${akCopy.hint}</span></div>
-          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">
             <input class="rename-input" style="flex:1;min-width:280px" value=${akTarget}
               placeholder="/absolute/path/to/target" onInput=${e => setAkTarget(e.target.value)} />
             <button class="cur-btn" disabled=${akBusy} onClick=${() => applyKindFix(false)}>${akBusy ? 'working…' : 'Preview'}</button>
             <button class="cur-btn primary" disabled=${akBusy} onClick=${() => applyKindFix(true)}>${akCopy.button} →</button>
+            ${/* mcp_remove ("Remove this MCP server entry") lands here too — this
+                  is the shared action-row treatment, same as every other card
+                  kind: white Dismiss beside the primary button, same row. */ ''}
+            <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>
           ${akPreview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${akPreview}</pre>` : null}
           ${akWarning ? html`<div class="opt-caveat" style="color:var(--warn)">${akWarning} <span class="sz-link" onClick=${() => applyKindFix(true, true)}>Apply anyway →</span></div>` : null}
@@ -10727,11 +10736,12 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
             <span class="dim" style="font-weight:400">writes a reversible rung-1 note to the project ${prop.target_path ? 'below' : html`<code>CLAUDE.md</code> you paste below, or register it once with <code>tj onboard --add-project</code>`}</span>
             ${!prop.target_path ? html`<${CopySnippetButton} text="tj onboard --add-project" />` : null}
           </div>
-          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">
             <input class="rename-input" style="flex:1;min-width:280px" value=${target}
               placeholder="/absolute/path/to/project/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
             <button class="cur-btn" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
             <button class="cur-btn primary" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(true)}>Apply note →</button>
+            <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>
           ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
@@ -10742,14 +10752,14 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
               applied" here would be a second, disconnected ledger for the
               same state. The card's one affordance is the link to that
               surface, worded as a review action, never a claimable "Apply". */ ''}
-        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+        <div style="display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px">
           <a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || '#/optimize/summarize'}>Review in Summarize →</a>
           <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
         </div>
       ` : hasSnippet ? html`
         ${/* The snippet block above IS this card's fix; "Mark applied" is the
               follow-up that records having done it, not the fix itself. */ ''}
-        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+        <div style="display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:12px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>
           ${/* Dismiss is the secondary, discarding action: plain text, so the
                 blue belongs to the one action the card is asking for. */ ''}
@@ -10770,13 +10780,12 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
               a blank action area reading as a bug. */ ''}
         <div style="margin-top:12px">
           ${!blockedReason && !description ? html`<div class="sz-note" style="font-size:12px">There is no ready-made change to apply here yet. What this cost is measured; the fix is not something tokenjam can hand over.</div>` : null}
-          <div style="display:flex;gap:12px;align-items:center">
+          <div style="display:flex;gap:12px;align-items:center;justify-content:flex-end">
             <a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>
             <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
           </div>
         </div>
       `}
-      ${canApply ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
     </div>`;
 }
 
