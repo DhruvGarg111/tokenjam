@@ -15,6 +15,7 @@ from tokenjam.core.framing import (
     plan_determination_mix,
 )
 from tokenjam.core.models import CostFilters
+from tokenjam.core.pricing_coverage import coverage_note, summarize_pricing_coverage
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -545,6 +546,27 @@ def _dimension_coverage(conn, agent_id, since_dt, until_dt) -> dict:
     return out
 
 
+def _pricing_coverage_block(conn, agent_id, since_dt, until_dt) -> dict:
+    """The default-rate share of this window, shaped for the UI.
+
+    `measured` distinguishes "asked, nothing unpriced" from "could not ask" so
+    the panel can stay silent rather than assert a clean bill it never checked
+    (root anti-pattern 22 — a surface must not claim more than its data
+    supports).
+    """
+    coverage = summarize_pricing_coverage(conn, agent_id, since_dt, until_dt)
+    return {
+        "measured": coverage.measured,
+        "unpriced_call_count": coverage.unpriced_call_count,
+        "unpriced_cost_usd": coverage.unpriced_cost_usd,
+        "unpriced_models": [
+            {"provider": provider, "model": model, "call_count": calls}
+            for provider, model, calls in coverage.unpriced_models
+        ],
+        "note": coverage_note(coverage),
+    }
+
+
 @router.get("/cost")
 async def get_cost(
     request: Request,
@@ -619,6 +641,13 @@ async def get_cost(
         # group_by, so switching the dropdown to an uninstrumented dimension
         # doesn't require a second round-trip to know it'll be empty.
         "attribution_coverage": _dimension_coverage(conn, agent_id, since_dt, until_dt),
+        # Which models in this window were priced at the flat default rate
+        # rather than a published one. Without this the UI cannot tell an
+        # estimated dollar figure from a quoted one, which is exactly how a
+        # missing table row stays invisible while the number is 5-30x wrong.
+        "pricing_coverage": _pricing_coverage_block(
+            conn, agent_id, since_dt, until_dt,
+        ),
         # `available_days` (core/data_span.py) so the Cost view's own window
         # selector can derive its options from what the store actually holds,
         # the same way the Dashboard's does — instead of a fixed 24h/7d/30d/90d

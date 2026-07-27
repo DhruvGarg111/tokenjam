@@ -99,7 +99,7 @@ from tokenjam.core.pricing import (
 
 #: Provider string used when a span's provider column is null. Matches what the
 #: analyzers passed before this module existed, so lookups behave identically —
-#: `get_rates` still finds the model through a model-keyed user override (#200).
+#: `get_rates` still finds the model through a model-keyed user override.
 UNKNOWN_PROVIDER = "unknown"
 
 #: The numeric rate components of :class:`ModelRates`, i.e. the fields a blend

@@ -6941,6 +6941,26 @@ function capitalize(name) {
 // Summarize) is byte-identical; the Dashboard passes fmtDashUsd so its
 // Recoverable-waste tiles stay at most 2dp without changing this formatter's
 // precision anywhere else it's used.
+// Reuse clustering runs on prompt prefixes, tool sequences, or a mix of both.
+// Anything short of full prompt capture must SAY so: a window where only some
+// planning calls carried prompt text was previously indistinguishable from one
+// where they all did, because the check tested only for the all-degraded value.
+const DEGRADED_CAPTURE_MODES = ['tool_sequence_only', 'mixed_prompt_prefix'];
+
+function isDegradedCapture(mode) {
+  return DEGRADED_CAPTURE_MODES.includes(mode);
+}
+
+function captureModeNote(mode) {
+  if (mode === 'tool_sequence_only') {
+    return ' (tool-sequence only: no prompt text was captured for these calls)';
+  }
+  if (mode === 'mixed_prompt_prefix') {
+    return ' (mixed basis: only some of these calls carried prompt text; the rest matched on tool sequence alone)';
+  }
+  return '';
+}
+
 function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost) {
   // `framing == null` means "not yet known" (the read that would carry it
   // hasn't landed), NOT "no suppression needed" — dollarsSuppressed(null)
@@ -7525,7 +7545,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
     } else if (name === 'reuse') {
       body = (fd.clusters || []).length ? html`
-        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${fd.capture_mode === 'tool_sequence_only' ? ' (tool-sequence only: enable capture.prompts for finer clustering)' : ''}.</div>
+        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${captureModeNote(fd.capture_mode)}.</div>
+        ${isDegradedCapture(fd.capture_mode) && fd.hint ? html`<div class="opt-line dim">${fd.hint}</div>` : null}
         <table class="opt-table"><thead><tr><th>Repeats</th><th>Signature</th><th>Reuse</th><th>Script</th></tr></thead>
           <tbody>${fd.clusters.slice(0, 5).map(c => html`<tr><td>${c.repetitions}×</td><td class="mono">${(c.tool_signature || []).join(' → ').slice(0, 60)}</td><td>${fmtFramedSavings(c.cache_reuse_recoverable_usd, c.cache_reuse_recoverable_tokens, framing)}</td><td>${fmtFramedSavings(c.script_replacement_recoverable_usd, c.script_replacement_recoverable_tokens, framing)}</td></tr>`)}</tbody></table>
         ${fd.clusters[0].caveat ? html`<div class="opt-caveat">! ${fd.clusters[0].caveat}</div>` : null}`

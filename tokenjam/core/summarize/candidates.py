@@ -285,11 +285,29 @@ def _pricing_mode(config: "TjConfig | None") -> str:
 # Target enumeration
 # --------------------------------------------------------------------------- #
 
-def _global_targets() -> list[Path]:
+def _expand_home(raw: str, home: Path | None) -> str:
+    """Expand a leading `~` against `home`, or the real home when None.
+
+    `home` is the analyzer scope's home (see `core/optimize/scope.py`). The
+    catalog's global paths span several agent homes (`~/.claude`, `~/.gemini`,
+    `~/.codex`), so scoping them means redirecting `~` itself — anything
+    narrower would leave most of the catalog reading the operator's real files
+    while a `--projects-root` was in force.
+    """
+    if home is None:
+        return os.path.expanduser(raw)
+    if raw == "~":
+        return str(home)
+    if raw.startswith("~/"):
+        return str(home / raw[2:])
+    return raw
+
+
+def _global_targets(home: Path | None = None) -> list[Path]:
     """Catalog global/system paths ("~" expanded; glob patterns expanded)."""
     out: list[Path] = []
     for raw in load_catalog().global_paths:
-        ep = os.path.expanduser(raw)
+        ep = _expand_home(raw, home)
         if any(ch in ep for ch in "*?["):
             # recursive=True so a `**` in a catalog global path (e.g.
             # `~/.claude/rules/**/*.md`) descends; without it `glob` treats `**`
@@ -372,20 +390,39 @@ def list_candidates(
     min_prose_words: int = MIN_PROSE_WORDS,
     ratio: float = DEFAULT_TARGET_RATIO,
     extra_exts: Iterable[str] = (),
+    home: "Path | None" = None,
+    project_root: "Path | None" = None,
     project_roots: "Sequence[str | os.PathLike[str]] | None" = None,
 ) -> ScanResult:
     """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes.
 
-    ``project_roots`` replaces the single-``cwd`` project scope with a scan of
-    EVERY given root. It exists for the optimize analyzer, which prices a whole
-    telemetry window that spans many repos: pricing only the repo the process
-    happens to sit in makes every other repo's always-resident `CLAUDE.md`
-    contribute exactly nothing. Roots are scanned with the SAME catalog-default
-    net as the cwd scan — deliberately NOT via ``path``, which widens the net to
-    every `*.md` in a directory and would price `README.md` / `CHANGELOG.md` as
-    if the harness auto-loaded them. Roots are the caller's responsibility to
-    validate (see ``core/summarize/repo_roots``); they are ignored entirely when
-    an explicit ``path``/``--recursive``/``--repo`` asks for a specific scope.
+    Three parameters govern WHERE the scan looks, and they are deliberately
+    different questions:
+
+    * ``home`` scopes the catalog's ``~``-rooted global paths.
+    * ``project_root`` relocates the implicit "where am I" that the single-root
+      project and repo discovery start from, without any of the widening a
+      positional ``path`` carries: ``path`` marks the scan explicit, which opens
+      ``ext_set`` to all-md and relabels the scope from "project" to "path". A
+      caller that only needs the scan confined — an analyzer honoring
+      ``--projects-root`` — wants the relocation and none of the widening.
+      ``None`` means the process's cwd, which is what every caller got before
+      this parameter existed.
+    * ``project_roots`` replaces that single-root project scope with a scan of
+      EVERY given root. It exists for the optimize analyzer, which prices a
+      whole telemetry window that spans many repos: pricing only the repo the
+      process happens to sit in makes every other repo's always-resident
+      ``CLAUDE.md`` contribute exactly nothing. Roots are scanned with the SAME
+      catalog-default net as the cwd scan — deliberately NOT via ``path``, for
+      the widening reason above. They are the caller's responsibility to derive
+      and to confine within whatever boundary applies (see
+      ``core/summarize/repo_roots`` and the summarize analyzer's scope
+      composition); they are ignored entirely when an explicit
+      ``path``/``--recursive``/``--repo`` asks for a specific scope.
+
+    ``project_root`` and ``project_roots`` never both apply: a caller supplying
+    an explicit root list has already decided the population, and
+    ``project_root`` is the fallback starting point for when it has not.
     """
     mode = _pricing_mode(config)
     extra = {e for e in (_norm_ext(x) for x in extra_exts) if e}
@@ -412,14 +449,18 @@ def list_candidates(
     # 1) Globals (the floor) — always catalog prompts, unless suppressed.
     globals_checked = 0
     if include_global:
-        for gp in _global_targets():
+        for gp in _global_targets(home):
             if gp.exists():
                 globals_checked += 1
                 _add(gp, "global")
 
     # 2) Project scope.
     explicit = path is not None
-    target = Path(path).expanduser() if path is not None else Path.cwd()
+    # Everywhere below that would have consulted the process's cwd consults
+    # this instead, so a confined scan cannot reach a project outside its root
+    # through the one door the catalog scoping left open.
+    here = Path(project_root).expanduser() if project_root is not None else Path.cwd()
+    target = Path(path).expanduser() if path is not None else here
 
     if explicit and not target.exists():
         # A typo'd / missing PATH shouldn't silently show only globals. This MUST be
@@ -436,7 +477,7 @@ def list_candidates(
         root_used = target
         _add(target, "path")
     elif recursive:
-        walk_root = target if explicit else find_repo_root(Path.cwd())
+        walk_root = target if explicit else find_repo_root(here)
         if walk_root is None:
             tail = "showing globals only" if cands else "nothing to show"
             note = ("--recursive needs a git repo or an explicit PATH; no safe root "
@@ -459,9 +500,9 @@ def list_candidates(
         root_used = None
     else:
         if repo and not explicit:
-            found = find_repo_root(Path.cwd())
+            found = find_repo_root(here)
             if found is None:                       # --repo but no repo: don't fake a "repo" root
-                scope_root, scope = Path.cwd(), "project"
+                scope_root, scope = here, "project"
                 note = "--repo: no git repo found — scanning the current directory instead."
             else:
                 scope_root, scope = found, "repo"

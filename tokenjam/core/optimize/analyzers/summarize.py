@@ -31,6 +31,21 @@ copies are charged once (see `_copy_key`), while a genuinely stacked pair — a
 meta-repo's `CLAUDE.md` and a sub-repo's, both of which really are loaded — is
 kept, distinguished by whether their roots nest.
 
+That population composes with the filesystem scope (`core/optimize/scope`)
+in one direction, and the direction matters: **the scope is the boundary, the
+recorded working directories are the selection within it.** The scope decides
+which disk this run may read; the recorded cwds decide which directories on it
+are worth reading. So the transcript corpus is read under the scope's projects
+root, and the roots derived from it must sit inside the scope's home before
+they are scanned (`_scan_boundary`) — a transcript stored under a scoped root
+can still record a working directory anywhere, so confining the corpus does not
+by itself confine the population. The inverse composition is the trap to avoid:
+filtering an UNSCOPED run against the default projects root would collapse the
+population back to a single directory, because that root holds no source
+project, restoring the very bug this enumeration exists to fix. A boundary is
+therefore applied only when one was actually drawn, and whatever it excludes is
+disclosed in the basis rather than silently dropped.
+
 **The saving RECURS, but only for the part of a file that is actually
 resident.** The catalog lumps five different things together and they are not
 loaded the same way: `CLAUDE.md` and `.claude/rules/*.md` are re-sent whole at
@@ -203,17 +218,46 @@ _VANISHED_SOME = (
     "scanned as nothing — their files cannot be read, so no figure is quoted "
     "for them and these totals understate the corpus by that much."
 )
+#: Appended whenever an explicitly drawn filesystem scope excluded recorded
+#: roots. "Confined on purpose" is a different statement from "not observed",
+#: and a basis that cannot tell them apart understates the corpus silently.
+_CONFINED_SOME = (
+    " A further {out_of_scope:,} recorded root(s) fall outside the filesystem "
+    "scope this run was given and were deliberately not scanned; these totals "
+    "describe the scoped corpus only."
+)
+#: The population statement when a scope was drawn and NOTHING the window
+#: recorded survives it. Distinct from `_POPULATION_CWD`: sessions did record
+#: working directories, the scope simply excluded all of them, and saying "no
+#: session recorded one" would be a plain misstatement of why the scan is
+#: narrow (root anti-pattern 22).
+_POPULATION_CONFINED = (
+    "Every one of the {out_of_scope:,} project root(s) this window's sessions "
+    "recorded falls outside the filesystem scope this run was given, so "
+    "project-scope files were scanned only within that scope — the recorded "
+    "repos' always-resident files are excluded from these totals by the scope, "
+    "not counted as zero."
+)
 
 
 def _population_basis(roots: "ResolvedRoots | None", scanned: int) -> str:
     """How the scanned file population was arrived at, stated truthfully."""
     if roots is None or scanned <= 0:
+        # Two different reasons the corpus scan produced nothing to scan, and
+        # they must not share a sentence: an explicit scope excluded every
+        # recorded root, versus no root was ever recorded.
+        if roots is not None and roots.out_of_scope:
+            return _POPULATION_CONFINED.format(out_of_scope=roots.out_of_scope)
         return _POPULATION_CWD
     vanished = (
         _VANISHED_SOME.format(vanished=roots.vanished) if roots.vanished
         else _VANISHED_NONE
     )
-    return _POPULATION_CORPUS.format(roots=scanned, vanished=vanished)
+    confined = (
+        _CONFINED_SOME.format(out_of_scope=roots.out_of_scope)
+        if roots.out_of_scope else ""
+    )
+    return _POPULATION_CORPUS.format(roots=scanned, vanished=vanished) + confined
 
 
 def _estimate_basis(
@@ -761,8 +805,14 @@ def _collapse_copies(
     return kept, collapsed
 
 
-def _invocation_counts(ctx: AnalyzerContext) -> InvocationCounts:
+def _invocation_counts(ctx: AnalyzerContext, scope) -> InvocationCounts:
     """Observed skill/command/agent invocations for the window.
+
+    Reads the transcript corpus under the RESOLVED scope's projects root — the
+    same root `deadweight` and `relearn` are handed — so the sessions counted
+    here, and the working directories derived from them, describe the corpus
+    the run was scoped to. Left unscoped this walked `~/.claude/projects`
+    regardless, which is the escape the scope contract exists to close.
 
     Never raises: any failure degrades to ``observed=False``, which makes every
     on-demand candidate report no window figure rather than one priced as if
@@ -773,11 +823,59 @@ def _invocation_counts(ctx: AnalyzerContext) -> InvocationCounts:
 
     try:
         return count_invocations(
-            ctx.since, ctx.until, cache_dir=default_cache_dir(ctx.config),
+            ctx.since, ctx.until,
+            projects_root=scope.projects_root,
+            cache_dir=default_cache_dir(ctx.config),
         )
     except Exception:
         logger.debug("summarize analyzer: invocation scan failed", exc_info=True)
         return InvocationCounts()
+
+
+def _scan_boundary(scope) -> "Path | None":
+    """The outermost directory a session-derived project root may sit in.
+
+    The two scoping mechanisms here answer different questions and compose in
+    one direction only: the scope is the BOUNDARY, the recorded cwds are the
+    SELECTION within it. A transcript living under a scoped projects root can
+    still record a working directory anywhere on disk, so confining the
+    transcript corpus does not by itself confine the roots derived from it.
+
+    `None` — no boundary — when no root was drawn explicitly. The default
+    projects root is not a boundary anyone asked for, and treating it as one
+    would filter the observed population down to whatever sits under
+    `~/.claude/projects`, which holds no source project at all: the scan would
+    collapse back to the single-cwd population it exists to replace. Once
+    `--projects-root` or the env var HAS drawn a root, the scope's home is the
+    boundary, the same unit `_project_scan_root` measures the cwd against.
+    """
+    if scope.source not in ("flag", "env"):
+        return None
+    return scope.home.expanduser()
+
+
+def _project_scan_root(scope) -> "Path | None":
+    """Where the candidate scan's PROJECT half may start looking.
+
+    `None` means "the process's cwd", the behavior every run had before the
+    scan was scoped at all — and the behavior an unscoped run must keep
+    byte-for-byte, since the default projects root (`~/.claude/projects`)
+    contains no source project and rooting there would empty the scan.
+
+    Once a root has been drawn explicitly (`--projects-root`, or the env var),
+    the cwd is only an acceptable starting point while it is INSIDE that
+    scope; from anywhere else it reaches straight past the boundary the caller
+    asked for, so the scan starts at the scope's home instead.
+    """
+    if scope.source not in ("flag", "env"):
+        return None
+    home = scope.home.expanduser()
+    cwd = Path.cwd()
+    try:
+        cwd.relative_to(home)
+    except ValueError:
+        return home
+    return cwd
 
 
 @register("summarize")
@@ -798,15 +896,28 @@ def run(ctx: AnalyzerContext) -> None:
         ctx.report.findings["summarize"] = finding
         return
 
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.summarize.candidates import list_candidates
+
+    scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
+    if not scope.enabled:
+        # Same reason the sibling filesystem analyzers bail: the catalog scan
+        # reads always-loaded prompt files off the operator's real home, which
+        # an explicit `--db` was asked to isolate away from.
+        ctx.report.filesystem_scan_skipped_reason = scope.reason
+        ctx.report.findings["summarize"] = finding
+        return
 
     # Observed invocation counts for the on-demand half of the model, plus the
     # working directories the window's sessions recorded. Scanned once for the
     # whole finding, off the same corpus + persistent parse cache
-    # `deadweight`/`relearn` already use. Runs BEFORE the filesystem scan
-    # because the scan's project population is derived from those cwds.
-    invocations = _invocation_counts(ctx)
-    roots = resolve_roots(invocations.session_cwds)
+    # `deadweight`/`relearn` already use — and off the SAME resolved scope, so
+    # the sessions this finding reasons about are the ones the run was scoped
+    # to rather than whatever `~/.claude/projects` happens to hold. Runs BEFORE
+    # the filesystem scan because the scan's project population is derived from
+    # those cwds.
+    invocations = _invocation_counts(ctx, scope)
+    roots = resolve_roots(invocations.session_cwds, within=_scan_boundary(scope))
 
     # How much of each file the reduction assumes goes away. The target ratio is
     # what the rewriter is ASKED for and nothing enforces it, so a measured
@@ -816,15 +927,29 @@ def run(ctx: AnalyzerContext) -> None:
     ratio = measured_ratio if measured_ratio is not None else DEFAULT_TARGET_RATIO
 
     try:
-        # Project scope spans every repo the window actually worked in — not the
-        # one directory this process happens to sit in, which left every other
-        # repo in the corpus contributing nothing. `project_roots=None` (no
-        # corpus, so no observed root) keeps the historical cwd scan rather than
-        # scanning nothing. Deliberately NOT passed as `path`: that widens the net to
-        # every `*.md` in a directory and would price `README.md` / `CHANGELOG.md`
-        # as if the harness auto-loaded them (Critical Rule 22).
-        scan = list_candidates(  # read-only, never writes
-            config=ctx.config, project_roots=roots.roots or None, ratio=ratio,
+        # read-only, never writes. Three scope inputs, one resolved scope:
+        #
+        # * `home` scopes the catalog's `~`-rooted global paths.
+        # * `project_roots` is the project population: every repo the window
+        #   actually worked in, not the one directory this process happens to
+        #   sit in — which left every other repo in the corpus contributing
+        #   nothing. Already confined to the scope boundary by
+        #   `_scan_boundary` above, so it can never reach past a root the
+        #   caller drew.
+        # * `project_root` is the FALLBACK starting point for when no observed
+        #   root survives (no corpus, or every recorded cwd outside the
+        #   boundary). It carries upstream's rule that a cwd outside an
+        #   explicitly drawn scope is replaced by the scope's home, so the
+        #   fallback cannot escape the boundary either.
+        #
+        # Roots are deliberately NOT passed as `path`: that widens the net to
+        # every `*.md` in a directory and would price `README.md` /
+        # `CHANGELOG.md` as if the harness auto-loaded them (Critical Rule 22).
+        scan = list_candidates(
+            config=ctx.config, home=scope.home,
+            project_roots=roots.roots or None,
+            project_root=_project_scan_root(scope),
+            ratio=ratio,
         )
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the

@@ -53,9 +53,24 @@ class ResolvedRoots:
     #: Distinct recorded directories that exist but are refused as scan roots by
     #: the boundary gate (``$HOME``, ``/``, a bare top-level dir).
     refused: int = 0
+    #: Distinct recorded directories that exist and are safe, but fall outside
+    #: the caller-supplied ``within`` boundary. Dropped, and counted so the
+    #: basis can say the population was confined rather than simply absent.
+    out_of_scope: int = 0
 
 
-def resolve_roots(cwds: Iterable[str]) -> ResolvedRoots:
+def _inside(root: Path, boundary: Path) -> bool:
+    """Whether ``root`` sits at or under ``boundary``."""
+    try:
+        root.relative_to(boundary)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_roots(
+    cwds: Iterable[str], *, within: Path | None = None,
+) -> ResolvedRoots:
     """Turn recorded working directories into scannable project roots.
 
     For each recorded directory that still exists, BOTH the directory itself and
@@ -65,11 +80,27 @@ def resolve_roots(cwds: Iterable[str]) -> ResolvedRoots:
     Duplicate content across those roots is the caller's problem to collapse —
     the same file reached two ways resolves to one path here, but two byte-equal
     COPIES (a git worktree) are two real files and are returned as such.
+
+    ``within``, when given, is an outer boundary every returned root must sit
+    at or under. It is how this derivation composes with an explicitly drawn
+    filesystem scope (``--projects-root`` and its env var): the scope decides
+    WHERE the run may look, and this function decides WHICH directories inside
+    that are worth looking at. A recorded cwd is not itself trustworthy for
+    confinement — a transcript stored under a scoped projects root can record a
+    working directory anywhere on disk — so the boundary is applied to the
+    derived roots rather than assumed from where the transcript lived. ``None``
+    means no boundary was drawn and the observed population stands as recorded;
+    it is NOT a default root to filter against, since filtering an unscoped run
+    against the default projects root would empty the population rather than
+    confine it.
     """
     roots: set[Path] = set()
     recorded: set[str] = set()
     vanished: set[str] = set()
     refused: set[str] = set()
+    out_of_scope: set[str] = set()
+
+    boundary = within.expanduser().resolve() if within is not None else None
 
     for raw in cwds:
         if not raw:
@@ -85,12 +116,23 @@ def resolve_roots(cwds: Iterable[str]) -> ResolvedRoots:
             vanished.add(raw)
             continue
         found = False
+        confined_out = False
         for candidate_root in (resolved, find_repo_root(resolved)):
             if candidate_root is None or not is_safe_scan_root(candidate_root):
                 continue
+            if boundary is not None and not _inside(candidate_root, boundary):
+                # Safe and real, but past the boundary the caller drew. Counted
+                # separately from `refused` so "outside your scope" never reads
+                # as "structurally unscannable".
+                confined_out = True
+                continue
             roots.add(candidate_root)
             found = True
-        if not found:
+        if found:
+            continue
+        if confined_out:
+            out_of_scope.add(raw)
+        else:
             refused.add(raw)
 
     return ResolvedRoots(
@@ -98,4 +140,5 @@ def resolve_roots(cwds: Iterable[str]) -> ResolvedRoots:
         recorded=len(recorded),
         vanished=len(vanished),
         refused=len(refused),
+        out_of_scope=len(out_of_scope),
     )

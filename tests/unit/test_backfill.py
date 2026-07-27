@@ -17,7 +17,7 @@ from tokenjam.core.backfill import (
 )
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 from tests.factories import make_llm_span, make_tool_span
 
@@ -857,9 +857,14 @@ def _llm_and_tool(parsed):
     return llm, tool
 
 
-def test_capture_off_leaves_attributes_unchanged(tmp_path):
-    """Every toggle explicitly off extracts NO content — attributes stay
-    exactly {"source": ...} on both the LLM and tool span (#3 default-off)."""
+def test_capture_off_extracts_no_content_only_provenance(tmp_path):
+    """Every toggle explicitly off extracts NO content (#3 default-off).
+
+    Asserted as "no content key is present" rather than as an exact attribute
+    dict: provenance — the ingest source, and the call id that lets a second
+    observer of the same call be recognised instead of counted twice — is not
+    content and is stamped regardless of the capture toggles.
+    """
     path = _content_session_file(tmp_path)
 
     parsed = parse_claude_code_session(
@@ -867,8 +872,15 @@ def test_capture_off_leaves_attributes_unchanged(tmp_path):
     )
     assert parsed is not None
     llm, tool = _llm_and_tool(parsed)
-    assert llm.attributes == {"source": "backfill.claude_code"}
-    assert tool.attributes == {"source": "backfill.claude_code"}
+    content_keys = {
+        GenAIAttributes.PROMPT_CONTENT, GenAIAttributes.COMPLETION_CONTENT,
+        GenAIAttributes.TOOL_INPUT, GenAIAttributes.TOOL_OUTPUT,
+        TjAttributes.SYSTEM_PREFIX_CONTENT,
+    }
+    for span in (llm, tool):
+        assert span.attributes["source"] == "backfill.claude_code"
+        assert content_keys.isdisjoint(span.attributes)
+    assert llm.attributes[TjAttributes.CALL_ID] == "msg-cap"
 
 
 def test_capture_default_extracts_prompt_and_tool_input(tmp_path):
