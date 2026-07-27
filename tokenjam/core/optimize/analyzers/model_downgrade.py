@@ -345,6 +345,26 @@ def _driver_session_arithmetic(
     absorbed a price change. ``window_start`` is the fallback instant for a turn
     with no recorded time; see :func:`span_pricing.span_instant`.
     """
+    # No `offloadable_share`-style factor is applied here, and that is a
+    # deliberate difference in MECHANISM, not an omission — this case scopes by
+    # SELECTION rather than by a fraction.
+    #
+    # `context_resend` multiplies every main-thread turn's tail by a measured
+    # delegable-share proxy. This case instead prices only the turns `mask`
+    # admits: contiguous runs where each turn actually ran a tool, inside
+    # sessions `premium_driver_role` has already restricted to premium drivers
+    # that never delegated. That selection IS the delegability scope — the
+    # material claimed is the exploration/edit work a subagent would have
+    # carried, taken at full weight, with everything outside a stretch priced
+    # at nothing.
+    #
+    # So both analyzers scope the same quantity by different means: a fraction
+    # of a broad population there, all of a narrow one here. The difference is
+    # which structure each population offers to select on — resend's figure
+    # deliberately covers the sessions this gate REJECTS, where no contiguous
+    # tool-run signal is available to select with. Neither carries a
+    # realization or compliance discount, and adding one here would be a
+    # second, different claim rather than a consistency fix.
     mask = tool_driven_stretch_mask(main_turns)
     if not any(mask):
         return None
