@@ -299,8 +299,12 @@ class Framing:
     api_share_pct: float = 0.0
     display_rule: str = DISPLAY_SHOW_DOLLARS
     qualifier_text: str | None = None
-    # Window totals carried so renderers can compute token-share without a
-    # second query (used by render_savings in subscription mode).
+    # Window totals carried so callers can compute a token-share without a
+    # second query. `render_savings`/`render_dollar` in this module no longer
+    # read `window_total_tokens` (dollars render identically across pricing
+    # modes now), but `cmd_context`/`cmd_tokenmaxx`'s `_quota_share` helpers
+    # and the web UI's `fmtFramedSavings` still do, for the token-only
+    # "X% of cycle tokens" figure that is orthogonal to dollar display.
     window_total_tokens: int = 0
     window_total_cost_usd: float = 0.0
 
@@ -446,22 +450,26 @@ def _fmt_usd(value: float) -> str:
 
 
 def render_dollar(value: float | None, framing: Framing) -> str:
-    """Render a single dollar value framed for the pricing mode.
+    """Render a single dollar value.
 
-    Returns e.g. ``"$148"`` (api), ``"12.4% of cycle"`` (subscription with a
-    known plan fee), or ``"—"`` (local, or no value).
+    Standing product decision: tj does not differentiate between a
+    subscription-billed user and an API-billed user — both want the same
+    dollar figure, and both face the same incentive (ignore cost, burn quota
+    or pay more). Dollars are therefore shown verbatim for every pricing mode
+    that has a dollar figure at all (api, subscription, unknown); a
+    subscription account used to have that same figure converted into
+    "X% of cycle", which was suppression by plan, not a genuine absence of
+    data, so that branch is gone.
+
+    ``local`` is different in kind: local inference has no marginal cost, so
+    there is no dollar figure to show at all — that placeholder path stays.
+
+    Returns e.g. ``"$148"``, or ``"—"`` (local inference, or no value).
     """
     if value is None:
         return "—"
-    mode = framing.pricing_mode
-    if mode == "local":
+    if framing.pricing_mode == "local":
         return "—"
-    if mode == "subscription":
-        if framing.plan_monthly_usd:
-            pct = 100.0 * value / framing.plan_monthly_usd
-            return f"{pct:.1f}% of cycle"
-        return "—"
-    # api / unknown — dollars shown (qualifier carried separately on Framing)
     return _fmt_usd(value)
 
 
@@ -470,27 +478,23 @@ def render_savings(
     value_tokens: int | None,
     framing: Framing,
 ) -> str:
-    """Render a savings / recoverable figure framed for the pricing mode.
+    """Render a savings / recoverable figure.
 
-    - api / unknown: dollars (``"$148"``)
-    - subscription: token-share of the cycle (``"12.4% of cycle tokens"``)
-    - local: token count (``"1.2M tokens"``)
+    - api / subscription / unknown: dollars (``"$148"``) — identical across
+      plan tiers by product decision (see :func:`render_dollar`). A
+      subscription account used to get a token-share-of-cycle percentage
+      here instead of dollars; that plan-based suppression is gone.
+    - local: token count (``"1.2M tokens"``) — local inference genuinely has
+      no dollar figure (no marginal cost), so this path is a real absence of
+      data, not a display choice, and stays as-is.
 
     Returns ``"—"`` when the relevant figure is unavailable.
     """
-    mode = framing.pricing_mode
-    if mode == "subscription":
-        if value_tokens is None:
-            return "—"
-        if framing.window_total_tokens > 0:
-            pct = 100.0 * value_tokens / framing.window_total_tokens
-            return f"{pct:.1f}% of cycle tokens"
-        return f"{format_tokens(value_tokens)} tokens"
-    if mode == "local":
+    if framing.pricing_mode == "local":
         if value_tokens is None:
             return "—"
         return f"{format_tokens(value_tokens)} tokens"
-    # api / unknown
+    # api / subscription / unknown
     if value_usd is None:
         return "—"
     return _fmt_usd(value_usd)
