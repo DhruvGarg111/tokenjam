@@ -104,6 +104,7 @@ class StorageBackend(Protocol):
         self, agent_id: str | None, since: datetime | None, tool_name: str | None,
     ) -> list[dict]: ...
     def get_daily_cost(self, agent_id: str, date: date) -> float: ...
+    def get_daily_cost_for_agents(self, agent_ids: list[str], date: date) -> float: ...
     def get_session_cost(self, session_id: str) -> float: ...
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]: ...
     # Issue #309: methods that callers (CostEngine, cmd_status, cost compare)
@@ -2709,6 +2710,23 @@ class DuckDBBackend:
             "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans "
             "WHERE agent_id = $1 AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $2",
             [agent_id, date],
+        ).fetchone()
+        return float(result[0]) if result else 0.0
+
+    def get_daily_cost_for_agents(self, agent_ids: list[str], date: date) -> float:
+        """Summed daily cost across a SET of agent_ids for one UTC calendar
+        day — generalizes `get_daily_cost` for a coding-tool GROUP cap
+        (e.g. every `claude-code-<project>` variant), where the ceiling
+        applies to the group's combined spend, not any one member alone.
+        """
+        if not agent_ids:
+            return 0.0
+        placeholders = ", ".join(f"${i + 2}" for i in range(len(agent_ids)))
+        result = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans "
+            f"WHERE agent_id IN ({placeholders}) "
+            "AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $1",
+            [date, *agent_ids],
         ).fetchone()
         return float(result[0]) if result else 0.0
 
