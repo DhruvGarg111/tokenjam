@@ -1791,8 +1791,13 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
         # "(or project-scoping)" is only a real second option for a
         # USER-scoped (global) server; a server already at project scope has
         # nothing left to narrow, so offering it there would be a no-op that
-        # delivers $0 of the claim (see `server.fix`'s own conditional
-        # wording in deadweight.py, mirrored here).
+        # delivers none of the claim. This adapter used to hardcode the
+        # alternative unconditionally, independently of `server.fix`'s own
+        # copy of the same wording in deadweight.py -- the same bug existing
+        # in two separate places is exactly what happens when the REASON
+        # for a conditional is never written down next to it. Keep both
+        # copies scope-conditional; do not let one drift back to a bare
+        # string while the other stays conditional.
         reversible_note = (
             " Removing (or project-scoping) it is reversible and loses no "
             "data; it only stops the standing schema-injection tax on "
