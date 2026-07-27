@@ -284,6 +284,7 @@ def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
                 "req_per_min": req_per_min,
                 "err_rate": err_rate,
                 "window_cost": s.get("window_cost", 0.0),
+                "window_tokens": s.get("window_tokens", 0),
             })
 
         # Live first, then went_quiet, then long_dormant; each newest-seen first.
@@ -351,6 +352,15 @@ async def get_status(
                 sessions = [_row_to_session(r, cols) for r in rows]
 
         today_cost = db.get_daily_cost(aid, now.date())
+        today_tokens = 0
+        if hasattr(db, "conn"):
+            tokens_row = db.conn.execute(
+                "SELECT COALESCE(SUM(input_tokens + output_tokens + cache_tokens "
+                "+ cache_write_tokens), 0) FROM spans "
+                "WHERE agent_id = $1 AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $2",
+                [aid, now.date()],
+            ).fetchone()
+            today_tokens = int(tokens_row[0] or 0) if tokens_row else 0
 
         # Active (unacknowledged, unsuppressed) alerts for this agent.
         alerts = db.get_alerts(AlertFilters(agent_id=aid, unread=True, limit=50))
@@ -394,6 +404,7 @@ async def get_status(
                     session_labels, db_labels,
                 ),
                 "cost_today": today_cost,
+                "tokens_today": today_tokens,
                 "total_cost_usd": (
                     float(session.total_cost_usd)
                     if session.total_cost_usd is not None else 0.0

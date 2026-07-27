@@ -1220,7 +1220,7 @@ def sdk_service_series(
     Powers the /status SDK-services zone (Prometheus-style sparklines). Returns
     {} when `conn` is None or no agents are given. Each agent maps to:
         {cost_per_min, calls_per_min, err_pct_per_min: [slots],
-         window_cost, window_calls, window_errors, last_seen}
+         window_cost, window_calls, window_errors, window_tokens, last_seen}
     """
     if conn is None or not agent_ids:
         return {}
@@ -1239,6 +1239,7 @@ def sdk_service_series(
             "window_cost": 0.0,
             "window_calls": 0,
             "window_errors": 0,
+            "window_tokens": 0,
             "last_seen": None,
         }
         for aid in agent_ids
@@ -1253,18 +1254,21 @@ def sdk_service_series(
                CAST(epoch(date_trunc('minute', start_time AT TIME ZONE 'UTC')) AS BIGINT) AS b,
                COALESCE(SUM(cost_usd), 0.0)                  AS cost,
                COUNT(*) FILTER (WHERE status_code = 'error') AS errors,
-               COUNT(*)                                      AS calls
+               COUNT(*)                                      AS calls,
+               COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0)
+                                                              AS tokens
         FROM spans
         WHERE start_time >= $1 AND agent_id IN ({ph})
         GROUP BY agent_id, b
         """,
         [window_start, *agent_ids],
     ).fetchall()
-    for aid, b, cost, errors, calls in rows:
+    for aid, b, cost, errors, calls, tokens in rows:
         r = result[aid]
         r["window_cost"] += float(cost or 0.0)
         r["window_calls"] += int(calls or 0)
         r["window_errors"] += int(errors or 0)
+        r["window_tokens"] += int(tokens or 0)
         slot = index.get(int(b))
         if slot is None:
             continue
@@ -2530,7 +2534,13 @@ class DuckDBBackend:
                    COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
                                      THEN cost_usd ELSE 0 END), 0.0) AS cur_cost,
                    COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
-                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost
+                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost,
+                   COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
+                                     THEN input_tokens + output_tokens + cache_tokens
+                                          + cache_write_tokens ELSE 0 END), 0) AS cur_tokens,
+                   COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
+                                     THEN input_tokens + output_tokens + cache_tokens
+                                          + cache_write_tokens ELSE 0 END), 0) AS prev_tokens
             FROM spans
             WHERE (start_time >= $3 AND start_time < $2)
               AND {group_col} IS NOT NULL
@@ -2544,7 +2554,9 @@ class DuckDBBackend:
         ).fetchall()
         return [
             {"group": r[0], "current_cost": float(r[1]), "previous_cost": float(r[2]),
-             "delta": float(r[1]) - float(r[2])}
+             "delta": float(r[1]) - float(r[2]),
+             "current_tokens": int(r[3] or 0), "previous_tokens": int(r[4] or 0),
+             "tokens_delta": int(r[3] or 0) - int(r[4] or 0)}
             for r in rows
         ]
 

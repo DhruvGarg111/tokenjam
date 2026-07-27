@@ -1057,7 +1057,9 @@ def _render_downgrade(
     else:  # api
         console.print(
             f"     • Would have cost ~{format_cost(d.alternative_cost_usd)} on the "
-            f"smaller model vs {format_cost(d.actual_cost_usd)} actual (in window)"
+            f"smaller model vs {format_cost(d.actual_cost_usd)} actual (in window), "
+            f"{format_tokens(d.candidate_tokens)} of {format_tokens(d.window_total_tokens)} "
+            f"window tokens"
         )
         console.print(
             f"     • Projected savings if pattern holds: "
@@ -1386,6 +1388,18 @@ def _finding_header(marker: str, label: str) -> str:
     return f"  [bold]{prefix}{label}[/bold]"
 
 
+def _usd_with_tokens(usd: float, tokens: int | None) -> str:
+    """`format_cost(usd)` with a parenthetical token figure when available.
+
+    Shared by the api-mode "estimated recoverable" lines so a dollar figure
+    never renders alone when its own past_overspend_tokens counterpart is
+    right there on the same candidate.
+    """
+    if tokens is not None:
+        return f"{format_cost(usd)} (~{format_tokens(tokens)} tokens)"
+    return format_cost(usd)
+
+
 def _render_cache_control_or_no_lever(snippet: str, persona: str) -> None:
     """Persona-gated `cache_control` snippet render, shared by every
     cache-family CLI renderer that prints one (`cache`'s A1/A2/A3
@@ -1544,7 +1558,7 @@ def _render_cache_root_causes(
                 if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
+                        f"[green]{_usd_with_tokens(c.past_overspend_usd, c.past_overspend_tokens)}[/green] "
                         f"estimated recoverable over this window"
                     )
                 else:
@@ -1596,7 +1610,7 @@ def _render_cache_root_causes(
                 if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
+                        f"[green]{_usd_with_tokens(c.past_overspend_usd, c.past_overspend_tokens)}[/green] "
                         f"wasted writing this prefix over this window"
                     )
                 else:
@@ -1626,7 +1640,7 @@ def _render_cache_root_causes(
                 if c.past_overspend_usd is not None:
                     console.print(
                         f"           [dim]≈[/dim] "
-                        f"[green]{format_cost(c.past_overspend_usd)}[/green] "
+                        f"[green]{_usd_with_tokens(c.past_overspend_usd, c.past_overspend_tokens)}[/green] "
                         f"estimated recoverable over this window"
                     )
                 else:
@@ -1717,7 +1731,8 @@ def _render_cache_recommend(
         if pricing_mode == "api":
             if c.past_overspend_usd is not None:
                 console.print(
-                    f"           [dim]≈[/dim] [green]{format_cost(c.past_overspend_usd)}[/green] "
+                    f"           [dim]≈[/dim] "
+                    f"[green]{_usd_with_tokens(c.past_overspend_usd, c.past_overspend_tokens)}[/green] "
                     f"estimated over this window [dim](model {c.model})[/dim]"
                 )
             else:
@@ -1730,9 +1745,9 @@ def _render_cache_recommend(
 
     if pricing_mode == "api" and finding.past_overspend_usd is not None:
         console.print(
-            f"     • [green]~{format_cost(finding.past_overspend_usd)}[/green] "
-            f"estimated recoverable across these candidates [dim](reads after "
-            f"the first occurrence, minus one cache write per prefix)[/dim]"
+            f"     • [green]~{_usd_with_tokens(finding.past_overspend_usd, finding.past_overspend_tokens)}"
+            f"[/green] estimated recoverable across these candidates [dim](reads "
+            f"after the first occurrence, minus one cache write per prefix)[/dim]"
         )
     elif pricing_mode != "api":
         console.print(
@@ -1805,7 +1820,7 @@ def _render_workflow_restructure(
         )
         console.print(
             f"       [bold]{c.instances}×[/bold] {sig_preview}  "
-            f"[dim]({dur})[/dim]"
+            f"[dim]({dur}, ~{format_tokens(c.avg_tokens)} avg tokens)[/dim]"
         )
         if pricing_mode == "api" and c.avg_cost_usd > 0:
             console.print(
@@ -1866,10 +1881,15 @@ def _render_prompt_bloat(
         sample = p.sample_chars.replace("\n", " ")[:80]
         if len(p.sample_chars) > 80:
             sample = sample[:77] + "..."
+        trim_cost = (
+            f" (~{format_cost(p.estimated_cost_reduction_usd)})"
+            if pricing_mode == "api" and p.estimated_cost_reduction_usd is not None
+            else ""
+        )
         console.print(
             f"       [dim]{p.agent_id}[/dim]  "
             f"[bold]{p.bloat_chars}[/bold] bloat / {p.prompt_chars} chars  "
-            f"[dim]~{p.estimated_token_reduction} tokens trimmable[/dim]"
+            f"[dim]~{p.estimated_token_reduction} tokens trimmable{trim_cost}[/dim]"
         )
         console.print(f"           [dim italic]{_rich_escape(sample)}[/dim italic]")
         # Provenance (read-only, see prompt_bloat.py's module docstring): most
@@ -1955,14 +1975,21 @@ def _render_reuse(
         console.print(
             f"       [bold]{c.repetitions}×[/bold] {sig_preview}"
         )
-        # Recoverable framing. api → dollars; subscription/local → tokens;
-        # unknown → dollars with the standard overstate qualifier.
+        # Recoverable framing. api/unknown → dollars + tokens; subscription/local
+        # → tokens only (dollars suppressed, Critical Rule 22 — a flat-fee/local
+        # plan has no marginal dollar figure to realise).
         if pricing_mode in ("subscription", "local"):
             cache_str = f"~{format_tokens(c.cache_reuse_recoverable_tokens)} tokens"
             script_str = f"~{format_tokens(c.script_replacement_recoverable_tokens)} tokens"
         else:
-            cache_str = format_cost(c.cache_reuse_recoverable_usd)
-            script_str = format_cost(c.script_replacement_recoverable_usd)
+            cache_str = (
+                f"{format_cost(c.cache_reuse_recoverable_usd)} "
+                f"(~{format_tokens(c.cache_reuse_recoverable_tokens)} tokens)"
+            )
+            script_str = (
+                f"{format_cost(c.script_replacement_recoverable_usd)} "
+                f"(~{format_tokens(c.script_replacement_recoverable_tokens)} tokens)"
+            )
         console.print(
             f"          [dim]recoverable by reusing[/dim] [bold]{cache_str}[/bold]  "
             f"[dim]· by scripting[/dim] {script_str}"
@@ -2053,7 +2080,10 @@ def _render_subagent(
     # "estimated recoverable" framing only; the caveat below still governs.
     if finding.past_overspend_tokens is not None:
         if pricing_mode == "api" and finding.past_overspend_usd is not None:
-            recov = format_cost(finding.past_overspend_usd)
+            recov = (
+                f"{format_cost(finding.past_overspend_usd)} "
+                f"({format_tokens(finding.past_overspend_tokens)} tokens)"
+            )
         else:
             recov = f"{format_tokens(finding.past_overspend_tokens)} tokens"
         console.print(
@@ -2077,15 +2107,17 @@ def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
     library, and a cluster whose rule is uneconomic to keep, both still cost
     real money) and no future maintenance cost is netted out of it.
 
-    Dollars only for api-billed users, the same category discipline every peer
-    renderer follows; a subscription user sees the token figure instead of a
-    price they were never charged. Empty string when the cluster carries
-    neither field — a cache written before they existed — so the caller omits
-    the segment rather than printing a confident zero.
+    Dollars alongside tokens for api-billed users; a subscription user sees the
+    token figure only, never a price they were never charged (Critical Rule 22).
+    Empty string when the cluster carries neither field — a cache written
+    before they existed — so the caller omits the segment rather than
+    printing a confident zero.
     """
     usd = getattr(cluster, "past_overspend_usd", None)
     tokens = getattr(cluster, "past_overspend_tokens", None)
     if pricing_mode == "api" and usd:
+        if tokens:
+            return f"{format_cost(usd)} (~{format_tokens(tokens)} tok)"
         return format_cost(usd)
     if tokens:
         return f"~{format_tokens(tokens)} tok"
@@ -2245,10 +2277,14 @@ def _render_verbosity(
         f"[dim](output well above the per-task-shape median)[/dim]{more}"
     )
     for c in finding.candidates:
-        # Recoverable framing: dollars only for api-billed users; otherwise the
-        # over-baseline token figure (the same category discipline as peers).
+        # Recoverable framing: dollars plus tokens for api-billed users;
+        # otherwise the over-baseline token figure only (the same category
+        # discipline as peers — Critical Rule 22).
         if pricing_mode == "api" and c.recoverable_usd:
-            recov = f"~{format_cost(c.recoverable_usd)} at output rates"
+            recov = (
+                f"~{format_cost(c.recoverable_usd)} "
+                f"(~{format_tokens(c.over_baseline_tokens)} tokens) at output rates"
+            )
         else:
             recov = f"~{format_tokens(c.over_baseline_tokens)} output tokens"
         ratio = (
@@ -2502,8 +2538,9 @@ def _render_placement(
 
     if pricing_mode == "api" and finding.past_overspend_usd is not None:
         console.print(
-            f"     • [green]~{format_cost(finding.past_overspend_usd)}[/green] "
-            f"estimated price difference over this window "
+            f"     • [green]~{_usd_with_tokens(finding.past_overspend_usd, finding.past_overspend_tokens)}"
+            f"[/green] estimated price difference over this window (the token count "
+            f"is the size of the affected workload, not tokens freed) "
             f"[dim](the same work, billed at the Batch API's flat rate)[/dim]"
         )
     else:

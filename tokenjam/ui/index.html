@@ -2642,7 +2642,7 @@ function SdkServicesPanel({ services, framing }) {
         <div class="svc-metric">$${(s.today_cost || 0).toFixed(2)}<span class="unit">/day</span></div>
         <div class="spark-wrap">
           <div class="spark-col" style="flex:1;min-width:1px">
-            <span class="spark-lab">cost / min · ${fmtCost(s.window_cost)} last 24m</span>
+            <span class="spark-lab">cost / min · ${fmtCost(s.window_cost)} · ${fmtTokens(s.window_tokens)} tokens last 24m</span>
             <${Sparkline} values=${s.cost_per_min} color="var(--brand)" width=${220} height=${30} />
           </div>
           <div class="spark-col" style="width:110px">
@@ -6018,7 +6018,13 @@ function CostView({ params }) {
   // % arithmetic noise. Use its session count as the "did anything happen" proxy
   // so TrendChip shows "new" instead of e.g. ▲140980% on a first-run compare.
   const trendPrevThin = !!(compare && compare.previous) && (compare.previous.sessions || 0) < 2;
-  const totalDisplay = useTokens ? (fmtTokens(totalTokens) + ' tokens') : fmtFramedDollar(total, framing);
+  // Local has no marginal cost to price at all (a genuine no-rate case, never
+  // an invented one), so it shows tokens only; every other mode shows the
+  // dollar figure PLUS the token total so neither unit is ever the only one
+  // on screen.
+  const totalDisplay = useTokens
+    ? (fmtTokens(totalTokens) + ' tokens')
+    : `${fmtFramedDollar(total, framing)} (${fmtTokens(totalTokens)} tokens)`;
   const tableMode = groupBy === 'total' ? 'day' : groupBy;
   const totalIn = rows.reduce((s, r) => s + (r.input_tokens || 0), 0);
   const totalOut = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
@@ -6087,7 +6093,8 @@ function CostView({ params }) {
           <span class="cache-sep">·</span>
           <span class="cache-stat">${useTokens
             ? html`<b>${fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window`
-            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window`}</span>
+            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window
+              <span class="dim">(${fmtTokens(cacheResp.total_captured_tokens || 0)} cached reads)</span>`}</span>
         </div>
         ${loading ? html`<div class="shimmer" style="height:180px"></div>` : html`
           <${CacheSavingsChart} data=${cacheSeries.data} height=${180}
@@ -6169,15 +6176,16 @@ function TopTenantsPanel({ tenants, framing }) {
       ` : html`
         <div class="table-wrap"><table>
           <thead><tr>
-            <th>Tenant</th><th>Cost</th><th>Share of total</th><th>Calls</th><th>Trend</th>
+            <th>Tenant</th><th>Cost</th><th>Tokens</th><th>Share of total</th><th>Calls</th><th>Trend</th>
           </tr></thead>
           <tbody>
             ${data.rows.map(r => html`
               <tr>
                 <td class="mono">${r.tenant_id}</td>
                 <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
+                <td>${fmtTokens((r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_tokens || 0) + (r.cache_write_tokens || 0))}</td>
                 <td>${r.share_of_total != null ? (r.share_of_total * 100).toFixed(1) + '%' : '-'}</td>
-                <td>${fmtTokens(r.call_count)}</td>
+                <td>${fmtCount(r.call_count)}</td>
                 <td>${r.delta_pct != null
                   ? html`<${TrendChip} pct=${r.delta_pct} prevThin=${false} />`
                   : html`<span class="dim">new</span>`}</td>
@@ -7177,7 +7185,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
           <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
           ${fd.per_prompt.slice(0, 5).map((p, i) => html`
             <div key=${i} style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-              <div class="opt-line"><span class="mono">${p.agent_id}</span> <span class="dim">${p.bloat_chars}/${p.prompt_chars} chars flagged, ~${p.estimated_token_reduction} tokens trimmable</span></div>
+              <div class="opt-line"><span class="mono">${p.agent_id}</span> <span class="dim">${p.bloat_chars}/${p.prompt_chars} chars flagged, ~${p.estimated_token_reduction} tokens trimmable${!dollarsSuppressed(framing) && p.estimated_cost_reduction_usd != null ? ` (~${fmtCost(p.estimated_cost_reduction_usd)})` : ''}</span></div>
               ${p.source_path ? html`
                 <div class="opt-line dim">Attributed to <span class="mono">${p.source_path}</span> (${p.source_basis}) <a class="sz-link" href="#/optimize/summarize">Review in Summarize →</a></div>` : null}
               ${(p.regions || []).length ? html`

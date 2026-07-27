@@ -86,3 +86,27 @@ def test_unknown_mode_shows_dollars_with_no_note():
     assert "Cost delta:" in out
     assert "$148" in out
     assert "may overstate" not in out
+
+
+def test_top_shifts_render_token_deltas_when_present():
+    """get_cost_delta_by_group now sums tokens alongside cost per group (the
+    dollars+tokens sweep); the top-shifts renderer must show that token delta
+    next to the dollar delta rather than leaving it dollars-only."""
+    diff = _fake_diff()
+    diff.by_agent[0]["current_tokens"] = 900_000
+    diff.by_agent[0]["previous_tokens"] = 600_000
+    diff.by_agent[0]["tokens_delta"] = 300_000
+    with console.capture() as cap:
+        from tokenjam.cli.cmd_cost import _render_diff
+        _render_diff(diff, Framing(pricing_mode="api"))
+    out = cap.get()
+    assert "tokens)" in out
+    assert "a1" in out
+
+
+def test_top_shifts_render_fine_with_no_token_fields(monkeypatch=None):
+    """Entries without tokens_delta (older payload shape) must still render
+    without crashing, and without a bogus tokens suffix."""
+    out = _render(Framing(pricing_mode="api"))
+    assert "a1" in out
+    assert "claude-opus-4-7" in out

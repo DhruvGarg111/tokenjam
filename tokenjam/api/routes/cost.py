@@ -641,6 +641,9 @@ async def get_cost_tenants(
         "total_cost_usd": 0.0,
         "attributed_cost_usd": 0.0,
         "unattributed_cost_usd": 0.0,
+        "total_tokens": 0,
+        "attributed_tokens": 0,
+        "unattributed_tokens": 0,
         "has_data": False,
         "attribute": "tokenjam.tenant_id",
         "window_start": int(since_dt.timestamp()) if since_dt is not None else None,
@@ -664,17 +667,25 @@ async def get_cost_tenants(
     # in one scan.
     totals_row = conn.execute(
         "SELECT COALESCE(SUM(cost_usd), 0.0), "
-        "COALESCE(SUM(cost_usd) FILTER (WHERE tenant_id IS NOT NULL), 0.0) "
+        "COALESCE(SUM(cost_usd) FILTER (WHERE tenant_id IS NOT NULL), 0.0), "
+        "COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0), "
+        "COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens) "
+        "FILTER (WHERE tenant_id IS NOT NULL), 0) "
         f"FROM spans WHERE {where}",
         params,
     ).fetchone()
     total_cost = float(totals_row[0] or 0.0) if totals_row else 0.0
     attributed_cost = float(totals_row[1] or 0.0) if totals_row else 0.0
     unattributed_cost = max(0.0, total_cost - attributed_cost)
+    total_tokens = int(totals_row[2] or 0) if totals_row else 0
+    attributed_tokens = int(totals_row[3] or 0) if totals_row else 0
+    unattributed_tokens = max(0, total_tokens - attributed_tokens)
 
     if attributed_cost <= 0.0:
         return {**empty, "total_cost_usd": round(total_cost, 8),
-                "unattributed_cost_usd": round(total_cost, 8)}
+                "unattributed_cost_usd": round(total_cost, 8),
+                "total_tokens": total_tokens,
+                "unattributed_tokens": total_tokens}
 
     top_rows = conn.execute(
         "SELECT tenant_id, "
@@ -732,6 +743,9 @@ async def get_cost_tenants(
         "total_cost_usd": round(total_cost, 8),
         "attributed_cost_usd": round(attributed_cost, 8),
         "unattributed_cost_usd": round(unattributed_cost, 8),
+        "total_tokens": total_tokens,
+        "attributed_tokens": attributed_tokens,
+        "unattributed_tokens": unattributed_tokens,
         "has_data": True,
         "attribute": "tokenjam.tenant_id",
         "window_start": int(since_dt.timestamp()) if since_dt is not None else None,

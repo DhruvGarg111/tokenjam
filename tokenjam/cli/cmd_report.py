@@ -247,7 +247,11 @@ def _render_html(finding, agent_scope: str | None, since: str) -> str:
             f"<b>{p.significant_chars}</b> significant · "
             f"<b class='bloat'>{p.bloat_chars}</b> in flagged regions · "
             f"~<b>{p.estimated_token_reduction}</b> tokens potentially trimmable"
-            f"</p>"
+            + (
+                f" (~<b>${p.estimated_cost_reduction_usd:,.4f}</b>)"
+                if p.estimated_cost_reduction_usd is not None else ""
+            )
+            + f"</p>"
             f"<h3>Bloat regions ({len(p.regions)})</h3>"
             f"{''.join(region_blocks) if region_blocks else '<p>None flagged.</p>'}"
             f"</section>"

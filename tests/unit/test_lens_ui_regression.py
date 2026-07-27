@@ -4396,3 +4396,24 @@ def test_summarize_engine_intro_uses_colon_not_em_dash(html):
     view = _summarize_engine_view(html)
     assert "Rewrites prose only —" not in view
     assert "Rewrites prose only: code, tables, and" in view
+
+
+def _top_tenants_src(html: str) -> str:
+    start = html.index("function TopTenantsPanel({ tenants, framing })")
+    return html[start: html.index("\n}\n", start)]
+
+
+def test_cost_tenants_table_shows_tokens_and_never_mislabels_call_count(html):
+    """The Top-tenants-by-spend table rendered `call_count` (a raw call
+    count) through `fmtTokens` -- a token formatter -- with no unit at all,
+    and had no Tokens column even though /cost/tenants already returns
+    per-row input/output/cache token sums. Pin both fixes: `fmtCount` for
+    Calls, and a Tokens column summing all four token fields."""
+    panel = _top_tenants_src(html)
+    assert "fmtTokens(r.call_count)" not in panel
+    assert "fmtCount(r.call_count)" in panel
+    assert "<th>Tokens</th>" in panel
+    assert (
+        "fmtTokens((r.input_tokens || 0) + (r.output_tokens || 0) "
+        "+ (r.cache_tokens || 0) + (r.cache_write_tokens || 0))"
+    ) in panel
