@@ -1363,7 +1363,7 @@ def get_optimize_report(
             )
             backend = ApiBackend(_serve_url, api_key)
             try:
-                return backend.fetch_optimize_report(
+                payload = backend.fetch_optimize_report(
                     since=since or "30d",
                     agent_id=agent_id,
                     findings=findings,
@@ -1372,6 +1372,24 @@ def get_optimize_report(
                 )
             finally:
                 backend.close()
+            # The daemon serves a STORED report its background scan produced;
+            # no route runs an analyzer. A cold store carries no report body,
+            # and an LLM reading a bare empty payload would report "no
+            # optimization opportunities found" — an absence claim off a scan
+            # that never ran. Say what is actually true instead.
+            if payload.get("report_available") is False:
+                return {
+                    "error": "scan_not_ready",
+                    "status": payload.get("status", "never_run"),
+                    "message": (
+                        "The tj serve daemon has not stored an analyzer report "
+                        "yet, so there are no findings to report. This is NOT a "
+                        "finding of zero waste. The daemon scans at startup and "
+                        "on a schedule; retry shortly."
+                    ),
+                    "last_error": payload.get("last_error"),
+                }
+            return payload
 
         # Direct-DB mode: reuse the single read-only connection when we have one
         # (fallback path, serve unreachable). We never open a competing
