@@ -432,6 +432,26 @@ def test_overview_error_handling_is_asymmetric(html):
     assert "api('/drift').catch(() => ({ agents: [] }))" not in html
 
 
+def test_triage_read_settle_only_clears_in_flight_for_its_own_generation(html):
+    # useTriageRead's `refresh()` guards against stacking a poll on a slow read
+    # via `inFlight.current` — but a window/filter change (a `deps` change) also
+    # bumps `gen.current` and clears `inFlight.current` early (in the effect's
+    # cleanup) so the REPLACEMENT request can start immediately without waiting
+    # behind the superseded one. If the superseded request's OWN `.then()` later
+    # unconditionally cleared `inFlight.current` again, it would falsely mark the
+    # guard idle while the replacement request was still genuinely in flight, and
+    # a poll tick landing in that window would stack a second query on top of it.
+    # Both settle branches (success and error) must gate the clear on the
+    # generation still matching, exactly like they already gate the `setSt` call.
+    fn = html[html.index("function useTriageRead(run, deps) {"):]
+    fn = fn[:fn.index("\n}\n") + 3]
+    assert "if (gen.current === g) inFlight.current = false;" in fn
+    # The naive/buggy form: an unconditional clear as the first statement of a
+    # settle branch, with no generation check anywhere in that branch.
+    assert "(data) => {\n        inFlight.current = false;" not in fn
+    assert "(err) => {\n        inFlight.current = false;" not in fn
+
+
 def test_overview_empty_gate_considers_historical_cost(html):
     # Regression: the Overview front door showed "No data yet" whenever /status
     # reported 0 active agents — and it returned BEFORE /cost was ever fetched.

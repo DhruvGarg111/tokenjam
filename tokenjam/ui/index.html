@@ -6929,11 +6929,18 @@ function useTriageRead(run, deps) {
     setSt(s => ({ phase: 'loading', data: s.data, error: null }));
     run().then(
       (data) => {
-        inFlight.current = false;
+        // Only the settle whose generation still matches the current one may
+        // clear the guard. A window/filter change bumps gen.current and (via
+        // the effect's cleanup below) already cleared inFlight.current so the
+        // REPLACEMENT request could start immediately — if this superseded
+        // settle unconditionally cleared it again, a poll tick landing between
+        // the replacement starting and finishing would see a falsely-idle
+        // guard and stack a second query on top of it.
+        if (gen.current === g) inFlight.current = false;
         setSt(s => (gen.current === g ? { phase: 'ready', data, error: null } : s));
       },
       (err) => {
-        inFlight.current = false;
+        if (gen.current === g) inFlight.current = false;
         setSt(s => (gen.current === g
           ? { phase: 'error', data: s.data, error: err.message || String(err) } : s));
       },
