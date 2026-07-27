@@ -128,6 +128,29 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
 
     scheduler.add_job(_cost_proposals_job, "interval", hours=6)
 
+    # Full analyzer report. Same reasoning as the two jobs above, generalised:
+    # NO HTTP request path runs an analyzer any more. `GET /optimize`,
+    # `/reuse/clusters`, `/cost/components` and `/cost/cache` all read the
+    # store this job writes (`core.optimize.report_store`), so the Dashboard's
+    # recoverable-waste panel and Budget-at-risk card paint from a stored
+    # result instead of blocking on a full-corpus dispatch. Ingestion is
+    # untouched and keeps updating traces/spans/sessions continuously.
+    #
+    # Three triggers, one mechanism: this interval, the lifespan kick below,
+    # and `POST /api/v1/optimize/rescan`. `scan_enabled = false` is the kill
+    # switch for the two automatic ones; it never re-enables inline compute.
+    from tokenjam.core.optimize import report_store
+
+    def _analyzer_scan_job() -> None:
+        report_store.trigger_background_recompute(
+            lambda: DuckDBBackend(config.storage), config,
+        )
+
+    if config.optimize.scan_enabled:
+        scheduler.add_job(
+            _analyzer_scan_job, "interval", hours=config.optimize.scan_interval_hours,
+        )
+
     # Continuous transcript ingestion. Claude Code's OTLP exporter has no retry
     # and no buffer, so the live path silently drops any session whose shell
     # lacked the telemetry env vars, or that ran while this daemon was down or
@@ -194,6 +217,12 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         # thread via trigger_background_cost_recompute) — a fresh install's
         # Cost-advisories tab shouldn't sit on "never_run" for up to 6h either.
         _cost_proposals_job()
+        # Same startup kick for the analyzer report. Without it a fresh install
+        # (or a just-restarted daemon) would serve `never_run` on every
+        # analyzer surface until the first interval fired — the surfaces would
+        # correctly say "not computed yet", but for hours.
+        if config.optimize.scan_enabled:
+            _analyzer_scan_job()
         # Catch up on anything the live path missed while this daemon was down.
         # Wider window than the interval job: a startup pass has to cover
         # however long we were off, not just one interval. Runs on its own

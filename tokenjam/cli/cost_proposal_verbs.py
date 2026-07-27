@@ -46,7 +46,13 @@ from tokenjam.core.framing import (
     plan_determination_mix,
     render_savings,
 )
-from tokenjam.core.optimize import cost_apply, relearn_apply, relearn_proposals, relearn_store
+from tokenjam.core.optimize import (
+    cost_apply,
+    inbox_contribution,
+    relearn_apply,
+    relearn_proposals,
+    relearn_store,
+)
 from tokenjam.utils.formatting import console
 
 
@@ -138,17 +144,55 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
         return
 
     applied_sigs = {
-        rec.get("signature") for rec in cost_apply.list_applied(config)
+        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
         if rec.get("state") != "reverted"
     }
-    open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
+    open_proposals = [
+        p for p in proposals
+        if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
+    ]
 
-    if open_proposals:
-        from tokenjam.core.optimize.cost_proposals import (
-            DEFAULT_COST_WINDOW_DAYS,
-            past_overspend_rollup,
+    # THE CLI HEADLINE COVERS THE SAME POPULATION AS THE WEB ONE. The web
+    # Review inbox's headline (`GET /relearn/cost-proposals`) sums the open
+    # cost proposals PLUS every open relearn cluster, each contributing an
+    # ordinary row on the canonical field via `core/optimize/
+    # inbox_contribution.py` -- never a second aggregate, never re-derived
+    # per surface. This terminal rollup used to cover cost proposals only,
+    # which made it a smaller, disagreeing number for the same underlying
+    # data. Reuse the exact same shared-module calls the API route makes
+    # rather than re-deriving the rollup logic here.
+    from tokenjam.core.optimize.cost_proposals import past_overspend_rollup
+
+    window_days = inbox_contribution.headline_window_days(block)
+    relearn_cache = relearn_store.read_cache(config=config)
+    relearn_finding = (relearn_cache or {}).get("finding")
+    relearn_label = inbox_contribution.contribution_window_label(
+        relearn_finding, window_days,
+    )
+    relearn_applied_sigs = {
+        str(rec.get("signature") or "")
+        for rec in relearn_apply.list_applied(config)
+        if rec.get("state") != "reverted"
+    }
+    relearn_rows = inbox_contribution.relearn_contribution_rows(
+        relearn_finding, label=relearn_label,
+        applied_signatures=relearn_applied_sigs,
+    )
+    unrepresented = inbox_contribution.unrepresented_relearn(
+        relearn_finding, label=relearn_label,
+        applied_signatures=relearn_applied_sigs,
+    )
+    excluded = {
+        **((block.get("cost_excluded") or {}) if block else {}),
+        **inbox_contribution.relearn_excluded_entry(
+            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
+        ),
+    }
+
+    if open_proposals or relearn_rows:
+        rollup = past_overspend_rollup(
+            open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
         )
-        rollup = past_overspend_rollup(open_proposals)
         headline = render_savings(
             rollup.get("past_overspend_usd"),
             rollup.get("past_overspend_tokens"),
@@ -160,12 +204,13 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
                 f"{rollup.get('proposal_count', 0)} of "
                 f"{rollup.get('deduplicated_proposal_count', 0)} open proposal(s) "
                 f"[dim](observed over the last "
-                f"{rollup.get('window_days', DEFAULT_COST_WINDOW_DAYS)} days; "
+                f"{rollup.get('window_days', window_days)} days; "
                 f"estimated, correlational)[/dim]\n"
             )
 
     for i, p in enumerate(proposals, start=1):
-        _render_cost_proposal(p, framing, i, applied=p.get("signature") in applied_sigs)
+        applied = cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
+        _render_cost_proposal(p, framing, i, applied=applied)
         console.print()
 
     if any(not p.get("apply_capable") for p in proposals):

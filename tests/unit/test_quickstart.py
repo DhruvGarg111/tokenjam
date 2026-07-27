@@ -127,6 +127,27 @@ def test_timeline_reread_share_reflects_cache_reads(tmp_path):
         assert s.total_tokens >= s.cache_tokens
 
 
+def test_timeline_total_tokens_includes_cache_write_tokens():
+    """`total_tokens` (both the per-session figure and the window aggregate)
+    must sum all four token types, not just input+output+cache-read. Before
+    the fix this silently understated spend by dropping cache_write_tokens
+    (Cache token types in aggregates, root CLAUDE.md)."""
+    from tests.factories import make_session
+
+    db = InMemoryBackend()
+    db.upsert_session(make_session(
+        session_id="s1", input_tokens=2, output_tokens=465,
+        cache_tokens=243597, cache_write_tokens=209000,
+    ))
+
+    timeline = compute_session_timeline(db.conn)
+
+    expected = 2 + 465 + 243597 + 209000
+    assert timeline.total_tokens == expected
+    assert timeline.sessions[0].total_tokens == expected
+    assert timeline.sessions[0].cache_write_tokens == 209000
+
+
 def test_timeline_to_dict_is_json_serialisable(tmp_path):
     from tokenjam.core.backfill import ingest_claude_code
 

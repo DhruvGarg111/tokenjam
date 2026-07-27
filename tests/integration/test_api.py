@@ -81,6 +81,16 @@ def auth_client(app_with_auth):
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
+def _warm_scan(db, config):
+    """Run the daemon's background analyzer scan so the routes have a STORED
+    report to serve. No route runs an analyzer any more (see
+    core/optimize/report_store.py), so a test that wants findings on the wire
+    must warm the store first, exactly as `tj serve` does at boot."""
+    from tokenjam.core.optimize import report_store
+
+    return report_store.recompute_now(db, config)
+
+
 def _otlp_body(spans: list[dict] | None = None) -> dict:
     """Build a minimal OTLP JSON body."""
     if spans is None:
@@ -347,6 +357,21 @@ async def test_get_traces_returns_list(client):
     assert len(data["traces"]) >= 1
 
 
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_get_traces_malformed_since_returns_400_not_500(client, bad_since):
+    """A malformed --since must degrade to a helpful 400, matching /optimize's
+    existing try/except pattern — not a bare 500 from an unhandled ValueError."""
+    resp = await client.get("/api/v1/traces", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
+async def test_get_traces_malformed_until_returns_400_not_500(client):
+    resp = await client.get("/api/v1/traces", params={"until": "abc"})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
 async def test_get_traces_returns_total_count_for_pagination(db, client):
     for idx in range(3):
         db.insert_span(make_llm_span(agent_id="a", trace_id=f"trace-{idx}"))
@@ -467,6 +492,19 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
+@pytest.mark.parametrize("path", [
+    "cost", "cost/components", "cost/cache", "cost/tenants",
+])
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_cost_endpoints_malformed_since_returns_400_not_500(client, path, bad_since):
+    """Every /cost* endpoint parses --since the same way; all four must
+    degrade to a helpful 400, matching /optimize's existing try/except
+    pattern, not a bare 500 from an unhandled ValueError."""
+    resp = await client.get(f"/api/v1/{path}", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
 async def test_trace_detail_includes_cache_write_tokens(db, client):
     """The traces API exposes cache_write_tokens so per-span cost reconciles
     from the displayed columns (#17 — it was the ~91% cost driver, hidden)."""
@@ -491,6 +529,22 @@ async def test_cost_rows_carry_cache_tokens(db, client):
     assert data["rows"][0]["cache_tokens"] == 243597
     assert data["rows"][0]["cache_write_tokens"] == 209000
     assert data["total_cache_write_tokens"] == 209000
+
+
+async def test_cost_total_tokens_includes_both_cache_types(db, client):
+    """`total_tokens` must sum all four token types, not just input+output.
+
+    Before the fix, `total_tokens` was `input_tokens + output_tokens` only,
+    which on a cache-heavy corpus undercounted by roughly two orders of
+    magnitude (a ~99.6% undercount was observed live: 9,964,627 vs the
+    matching /optimize window's 2,280,025,819 over the same 24h window).
+    """
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    data = (await client.get("/api/v1/cost?group_by=model")).json()
+    assert data["total_tokens"] == 2 + 465 + 243597 + 209000
 
 
 async def test_cost_includes_window_series_for_chart(client):
@@ -725,6 +779,7 @@ async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
     _seed_reuse_cluster(db, count=3, completions=True)
     pipeline = IngestPipeline(db=db, config=cfg)
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/reuse/clusters", params={"since": "30d"})
@@ -738,8 +793,9 @@ async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
     assert data["pricing_mode"] in ("api", "subscription", "local", "unknown")
 
 
-async def test_optimize_response_includes_framing_block(client):
+async def test_optimize_response_includes_framing_block(client, db, config):
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d")
     assert resp.status_code == 200
     data = resp.json()
@@ -748,10 +804,11 @@ async def test_optimize_response_includes_framing_block(client):
     assert _FRAMING_KEYS <= set(data["framing"])
 
 
-async def test_optimize_response_always_carries_downgrade_key(client):
+async def test_optimize_response_always_carries_downgrade_key(client, db, config):
     """The downsize typed slot must always be present (null when no candidates)
     so the UI can always render a Downsize section (#126)."""
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d")
     data = resp.json()
     if data.get("error") == "no_data":
@@ -766,10 +823,11 @@ async def test_root_serves_lens_title(client):
     assert "<title>TokenJam Lens</title>" in resp.text
 
 
-async def test_optimize_chain_framing_and_recoverable_fields(client):
+async def test_optimize_chain_framing_and_recoverable_fields(client, db, config):
     """The framing block (#110) + per-finding recoverable fields (#111) are
     both present on /api/v1/optimize — validates the chain Overview relies on."""
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d")
     data = resp.json()
     if data.get("error") == "no_data":
@@ -784,19 +842,31 @@ async def test_optimize_chain_framing_and_recoverable_fields(client):
             assert "estimate_basis" in findings[name]
 
 
-async def test_optimize_fast_skips_trim(client):
-    """fast=true skips the expensive Trim analyzer and reports it (#114)."""
+async def test_optimize_fast_no_longer_means_anything(client, db, config):
+    """`fast=true` used to drop the expensive Trim analyzer from a LIVE
+    dispatch on the request thread. There is no live dispatch any more — the
+    route serves the stored report — so nothing is "skipped for speed" and
+    `skipped_analyzers` is always empty.
+
+    The assertion is inverted rather than deleted (Critical Rule 23): the old
+    one now defends the wrong state, and asserting the empty list is what
+    catches a reintroduced inline dispatch.
+    """
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d&fast=true")
     assert resp.status_code == 200
     data = resp.json()
     if data.get("error") == "no_data":
         pytest.skip("no spans landed for optimize in this fixture")
-    assert "trim" in data.get("skipped_analyzers", [])
-    assert "trim" not in (data.get("findings") or {})
+    assert data.get("skipped_analyzers") == []
+    # The stored report is the same one `fast=false` gets — there is one
+    # report, not a fast variant and a slow variant that could disagree.
+    slow = (await client.get("/api/v1/optimize?since=30d")).json()
+    assert set(data.get("findings") or {}) == set(slow.get("findings") or {})
 
 
-async def test_optimize_payload_reports_persona_disabled_analyzers(db, client):
+async def test_optimize_payload_reports_persona_disabled_analyzers(db, client, config):
     """A claude-code window reports which analyzers the persona gate dropped,
     and never lists one as merely `skipped` — the UI renders a placeholder for
     a skipped name, and a gated analyzer must vanish instead."""
@@ -816,6 +886,7 @@ async def test_optimize_payload_reports_persona_disabled_analyzers(db, client):
             session_id=f"cc-{i}", start_time=started,
         ))
 
+    _warm_scan(db, config)
     data = (await client.get("/api/v1/optimize?since=30d&fast=true")).json()
     assert data["persona"] == "claude-code"
     gated = set(data["persona_disabled_analyzers"])
@@ -860,6 +931,15 @@ async def test_get_alerts_returns_list(client):
     assert isinstance(data["alerts"], list)
 
 
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_get_alerts_malformed_since_returns_400_not_500(client, bad_since):
+    """A malformed --since must degrade to a helpful 400, matching /optimize's
+    existing try/except pattern — not a bare 500 from an unhandled ValueError."""
+    resp = await client.get("/api/v1/alerts", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
 async def test_get_tools_returns_list(client):
     resp = await client.get("/api/v1/tools")
     assert resp.status_code == 200
@@ -883,6 +963,139 @@ async def test_get_drift_without_agent_id_returns_all(client):
     data = resp.json()
     assert "agents" in data
 
+
+def _drift_baseline(agent_id: str):
+    """A baseline row for `agent_id` with realistic-looking spread."""
+    from tokenjam.core.models import DriftBaseline
+    from tokenjam.utils.time_parse import utcnow
+
+    return DriftBaseline(
+        agent_id=agent_id,
+        sessions_sampled=12,
+        computed_at=utcnow(),
+        avg_input_tokens=4200.0,
+        stddev_input_tokens=310.0,
+        avg_output_tokens=800.0,
+        stddev_output_tokens=90.0,
+        avg_session_duration_s=45.0,
+        stddev_session_duration=6.0,
+        avg_tool_call_count=3.0,
+        stddev_tool_call_count=0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_drift_list_excludes_interactive_coding_agent_baselines(tmp_path):
+    """A legacy coding-agent baseline must never render as a drift card.
+
+    `DriftDetector.on_session_end` already refuses to build one, but baselines
+    are written once and never recomputed, so a row from before that skip (or
+    from an id reclassified since) survives forever. The read path applies the
+    same persona gate so the two cannot disagree.
+    """
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        db.upsert_baseline(_drift_baseline("claude-code"))
+        db.upsert_baseline(_drift_baseline("codex-cli"))
+        db.upsert_baseline(_drift_baseline("prod-summarizer"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/drift")
+            assert resp.status_code == 200
+            agent_ids = [a["agent_id"] for a in resp.json()["agents"]]
+            assert agent_ids == ["prod-summarizer"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_drift_for_a_single_coding_agent_returns_no_baseline(tmp_path):
+    """The explicit `?agent_id=` path applies the same gate as the list path."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        db.upsert_baseline(_drift_baseline("claude-code"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/drift", params={"agent_id": "claude-code"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["baseline"] is None
+            assert body["baseline_skipped_reason"] == "interactive_coding_agent"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_an_alert_drops_it_from_the_unread_list(tmp_path):
+    """The contract the Alerts screen's Acknowledge button relies on.
+
+    The endpoint existed with no control wired to it, so nothing exercised the
+    acknowledge-then-refetch round trip the UI performs: PATCH with a JSON body,
+    then re-read with `unread=true` and expect the alert to be gone.
+    """
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.models import Alert, AlertType, Severity
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        alert = Alert(
+            alert_id="ack-me",
+            fired_at=utcnow(),
+            type=AlertType.SESSION_DURATION,
+            severity=Severity.WARNING,
+            title="Long session",
+            detail={},
+            agent_id="prod-summarizer",
+            acknowledged=False,
+        )
+        db.insert_alert(alert)
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/alerts", params={"unread": "true"})
+            assert [a["alert_id"] for a in resp.json()["alerts"]] == ["ack-me"]
+
+            resp = await c.patch("/api/v1/alerts/ack-me/acknowledge", json={})
+            assert resp.status_code == 200
+            assert resp.json() == {"acknowledged": True, "alert_id": "ack-me"}
+
+            resp = await c.get("/api/v1/alerts", params={"unread": "true"})
+            assert resp.json()["alerts"] == []
+            resp = await c.get("/api/v1/alerts")
+            assert resp.json()["alerts"][0]["acknowledged"] is True
+    finally:
+        db.close()
 
 # ── API key auth ───────────────────────────────────────────────────────────
 
@@ -1038,7 +1251,7 @@ async def test_post_budget_zero_clears_limit(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 0})
@@ -1085,7 +1298,7 @@ async def test_post_provider_budget_creates_new_ceiling(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post(
@@ -1115,7 +1328,7 @@ async def test_post_provider_budget_zero_clears_ceiling_but_keeps_cycle(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget/provider", json={"provider": "anthropic", "usd": 0})
@@ -1124,6 +1337,86 @@ async def test_post_provider_budget_zero_clears_ceiling_but_keeps_cycle(db):
     pb = resp.json()["provider_budgets"]["anthropic"]
     assert pb["usd"] is None
     assert pb["cycle_start_day"] == 15  # untouched field survives
+
+
+async def test_post_budget_writes_to_tj_config_file_not_search_path(db, tmp_path, monkeypatch):
+    """POST /budget must write to the file `TJ_CONFIG` points at, not a
+    search-path config — the split-brain hazard `_warn_if_secrets_diverge`
+    already warns about, but for budget writes rather than ingest_secret."""
+    tj_config_file = tmp_path / "tj_config" / "custom.toml"
+    tj_config_file.parent.mkdir(parents=True)
+    tj_config_file.write_text("")
+    search_path_file = tmp_path / "search_path" / ".tj" / "config.toml"
+    search_path_file.parent.mkdir(parents=True)
+    search_path_file.write_text("")
+
+    monkeypatch.setenv("TJ_CONFIG", str(tj_config_file))
+    import tokenjam.core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+        tmp_path / "tokenjam.toml",
+        search_path_file,
+        tmp_path / "global" / "config.toml",
+    ])
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        agents={"my-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 3.0})
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    written_path = mock_write.call_args[0][1]
+    assert written_path == tj_config_file
+    assert written_path != search_path_file
+
+
+async def test_post_provider_budget_writes_to_tj_config_file_not_search_path(db, tmp_path, monkeypatch):
+    """POST /budget/provider — same split-brain hazard, second write site."""
+    tj_config_file = tmp_path / "tj_config" / "custom.toml"
+    tj_config_file.parent.mkdir(parents=True)
+    tj_config_file.write_text("")
+    search_path_file = tmp_path / "search_path" / ".tj" / "config.toml"
+    search_path_file.parent.mkdir(parents=True)
+    search_path_file.write_text("")
+
+    monkeypatch.setenv("TJ_CONFIG", str(tj_config_file))
+    import tokenjam.core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+        tmp_path / "tokenjam.toml",
+        search_path_file,
+        tmp_path / "global" / "config.toml",
+    ])
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget/provider",
+                json={"provider": "anthropic", "usd": 250.0},
+            )
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    written_path = mock_write.call_args[0][1]
+    assert written_path == tj_config_file
+    assert written_path != search_path_file
 
 
 async def test_post_provider_budget_rejects_invalid_cycle_start_day(db):
@@ -1136,7 +1429,7 @@ async def test_post_provider_budget_rejects_invalid_cycle_start_day(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post(
@@ -3254,3 +3547,38 @@ async def test_approach_cross_terminal_child_session_level_only(
     assert child_agents[0]["capture_completeness"] == "session_level"
     # No method -> nothing spliced into the spine list.
     assert body["cross_terminal"] == []
+
+
+async def test_post_budget_persists_to_the_path_the_config_was_loaded_from(db):
+    """A budget mutation must be serialized back to the file the DAEMON'S
+    config came from, not to a path rediscovered inside the request.
+
+    `tj serve --config PATH` puts an explicit path on the running app that no
+    rediscovery in this process can see: TJ_CONFIG and the search path point
+    somewhere else entirely. Re-deriving here overwrote that unrelated file
+    while leaving the config the daemon actually reads unchanged.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from tokenjam.core.config import SecurityConfig, TjConfig
+    from tokenjam.core.ingest import IngestPipeline
+
+    loaded_from = Path("/loaded/from/tj.toml")
+    cfg = TjConfig(version="1", security=SecurityConfig(ingest_secret=INGEST_SECRET))
+    cfg.config_path = loaded_from
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.resolve_config_path",
+               return_value="/rediscovered/elsewhere.toml"), \
+         patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget", json={"scope": "defaults", "daily_usd": 9.0}
+            )
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    assert Path(mock_write.call_args[0][1]) == loaded_from

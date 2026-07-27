@@ -87,17 +87,13 @@ COST_CORRELATIONAL_CAVEAT = (
 #: ``report.findings["summarize"]`` directly (not this proposal list) to size
 #: every OTHER analyzer's rule-writing budget, and this card is never
 #: ``apply_capable`` so it never enters that netting pass itself.
-#: ``relearn`` (recurring agent failures) IS here, for the same founder
-#: decision that re-admitted ``summarize``: the Review inbox is the complete
-#: index of everything actionable, not the list of things whose apply flow
-#: happens to live here. relearn was the last analyzer whose measured cost
-#: reached NO aggregate surface at all — it produces ``RelearnCluster``s, not
-#: ``CostProposal``s, so ``past_overspend_rollup`` was structurally blind to
-#: it and the Dashboard hero's "what waste already cost you" omitted the entire
-#: self-improve loop. ``_relearn_to_proposals`` adds exactly one aggregate
-#: card, never one per cluster (relearn's own per-cluster rows in the Review
-#: inbox are richer and stay the detail view), and it is never
-#: ``apply_capable``: the apply path is relearn's own reviewed write flow.
+#: ``relearn`` (recurring agent failures) is a member but produces NO cost
+#: proposal any more — there is no adapter for it. Membership is what keeps the
+#: analyzer running inside the inbox recompute (its per-cluster rows and the write
+#: budget both depend on the finding); the one aggregate card it used to also emit
+#: is deleted, because the only figure that card ever carried was the retired
+#: total-observed-cost field. See the note above ``_summarize_to_proposals``'s
+#: neighbours where that card used to live.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
     "script", "reuse", "verbosity", "resend", "summarize", "relearn",
@@ -216,16 +212,6 @@ class CostProposal:
     # Recommendation the user applies themselves + an optional copyable snippet.
     advise_text: str
     suggestion:  str = ""
-    # COST OF WASTE — what the flagged behaviour actually COST over the window,
-    # fully observed. An ANALYZER-SIDE input, never rendered directly: the
-    # stamper below routes it onto `observed_cost_*`. Structurally separate
-    # from `past_overspend_*` and MUST NEVER be summed with it, on any surface:
-    # the avoidable figure is a SUBSET of this cost, and the difference is
-    # spend that was never analysed, not spend shown to be unavoidable (see
-    # `analyzers/context_resend.py`'s module docstring).
-    cost_of_waste_usd:            float | None = None
-    cost_of_waste_tokens:         int | None   = None
-    cost_of_waste_basis:          str          = ""
     # PAST OVERSPEND — **THE canonical per-analyzer dollar/token figure.** One
     # field, one meaning, one time basis; there is no second name for it and no
     # paced variant of it anywhere in the tree (see the field contract in the
@@ -240,21 +226,19 @@ class CostProposal:
     # be an avoidable figure.
     #
     # Set by the ADAPTER, straight off its analyzer's own
-    # `past_overspend_usd`/`_tokens`; `_with_past_overspend` adds only the
-    # basis string (and the `observed_cost_*` pair below), so no adapter
-    # invents its own tense or wording. ``None`` when the finding produced no
-    # priced figure for this item — never coerced to 0.0, which would state
-    # "worth nothing" for "not measured" (relearn's aggregate card relies on
-    # this: it has no fixed window, so it carries a cost figure only).
+    # `past_overspend_usd`/`_tokens`; `_with_past_overspend` adds only the basis
+    # string, so no adapter invents its own tense or wording. ``None`` when the
+    # finding produced no priced figure for this item — never coerced to 0.0,
+    # which would state "worth nothing" for "not measured".
     #
-    # It deliberately does NOT carry `cost_of_waste_usd`. That figure spans
-    # EVERY session, whereas the avoidable figure is computed over a filtered
-    # subset (see `resend`'s driver-role partition and context floor). Leading
-    # with the big number asserted, implicitly, that the ~94% difference had
-    # been shown to be unavoidable. It had not — it was analysed on another
-    # card, filtered out before analysis, or outside the tail definition. The
-    # cost figure still ships, on `observed_cost_*` below, labelled as cost
-    # and never as waste.
+    # There is no second per-analyzer dollar field beside it. A total-observed-cost
+    # pair (`cost_of_waste_*` on the analyzer, `observed_cost_*` here) used to ride
+    # alongside, spanning EVERY session while the avoidable figure spanned a
+    # filtered subset. It is DELETED, by founder decision: two analyzers of twelve
+    # emitted it, only one ever rendered it, and the aggregate it fed made a claim
+    # that was provably false (see `past_overspend_rollup`). What the avoidable
+    # figure does and does not cover is stated in `coverage_note` instead, in
+    # words, which is the part that was actually load-bearing.
     #
     # Per-analyzer derivation, verified against source: downsize
     # (`actual_cost - alt_cost` over the window), deadweight (window tax, "NO
@@ -271,26 +255,17 @@ class CostProposal:
     past_overspend_usd:           float | None = None
     past_overspend_tokens:        int | None   = None
     past_overspend_basis:         str          = ""
-    # OBSERVED COST — what the flagged behaviour cost in total over the same
-    # window, including the part that was never shown to be avoidable.
-    # Populated ONLY where that total is a genuinely different quantity from
-    # the avoidable figure above (today: `resend` alone, from
-    # `cost_of_waste_usd`); `None` everywhere else, which is what makes a card
-    # render one number instead of saying the same thing twice.
+    # Plain-language statement of what the figure above does and does NOT cover,
+    # supplied by the analyzer. It exists because a filtered avoidable figure
+    # invites the reader to assume everything outside it was unavoidable, and
+    # that inference is wrong: what is outside was analysed on another card,
+    # filtered out before the calculation, or outside the definition the analyzer
+    # measures. The note has to end by saying so.
     #
-    # Rendered with COST wording only — "re-sending context cost you $X" — and
-    # never as waste, overspend, or anything a reader could take as claimable.
-    # NEVER summed with `past_overspend_usd` (they overlap: the avoidable
-    # figure is a subset of this cost) and never summed into the recoverable
-    # rollup. `past_overspend_rollup` reports it as its own separate total.
-    observed_cost_usd:            float | None = None
-    observed_cost_tokens:         int | None   = None
-    observed_cost_basis:          str          = ""
-    # Plain-language statement of how the two figures' POPULATIONS differ,
-    # supplied by the analyzer. Required whenever `observed_cost_usd` is set:
-    # a cost spanning all sessions shown beside an avoidable figure spanning a
-    # filtered subset must never be presented as two views of one quantity
-    # without the coverage being stated.
+    # It survived the deletion of the total-cost figure it originally sat beside,
+    # on purpose. The pairing was what made the false claim, and the note was what
+    # corrected it; the correction is worth keeping on its own, as a collapsed
+    # disclosure, because the filtering it describes is still happening.
     coverage_note:                str          = ""
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
@@ -324,6 +299,20 @@ class CostProposal:
     proposed_model:       str  = ""
     source_path:          str  = ""
     target_path:          str  = ""
+    #: ``apply_capable`` but not yet applyable: the fix is a deterministic edit
+    #: and the one missing input is WHERE, which only the user can answer (see
+    #: ``_model_swap_plumbing``). A row carrying this asks for the path and then
+    #: applies, rather than falling back to "Mark applied" — which records that
+    #: the user did something by hand and is the weakest thing the inbox can
+    #: offer. ``apply_kind`` stays unset while this is true.
+    needs_source_path:    bool = False
+    #: The caveat that must stay VISIBLE beside an Apply control, never folded
+    #: into the collapsed description with the rest of the prose. Set only where
+    #: an apply is on offer and the fix carries a risk the measurement does not
+    #: cover — today the model swap, whose cost delta is measured and whose
+    #: quality equivalence is never claimed (Critical Rule 14). An Apply button
+    #: must not imply the change is free of judgement.
+    apply_caveat:         str  = ""
     # Why the direct apply is not on offer, when it is not. Rendered on the card
     # next to the one-paste fix so a fallback is never silent.
     apply_blocked_reason: str  = ""
@@ -637,16 +626,52 @@ def _agent_arithmetic_line(row: Any) -> str:
     return window
 
 
+#: The one sentence an Apply button on a model swap must never be allowed to
+#: drown out (Critical Rule 14). The token-cost delta IS measured; quality
+#: equivalence is never claimed, and a one-click write makes that distinction
+#: easier to lose, not harder. Spliced into ``advise_text`` AND carried on its own
+#: ``apply_caveat`` field from this ONE constant, so the sentence beside the button
+#: and the sentence in the prose cannot drift into two different strengths of
+#: claim — and so the card can render it OUTSIDE the collapsed description, where
+#: a caveat behind a "Read more" would not have counted as visible.
+MODEL_SWAP_QUALITY_CAVEAT = (
+    "The price difference is arithmetic on this agent's own measured tokens. "
+    "Whether the cheaper model answers as well is NOT measured here, so review "
+    "the example sessions before applying."
+)
+
+
 def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
     """Whether this agent's swap can be written directly, and where.
 
-    The direct write is offered only when the user registered a local source
-    path for the agent and every precondition in
-    ``model_apply.model_swap_precheck`` holds. Otherwise the card keeps its
-    one-paste artifact and states the reason.
+    Three outcomes, not two. The middle one is the point of this docstring.
+
+    **Applyable now.** A registered source path and every precondition in
+    ``model_apply.model_swap_precheck`` holding: the card carries ``apply_kind``
+    and the resolved ``target_path``, and Apply writes.
+
+    **Applyable once answered** (``needs_source_path``). The ONLY thing missing
+    is that nobody ever told tokenjam where this agent's source lives — and
+    tokenjam will not go looking, by design (``config.AgentConfig.source_path``:
+    opt-in, never inferred, because scanning a filesystem for an agent's source
+    is not a thing this product does). That is a QUESTION, so the row asks it
+    instead of degrading to "Mark applied". ``apply_capable`` is true and
+    ``apply_kind`` is deliberately UNSET: with no registered path there is no
+    deterministic edit yet, so the row must not route to the apply endpoint that
+    assumes one. It routes to the register-then-apply endpoint, which persists
+    the answer to the user's config and re-runs every gate below against it.
+
+    **Not applyable.** Any later gate fails — not a git repo, the model id in
+    several files, the file dirty. None of those is answerable from a card, so
+    the row stays advise-only with its one-paste artifact and says why.
+
+    Branching on ``needs_source_path`` rather than on the reason string is
+    load-bearing: two gates that report through one prose channel eventually get
+    treated as one condition.
     """
     from tokenjam.core.optimize.model_apply import (
         APPLY_KIND_MODEL_SWAP,
+        MODEL_SWAP_NEEDS_SOURCE_PATH,
         model_swap_precheck,
     )
 
@@ -654,6 +679,15 @@ def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
     agent_cfg = agents.get(row.agent_id) if hasattr(agents, "get") else None
     source_path = str(getattr(agent_cfg, "source_path", "") or "")
     check = model_swap_precheck(source_path, row.model)
+    if not check["ok"] and check.get(MODEL_SWAP_NEEDS_SOURCE_PATH):
+        return {
+            "apply_capable": True,
+            # No apply_kind and no target_path until the user supplies the path.
+            "needs_source_path": True,
+            "current_model": row.model,
+            "proposed_model": row.alt_model,
+            "apply_blocked_reason": "",
+        }
     if not check["ok"]:
         return {"apply_capable": False, "apply_blocked_reason": check["reason"]}
     return {
@@ -702,12 +736,21 @@ def _downsize_agent_proposals(
         )
         advise = (
             f"Route {row.agent_id}'s flagged structural-shaped work from "
-            f"{row.model} to {row.alt_model}. The price difference above is "
-            f"arithmetic on this agent's measured tokens, given the switch; "
-            f"whether the cheaper model answers as well is not measured here, "
-            f"so review the example sessions first."
+            f"{row.model} to {row.alt_model}. " + MODEL_SWAP_QUALITY_CAVEAT
         )
-        if plumbing.get("apply_capable"):
+        if plumbing.get("needs_source_path"):
+            # Asks, rather than announcing a target it does not have. The
+            # honesty caveat above is untouched: nothing here claims the cheaper
+            # model answers as well, only that the substitution can be made.
+            advise += (
+                f" tokenjam can make this exact substitution for you, committed "
+                f"and revertable in one call, once you point it at "
+                f"{row.agent_id}'s local checkout below. After it is applied "
+                f"you must redeploy or restart the agent: measurement starts at "
+                f"the first call that runs on {row.alt_model}, not at the "
+                f"moment of the write."
+            )
+        elif plumbing.get("apply_capable"):
             advise += (
                 f" tokenjam can make this exact substitution in "
                 f"{plumbing['target_path']}, with the change committed and "
@@ -724,7 +767,19 @@ def _downsize_agent_proposals(
         proposals.append(CostProposal(
             kind="cost",
             analyzer="downsize",
-            signature=f"cost:downsize:{row.agent_id}",
+            # The signature has to be as fine-grained as the ROW, or the rollup's
+            # dedup-by-signature silently drops money that still renders.
+            # `build_agent_price_rows` groups by (agent, provider, model,
+            # alt_model), so one agent that ran two over-sized models yields two
+            # rows — two distinct inbox cards, two distinct titles, two distinct
+            # figures. Keyed on the agent alone they collided, and
+            # `past_overspend_rollup` kept whichever sorted first and discarded
+            # the rest, so the headline understated a total whose parts the user
+            # could see listed underneath it. Mirror the grouping key exactly.
+            signature=(
+                f"cost:downsize:{row.agent_id}:{row.provider}:"
+                f"{row.model}:{row.alt_model}"
+            ),
             title=f"Model over-sizing in {row.agent_id} ({row.model} to {row.alt_model})",
             target_key={
                 "agent_id": row.agent_id,
@@ -768,6 +823,12 @@ def _downsize_agent_proposals(
             current_model=str(plumbing.get("current_model", "")),
             proposed_model=str(plumbing.get("proposed_model", "")),
             apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
+            needs_source_path=bool(plumbing.get("needs_source_path")),
+            # Only where an Apply is actually on offer. On an advise-only row the
+            # sentence is already in the prose and there is no button to qualify.
+            apply_caveat=(
+                MODEL_SWAP_QUALITY_CAVEAT if plumbing.get("apply_capable") else ""
+            ),
         ))
     return proposals
 
@@ -932,6 +993,14 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
             "sessions_examined": int(getattr(finding, "sessions_examined", 0) or 0),
             "calls_per_session": getattr(finding, "calls_per_session", None),
             "avg_reduction_pct": reduction,
+            # The on-demand half of the figure's inputs, carried for the same
+            # reason the always-on half's are: a skill/command/agent body is
+            # priced by OBSERVED invocations, and a reader should be able to
+            # see that count rather than take the total on trust.
+            "invocations_observed": bool(
+                getattr(finding, "invocations_observed", False),
+            ),
+            "invocations_total": int(getattr(finding, "invocations_total", 0) or 0),
         },
         advise_text=advise,
         past_overspend_usd=usd,
@@ -941,209 +1010,37 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
     )]
 
 
-#: Where a relearn card routes: the Review inbox, which is where relearn's own
-#: per-cluster rows and their apply flow already live.
-RELEARN_REVIEW_HREF = "#/review"
-
-
-def _relearn_to_proposals(finding: Any) -> list[CostProposal]:
-    """One window-wide card for the ``relearn`` (recurring agent failures)
-    finding — see ``COST_ANALYZERS``'s docstring for why relearn is a member.
-
-    ONE card, never one per cluster. relearn already renders every cluster
-    individually in the Review inbox, with a richer treatment than a cost card
-    could give (apply path, rung badge, example sessions). What it lacked was
-    any presence on an AGGREGATE surface: it is a ``RelearnCluster``, not a
-    ``CostProposal``, so ``past_overspend_rollup`` could not see a cent of it
-    and the Dashboard hero's "what waste already cost you" total silently
-    omitted the entire self-improve loop. This adapter closes exactly that gap and nothing
-    more.
-
-    ONE number, past tense. ``cost_of_waste_*`` is what the recurrences ALREADY
-    COST, summed across EVERY cluster including the ones with no fix template
-    and the ones whose rule is uneconomic to keep. Ungated and un-netted on
-    purpose: "we have no action for this" is not "this was unavoidable", and a
-    fix's future maintenance cost is not subtracted from money already spent.
-    ``_with_past_overspend`` routes it onto ``observed_cost_*``.
-
-    ``past_overspend_usd`` — the canonical avoidable field — stays ``None`` on
-    this card, deliberately, and must NOT be coerced to 0.0: relearn scans
-    unbounded history and has no fixed window to observe an avoidable figure
-    over, so the card states "Not priced" rather than "worth nothing". relearn
-    prices each occurrence at one re-issued turn TIMES its measured re-read
-    tail, and that tail is re-sent context — the exact quantity ``resend``
-    already claims in full. Two analyzers claiming the same spans in
-    ``past_overspend_rollup`` is CLAUDE.md rule 27, and the
-    rollup's signature dedup cannot catch it. The claim is not lost: it lives
-    where it always has, on relearn's own per-cluster rows in the Review inbox,
-    counted once. ``baseline`` carries the re-read share so the overlap is
-    inspectable rather than merely asserted.
-
-    Because ``_with_past_overspend`` stamps ``observed_cost_usd`` from
-    ``cost_of_waste_usd`` for any cost-only card, this card is bound by the
-    same contract ``coverage_note`` states elsewhere on this module: a cost
-    figure with no avoidable figure beside it must say why, not leave the gap
-    to imply the spend was unavoidable. ``_relearn_coverage_note`` supplies
-    it, naming the rule-27 disjointness against ``resend`` and breaking the
-    gated clusters down by why each carries no fix of its own.
-
-    Deliberately never ``apply_capable``: relearn's apply path is its own
-    reviewed rung-1/rung-2 write flow (``POST /relearn/apply``), which this
-    adapter must not shadow with a second, thinner one — the same routing
-    choice ``_summarize_to_proposals`` makes.
-    """
-    if finding is None:
-        return []
-    clusters = list(getattr(finding, "clusters", []) or [])
-    past_usd = getattr(finding, "past_overspend_usd", None)
-    past_tokens = int(getattr(finding, "past_overspend_tokens", 0) or 0)
-    if not clusters or (past_usd is None and past_tokens <= 0):
-        # Nothing observed, or nothing priceable — a card with no figure to
-        # lead with would state "worth nothing" for "not measured".
-        return []
-
-    occurrences = sum(int(getattr(c, "occurrences", 0) or 0) for c in clusters)
-    window_days = getattr(finding, "window_days", None)
-    span = f" over {window_days:.0f} days" if window_days else ""
-    shown = ", ".join(str(getattr(c, "title", "") or c.signature) for c in clusters[:3])
-    if len(clusters) > 3:
-        shown += f", +{len(clusters) - 3} more"
-    plural = "" if len(clusters) == 1 else "s"
-    evidence = (
-        f"{len(clusters)} recurring failure cluster{plural} "
-        f"({occurrences} occurrence(s)){span}: {shown}."
-    )
-    headline = _money(past_usd) if past_usd is not None else f"~{past_tokens:,} tok"
-    advise = (
-        f"Review the {len(clusters)} recurring failure cluster{plural} in the "
-        "Review inbox (or `tj optimize relearn --json`). Each carries its own "
-        "example sessions and, where a fix template matched, a reviewable "
-        "rung-1/rung-2 write. Clusters with no fix template still appear here: "
-        "they cost this money whether or not our library has a remedy for "
-        "them yet."
-    )
-    return [CostProposal(
-        kind="cost",
-        analyzer="relearn",
-        signature="cost:relearn",
-        title=f"{len(clusters)} recurring agent failure{plural} already cost {headline}",
-        target_key={
-            "href": RELEARN_REVIEW_HREF,
-            "clusters": [str(getattr(c, "signature", "")) for c in clusters],
-        },
-        evidence=evidence,
-        baseline={
-            "clusters": len(clusters),
-            "occurrences": occurrences,
-            "sessions_scanned": int(getattr(finding, "sessions_scanned", 0) or 0),
-            "transcript_sessions_scanned": int(
-                getattr(finding, "transcript_sessions_scanned", 0) or 0,
-            ),
-            "archived_sessions_scanned": int(
-                getattr(finding, "archived_sessions_scanned", 0) or 0,
-            ),
-            "window_days": window_days,
-            "corpus_basis": str(getattr(finding, "corpus_basis", "") or ""),
-            # Counted, never claimed — see `relearn.BELOW_THRESHOLD_BASIS`.
-            "below_threshold_occurrences": int(
-                getattr(finding, "below_threshold_occurrences", 0) or 0,
-            ),
-            "below_threshold_past_overspend_usd": getattr(
-                finding, "below_threshold_past_overspend_usd", None,
-            ),
-            # The re-read SHARE of the figure above (a component, not an
-            # addend). Carried so the overlap with `resend`'s re-sent-context
-            # figure is inspectable — the reason this card states no forward
-            # claim at all (CLAUDE.md rule 27; see the docstring).
-            "past_reread_tokens": int(getattr(finding, "past_reread_tokens", 0) or 0),
-            "past_reread_usd": getattr(finding, "past_reread_usd", None),
-        },
-        advise_text=advise,
-        cost_of_waste_usd=past_usd,
-        cost_of_waste_tokens=past_tokens or None,
-        cost_of_waste_basis=str(getattr(finding, "past_overspend_basis", "") or ""),
-        coverage_note=_relearn_coverage_note(clusters),
-        # No forward claim exists on this card (`past_overspend_usd` stays
-        # None by design — see `_relearn_coverage_note`), so there is no
-        # `estimate_basis` to caption; the observed figure's own basis lives
-        # on `cost_of_waste_basis` above.
-        caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
-    )]
-
-
-#: Short, reader-facing labels for the ``write_budget`` suppression reasons a
-#: gated ``RelearnCluster`` carries, keyed by the exact reason string so a
-#: future reason added there degrades to "for another reason" instead of
-#: silently going unlabelled.
-def _relearn_gate_labels() -> dict[str, str]:
-    from tokenjam.core.optimize import write_budget as wb
-
-    return {
-        wb.REASON_PLACEHOLDER: "have no derived fix template",
-        wb.REASON_NET_NEGATIVE: (
-            "are modelled as net-negative to codify (the rule's standing cost "
-            "would exceed what it recovers; the value of PREVENTING the "
-            "failure is not counted)"
-        ),
-        wb.REASON_BUDGET_FULL: (
-            "are budget-deferred (this window's permanent-rule budget is "
-            "already allocated to higher-value fixes)"
-        ),
-        wb.REASON_FAMILY_MERGED: "are covered by another cluster's shared rule",
-        wb.REASON_CEILING_REACHED: "are blocked by the standing-context ceiling",
-    }
-
-
-def _relearn_coverage_note(clusters: list[Any]) -> str:
-    """State, in words, why this card carries no avoidable figure and what the
-    gated clusters' money is doing instead of leaving the gap unexplained.
-
-    The defect this closes: a cost line with a blank where the avoidable
-    figure belongs invites the reader to read the blank as "this was
-    unavoidable" — the exact CLAUDE.md rule 27 failure mode already fixed once
-    for ``resend`` (see ``_coverage_note`` in ``analyzers/context_resend.py``).
-    relearn's case isn't a filtered SUBSET like resend's, though: the forward
-    claim is entirely absent from this card by design (see
-    ``_relearn_to_proposals``'s docstring) because it would price the same
-    re-read tokens ``resend`` already claims in full. Absence of a claim is
-    not evidence the spend was unavoidable — it is what this card does not
-    attempt to price at all, and the second paragraph names exactly which
-    clusters are gated and why, so "no fix yet" is never confused with "no
-    cost".
-    """
-    plural = "" if len(clusters) == 1 else "s"
-    parts = [
-        f"COVERAGE. The cost figure above covers all {len(clusters)} recurring-"
-        f"failure cluster{plural} observed over this window. No avoidable "
-        "figure is reported on this card: relearn's own forward claim would "
-        "price the same re-read tokens the resend card already claims in "
-        "full, and counting them on both cards would double the same spend "
-        "(CLAUDE.md rule 27), so this aggregate deliberately carries none."
-    ]
-    labels = _relearn_gate_labels()
-    counts: dict[str, int] = {}
-    for c in clusters:
-        if getattr(c, "write_offered", True):
-            continue
-        reason = str(getattr(c, "write_blocked_reason", "") or "")
-        label = labels.get(reason, "are gated for another reason")
-        counts[label] = counts.get(label, 0) + 1
-    if counts:
-        gated = sum(counts.values())
-        gated_plural = "" if gated == 1 else "s"
-        breakdown = "; ".join(f"{n} {label}" for label, n in counts.items())
-        parts.append(
-            f"Of those, {gated} cluster{gated_plural} carry no permanent fix "
-            f"of their own: {breakdown}. Each still cost real money; the gate "
-            "is a gap in what we could act on, not a finding that the failure "
-            "was harmless."
-        )
-    parts.append(
-        "The absence of an avoidable figure here is not a measurement of what "
-        "was unavoidable. It is what this analyzer did not, or could not, "
-        "price."
-    )
-    return " ".join(parts)
+# THE RELEARN AGGREGATE CARD IS GONE, and the deletion is the whole story.
+#
+# `_relearn_to_proposals` built one window-wide card whose ONLY figure was the
+# total-observed-cost field (`past_overspend_usd` stayed None on it, deliberately:
+# relearn's re-read tail is the same re-sent context `resend` already claims in
+# full, and two analyzers claiming one span is CLAUDE.md rule 27). With that field
+# deleted the card had no number to carry at all, and a card that renders "Not
+# priced" where its headline belongs is worse than no card.
+#
+# It also had no reader. Measured on the live inbox before the purge: the card was
+# absent from the rendered list entirely — the sub-$5 floor deliberately does not
+# hide an unpriced item, so it was not filtered; it simply never earned a row, and
+# no other surface read it either. Critical Rule 24 covers exactly this: a surface
+# nothing links to is not a surface.
+#
+# relearn's measured cost is NOT lost. Every cluster still renders its own row in
+# the Review inbox, on the canonical field, counted once — which is where the
+# claim always lived. What is lost is relearn's presence in the cross-analyzer
+# rollup, and that presence was only ever via the separate total this purge
+# removes; it was never inside the headline avoidable figure. `relearn` stays in
+# `COST_ANALYZERS` so the analyzer still runs and still feeds the write budget and
+# its own per-cluster surface.
+#
+# Upstream reached the same place from the other side and got there first for its
+# half: `c83ec77c` retired relearn's FORWARD claim from this card (the last
+# dollar-field exception), dropping `relearn_claim_usd`/`_tokens` off `baseline`
+# and the `estimate_basis` caption with them. That is step one of the retirement
+# sequence the repo CLAUDE.md lays out; the purge above is step two. Neither
+# decision is being reverted here — taken together they leave the card with no
+# figure of either kind, which is why the card itself goes rather than shipping a
+# headline slot reading "Not priced".
 
 
 # --------------------------------------------------------------------------- #
@@ -1574,14 +1471,48 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
     return proposals
 
 
-#: A ``sub_agent_id`` only names an agent definition when it is a plain slug.
-#: Claude Code stamps a UUID for inline Task dispatches, and there is no file to
-#: edit for those: that is the guidance-block fallback case, not a lookup to
-#: guess at.
+#: A name only addresses an agent definition file (``.claude/agents/<name>.md``)
+#: when it is a plain lowercase slug. Built-in dispatch types that carry no
+#: definition file (``Explore``, ``Plan``) fail this on their capital letter,
+#: which is correct — there is nothing on disk to edit for those.
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
+#: A Claude Code DISPATCH id — ``a`` + an optional caller-chosen instance label
+#: + a hex suffix (``af8b26e872b7184a7``, ``aw-ratehistory-7e1dd2a1642d7c29``).
+#: Minted per dispatch; names no file.
+#:
+#: WHY THIS IS NOT REDUNDANT with ``_AGENT_NAME_RE`` above, which it may look
+#: like: a dispatch id is a lowercase letter followed by hex and dashes, which
+#: IS a well-formed plain slug. So the slug check matches essentially every
+#: dispatch id and rejects essentially none — it reads as a filter while
+#: filtering nothing, and that is precisely how the agent-file lookup came to
+#: spend its life hunting for a ``.claude/agents/a<hex>.md`` that cannot exist.
+#: Without this note the stricter predicate below looks like defensive
+#: over-engineering and the obvious "simplification" is to drop it, which
+#: restores the bug. The real fix is that this module resolves against
+#: ``sub_agent_type``, never a dispatch id; this pattern is the guard that
+#: keeps a dispatch id from being mistaken for a definition name anyway.
+_DISPATCH_ID_RE = re.compile(r"^a.*[0-9a-f]{16,17}$")
+
 #: Cap on transcripts read to locate the repos a finding's sessions ran in.
+#: Counted in DISTINCT sessions — the flagged rows are one per (session,
+#: dispatch) and a session commonly fans out to a dozen-plus subagents, so
+#: slicing the raw row list capped the scope decision at a small fraction of the
+#: sessions it was meant to cover.
 _MAX_SCOPE_SESSIONS = 20
+
+
+def _names_agent_definition(name: str) -> bool:
+    """Whether ``name`` could address a ``.claude/agents/<name>.md`` file.
+
+    Rejects the empty string, anything that is not a plain lowercase slug, and
+    any Claude Code per-dispatch id (which satisfies the slug shape but names no
+    file). A True here is a shape check only — the caller still has to find the
+    file on disk.
+    """
+    if not name or _DISPATCH_ID_RE.match(name):
+        return False
+    return bool(_AGENT_NAME_RE.match(name))
 
 
 def _session_cwds(session_ids: list[str], config: Any) -> dict[str, str]:
@@ -1596,19 +1527,46 @@ def _session_cwds(session_ids: list[str], config: Any) -> dict[str, str]:
 
     override = getattr(getattr(config, "loop", None), "transcript_path", None)
     root = resolve_projects_root(override)
-    pairs = [(sid, sid) for sid in session_ids[:_MAX_SCOPE_SESSIONS]]
+    # Dedupe BEFORE the cap: callers pass one entry per flagged ROW, and a
+    # session that fanned out to N subagents contributes N identical ids, so
+    # slicing the raw list spent the whole budget on a handful of sessions.
+    unique = list(dict.fromkeys(session_ids))[:_MAX_SCOPE_SESSIONS]
+    pairs = [(sid, sid) for sid in unique]
     return _repo_cwd_map_for(pairs, root)
 
 
 def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any]:
     """Whether a flagged subagent has a definition file whose model can be set.
 
+    Keyed on the row's ``sub_agent_type`` — the agent TYPE that was dispatched,
+    which is the only identity that names a file. ``sub_agent_id`` is minted per
+    dispatch and cannot: it looks like a slug, so it used to pass the name check
+    and send every lookup after a ``.claude/agents/a<hex>.md`` that can never
+    exist, which is why this path resolved nothing at all.
+
+    EXPECT THIS TO RETURN ``{}`` ON A CODING-AGENT WINDOW, AND DO NOT TREAT THAT
+    AS A BUG IN THE LOOKUP. Measured on a real coding-agent corpus, every type
+    actually dispatched was a Claude Code BUILT-IN (``general-purpose``,
+    ``Explore``, ``fork`` and friends). A built-in has no
+    ``.claude/agents/<name>.md`` — there is nothing on disk to open, whether or
+    not the user has an agents directory at all — so the ``model:`` write branch
+    below is unreachable in practice and the card degrades to the rubric that
+    ``_subagent_to_proposals`` falls back to.
+
+    That is a fact about how people USE the tool (they dispatch built-ins rather
+    than authoring named agent definitions), not a defect in the resolution
+    above: fed a user-defined type whose file exists, this resolves it. A reader
+    who sees the empty result and starts debugging the lookup, loosening the
+    name predicate, or widening the scope search is chasing a working mechanism.
+    Recorded at more length in the persona matrix under product-state.
+
     Scope routing is relearn's: sessions concentrated in one repo write into
     that repo's ``.claude/agents/``, sessions spanning repos write into the
     user-global one. The flagged rows are cost-ordered, so the first subagent
     with a real definition file is the most expensive one that can be fixed
-    outright. No file means the guidance block stays the fix, which is the
-    inline Task-tool case.
+    outright. No file means the guidance block stays the fix — that covers the
+    built-in dispatch types (``general-purpose``, ``Explore``) as well as a
+    type whose definition lives outside the resolved scope.
     """
     from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
     from tokenjam.core.optimize.analyzers.relearn import _scope_for
@@ -1619,7 +1577,7 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
 
     named = [
         r for r in over_powered
-        if _AGENT_NAME_RE.match(str(getattr(r, "sub_agent_id", "") or ""))
+        if _names_agent_definition(str(getattr(r, "sub_agent_type", "") or ""))
     ]
     if not named or config is None:
         return {}
@@ -1632,7 +1590,7 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
         proposed = lookup_downgrade(str(row.provider), str(row.model))
         if not proposed:
             continue
-        name = str(row.sub_agent_id)
+        name = str(row.sub_agent_type)
         path = default_agent_file_path(scope, repo_cwd, name)
         if not path or not Path(path).is_file():
             continue
@@ -1833,6 +1791,12 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     if finding is None:
         return []
     proposals: list[CostProposal] = []
+    # Whole-window blind spot (a recorded session cwd that no longer exists
+    # on disk, so this analyzer could not check that project's MCP config at
+    # all), not per-server -- same string on every server's card below, since
+    # deadweight emits N proposals (one per dead server) rather than the
+    # single card `resend`/`relearn` attach their own `coverage_note` to.
+    coverage_note = str(getattr(finding, "coverage_note", "") or "")
     for server in getattr(finding, "dead_servers", []) or []:
         evidence = (
             f"`{server.name}` MCP server ({server.scope} scope, configured at "
@@ -1846,11 +1810,25 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             )
         scope_flag = "user" if server.scope == "user" else "project"
         plumbing = _mcp_remove_plumbing(server)
-        advise = (
-            server.fix + " Removing (or project-scoping) it is reversible "
-            "and loses no data; it only stops the standing schema-injection "
-            "tax on future sessions."
+        # "(or project-scoping)" is only a real second option for a
+        # USER-scoped (global) server; a server already at project scope has
+        # nothing left to narrow, so offering it there would be a no-op that
+        # delivers none of the claim. This adapter used to hardcode the
+        # alternative unconditionally, independently of `server.fix`'s own
+        # copy of the same wording in deadweight.py -- the same bug existing
+        # in two separate places is exactly what happens when the REASON
+        # for a conditional is never written down next to it. Keep both
+        # copies scope-conditional; do not let one drift back to a bare
+        # string while the other stays conditional.
+        reversible_note = (
+            " Removing (or project-scoping) it is reversible and loses no "
+            "data; it only stops the standing schema-injection tax on "
+            "future sessions."
+            if server.scope == "user" else
+            " Removing it is reversible and loses no data; it only stops "
+            "the standing schema-injection tax on future sessions."
         )
+        advise = server.fix + reversible_note
         if plumbing.get("apply_capable"):
             advise += (
                 f" tokenjam can remove this exact entry from "
@@ -1859,6 +1837,20 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             )
         elif plumbing.get("apply_blocked_reason"):
             advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
+        if server.other_sources:
+            # The one-paste `claude mcp remove` fallback (and, for that
+            # matter, the deterministic auto-apply above) both edit exactly
+            # ONE file. Neither reaches the other independently-declared
+            # copies, so a reader must be told to repeat the command at each
+            # of them rather than assuming one run closed out the claim.
+            advise += (
+                f" `claude mcp remove` (and the auto-apply above, if "
+                f"offered) only edit {server.source}; the same command "
+                f"needs to be run again from each of the "
+                f"{len(server.other_sources)} other location(s) that "
+                f"independently declare `{server.name}` to stop the rest "
+                f"of the claimed tax."
+            )
         proposals.append(CostProposal(
             kind="cost",
             analyzer="deadweight",
@@ -1876,12 +1868,15 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 "source": server.source,
                 "example_sessions": list(server.example_sessions),
                 "priced_model": server.priced_model,
+                "other_sources": list(server.other_sources),
+                "primary_source_sessions": server.primary_source_sessions,
             },
             advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
             past_overspend_tokens=server.estimated_tax_tokens_window or None,
             past_overspend_usd=server.estimated_tax_usd_window,
             estimate_basis=server.tax_construction,
+            coverage_note=coverage_note,
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
             apply_kind=str(plumbing.get("apply_kind", "")),
@@ -2280,20 +2275,12 @@ def _resend_to_proposals(
         f"earlier turn (conservative lower bound; independent of whether "
         f"caching is enabled)."
     )
-    cost_of_waste_usd = getattr(finding, "cost_of_waste_usd", None)
-    if cost_of_waste_usd is not None:
-        # Deliberately does NOT restate the dollar figure: the card renders it
-        # once, on its own COST line (`observed_cost_usd`), immediately
-        # followed by the coverage note. This sentence used to carry the number
-        # AND end "the rest is what multi-turn work inherently re-sends" —
-        # asserting that everything outside the avoidable figure had been shown
-        # to be necessary. It had not been: most of it is simply outside the
-        # avoidability analysis, which `coverage_note` now spells out.
-        evidence += (
-            " What that volume cost is reported below as cost, not waste: it is "
-            "an observation of what already billed, not a claim about what a "
-            "fix returns."
-        )
+    # No second cost sentence here. This used to point at a total-cost figure the
+    # card rendered beside the avoidable one; that figure is gone (founder
+    # decision — a field two analyzers emit does not earn a place in the
+    # contract), so a sentence promising "reported below as cost" would point at
+    # nothing. What the avoidable figure does and does not cover is still stated,
+    # in `coverage_note`, which is where it belongs.
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
     fix_subagent_offload = str(getattr(finding, "fix_subagent_offload", "") or "")
@@ -2366,6 +2353,14 @@ def _resend_to_proposals(
             "offloadable_share_median": getattr(finding, "offloadable_share_median", None),
             "offload_recoverable_usd": getattr(finding, "offload_recoverable_usd", None),
             "rightsize_recoverable_usd": getattr(finding, "rightsize_recoverable_usd", None),
+            # The token counts those two dollar terms were priced over, carried
+            # so the per-term implied rate is auditable off the card itself
+            # (Critical Rule 28), and the compaction lever's separate, wider
+            # token estimate — which is deliberately NOT part of
+            # `past_overspend_tokens` and must never be summed into a rollup.
+            "offload_recoverable_tokens": getattr(finding, "offload_recoverable_tokens", None),
+            "rightsize_recoverable_tokens": getattr(finding, "rightsize_recoverable_tokens", None),
+            "compaction_avoidable_tokens": getattr(finding, "compaction_avoidable_tokens", None),
             "rightsize_agent_name": rightsize.get("agent_name", ""),
             "rightsize_target_path": rightsize.get("target_path", ""),
             # The two figures' differing populations, carried machine-readable
@@ -2383,9 +2378,6 @@ def _resend_to_proposals(
         one_paste_fix=one_paste_fix,
         past_overspend_usd=getattr(finding, "past_overspend_usd", None),
         past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
-        cost_of_waste_usd=cost_of_waste_usd,
-        cost_of_waste_tokens=getattr(finding, "cost_of_waste_tokens", None) or None,
-        cost_of_waste_basis=str(getattr(finding, "cost_of_waste_basis", "") or ""),
         coverage_note=str(getattr(finding, "coverage_note", "") or ""),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
@@ -2691,7 +2683,6 @@ def cost_proposals_from_report(
             _pick("resend"),
         ),
         (_summarize_to_proposals, _pick("summarize")),
-        (_relearn_to_proposals, _pick("relearn")),
     )
     for adapter, finding in adapters:
         try:
@@ -2832,23 +2823,8 @@ PAST_OVERSPEND_OBSERVED_NOTE = (
     "claim about what a fix returns."
 )
 
-#: Same, for the second (total observed cost) number. Cost wording only — the
-#: whole point of separating it from the figure above is that this one includes
-#: spend nobody has shown to be avoidable, so calling it waste would be a claim
-#: the data does not support.
-OBSERVED_COST_NOTE = (
-    "Also observed over the same window: what this behaviour cost in TOTAL, "
-    "including the part that was never shown to be avoidable. This is cost, "
-    "not waste, and not a claim about what a fix returns. It is not summed "
-    "with the figure above — the avoidable figure is a subset of it."
-)
-
-
 def _with_past_overspend(proposal: CostProposal) -> CostProposal:
-    """Stamp the tense-bearing BASIS strings onto a finished proposal:
-    ``past_overspend_basis`` for the canonical figure the adapter already set,
-    and the ``observed_cost_*`` trio where a finding also measured the full
-    cost of the behaviour.
+    """Stamp the tense-bearing ``past_overspend_basis`` onto a finished proposal.
 
     ONE place decides the wording for every analyzer: two surfaces reading two
     differently-worded "what did this cost me" figures is how the Dashboard
@@ -2861,53 +2837,23 @@ def _with_past_overspend(proposal: CostProposal) -> CostProposal:
     analyzer's field of the same name, and nothing rewrites it here.
 
     **The headline is the AVOIDABLE figure for every analyzer**, because waste
-    is only ever the avoidable portion. A finding that also computes the full
-    observed cost of the behaviour (``cost_of_waste_usd`` — today only
-    ``resend`` and ``relearn``) carries it on ``observed_cost_*`` as an
-    explicitly-cost second number, together with the analyzer's
-    ``coverage_note`` stating how the two figures' populations differ. This
-    used to be inverted, which made the card assert that the ~94% gap between
-    them was unavoidable; it never was, it was merely un-analysed. Every other
-    analyzer produces one quantity, so the second number stays ``None`` and the
-    card shows a single figure rather than saying the same thing twice.
+    is only ever the avoidable portion. There is no second figure any more: the
+    total-observed-cost pair this function used to stamp is deleted, so a card
+    carries one number or none, and what the number does not cover is stated in
+    words by ``coverage_note``.
 
     Never applies a projection ratio — there is none left to apply. Never
     mutates: returns a new proposal.
     """
-    has_avoidable = (
-        proposal.past_overspend_usd is not None
-        or proposal.past_overspend_tokens is not None
-    )
-    cost_usd = proposal.cost_of_waste_usd
-    cost_tokens = proposal.cost_of_waste_tokens
-    has_cost = cost_usd is not None or bool(cost_tokens)
-    if not has_avoidable and not has_cost:
-        # Nothing observed at all — e.g. relearn's window produced no priced
-        # figure of either kind. Neither field would have anything to carry.
+    if proposal.past_overspend_usd is None and proposal.past_overspend_tokens is None:
+        # Nothing observed — there is no basis to describe.
         return proposal
-
-    stamped = proposal
-    if has_avoidable:
-        stamped = replace(
-            stamped,
-            past_overspend_basis=" ".join(
-                x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
-            ),
-        )
-    if has_cost:
-        # A cost-only card (no avoidable claim at all — e.g. relearn, whose
-        # forward claim is deliberately omitted per CLAUDE.md rule 27) must
-        # still get its observed cost stamped here; it cannot ride along on
-        # the `has_avoidable` branch above, which it never enters.
-        stamped = replace(
-            stamped,
-            observed_cost_usd=cost_usd,
-            observed_cost_tokens=cost_tokens or None,
-            observed_cost_basis=" ".join(
-                x for x in (proposal.cost_of_waste_basis, OBSERVED_COST_NOTE) if x
-            ),
-        )
-    return stamped
+    return replace(
+        proposal,
+        past_overspend_basis=" ".join(
+            x for x in (proposal.estimate_basis, PAST_OVERSPEND_OBSERVED_NOTE) if x
+        ),
+    )
 
 
 #: The pre-collapse names a cached cost-proposal dict may still carry, mapped
@@ -2923,6 +2869,23 @@ _LEGACY_PROPOSAL_FIELD_ALIASES = (
     ("past_overspend_tokens", "estimated_recoverable_tokens"),
 )
 
+#: Keys a warm cache may still carry for figures that no longer exist. Unlike the
+#: aliases above there is nothing to migrate them ONTO: `estimated_monthly_*` was
+#: a paced variant of the canonical figure, and the two `*cost*` trios were the
+#: total-observed-cost pair (analyzer-side input, then the published field). Both
+#: are deleted, so the only correct read-time action is to drop them — a renderer
+#: that still branched on one would resurrect a retired figure from a stale entry.
+_RETIRED_PROPOSAL_KEYS = (
+    "estimated_monthly_usd", "estimated_monthly_tokens",
+    "cost_of_waste_usd", "cost_of_waste_tokens", "cost_of_waste_basis",
+    "observed_cost_usd", "observed_cost_tokens", "observed_cost_basis",
+)
+
+
+def _without_retired_keys(proposal: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``proposal`` with every retired figure key removed."""
+    return {k: v for k, v in proposal.items() if k not in _RETIRED_PROPOSAL_KEYS}
+
 
 def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str, Any]:
     """Read-time backward compat for a cost-proposal dict cached before the
@@ -2935,10 +2898,17 @@ def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str,
     recompute, up to 6h away. Renames the legacy keys, applies the SAME basis
     derivation ``_with_past_overspend`` does, and never invents a figure: a
     legacy entry with no observed figure at all stays empty.
+
+    Dropping the RETIRED keys is unconditional, unlike the rename. A cache
+    written by any build between the field-collapse and the total-cost purge
+    carries ``past_overspend_basis`` already, so it takes the early return —
+    which is why the retired-key strip has to happen before that return, not
+    after it. Otherwise a deleted figure keeps rendering off a warm cache for up
+    to the recompute interval.
     """
-    if "past_overspend_basis" in proposal:
-        return proposal
-    stamped = {**proposal}
+    stamped = _without_retired_keys(proposal)
+    if "past_overspend_basis" in stamped:
+        return stamped
     for canonical, legacy in _LEGACY_PROPOSAL_FIELD_ALIASES:
         # Always PRESENT, even when there is nothing to carry: a renderer that
         # indexes the canonical key must not blow up on a legacy entry, and an
@@ -2952,21 +2922,7 @@ def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str,
     stamped["past_overspend_basis"] = " ".join(
         x for x in (proposal.get("estimate_basis") or "", PAST_OVERSPEND_OBSERVED_NOTE) if x
     )
-    # The retired paced fields never render again, whatever a stale cache says.
-    stamped.pop("estimated_monthly_usd", None)
-    stamped.pop("estimated_monthly_tokens", None)
-    cost_usd = proposal.get("cost_of_waste_usd")
-    cost_tokens = proposal.get("cost_of_waste_tokens")
-    if cost_usd is None and not cost_tokens:
-        return stamped
-    return {
-        **stamped,
-        "observed_cost_usd": cost_usd,
-        "observed_cost_tokens": cost_tokens or None,
-        "observed_cost_basis": " ".join(
-            x for x in (proposal.get("cost_of_waste_basis") or "", OBSERVED_COST_NOTE) if x
-        ),
-    }
+    return stamped
 
 
 # --------------------------------------------------------------------------- #
@@ -2996,6 +2952,29 @@ def past_overspend_rollup(
     dedup rule for overlapping CLAIMS lives one layer down, in each analyzer's
     adapter — see CLAUDE.md rule 27).
 
+    **EVERY ROW OF THE REVIEW INBOX, THROUGH THE SAME DOOR.** The inbox is one
+    list fed by more than one producer, and this total has to cover all of it or
+    every sentence derived from the list (the collapsed tail's combined figure,
+    the below-floor "still counted in the total above" note) is false for the
+    part it cannot see. So a producer that is not the cost pipeline contributes
+    by handing ROWS to this function on the canonical field — see
+    ``core/optimize/inbox_contribution.py``, which builds relearn's clusters into
+    exactly that shape on the window this rollup is labelled with. This is
+    deliberately the ONLY way in: the retired mechanism was a relearn-only
+    ``relearn_clusters=`` parameter that computed a figure INSIDE here on a
+    second time basis and published it in its own key, and that parameter is
+    still guarded against by ``test_cost_proposals.
+    test_the_rollup_has_no_per_analyzer_side_channel``. No per-analyzer parameter
+    belongs on this signature, ever.
+
+    ``proposal_count`` / ``deduplicated_proposal_count`` / ``by_analyzer``
+    therefore count inbox ROWS, which is what they have always counted: they
+    describe the population this total was summed over, so a contributing row
+    that came from a non-cost producer is counted and named like any other. A
+    contribution that is NOT reflected in these counts would be a delta a reader
+    cannot attribute, which is the failure mode the ``observed_cost_usd`` note
+    below records.
+
     This is the AVOIDABLE portion of what the flagged behaviours already cost
     over the analyzed window, every token priced at the rate it genuinely
     billed at. Waste is only ever what could have been avoided, so this — not
@@ -3017,14 +2996,18 @@ def past_overspend_rollup(
       ``token_proposal_count`` against ``deduplicated_proposal_count`` and say
       the figure is a floor, not a total.
 
-    ``observed_cost_usd`` (the second, LARGER number ``resend`` and ``relearn``
-    carry: the full cost of the behaviour including the part nobody has shown
-    to be avoidable) IS summed, into its own separate ``observed_cost_usd`` key
-    and per-analyzer entry — never into ``past_overspend_usd``. The two totals
-    overlap by construction (the avoidable figure is a subset of the cost), so
-    adding them would double-count, and swapping them would relabel unanalysed
-    cost as waste. A renderer shows the avoidable total as the headline and the
-    cost total as an explicitly-cost second line.
+    **Every figure this block publishes covers the SAME set of proposals.** It
+    used to publish a second total, ``observed_cost_usd``, summed over whichever
+    proposals happened to carry a total-cost figure — 2 of them, against the 13
+    the headline summed — under a disclosure asserting "the avoidable figure is a
+    subset of it". That was false as published: roughly $5,754 of the $6,163
+    avoidable total came from proposals reporting no observed cost at all, so the
+    headline was mostly OUTSIDE the figure it was described as a subset of. Two
+    figures over two different populations cannot be shown as two views of one
+    quantity, and a reader computes the ratio anyway. The second total and its
+    disclosure are deleted rather than re-worded, because the defect was
+    structural: any second total published here would be summed over its own
+    population and invite the same inference.
 
     ``excluded`` is a passthrough for waste a caller decided NOT to sum in as a
     peer proposal (an analyzer with its own review surface and no representable
@@ -3043,8 +3026,6 @@ def past_overspend_rollup(
 
     total_usd = 0.0
     total_tokens = 0
-    total_observed_cost_usd = 0.0
-    observed_cost_count = 0
     usd_count = 0
     token_count = 0
     by_analyzer: dict[str, dict[str, Any]] = {}
@@ -3057,13 +3038,11 @@ def past_overspend_rollup(
         if (
             row.get("past_overspend_usd") is None
             and row.get("past_overspend_tokens") is None
-            and row.get("observed_cost_usd") is None
         ):
             continue
         entry = by_analyzer.setdefault(
             analyzer,
-            {"analyzer": analyzer, "count": 0, "usd": 0.0, "tokens": 0,
-             "observed_cost_usd": None},
+            {"analyzer": analyzer, "count": 0, "usd": 0.0, "tokens": 0},
         )
         entry["count"] += 1
 
@@ -3072,14 +3051,6 @@ def past_overspend_rollup(
             total_tokens += int(tokens)
             token_count += 1
             entry["tokens"] = int(entry["tokens"]) + int(tokens)
-
-        observed_cost = row.get("observed_cost_usd")
-        if observed_cost is not None:
-            total_observed_cost_usd += float(observed_cost)
-            observed_cost_count += 1
-            entry["observed_cost_usd"] = round(
-                (entry["observed_cost_usd"] or 0.0) + float(observed_cost), 6
-            )
 
         usd = row.get("past_overspend_usd")
         if usd is None:
@@ -3092,7 +3063,7 @@ def past_overspend_rollup(
     deduplicated_proposal_count = len(seen)
     if usd_count == 0:
         basis = (
-            f"no open (not yet applied) cost proposal currently carries an "
+            f"no open (not yet applied) Review inbox row currently carries an "
             f"observed dollar figure for the last {window_days} days."
         )
     else:
@@ -3103,34 +3074,19 @@ def past_overspend_rollup(
         basis = (
             f"sum of the AVOIDABLE window figure (past_overspend_usd) across "
             f"{usd_count} of {deduplicated_proposal_count} open (not yet "
-            f"applied), deduplicated-by-signature cost proposal(s), observed "
+            f"applied), deduplicated-by-signature Review inbox row(s), observed "
             f"over the last {window_days} days; contributing analyzers: "
             f"{breakdown}."
         )
     if token_count:
         basis += (
             f" Token figure: sum of past_overspend_tokens across "
-            f"{token_count} of {deduplicated_proposal_count} proposal(s); the "
+            f"{token_count} of {deduplicated_proposal_count} row(s); the "
             f"rest carry no token figure, so it is a floor, not a total."
-        )
-    if observed_cost_count:
-        basis += (
-            f" Separately, {observed_cost_count} proposal(s) also report a "
-            f"total observed COST of the behaviour they flag, summed into "
-            f"observed_cost_usd. That total includes spend that was never "
-            f"shown to be avoidable, so it is never added to the figure above "
-            f"and is never labelled waste or overspend."
         )
     return {
         "past_overspend_usd": round(total_usd, 6),
         "past_overspend_tokens": total_tokens,
-        # The total observed cost of the same behaviours, kept as a distinct
-        # key so no renderer can confuse it for the avoidable headline and no
-        # caller can accidentally sum the two overlapping quantities.
-        "observed_cost_usd": (
-            round(total_observed_cost_usd, 6) if observed_cost_count else None
-        ),
-        "observed_cost_proposal_count": observed_cost_count,
         "proposal_count": usd_count,
         "token_proposal_count": token_count,
         "deduplicated_proposal_count": deduplicated_proposal_count,
@@ -3139,5 +3095,4 @@ def past_overspend_rollup(
         "excluded": excluded or {},
         "basis": basis,
         "disclosure": PAST_OVERSPEND_OBSERVED_NOTE,
-        "cost_disclosure": OBSERVED_COST_NOTE if observed_cost_count else "",
     }

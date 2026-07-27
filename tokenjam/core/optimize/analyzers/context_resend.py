@@ -35,20 +35,17 @@ Honesty discipline (CLAUDE.md Rule 14 / anti-pattern #22): `repeat_share`
 itself is a measured token-share, not a savings claim; it is shown
 regardless of pricing or caching state.
 
-**Two dollar figures live on this finding, they are NEVER summed, and only
-ONE of them may ever be called waste.**
+**ONE dollar figure lives on this finding, and it is the avoidable one.**
 
-`cost_of_waste_usd` is an OBSERVATION and is COST, not waste: what the
-re-sent volume actually cost over the window, priced per token class at the
-rates it really billed at (cache reads at the cache-read rate, uncached
-repeat at the input rate). Nothing is projected and nothing is discounted,
-because nothing is being claimed — this answers "what did re-sending context
-cost me", which is a question the data answers exactly.
+A second, larger figure used to sit beside it: `cost_of_waste_usd`, the full
+observed cost of the re-sent volume across every session with repeat volume.
+It is DELETED (founder decision). The pairing was the problem, not the
+wording: the avoidable figure is computed over a filtered subset, so the ratio
+of the two read as "94% of this money was shown to be unavoidable", which was
+never measured and was never true.
 
-**It must never be rendered as "wasted" or "overspent".** Waste is only ever
-the portion that could have been avoided; unavoidable spend is cost. The
-difference between this figure and `past_overspend_usd` is NOT a
-measurement of how much re-sending was inherently necessary. Most of it is
+What the avoidable figure does NOT cover is still measured and still stated,
+because that is the part a reader actually needs. The money outside it is
 simply OUTSIDE the avoidability analysis:
 
   * sessions handed to `downsize`'s driver-role case (Critical Rule 27) are
@@ -62,15 +59,28 @@ simply OUTSIDE the avoidability analysis:
 None of those three establish that the excluded money was unavoidable — only
 that this analyzer did not analyse it. The coverage fields below
 (`cost_in_scope_usd` / `cost_driver_role_usd` / `cost_no_lever_usd`,
-`offload_ceiling_usd`, `coverage_note`) exist so a surface can state that
-explicitly instead of letting the ratio of the two headline numbers imply a
-94%-unavoidable claim the data never made.
+`offload_ceiling_usd`, `coverage_note`) exist so a surface can state that in
+words. They partition observed cost by the SAME predicate the avoidable figure
+uses, so they survived the deletion of the total: each one names a specific
+population and what happened to it, which is a statement, not a total inviting
+a ratio.
 
 `past_overspend_usd` is what the fix actually returns, is derived from
 THIS user's corpus rather than a cross-corpus constant, and is THE figure any
 surface leading with "waste"/"overspend" must show. The lever is a compound
 one — offload context-heavy in-thread work to a subagent AND right-size that
 subagent — and both halves are measured here; see `RESEND_ESTIMATE_BASIS`.
+
+`past_overspend_tokens` is the token count that SAME lever was priced over, not
+a wider one (Critical Rule 28). It used to be `repeat_tokens x 68.3%`, an
+estimate spanning every session with repeat volume, sitting beside a dollar
+figure computed over the in-scope subset only. Neither number was wrong; they
+answered different questions, and the cross-analyzer rollup sums the token
+fields, so the mismatch leaked out of this analyzer into the product's token
+floor — enough for the rollup's "tokens wasted" to exceed the window's billed
+tokens. The wider estimate still ships, on its own `compaction_avoidable_tokens`
+field, because it prices a real and separate lever; it is simply never the
+aggregate a rollup reads, and it is never paired with a dollar figure.
 """
 from __future__ import annotations
 
@@ -96,8 +106,8 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
     session_context_tokens,
 )
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
 
 # A window needs at least this many sessions and this many total LLM turns
 # before the aggregate repeat-share means anything: a 1-2 session sample is
@@ -117,13 +127,24 @@ MIN_TURNS_FOR_SIGNAL = 6
 # DIFFERENT metric from the 93.8% repeat-share above (dollars vs tokens,
 # Anthropic-only vs all-providers); it is not a nested fraction of it.
 #
-# It is a calibration constant from ANOTHER corpus, so it prices the TOKENS
-# claim only — the cache_control / compaction lever, whose mechanism is
-# cross-corpus by nature. The DOLLAR claim no longer inherits it: the offload
-# lever's avoidable fraction is measured from the user's own `sub_agent_id`
-# telemetry instead (see `_measure_offloadable_share`), because that lever's
-# realisable share is a property of how THIS user already works, not of a
-# benchmark suite.
+# It is a calibration constant from ANOTHER corpus, and it prices the
+# COMPACTION lever, whose mechanism is cross-corpus by nature. It lives on its
+# own named field (`compaction_avoidable_tokens`) and NOWHERE else. The dollar
+# claim never inherited it: the offload lever's avoidable fraction is measured
+# from the user's own `sub_agent_id` telemetry instead (see
+# `_measure_offloadable_share`), because that lever's realisable share is a
+# property of how THIS user already works, not of a benchmark suite.
+#
+# It also no longer feeds `past_overspend_tokens`. It used to, and that was the
+# defect Critical Rule 28 names: the token field answered "how much re-sent
+# volume is avoidable in principle, across EVERY session with repeat volume"
+# while the dollar field answered "what does the offload+right-size lever
+# return, over the SUBSET of sessions that lever applies to". Both were
+# individually defensible and their ratio was nonsense — measured on the local
+# 30-day corpus, $472.66 against 13.1B tokens is $0.036/MTok, roughly 5x below
+# the cheapest cache-read rate any provider charges, so the implied price of a
+# token was lower than any real price. The aggregate fields now count the SAME
+# events; this constant keeps its own field, per Rule 28's corollary (b).
 AVOIDABLE_FRACTION_OF_REPEAT = 0.683
 
 # --- The offload lever, measured -------------------------------------------
@@ -172,11 +193,15 @@ RESEND_HONESTY_CAVEAT = (
 RESEND_ESTIMATE_BASIS = (
     "repeat_tokens = sum(prompt_size) - max(prompt_size) per session "
     "(prompt_size = input_tokens + cache_tokens per turn), aggregated "
-    "token-weighted across sessions. TOKENS claim (compaction lever): "
-    "repeat_tokens x 68.3% avoidable-fraction (see AVOIDABLE_FRACTION_OF_REPEAT "
-    "docstring); cache-agnostic, since compaction cuts gross token volume "
-    "regardless of caching state, and cross-corpus calibrated rather than "
-    "measured here. USD claim (subagent-offload + right-sizing lever, measured "
+    "token-weighted across sessions. The headline TOKEN and USD figures count "
+    "the SAME events over the SAME sessions: both are the subagent-offload + "
+    "right-sizing lever below, so dividing one by the other yields a real "
+    "per-token price rather than a number no provider charges. A separate, "
+    "wider compaction-lever estimate (repeat_tokens x 68.3% avoidable-fraction, "
+    "cross-corpus calibrated rather than measured here) is reported on its own "
+    "`compaction_avoidable_tokens` field and is deliberately NOT summed into "
+    "the headline token figure, because no dollar figure is computed over that "
+    "population. USD claim (subagent-offload + right-sizing lever, measured "
     "on YOUR data): for each main-thread turn of a context-heavy session, the "
     "material it introduces (uncached input + output) is re-read by every later "
     "main-thread turn until the next compaction, billed at the cache-read rate "
@@ -188,6 +213,14 @@ RESEND_ESTIMATE_BASIS = (
     "where you delegate at all) rather than inherited from a benchmark. "
     "Right-sizing stacks on top: the same offloaded volume priced at the "
     "cheaper same-family model's input rate instead of the premium one. "
+    "TOKENS claim: exactly the token counts those two dollar terms were "
+    "applied to — the offloadable share of the re-read tail (billed at the "
+    "cache-read rate) plus the offloadable share of the material a right-sized "
+    "model would have read instead (billed at the premium-vs-cheaper input-rate "
+    "gap). A turn contributes to both the token and the dollar sum or to "
+    "neither: where a rate is missing — an unpriced model, or no cheaper "
+    "same-family model to compare against — that turn is dropped from BOTH, "
+    "never counted as tokens with zero dollars against it. "
     "Computed over main-thread spans only, so it never overlaps the subagent "
     "analyzer's own claim. Boundary against the relearn analyzer, which prices "
     "failed-call recovery over some of the same turns: "
@@ -242,21 +275,6 @@ def _offloadable_share_disclosure(measured: OffloadableShare) -> str:
         f"window's in-thread work was structurally offloadable; no per-tool-call "
         f"delegability measure is computed anywhere today.{spread}"
     )
-
-RESEND_COST_OF_WASTE_BASIS = (
-    "OBSERVED COST, not waste and not recoverable: what re-sent context "
-    "actually cost over the window, priced per token class at the rates it "
-    "really billed at — cache reads at the cache-read rate, the still-uncached "
-    "share of the repeat volume at the input rate. Nothing here is projected or "
-    "discounted because nothing is being claimed. Do NOT read this as a saving, "
-    "and do NOT read the gap between it and the avoidable figure as a "
-    "measurement of what was unavoidable: multi-turn work does inherently "
-    "re-send some context, but most of the gap is simply outside the "
-    "avoidability analysis (sessions analysed on the model-role card, sessions "
-    "below the context floor, and the volume outside the compaction-bounded "
-    "main-thread tail). The figure a fix actually returns is "
-    "past_overspend_usd, which is smaller and derived separately."
-)
 
 COMPACTION_FIX = (
     "Run /compact (or start a fresh session) once accumulated context crosses "
@@ -364,15 +382,14 @@ class ResendFinding:
     caveat:            str = RESEND_HONESTY_CAVEAT
     estimate_basis:    str = ""
     estimate_confidence: str = "heuristic"
+    #: The aggregate pair the cross-analyzer rollup reads. Both count the SAME
+    #: events — the offload tail and the right-sized material, over the in-scope
+    #: sessions only — so `past_overspend_usd / past_overspend_tokens` lands
+    #: inside a real price band (Critical Rule 28). They degrade together: when
+    #: no dollar figure can be claimed, the token figure is `None` too, never a
+    #: number standing alone.
     past_overspend_tokens: int | None = None
     past_overspend_usd:    float | None = None
-    # COST OF WASTE — an observation, never a saving, and NEVER summed with
-    # `past_overspend_usd` anywhere. See the module docstring and
-    # `RESEND_COST_OF_WASTE_BASIS`. `None` when no turn in the window carried a
-    # priced model (a zero would read as "re-sending context is free").
-    cost_of_waste_usd:      float | None = None
-    cost_of_waste_tokens:   int = 0
-    cost_of_waste_basis:    str = RESEND_COST_OF_WASTE_BASIS
     # The two halves of the compound recoverable claim, kept visible so the
     # headline is never a black box. They ARE summed into
     # `past_overspend_usd` — unlike cost-of-waste, these price the same
@@ -380,6 +397,19 @@ class ResendFinding:
     # does not stop it from also running on a cheaper model).
     offload_recoverable_usd:   float | None = None
     rightsize_recoverable_usd: float | None = None
+    #: The token counts each dollar term above was applied to, published
+    #: separately so the per-term implied rate is checkable rather than only the
+    #: blend: `offload_recoverable_usd / offload_recoverable_tokens` must be a
+    #: cache-read rate, and the right-size pair must be an input-rate gap. Their
+    #: sum IS `past_overspend_tokens`.
+    offload_recoverable_tokens:   int | None = None
+    rightsize_recoverable_tokens: int | None = None
+    #: The COMPACTION lever's separate, wider token estimate: every session with
+    #: repeat volume, priced by the cross-corpus 68.3% constant rather than by
+    #: this user's own telemetry. Its own field precisely because no dollar
+    #: figure is computed over that population, so it can never be paired with
+    #: one (Rule 28 corollary (b)); the aggregate rollup must not read it.
+    compaction_avoidable_tokens: int | None = None
     #: Share of context-introducing volume this user already routes through
     #: subagents, in the sessions where they delegate at all — the measured
     #: replacement for the inherited 68.3% constant on the dollar claim.
@@ -393,14 +423,14 @@ class ResendFinding:
     offloadable_share_sessions:       int = 0
     offloadable_share_sessions_total: int = 0
     offloadable_share_median:         float | None = None
-    # --- Coverage: the two dollar figures' POPULATIONS -----------------------
-    # `cost_of_waste_usd` is priced over EVERY session with repeat volume;
-    # `past_overspend_usd` only over the sessions that survive the
-    # driver-role partition and the context floor. Presenting the two as
-    # views of one quantity (and letting their ratio read as "94% of it was
-    # unavoidable") is only honest if the differing coverage is stated, so the
-    # split is measured here rather than left implicit. The three cost fields
-    # partition `cost_of_waste_usd` exactly, up to rounding.
+    # --- Coverage: WHICH sessions the avoidable figure was computed over ------
+    # `past_overspend_usd` is priced only over the sessions that survive the
+    # driver-role partition and the context floor. The three cost fields below
+    # partition observed cost across EVERY session with repeat volume, by the
+    # same predicate, so a surface can say what happened to the money outside the
+    # avoidable figure instead of leaving the reader to assume it was
+    # unavoidable. They are the reason no single total is needed: a partition
+    # states where the money went; a total only invites a ratio.
     #: Observed cost inside the sessions the avoidable figure WAS computed over.
     cost_in_scope_usd:     float | None = None
     #: Observed cost in the sessions ceded whole to `downsize`'s driver-role
@@ -558,20 +588,33 @@ def _coverage_class(
 def _coverage_note(finding: ResendFinding) -> str:
     """State, in words, what the avoidable figure does and does not cover.
 
-    The defect this exists to close: a cost figure spanning every session
-    shown beside an avoidable figure spanning a filtered subset invites the
-    reader to compute a ratio and conclude the remainder was unavoidable. It
-    was not — it was analysed elsewhere, filtered out, or outside the tail
-    definition. None of those is a finding of necessity, and the card has to
-    say so rather than leaving the ratio to speak.
+    The defect this exists to close: an avoidable figure computed over a
+    filtered subset invites the reader to assume everything outside it was
+    unavoidable. It was not — it was analysed elsewhere, filtered out, or
+    outside the tail definition. None of those is a finding of necessity, and
+    the card has to say so.
+
+    It originally corrected a stronger version of the same defect, where the
+    subset figure sat beside the full observed cost and their ratio made the
+    claim outright. That total is deleted; this note is not, because the
+    filtering it describes is still happening and is still invisible without it.
+
+    Gated on the COVERAGE PARTITION rather than on a total: the three cost
+    buckets are what this note actually reads, and they are populated by the same
+    pass that priced them. A gate on the deleted total would have had to be
+    replaced with a re-derived sum, which is a total again by another name.
     """
-    cost = finding.cost_of_waste_usd
-    if cost is None or cost <= 0:
+    sessions_total = (
+        finding.sessions_in_scope
+        + finding.sessions_no_lever
+        + finding.driver_role_sessions
+    )
+    if not sessions_total:
         return ""
     parts = [
-        f"COVERAGE. The cost figure covers every session with repeat volume; "
-        f"the avoidable figure was computed over {finding.sessions_in_scope:,} "
-        f"of them."
+        f"COVERAGE. {sessions_total:,} session(s) in this window carried repeat "
+        f"volume; the avoidable figure was computed over "
+        f"{finding.sessions_in_scope:,} of them."
     ]
     if finding.driver_role_sessions and finding.cost_driver_role_usd:
         parts.append(
@@ -670,7 +713,11 @@ def run(ctx: AnalyzerContext) -> None:
     offload_usd_total = 0.0
     offload_ceiling_total = 0.0
     rightsize_usd_total = 0.0
+    # The token counterparts of the two dollar terms, accumulated in the SAME
+    # branches that accumulate the dollars so a token can never be counted
+    # without the dollars it was priced at, or vice versa (Rule 28 corollary a).
     offload_tokens_total = 0
+    rightsize_tokens_total = 0
     # The observed cost, partitioned by the SAME predicate that decides
     # whether a session enters the avoidable figure — so the two numbers'
     # populations are stated rather than silently different.
@@ -719,9 +766,16 @@ def run(ctx: AnalyzerContext) -> None:
         # rate; the still-uncached share billed at that turn's input rate.
         # Nothing discounted, nothing projected — this is what it cost, not
         # what a fix returns. NEVER summed with the recoverable figures below.
+        #
+        # ...and at that turn's own TIMESTAMP, not today's. The pricing table
+        # carries a rate history, so a window that straddles a price change
+        # must bill each turn at the rate that actually billed it — see
+        # `tokenjam.core.optimize.span_pricing` for the convention (price each
+        # span at its own instant, then sum the dollars) this follows.
         session_waste_usd = 0.0
         for t in session_turns:
-            turn_rates = get_rates(t.provider or "unknown", t.model)
+            at = span_instant(t.start_time, window_start=ctx.since)
+            turn_rates = rates_at(t.provider, t.model, at)
             if turn_rates is None or turn_rates.input_per_mtok <= 0:
                 continue  # this turn's model unpriced: contributes no dollar figure
             uncached_repeat = repeat_tokens * (t.new_input_tokens / s_sum) if s_sum else 0.0
@@ -765,29 +819,61 @@ def run(ctx: AnalyzerContext) -> None:
         if offloadable_share is None:  # pragma: no cover - implied by klass
             continue
         for t, tail_tokens in zip(main_turns, _resend_tail_tokens_per_turn(main_turns)):
-            turn_rates = get_rates(t.provider or "unknown", t.model)
+            at = span_instant(t.start_time, window_start=ctx.since)
+            turn_rates = rates_at(t.provider, t.model, at)
             if turn_rates is None or turn_rates.cache_read_per_mtok <= 0:
                 continue
+            # `offloadable_share` is a SCOPE factor. It answers "how much of
+            # this tail is delegable work at all" — NOT what fraction of users
+            # will comply, and NOT a confidence haircut on a figure we believe.
+            # Read as a realization discount it invites a correction that does
+            # not apply, because there is no realization factor here to make
+            # consistent with anything.
+            #
+            # It is measured BEHAVIOURALLY (the share of context-introducing
+            # volume already routed through subagents, sampled from sessions
+            # that delegate at all) because the structural measure it stands in
+            # for — per-tool-call delegability — is computed nowhere in this
+            # tree. That is a known weakness of the proxy, not a preference;
+            # `_offloadable_share_disclosure` states it in the user-facing
+            # basis every time the figure is shown.
+            #
+            # Removing it would not undiscount this figure, it would enlarge
+            # the claim: the whole tail would then be asserted delegable.
+            #
+            # `model_downgrade`'s driver-role case carries no such factor and is
+            # NOT inconsistent with this — it scopes by SELECTION instead. See
+            # the paired note in `_driver_session_arithmetic`.
             offloadable_tail = tail_tokens * offloadable_share
             offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
-            # Same tail at a hypothetical 100% share: the ceiling the share
-            # discount is applied to, kept so the card can separate "outside
-            # the tail definition" from "discounted by the measured share"
-            # rather than presenting one opaque gap.
+            offload_tokens_total += round(offloadable_tail)
+            # Same tail at a hypothetical full share: the ceiling the scope
+            # factor is applied to, kept so the card can separate "outside the
+            # tail definition" from "outside the measured delegable share"
+            # rather than presenting one opaque gap. (Deliberately not called a
+            # discount — see the note above on what kind of factor this is.)
             offload_ceiling_total += tail_tokens / 1_000_000 * turn_rates.cache_read_per_mtok
 
             # Right-sizing stacks independently: the same offloaded material
             # still has to be read once by whatever runs it, so pricing it at
             # the cheaper same-family model's input rate instead of this
             # turn's is a second, non-overlapping cut. Skipped when no
-            # cheaper alternative is priced for this turn's own model.
+            # cheaper alternative is priced for this turn's own model — and
+            # skipped for the TOKEN sum on exactly the same condition, so this
+            # material never lands as tokens carrying no dollars (which is what
+            # made the two fields answer different questions before).
             offloaded_material = _introduced_tokens(t) * offloadable_share
-            offload_tokens_total += round(offloadable_tail + offloaded_material)
             alt = lookup_downgrade(t.provider or "unknown", t.model)
-            alt_rates = get_rates(t.provider or "unknown", alt) if alt else None
+            # Same instant as the turn it is a counterfactual for: an
+            # alternative priced at a different date than the model it replaces
+            # would make the gap between them part rate-change, part model
+            # choice, with no way to tell which.
+            alt_rates = rates_at(t.provider, alt, at) if alt else None
             if alt_rates is not None:
                 rate_gap = max(0.0, turn_rates.input_per_mtok - alt_rates.input_per_mtok)
-                rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
+                if rate_gap > 0:
+                    rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
+                    rightsize_tokens_total += round(offloaded_material)
 
     if total_sum <= 0:
         finding.notes.append(
@@ -807,11 +893,13 @@ def run(ctx: AnalyzerContext) -> None:
     examples.sort(key=lambda e: e.repeat_tokens, reverse=True)
     finding.examples = examples[:TOP_N_EXAMPLES]
 
-    finding.past_overspend_tokens = round(
+    # The compaction lever's own estimate, on its own field. It is NOT
+    # `past_overspend_tokens`: it covers every session with repeat volume, while
+    # no dollar figure is computed over that population, so pairing the two
+    # would be the exact Rule 28 basis mismatch this field exists to avoid.
+    finding.compaction_avoidable_tokens = round(
         AVOIDABLE_FRACTION_OF_REPEAT * finding.repeat_tokens
     )
-    finding.cost_of_waste_usd = round(waste_usd_total, 6) if any_waste_priced else None
-    finding.cost_of_waste_tokens = waste_tokens_total
     finding.offloadable_share = (
         round(offloadable_share, 4) if offloadable_share is not None else None
     )
@@ -827,22 +915,33 @@ def run(ctx: AnalyzerContext) -> None:
     finding.sessions_in_scope = sessions_by_class[COVERAGE_IN_SCOPE]
     finding.sessions_no_lever = sessions_by_class[COVERAGE_NO_LEVER]
     driver_role_sessions = sessions_by_class[COVERAGE_DRIVER_ROLE]
-    if offloadable_share is not None and offload_tokens_total > 0:
+    claimed_tokens = offload_tokens_total + rightsize_tokens_total
+    if offloadable_share is not None and claimed_tokens > 0:
         finding.offload_recoverable_usd = round(offload_usd_total, 6)
         finding.rightsize_recoverable_usd = round(rightsize_usd_total, 6)
+        finding.offload_recoverable_tokens = offload_tokens_total
+        finding.rightsize_recoverable_tokens = rightsize_tokens_total
         # The two halves compound: offloading decides where the work runs,
         # right-sizing decides what it runs on. Neither cancels the other, so
-        # they sum — unlike cost-of-waste, which never enters this figure.
+        # they sum — and the token field sums the identical two populations, so
+        # the pair divides to a real per-token rate (Critical Rule 28).
         finding.past_overspend_usd = round(
             offload_usd_total + rightsize_usd_total, 6
         )
+        finding.past_overspend_tokens = claimed_tokens
     else:
+        # Symmetric degrade (Rule 28 corollary a): no dollars means no tokens
+        # either. The measured `repeat_tokens` and the compaction lever's own
+        # `compaction_avoidable_tokens` still stand — they are separate fields
+        # answering separate questions, and neither is the aggregate the
+        # cross-analyzer rollup reads.
         finding.notes.append(
             "No dollar figure for the offload lever: this window has no "
             "session that both delegates to a subagent (nothing to measure "
             "your offloadable share from) and carries enough main-thread "
-            "context for offloading to pay. The token figure above still "
-            "stands."
+            "context for offloading to pay. No token figure is claimed for it "
+            "either — the two always degrade together. The measured repeat "
+            "volume and the compaction-lever token estimate above still stand."
         )
     finding.driver_role_sessions = driver_role_sessions
     if driver_role_sessions:
@@ -850,8 +949,7 @@ def run(ctx: AnalyzerContext) -> None:
             f"{driver_role_sessions} context-heavy session(s) in this window "
             "were driven inline by a premium-tier model that never dispatched "
             "a subagent. Their offload saving is claimed by the model-role "
-            "card instead of here, so the two never price the same tokens; "
-            "the cost figure above still covers them."
+            "card instead of here, so the two never price the same tokens."
         )
     finding.estimate_basis = RESEND_ESTIMATE_BASIS + (
         _offloadable_share_disclosure(measured_share) if measured_share is not None else ""

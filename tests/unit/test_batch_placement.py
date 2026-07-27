@@ -12,7 +12,7 @@ import pytest
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.batch_placement import (
-    BATCH_DISCOUNT,
+    batch_discount,
     MAX_START_GAP_CV,
     MIN_GROUP_COST_USD,
     MIN_SESSIONS_FOR_CADENCE,
@@ -72,7 +72,7 @@ def test_cadence_regular_unattended_workload_is_a_candidate(db):
     assert candidate.gap_cv == 0.0
     assert candidate.cost_usd == pytest.approx(6.0)
     # The Batch API is a flat half of standard prices.
-    assert candidate.estimated_batch_saving_usd == pytest.approx(6.0 * BATCH_DISCOUNT)
+    assert candidate.estimated_batch_saving_usd == pytest.approx(6.0 * batch_discount())
     assert finding.past_overspend_usd == pytest.approx(3.0)
     assert finding.percent_of_window_cost == pytest.approx(50.0)
     # All four billed token types travel with the candidate.

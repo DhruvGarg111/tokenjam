@@ -68,7 +68,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
@@ -77,6 +77,14 @@ from tokenjam.core.optimize.projection import build_projection_basis
 from tokenjam.core.optimize.analyzers.resend_tail import RELEARN_RESEND_BOUNDARY
 from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.relearn_window import (
+    RELEARN_WINDOW_LABELS,
+    WINDOWED_BASIS,
+    RelearnWindowedObservation,
+    RelearnWindowTotal,
+    sum_windowed,
+    window_days,
+)
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
 
@@ -144,7 +152,11 @@ PAST_OVERSPEND_BASIS = (
     "text's own measured "
     "re-read tail, priced at the rate the contributing sessions actually "
     "billed at. "
-    "Accumulated over the scanned corpus, NOT paced to 30 days. Deliberately "
+    "Accumulated over the scanned corpus and NEVER paced, projected or "
+    "extrapolated to a month. A companion figure bounded to a trailing window "
+    "may sit beside this one (past_overspend_windows); that is the same "
+    "occurrences FILTERED by date and capped at this figure, so it is always "
+    "the smaller of the two and is never this figure rescaled. Deliberately "
     "ungated: a cluster with no fix template in our library and a cluster "
     "whose rule is uneconomic to keep both still cost this, and no future "
     "maintenance cost is netted out of it. The re-read share is broken out "
@@ -922,7 +934,24 @@ def _below_threshold_residue(
 
 # --- Distill pass over the residual (non-family) bucket -----------------------
 
-def _distill_cache_dir() -> Path:
+def _distill_cache_dir(config: Any | None = None) -> Path:
+    """Where distilled cluster titles are cached between runs.
+
+    This is a SECOND cache, structurally separate from
+    ``relearn_store.default_cache_path``. That one was already threaded through
+    ``relearn_apply._storage_base_dir`` so an isolated config (``:memory:``, a
+    throwaway ``--db``) writes into a temp root instead of the operator's real
+    ``~/.tj``; this one was not, and wrote real files under the real home
+    regardless — silently, since it fires only after a successful distill LLM
+    call. Same helper, same guarantee, so neither cache can leak on its own.
+
+    ``config`` is None only for direct callers that never had a config to
+    thread (the standalone helpers and their tests); those keep the historical
+    path.
+    """
+    if config is not None:
+        from tokenjam.core.optimize.relearn_apply import _storage_base_dir
+        return _storage_base_dir(config) / "distill_cache" / "relearn"
     return Path.home() / ".tj" / "distill_cache" / "relearn"
 
 
@@ -1287,6 +1316,16 @@ class RelearnCluster:
     #: two analyzers can see exactly which part overlaps rather than guessing.
     past_reread_tokens:               int = 0
     past_reread_usd:                  float | None = None
+    #: The SAME observation as `past_overspend_*`, filtered to each of a small
+    #: vocabulary of trailing windows, keyed by window label ("30d"). Parallel
+    #: to the unbounded fields above and never a replacement for them: those are
+    #: the write budget's pre-net gross, so shrinking them in place would
+    #: silently flip clusters between "worth a permanent rule" and net-negative.
+    #: A FILTER, not a rescale, so each figure is capped at the unbounded one.
+    #: ``None`` means UNKNOWN, never zero: either the run computed no windows,
+    #: or not one of this cluster's occurrences carries a parseable timestamp,
+    #: or the cache predates this field. See `core/optimize/relearn_window.py`.
+    past_overspend_windows: dict[str, RelearnWindowedObservation] | None = None
     # Whether a PERMANENT artifact is actually on offer for this cluster, and
     # why not when it isn't (placeholder fix, net-negative payback, budget
     # exhausted, or merged into the family's single block). A suppressed write
@@ -1331,6 +1370,12 @@ class RelearnFinding:
     #: context in full).
     past_reread_tokens:    int = 0
     past_reread_usd:       float | None = None
+    #: The windowed totals, keyed by the same window labels the clusters carry.
+    #: Each is the sum of exactly the per-cluster figures for that window and of
+    #: nothing else, so a headline and a per-row floor note can read ONE
+    #: quantity over ONE population. ``None`` when the run computed no windows
+    #: or the cache predates the field: unknown, never zero.
+    past_overspend_windows: dict[str, RelearnWindowTotal] | None = None
     # The recurrence gate's OWN residue: failures real enough to observe but
     # not spread across `min_sessions` distinct sessions, so they never become
     # a cluster. They still cost money. Counted and priced here — on the same
@@ -1574,11 +1619,127 @@ def _tail_multiplier(
     return 1.0 + profile.cache_read_ratio * median_tail, median_tail
 
 
+def _windowed_observations(
+    failures: list[FailureEpisode],
+    *,
+    labels: Sequence[str],
+    anchor: Any,
+    turn_tokens: int | None,
+    profile: RateProfile | None,
+    timelines: dict[str, list[tuple[Any, int]]],
+    unbounded_tokens: int,
+    unbounded_head_tokens: int,
+) -> dict[str, RelearnWindowedObservation] | None:
+    """This cluster's observed cost, bounded to each trailing window in
+    ``labels``. ``None`` when no window can be asserted at all.
+
+    Read ``core/optimize/relearn_window.py``'s module docstring first: it owns
+    WHAT this quantity is (a filter, never a rescale), WHY the bound is computed
+    here rather than at the API (the cache keeps no per-occurrence dates), and
+    the rate/session-set decision (re-derive the occurrence set and the tail,
+    reuse the full cluster's price). This function is just that decision applied.
+
+    Returns ``None``, never a bucket reading zero, when not one occurrence
+    carries a parseable timestamp: an unplaceable observation is UNKNOWN over a
+    window, and a zero there would read as "this cost nothing in that window".
+    """
+    if not labels:
+        return None
+    from datetime import timedelta
+
+    anchor_dt = _as_utc(anchor)
+    if anchor_dt is None:
+        return None
+    placeable = [
+        (f, stamp) for f, stamp in ((f, _as_utc(_parse_failure_ts(f.ts))) for f in failures)
+        if stamp is not None
+    ]
+    if not placeable:
+        return None
+    undated = len(failures) - len(placeable)
+    # Reused from the full cluster, never recomputed per window. See the module
+    # docstring's rate/session-set decision.
+    per_turn_tokens = turn_tokens or GROUNDED_TOKENS_PER_OCCURRENCE
+
+    out: dict[str, RelearnWindowedObservation] = {}
+    for label in labels:
+        span_days = window_days(label)
+        start = anchor_dt - timedelta(days=span_days)
+        # `>= start`, with no upper bound, is exactly what `since` means on every
+        # other route: a trailing window, not a closed interval. A clock-skewed
+        # stamp a few seconds past the anchor stays counted rather than falling
+        # out of every window at once.
+        inside = [f for f, stamp in placeable if stamp >= start]
+        occurrences = len(inside)
+        detour_turns = sum(f.detour_turns or 1.0 for f in inside)
+        multiplier, median_tail = _tail_multiplier(inside, timelines, profile)
+        head_tokens = round(detour_turns * per_turn_tokens)
+        # Monotone by construction (a subset's detour turns cannot exceed the
+        # whole's, and the per-turn price is the same figure), so this `min` is
+        # an invariant written down rather than a correction that ever fires.
+        if unbounded_head_tokens > 0:
+            head_tokens = min(head_tokens, unbounded_head_tokens)
+        text_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+        reread_raw = round(text_tokens * max(multiplier - 1.0, 0.0))
+        # THE ONE PLACE RE-DERIVATION CAN OVERSHOOT. A filtered sample's median
+        # tail may exceed the whole cluster's when the window happens to hold
+        # the occurrence that sat in context longest. That is noise in a
+        # multiplier, not money that was spent twice, so the subset is capped at
+        # the whole and the bucket declares it instead of publishing a part
+        # larger than its whole.
+        reread_tokens = min(reread_raw, max(unbounded_tokens - head_tokens, 0))
+        out[label] = RelearnWindowedObservation(
+            label=label,
+            window_days=span_days,
+            window_start=start.isoformat(),
+            window_end=anchor_dt.isoformat(),
+            occurrences=occurrences,
+            sessions=len({f.session_id for f in inside}),
+            detour_turns=round(detour_turns, 4),
+            undated_occurrences=undated,
+            tail_calls_median=median_tail,
+            tail_multiplier=round(multiplier, 4),
+            past_overspend_tokens=head_tokens + reread_tokens,
+            past_overspend_usd=(
+                round((head_tokens + reread_tokens) * profile.input_rate_per_token, 6)
+                if profile is not None else None
+            ),
+            past_reread_tokens=reread_tokens,
+            past_reread_usd=(
+                round(reread_tokens * profile.input_rate_per_token, 6)
+                if profile is not None else None
+            ),
+            capped_at_unbounded=reread_tokens < reread_raw,
+            basis=WINDOWED_BASIS,
+        )
+    return out
+
+
+def _as_utc(value: Any) -> Any:
+    """A datetime made timezone-aware (UTC assumed when naive), or ``None``.
+
+    Failure timestamps come from transcripts and spans and are inconsistently
+    stamped; comparing a naive one against an aware anchor raises, and a raised
+    exception here would sink a whole cluster's figures.
+    """
+    if value is None:
+        return None
+    from datetime import timezone
+
+    try:
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    except AttributeError:
+        return None
+
+
 def build_proposals(
     clusters: list[_RawCluster],
     *,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     doc_text: str = "",
+    # The scope's Claude home, used only to suggest a user-global write target
+    # (see `relearn_apply.default_target_path`). `None` keeps `~/.claude`.
+    claude_home: Path | None = None,
     repo_cwd_map: dict[str, str] | None = None,
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
@@ -1587,6 +1748,8 @@ def build_proposals(
     projection: Any | None = None,
     existing_agent_file_tokens: int | None = None,
     sessions_by_repo: dict[str, int] | None = None,
+    window_labels: Sequence[str] | None = None,
+    window_anchor: Any | None = None,
 ) -> tuple[list[RelearnCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
@@ -1619,6 +1782,12 @@ def build_proposals(
     ``.claude/skills/`` note, so offering it there is a write that visibly
     succeeds and changes nothing. ``proposed_fix`` (the recommendation text)
     is unaffected either way — only the apply path is.
+
+    ``window_labels`` (with ``window_anchor``, the moment the windows trail back
+    from) additionally computes each cluster's BOUNDED figure for each named
+    window, on new parallel fields. Omitting it is today's behaviour exactly:
+    the unbounded fields are byte-identical either way, which they must be,
+    since the write budget nets against them as its pre-net gross.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
     from tokenjam.core.optimize.write_budget import (
@@ -1673,6 +1842,7 @@ def build_proposals(
             try:
                 suggested_target = default_target_path(
                     rung, scope, repo_cwd, slugify(cluster.title),
+                    claude_home=claude_home,
                 )
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
@@ -1734,7 +1904,11 @@ def build_proposals(
         gross_tokens = head_tokens + round(text_tokens * max(multiplier - 1.0, 0.0))
         # THE OBSERVATION. Accumulated over the whole scanned corpus, never
         # paced to 30 days, never netted against a fix's standing cost, never
-        # zeroed by a gate. The re-read tail is broken out as a COMPONENT (not
+        # zeroed by a gate. Bounded trailing-window views of these SAME
+        # occurrences are computed further down onto separate parallel fields —
+        # a date filter capped at this figure, never a rescale of it, and never
+        # written back over these two lines, which the write budget nets
+        # against as its pre-net gross. The re-read tail is broken out as a COMPONENT (not
         # an addend) so a reader can see which part of the figure overlaps the
         # re-sent context `analyzers/context_resend.py` prices in full.
         reread_tokens = max(gross_tokens - head_tokens, 0)
@@ -1760,6 +1934,20 @@ def build_proposals(
         # claiming it here would price the same tokens on two cards
         # (CLAUDE.md rule 27). So the tail stays in the OBSERVED figure, broken
         # out as `past_reread_*`, and is claimed by `resend` alone.
+
+        # The same observation, bounded to each requested trailing window. New
+        # parallel fields only: nothing above is touched, because the figures
+        # above are the write budget's netting input.
+        windows = _windowed_observations(
+            cluster.failures,
+            labels=window_labels or (),
+            anchor=window_anchor,
+            turn_tokens=turn_tokens,
+            profile=profile,
+            timelines=timelines,
+            unbounded_tokens=gross_tokens,
+            unbounded_head_tokens=head_tokens,
+        ) if window_labels else None
 
         proposals.append(RelearnCluster(
             signature=cluster.signature,
@@ -1787,6 +1975,7 @@ def build_proposals(
             past_overspend_basis=PAST_OVERSPEND_BASIS,
             past_reread_tokens=reread_tokens,
             past_reread_usd=past_reread_usd,
+            past_overspend_windows=windows,
             write_offered=has_real_fix,
             write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
             write_blocked_short=(
@@ -1932,6 +2121,9 @@ def analyze_relearns(
     sessions: list[tuple[str, str]],     # [(session_id, repo), ...]
     *,
     projects_root: Path | str | None = None,
+    # The scope's Claude home, used ONLY to suggest a user-global write target.
+    # `None` keeps the historical `~/.claude`; see `default_target_path`.
+    claude_home: Path | None = None,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     distill_enabled: bool = True,
     distill_cache_dir: Path | None = None,
@@ -1943,6 +2135,8 @@ def analyze_relearns(
     conn: Any | None = None,
     persona: str = "unknown",
     existing_agent_file_tokens: int | None = None,
+    window_labels: Sequence[str] | None = None,
+    window_anchor: Any | None = None,
 ) -> RelearnFinding:
     """Full pipeline over an explicit session list — the pure core the
     registry entry point and the on-disk cache job both call. Never raises.
@@ -1960,6 +2154,17 @@ def analyze_relearns(
     basis) — ``None`` keeps every cluster tokens-only, same as today.
     ``persona`` is forwarded to ``build_proposals`` to gate the rung-1/rung-2
     write — see its docstring.
+
+    ``window_labels`` additionally computes each cluster's observed cost BOUNDED
+    to each named trailing window, plus the matching totals on the finding, on
+    new parallel fields. It does not scope the SCAN: relearn's horizon is still
+    everything tokenjam kept, which is the premise of the analyzer (see
+    ``compute_relearn_finding``'s THREE LANES note). What it scopes is which
+    occurrences a given figure counts, so a caller with a window selector can
+    show relearn money on the same basis as the rest of its page. Default
+    ``None`` computes no windows at all and leaves this function's output
+    exactly as it was. ``window_anchor`` defaults to now, the only honest
+    trailing anchor for a run happening now.
     """
     all_failures: list[FailureEpisode] = []
     scanned = 0
@@ -1990,7 +2195,11 @@ def analyze_relearns(
     # The shared monthly-extrapolation basis (behavioral requirement #1): the
     # observed span across every failure this run examined, not a fixed
     # window — relearn scans unbounded history. See `_corpus_window_days`.
-    window_days = _corpus_window_days(all_failures)
+    # Named `corpus_window_days`, not `window_days`: `window_days` is now also a
+    # module-level function (a WINDOW LABEL's span, from `relearn_window`), and
+    # the two are different quantities — one is what the corpus happened to
+    # span, the other is what a caller asked to bound a figure to.
+    corpus_window_days = _corpus_window_days(all_failures)
 
     # The SAME basis the monthly extrapolation above uses, expressed once as a
     # ProjectionBasis so the write budget can price a permanent rule against
@@ -1998,7 +2207,7 @@ def analyze_relearns(
     # would reintroduce exactly the time-basis error this accounting exists to
     # remove. See `core/optimize/projection.py`.
     projection = build_projection_basis(
-        window_days or 0.0, _corpus_active_days(all_failures), scanned,
+        corpus_window_days or 0.0, _corpus_active_days(all_failures), scanned,
     )
 
     # Per-repo session counts: what a PROJECT-scoped rule's standing cost is
@@ -2007,13 +2216,25 @@ def analyze_relearns(
     for _session_id, repo in sessions:
         sessions_by_repo[repo] = sessions_by_repo.get(repo, 0) + 1
 
+    # The moment every bounded window trails back from. Fixed once for the whole
+    # run so every cluster's "last 30 days" means the same 30 days, and carried
+    # onto each bucket so a reader of a CACHED finding can see that the window
+    # ended when the detector ran rather than when they opened the page.
+    anchor = window_anchor
+    if window_labels and anchor is None:
+        from tokenjam.utils.time_parse import utcnow as _utcnow
+
+        anchor = _utcnow()
+
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
+        claude_home=claude_home,
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
-        conn=conn, window_days=window_days, persona=persona,
+        conn=conn, window_days=corpus_window_days, persona=persona,
         projection=projection,
         existing_agent_file_tokens=existing_agent_file_tokens,
         sessions_by_repo=sessions_by_repo,
+        window_labels=window_labels, window_anchor=anchor,
     )
     # The past-tense totals sum EVERY cluster, gated or not — that is the whole
     # point of the field, and the only figure a relearn cluster displays.
@@ -2022,6 +2243,28 @@ def analyze_relearns(
     reread_tokens = sum(p.past_reread_tokens for p in proposals)
     reread_priced = [p.past_reread_usd for p in proposals if p.past_reread_usd is not None]
 
+    # The windowed totals: the sum of the CLUSTERS' OWN windowed figures and
+    # nothing else, so a headline and a per-row floor note read one quantity over
+    # one population. Clusters that could not be placed in a window are counted
+    # as unknown inside each total rather than summed in as zero.
+    windowed_totals: dict[str, RelearnWindowTotal] | None = None
+    if window_labels and proposals:
+        per_cluster = [p.past_overspend_windows for p in proposals]
+        windowed_totals = {}
+        for label in window_labels:
+            total = sum_windowed(
+                per_cluster, label,
+                anchor_start="", anchor_end=anchor.isoformat() if anchor else "",
+            )
+            # The start is the label's own span back from the shared anchor; take
+            # it off a cluster that actually computed it rather than recomputing
+            # the arithmetic in a second place.
+            for windows in per_cluster:
+                if windows and label in windows:
+                    total.window_start = windows[label].window_start
+                    break
+            windowed_totals[label] = total
+
     return RelearnFinding(
         clusters=proposals,
         sessions_scanned=scanned,
@@ -2029,12 +2272,13 @@ def analyze_relearns(
         distilled_clusters=distilled_count,
         dropped_codified=dropped,
         min_sessions=min_sessions,
-        window_days=window_days,
+        window_days=corpus_window_days,
         past_overspend_tokens=past_tokens,
         past_overspend_usd=round(sum(past_priced), 6) if past_priced else None,
         past_overspend_basis=PAST_OVERSPEND_BASIS if proposals else "",
         past_reread_tokens=reread_tokens,
         past_reread_usd=round(sum(reread_priced), 6) if reread_priced else None,
+        past_overspend_windows=windowed_totals,
         below_threshold_clusters=residue["clusters"],
         below_threshold_occurrences=residue["occurrences"],
         below_threshold_past_overspend_tokens=residue["tokens"],
@@ -2158,12 +2402,15 @@ def compute_relearn_finding(
     since: Any | None = None,
     *,
     projects_root: Path | str | None = None,
+    claude_home: Path | None = None,
+    distill_cache_dir: Path | None = None,
     distill_enabled: bool = True,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
     persona: str = "unknown",
     existing_agent_file_tokens: int | None = None,
     retention_days: int | None = None,
+    window_labels: Sequence[str] | None = RELEARN_WINDOW_LABELS,
 ) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
     used by the serve-time background cache job (``api/routes/relearn.py``)
@@ -2216,6 +2463,15 @@ def compute_relearn_finding(
     cache entry for. ``None`` (the default) preserves this function's
     original always-reparse behavior — only the registered ``run(ctx)`` entry
     point and the serve-time background job opt in.
+
+    ``window_labels`` defaults ON here, unlike on ``analyze_relearns``: this is
+    the entry point whose result gets CACHED and served over HTTP, and the cache
+    is the one place a bounded figure can come from at all (the cached cluster
+    keeps no per-occurrence dates, so no route can derive one later). Computing
+    them costs no extra database round trips — every window reuses the rate
+    profile, per-turn cost and prompt timelines the unbounded figure already
+    built. Pass ``None`` to opt out. Nothing here SCOPES the scan to a window:
+    the horizon stays tokenjam's retention, per the note above.
     """
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
@@ -2282,13 +2538,16 @@ def compute_relearn_finding(
         doc_text = ""
 
     finding = analyze_relearns(
-        sessions, projects_root=root, codified_doc_text=doc_text,
-        distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
+        sessions, projects_root=root, claude_home=claude_home,
+        codified_doc_text=doc_text,
+        distill_enabled=distill_enabled, distill_cache_dir=distill_cache_dir,
+        repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures + archived_failures,
         advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
         conn=conn, persona=persona,
         existing_agent_file_tokens=existing_agent_file_tokens,
+        window_labels=window_labels,
     )
     archived_sessions = len({f.session_id for f in archived_failures})
     from dataclasses import replace as _replace
@@ -2320,7 +2579,19 @@ def run(ctx: AnalyzerContext) -> None:
     ``storage.retention_days`` — what tokenjam actually kept — which is the
     point of keeping it.
     """
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.transcript_cache import default_cache_dir
+
+    scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
+    if not scope.enabled:
+        # The leak this guards is not hypothetical: served against an empty
+        # throwaway `--db`, this analyzer surfaced recurring-mistake entries
+        # carrying real file paths from an unrelated project, because its
+        # evidence came off the machine's global transcript tree rather than
+        # the database being served.
+        ctx.report.filesystem_scan_skipped_reason = scope.reason
+        ctx.report.findings["relearn"] = RelearnFinding()
+        return
 
     optimize_cfg = getattr(ctx.config, "optimize", None)
     min_sessions = getattr(
@@ -2340,6 +2611,9 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
         retention_days=retention_days,
+        projects_root=scope.projects_root,
+        claude_home=scope.claude_home,
+        distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
         persona=ctx.persona,
         existing_agent_file_tokens=measured_agent_file_tokens(

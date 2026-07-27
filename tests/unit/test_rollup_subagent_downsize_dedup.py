@@ -132,6 +132,51 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     assert rollup["past_overspend_usd"] <= MAIN_COST + SUB_COST
 
 
+def test_downsize_still_excludes_a_high_output_subagent_after_gate_fix(db):
+    """The over_powered gate no longer requires small output (it used to make
+    a full-agent-loop subagent, the worst offender, LESS eligible to be
+    flagged — CLAUDE.md Critical Rule 29's inversion). Guard that this change
+    does not reopen the downsize/subagent overlap: `downsize`'s exclusion is
+    a `sub_agent_id IS NULL` column filter, structurally independent of the
+    subagent analyzer's flag shape, so a big-output dispatch must still be
+    fully invisible to `downsize`."""
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=MAIN_INPUT, output_tokens=MAIN_OUTPUT, cost_usd=MAIN_COST,
+        session_id="s1", sub_agent_id=None, start_time=start,
+    ))
+    # A full-agent-loop-shaped dispatch: large output, few tool calls -> now
+    # flagged over_powered (previously invisible), still must not leak into
+    # downsize's main-thread claim.
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=4_000, output_tokens=50_000, cost_usd=8.0,
+        session_id="s1", sub_agent_id="researcher", start_time=start,
+    ))
+    since, until = _window()
+    finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
+    assert finding is not None
+    assert finding.past_overspend_tokens == MAIN_INPUT + MAIN_OUTPUT
+    assert finding.actual_cost_usd == pytest.approx(MAIN_COST, abs=1e-6)
+
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize", "subagent"],
+    )
+    subagent_finding = report.findings["subagent"]
+    big = next(r for r in subagent_finding.flagged if r.sub_agent_id == "researcher")
+    assert "over_powered" in big.flags  # proves the gate fix actually fires here
+
+    proposals = cost_proposals_from_report(report, None, window_days=30.0)
+    downsize_tokens = sum(
+        (p.gross_recoverable_tokens if p.gross_recoverable_tokens is not None
+         else (p.past_overspend_tokens or 0))
+        for p in proposals if p.analyzer == "downsize"
+    )
+    assert downsize_tokens == MAIN_INPUT + MAIN_OUTPUT
+
+
 # --- resend's compound offload claim vs the subagent card --------------------
 # Same class of guard, third pair. `resend` prices the re-read tail that
 # offloading main-thread work removes, plus the right-sizing delta on that same
@@ -188,17 +233,24 @@ def test_resend_offload_claim_never_reaches_subagent_or_downsize_spans(db):
     # tail and a rate delta on main-thread material, never the subagent spans
     # the `subagent` card already claims.
     assert resend.past_overspend_usd <= heavy_main_cost + 0.15
-    # And it is strictly smaller than the observed cost of the same re-sending.
-    assert resend.cost_of_waste_usd > resend.past_overspend_usd
+    # And it is strictly smaller than the observed cost of the same re-sending,
+    # which the coverage partition still prices even though the single total that
+    # used to carry it is deleted from the contract.
+    observed = sum(
+        getattr(resend, f) or 0.0
+        for f in ("cost_in_scope_usd", "cost_driver_role_usd", "cost_no_lever_usd")
+    )
+    assert observed > resend.past_overspend_usd
 
     proposals = cost_proposals_from_report(report)
     resend_card = next(p for p in proposals if p.analyzer == "resend")
-    assert resend_card.cost_of_waste_usd == resend.cost_of_waste_usd
+    assert resend_card.past_overspend_usd == resend.past_overspend_usd
 
-    # cost-of-waste is structurally excluded from the headline: the rollup reads
-    # only the `estimated_*` fields, so the gross can never inflate it. Pinned
-    # by removing the recoverable figures and watching the rollup go to zero
-    # while the gross is still sitting on the card.
+    # The headline is the sum of the ONE canonical field and nothing else. Pinned
+    # by removing that field and watching the rollup go to zero: with the second
+    # figure deleted there is no other number left on the card for it to fall
+    # back onto, which is the structural version of the guard this used to make
+    # by asserting the gross was ignored.
     rollup = past_overspend_rollup(proposals)
     assert rollup["past_overspend_usd"] == pytest.approx(
         sum(p.past_overspend_usd or 0.0 for p in proposals)
@@ -207,5 +259,4 @@ def test_resend_offload_claim_never_reaches_subagent_or_downsize_spans(db):
         replace(p, past_overspend_usd=None, past_overspend_tokens=None)
         for p in proposals
     ]
-    assert any(p.cost_of_waste_usd for p in stripped)
     assert past_overspend_rollup(stripped)["past_overspend_usd"] == 0.0

@@ -4,6 +4,7 @@ and migration runner. DuckDB only — never import sqlite3.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -79,13 +80,16 @@ class StorageBackend(Protocol):
     def get_savings_entries(
         self, filters: PolicyDecisionFilters,
     ) -> list[SavingsLedgerEntry]: ...
-    def upsert_session(self, session: SessionRecord) -> None: ...
+    def upsert_session(
+        self, session: SessionRecord, *, accumulate_totals: bool = False,
+    ) -> None: ...
     def upsert_agent(self, agent: AgentRecord) -> None: ...
     def upsert_baseline(self, baseline: DriftBaseline) -> None: ...
     def get_session(self, session_id: str) -> SessionRecord | None: ...
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None: ...
     def close_sessions_by_instance(self, instance_id: str) -> int: ...
     def close_session_by_id(self, session_id: str) -> int: ...
+    def mark_sessions_completed(self, session_ids: list[str]) -> None: ...
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
@@ -100,13 +104,16 @@ class StorageBackend(Protocol):
         self, agent_id: str | None, since: datetime | None, tool_name: str | None,
     ) -> list[dict]: ...
     def get_daily_cost(self, agent_id: str, date: date) -> float: ...
+    def get_daily_cost_for_agents(self, agent_ids: list[str], date: date) -> float: ...
     def get_session_cost(self, session_id: str) -> float: ...
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]: ...
     # Issue #309: methods that callers (CostEngine, cmd_status, cost compare)
     # used to satisfy by reaching into `db.conn` directly. Having them on the
     # protocol keeps those paths behind the abstraction and lets InMemoryBackend
     # exercise them in unit tests.
-    def update_span_cost(self, span_id: str, cost_usd: float) -> None: ...
+    def update_span_cost(
+        self, span_id: str, cost_usd: float, pricing_source: str | None = None,
+    ) -> None: ...
     def increment_session_cost(self, session_id: str, delta_usd: float) -> None: ...
     def get_distinct_agent_ids(self) -> list[str]: ...
     def get_active_session(self, agent_id: str) -> SessionRecord | None: ...
@@ -198,7 +205,8 @@ _SPAN_BULK_COLUMNS: tuple[str, ...] = (
     "request_type", "conversation_id", "events", "billing_account",
     "cache_write_tokens", "request_params", "request_tools", "sub_agent_id",
     "tenant_id", "feature", "environment", "service_version", "commit_sha",
-    "prompt_template_id", "prompt_template_version",
+    "prompt_template_id", "prompt_template_version", "pricing_source",
+    "sub_agent_type",
 )
 
 # read_json column -> type. Timestamps are read as VARCHAR and cast to TIMESTAMPTZ
@@ -219,6 +227,7 @@ _SPAN_BULK_READ_TYPES: dict[str, str] = {
     "tenant_id": "VARCHAR", "feature": "VARCHAR", "environment": "VARCHAR",
     "service_version": "VARCHAR", "commit_sha": "VARCHAR",
     "prompt_template_id": "VARCHAR", "prompt_template_version": "VARCHAR",
+    "pricing_source": "VARCHAR", "sub_agent_type": "VARCHAR",
 }
 
 # Columns that need a cast in the SELECT (read as VARCHAR, stored as TIMESTAMPTZ).
@@ -298,6 +307,8 @@ def _span_to_json_obj(span: NormalizedSpan) -> dict:
         "commit_sha": span.commit_sha,
         "prompt_template_id": span.prompt_template_id,
         "prompt_template_version": span.prompt_template_version,
+        "pricing_source": span.pricing_source,
+        "sub_agent_type": span.sub_agent_type,
     }
 
 
@@ -621,6 +632,31 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_id       TEXT;\n"
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_version  TEXT"
     )),
+    # Migration 18: pricing_source on spans — provenance for cost_usd (HOW the
+    # rate resolved: exact / date_stripped / context_tag / override /
+    # default_fallback — see pricing.classify_pricing_source). Nullable;
+    # existing spans stay NULL on upgrade (their provenance was never
+    # recorded and can't be reconstructed after the fact). Populated going
+    # forward by CostEngine.process_span at ingest. Root-caused by an unpriced
+    # model (no models.toml row) silently pricing its cache tokens at zero via
+    # calculate_cost's fallback — the fallback figure and a real rate were
+    # otherwise indistinguishable once only cost_usd remained.
+    (18, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS pricing_source TEXT"),
+    # Migration 19: sub_agent_type on spans — the STABLE identity of a Claude
+    # Code subagent dispatch, alongside the per-dispatch `sub_agent_id` from
+    # migration 14. `sub_agent_id` is Claude Code's `agentId`, which is minted
+    # fresh per Task dispatch, so each value belongs to exactly ONE session by
+    # construction and no per-subagent cohort can ever be formed from it —
+    # leaving a substantial share of spans (all subagent work) unclusterable.
+    # This column carries the dispatched agent TYPE instead (the
+    # spawning Task/Agent call's `subagent_type` argument), which recurs across
+    # sessions and is the name that resolves to a `.claude/agents/<name>.md`
+    # definition file. Nullable; NULL for main-thread spans, non-Claude-Code
+    # telemetry, and dispatches whose type is a per-dispatch instance label
+    # rather than a reusable definition (see backfill._subagent_type_for).
+    # Populated by the backfill parser from the `agent-<id>.meta.json` sidecar;
+    # `tj backfill --reingest` re-tags pre-column history.
+    (19, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_type TEXT"),
 ]
 
 
@@ -652,6 +688,8 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("spans",    "commit_sha",              "TEXT"),               # migration 17
     ("spans",    "prompt_template_id",      "TEXT"),               # migration 17
     ("spans",    "prompt_template_version", "TEXT"),               # migration 17
+    ("spans",    "pricing_source",          "TEXT"),               # migration 18
+    ("spans",    "sub_agent_type",          "TEXT"),               # migration 19
 ]
 
 
@@ -867,6 +905,282 @@ def ensure_expected_columns(conn: duckdb.DuckDBPyConnection) -> list[str]:
     return added
 
 
+# A session whose stored total differs from its spans' sum by less than this is
+# treated as agreeing. Both sides are float sums over per-span figures rounded to
+# 8dp, so a long session accumulates real floating-point residue; a tenth of a
+# cent is far below anything a surface renders and far above that residue.
+SESSION_COST_DRIFT_TOLERANCE_USD = 0.001
+
+
+def session_cost_drift(
+    conn: duckdb.DuckDBPyConnection,
+    tolerance_usd: float = SESSION_COST_DRIFT_TOLERANCE_USD,
+    limit: int = 20,
+) -> tuple[int, float, list[tuple[str, float, float]]]:
+    """Find sessions whose ``total_cost_usd`` disagrees with ``SUM(spans.cost_usd)``.
+
+    ``recompute_session_totals_from_spans`` documents the span sum as the source
+    of truth, so any gap is a stale session row — written by a path that moved
+    one side without the other (a pre-priced span the cost hook re-priced, a
+    per-file backfill upsert that replaced rather than accumulated, a repricing
+    pass that never touched sessions). Two figures the UI can show side by side
+    then differ, which is the defect: a published total that excludes rows it
+    should include.
+
+    Returns ``(session_count, total_abs_drift_usd, worst)`` where ``worst`` is up
+    to ``limit`` ``(session_id, stored_usd, span_sum_usd)`` triples ordered by
+    absolute drift, largest first.
+
+    A NULL ``total_cost_usd`` is NOT drift when the session's spans carry no cost
+    either: sessions whose spans are all tool/marker spans (or LLM calls with no
+    usage attached) genuinely have nothing to price, and ``SUM`` over an
+    all-NULL column is itself NULL. ``COALESCE`` on both sides makes the
+    comparison treat NULL and 0.0 as the same "no priced spans" statement, which
+    is also how ``recompute_session_totals_from_spans`` writes it.
+    """
+    rows = conn.execute(
+        """
+        SELECT s.session_id,
+               COALESCE(s.total_cost_usd, 0.0)  AS stored,
+               COALESCE(agg.span_cost, 0.0)     AS span_sum
+        FROM sessions AS s
+        LEFT JOIN (
+            SELECT session_id, SUM(cost_usd) AS span_cost
+            FROM spans
+            WHERE session_id IS NOT NULL
+            GROUP BY session_id
+        ) AS agg ON agg.session_id = s.session_id
+        WHERE ABS(COALESCE(agg.span_cost, 0.0) - COALESCE(s.total_cost_usd, 0.0)) > $1
+        ORDER BY ABS(COALESCE(agg.span_cost, 0.0) - COALESCE(s.total_cost_usd, 0.0)) DESC
+        """,
+        [tolerance_usd],
+    ).fetchall()
+    total = sum(abs(float(r[2]) - float(r[1])) for r in rows)
+    worst = [(str(r[0]), float(r[1]), float(r[2])) for r in rows[:limit]]
+    return len(rows), total, worst
+
+
+# --- Duplicate call observations --------------------------------------------
+#
+# One LLM call can reach the store twice: the live receive path observes it as
+# it happens and a later transcript backfill observes it again, each minting its
+# own span_id, so span_id-keyed idempotency never sees the overlap and every
+# raw SUM prices the call twice. The two observations are recognised by their
+# billed shape (accounting.call_fingerprint) and are only ever treated as one
+# call when they came from DIFFERENT ingest sources — see that module for why
+# a fingerprint may not collapse two rows from one observer.
+
+#: An LLM call span: priced work, as opposed to a tool or marker span.
+_LLM_SPAN_PREDICATE = "model IS NOT NULL AND tool_name IS NULL"
+
+#: Columns making up a call's billed shape, in `call_fingerprint` order.
+_FINGERPRINT_COLUMNS = (
+    "session_id", "model",
+    "COALESCE(input_tokens, 0)", "COALESCE(output_tokens, 0)",
+    "COALESCE(cache_tokens, 0)", "COALESCE(cache_write_tokens, 0)",
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _ingest_source_sql() -> str:
+    """SQL reading a row's ingest source, defaulting to the live receive path.
+
+    Built from `accounting`'s constants so the SQL and the Python helpers can
+    never name the attribute differently — neither half is user data. Resolved
+    lazily because `tokenjam.core.optimize` pulls in every analyzer at import
+    time, and `core.db` is on the import path of every CLI command.
+    """
+    from tokenjam.core.optimize import accounting
+    return (
+        f"COALESCE(json_extract_string(attributes, "
+        f"'$.{accounting.INGEST_SOURCE_ATTRIBUTE}'), "
+        f"'{accounting.LIVE_INGEST_SOURCE}')"
+    )
+
+
+def has_spans_from_another_source(
+    conn: duckdb.DuckDBPyConnection, own_source: str,
+) -> bool:
+    """Could a second observer's restatement exist here at all?
+
+    A duplicate needs two ingest sources. On a machine that has only ever
+    backfilled, or only ever received live telemetry, the answer is no and
+    every per-call lookup is wasted work — this asks once and lets the caller
+    skip them all. Stops at the first match, so it is cheap exactly when the
+    answer is yes; the full scan is paid only when there is nothing to find.
+    """
+    row = conn.execute(
+        f"SELECT 1 FROM spans WHERE {_LLM_SPAN_PREDICATE} "
+        f"AND {_ingest_source_sql()} <> $1 LIMIT 1",
+        [own_source],
+    ).fetchone()
+    return row is not None
+
+
+def stored_observations_of_call(
+    conn: duckdb.DuckDBPyConnection,
+    session_id: str,
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_tokens: int,
+    cache_write_tokens: int,
+) -> dict[str, int]:
+    """Per-ingest-source count of stored observations of ONE call.
+
+    The live path's question, asked once per incoming LLM span: has another
+    observer already recorded this call? Scoped to a single session and an
+    exact token shape so it stays a narrow lookup rather than a scan.
+    """
+    if not session_id:
+        return {}
+    rows = conn.execute(
+        f"SELECT {_ingest_source_sql()} AS src, COUNT(*) FROM spans "
+        f"WHERE session_id = $1 AND model IS NOT DISTINCT FROM $2 "
+        f"  AND COALESCE(input_tokens, 0) = $3 "
+        f"  AND COALESCE(output_tokens, 0) = $4 "
+        f"  AND COALESCE(cache_tokens, 0) = $5 "
+        f"  AND COALESCE(cache_write_tokens, 0) = $6 "
+        f"  AND tool_name IS NULL "
+        f"GROUP BY 1",
+        [session_id, model, int(input_tokens or 0), int(output_tokens or 0),
+         int(cache_tokens or 0), int(cache_write_tokens or 0)],
+    ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def stored_observations_by_call(
+    conn: duckdb.DuckDBPyConnection, session_id: str,
+) -> dict[str, dict[str, int]]:
+    """Every stored LLM call in one session, as fingerprint -> {source: count}.
+
+    The backfill path's question, asked once per session rather than once per
+    span: which of the calls this file describes has another observer already
+    recorded, and how many times?
+    """
+    if not session_id:
+        return {}
+    rows = conn.execute(
+        f"SELECT session_id, model, COALESCE(input_tokens, 0), "
+        f"COALESCE(output_tokens, 0), COALESCE(cache_tokens, 0), "
+        f"COALESCE(cache_write_tokens, 0), {_ingest_source_sql()} AS src, COUNT(*) "
+        f"FROM spans WHERE session_id = $1 AND {_LLM_SPAN_PREDICATE} "
+        f"GROUP BY 1, 2, 3, 4, 5, 6, 7",
+        [session_id],
+    ).fetchall()
+    from tokenjam.core.optimize import accounting
+
+    by_call: dict[str, dict[str, int]] = {}
+    for r in rows:
+        key = accounting.call_fingerprint(*r[:6])
+        by_call.setdefault(key, {})[str(r[6])] = int(r[7])
+    return by_call
+
+
+def duplicate_call_observations(
+    conn: duckdb.DuckDBPyConnection, limit: int = 20,
+) -> tuple[int, float, list[tuple[str, int, float]]]:
+    """Find calls a second ingest source restated, in a DB written before
+    ingest-side suppression existed.
+
+    Prevention lives at both ingest paths now, so a DB filled by a current
+    build has nothing here. A DB filled by an older one carries a live and a
+    backfill observation of the same call and prices it twice; this names the
+    redundant rows so `tj doctor` can report them and `--repair` can drop them.
+
+    Returns ``(span_count, redundant_cost_usd, worst)`` where ``worst`` is up to
+    ``limit`` ``(session_id, span_count, redundant_cost_usd)`` triples ordered
+    by redundant cost, largest first.
+    """
+    rows = conn.execute(
+        _duplicate_observation_sql(
+            "obs.session_id, COUNT(*), COALESCE(SUM(obs.cost_usd), 0.0)"
+        ) + " GROUP BY obs.session_id ORDER BY 3 DESC"
+    ).fetchall()
+    total_spans = sum(int(r[1]) for r in rows)
+    total_cost = sum(float(r[2] or 0.0) for r in rows)
+    worst = [(str(r[0]), int(r[1]), float(r[2] or 0.0)) for r in rows[:limit]]
+    return total_spans, total_cost, worst
+
+
+def _duplicate_observation_sql(select_list: str) -> str:
+    """Rows that are a second observer's restatement of an already-observed call.
+
+    For each call, the number of times it really happened is the count the most
+    complete observer recorded; every other source's rows for that call are
+    restatements. Ties keep the live observation — it saw the request itself,
+    and carries the request-side attributes a transcript never had.
+    """
+    from tokenjam.core.optimize import accounting
+
+    fingerprint = ", ".join(_FINGERPRINT_COLUMNS)
+    return f"""
+        WITH obs AS (
+            SELECT span_id, session_id, cost_usd,
+                   {_ingest_source_sql()} AS src,
+                   MD5(CONCAT_WS('|', {fingerprint})) AS call_key
+            FROM spans
+            WHERE {_LLM_SPAN_PREDICATE} AND session_id IS NOT NULL
+        ),
+        per_source AS (
+            SELECT call_key, src, COUNT(*) AS n FROM obs GROUP BY 1, 2
+        ),
+        contested AS (
+            SELECT call_key FROM per_source GROUP BY call_key HAVING COUNT(*) > 1
+        ),
+        winner AS (
+            SELECT call_key, src FROM per_source
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY call_key
+                ORDER BY n DESC, (src = '{accounting.LIVE_INGEST_SOURCE}') DESC, src
+            ) = 1
+        )
+        SELECT {select_list} FROM obs
+        JOIN contested USING (call_key)
+        JOIN winner USING (call_key)
+        WHERE obs.src <> winner.src
+    """
+
+
+def purge_duplicate_call_observations(conn: duckdb.DuckDBPyConnection) -> tuple[int, list[str]]:
+    """Delete the redundant observations `duplicate_call_observations` names.
+
+    Returns ``(deleted_rows, touched_session_ids)`` — the caller reconciles
+    those sessions' totals afterwards, since the delete moves `SUM(spans)`.
+    Idempotent: a second run finds nothing left to collapse.
+    """
+    rows = conn.execute(
+        _duplicate_observation_sql("obs.span_id, obs.session_id")
+    ).fetchall()
+    if not rows:
+        return 0, []
+    span_ids = [str(r[0]) for r in rows]
+    sessions = sorted({str(r[1]) for r in rows})
+    # Same ART-index workaround `reconcile_backfill_spans` documents: DuckDB
+    # can raise a FATAL "Failed to delete all rows from index" — invalidating
+    # the connection — when deleting indexed span rows. Drop the secondary
+    # indexes, delete, recreate in a `finally` so a mid-delete error cannot
+    # leave the table permanently unindexed.
+    conn.execute(
+        "DROP INDEX IF EXISTS idx_spans_trace_id;\n"
+        "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
+        "DROP INDEX IF EXISTS idx_spans_start_time;\n"
+        "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
+        "DROP INDEX IF EXISTS idx_spans_conv_id"
+    )
+    try:
+        chunk = 5000
+        for start in range(0, len(span_ids), chunk):
+            batch = span_ids[start:start + chunk]
+            placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+            conn.execute(
+                f"DELETE FROM spans WHERE span_id IN ({placeholders})", batch,
+            )
+    finally:
+        conn.execute(SPANS_INDEX_SQL)
+    return len(span_ids), sessions
+
+
 def run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     """Apply unapplied migrations, then reconcile the schema. Idempotent."""
     conn.execute(
@@ -946,6 +1260,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),
         sub_agent_id=d.get("sub_agent_id"),
+        sub_agent_type=d.get("sub_agent_type"),
         end_time=d.get("end_time"),
         duration_ms=d.get("duration_ms"),
         status_message=d.get("status_message"),
@@ -971,6 +1286,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         commit_sha=d.get("commit_sha"),
         prompt_template_id=d.get("prompt_template_id"),
         prompt_template_version=d.get("prompt_template_version"),
+        pricing_source=d.get("pricing_source"),
     )
 
 
@@ -1148,7 +1464,7 @@ def sdk_service_series(
     Powers the /status SDK-services zone (Prometheus-style sparklines). Returns
     {} when `conn` is None or no agents are given. Each agent maps to:
         {cost_per_min, calls_per_min, err_pct_per_min: [slots],
-         window_cost, window_calls, window_errors, last_seen}
+         window_cost, window_calls, window_errors, window_tokens, last_seen}
     """
     if conn is None or not agent_ids:
         return {}
@@ -1167,6 +1483,7 @@ def sdk_service_series(
             "window_cost": 0.0,
             "window_calls": 0,
             "window_errors": 0,
+            "window_tokens": 0,
             "last_seen": None,
         }
         for aid in agent_ids
@@ -1181,18 +1498,21 @@ def sdk_service_series(
                CAST(epoch(date_trunc('minute', start_time AT TIME ZONE 'UTC')) AS BIGINT) AS b,
                COALESCE(SUM(cost_usd), 0.0)                  AS cost,
                COUNT(*) FILTER (WHERE status_code = 'error') AS errors,
-               COUNT(*)                                      AS calls
+               COUNT(*)                                      AS calls,
+               COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0)
+                                                              AS tokens
         FROM spans
         WHERE start_time >= $1 AND agent_id IN ({ph})
         GROUP BY agent_id, b
         """,
         [window_start, *agent_ids],
     ).fetchall()
-    for aid, b, cost, errors, calls in rows:
+    for aid, b, cost, errors, calls, tokens in rows:
         r = result[aid]
         r["window_cost"] += float(cost or 0.0)
         r["window_calls"] += int(calls or 0)
         r["window_errors"] += int(errors or 0)
+        r["window_tokens"] += int(tokens or 0)
         slot = index.get(int(b))
         if slot is None:
             continue
@@ -1328,6 +1648,38 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
 # DuckDBBackend
 # ---------------------------------------------------------------------------
 
+# The two totals policies `upsert_session` chooses between. See its docstring:
+# REPLACE is for a caller whose record describes a session's whole life so far
+# (the live path, which accumulates in Python); ACCUMULATE is for a caller whose
+# record describes only what THIS write added (the per-file backfill).
+_SESSION_TOTALS_REPLACE = """
+                    total_cost_usd = EXCLUDED.total_cost_usd,
+                    input_tokens = EXCLUDED.input_tokens,
+                    output_tokens = EXCLUDED.output_tokens,
+                    cache_tokens = EXCLUDED.cache_tokens,
+                    cache_write_tokens = EXCLUDED.cache_write_tokens,
+                    tool_call_count = EXCLUDED.tool_call_count,
+                    error_count = EXCLUDED.error_count,
+"""
+
+_SESSION_TOTALS_ACCUMULATE = """
+                    total_cost_usd = COALESCE(sessions.total_cost_usd, 0.0)
+                                   + COALESCE(EXCLUDED.total_cost_usd, 0.0),
+                    input_tokens = COALESCE(sessions.input_tokens, 0)
+                                 + COALESCE(EXCLUDED.input_tokens, 0),
+                    output_tokens = COALESCE(sessions.output_tokens, 0)
+                                  + COALESCE(EXCLUDED.output_tokens, 0),
+                    cache_tokens = COALESCE(sessions.cache_tokens, 0)
+                                 + COALESCE(EXCLUDED.cache_tokens, 0),
+                    cache_write_tokens = COALESCE(sessions.cache_write_tokens, 0)
+                                       + COALESCE(EXCLUDED.cache_write_tokens, 0),
+                    tool_call_count = COALESCE(sessions.tool_call_count, 0)
+                                    + COALESCE(EXCLUDED.tool_call_count, 0),
+                    error_count = COALESCE(sessions.error_count, 0)
+                                + COALESCE(EXCLUDED.error_count, 0),
+"""
+
+
 class DuckDBBackend:
     """Concrete DuckDB implementation of StorageBackend."""
 
@@ -1390,10 +1742,11 @@ class DuckDBBackend:
                 "request_type, conversation_id, events, billing_account, "
                 "cache_write_tokens, request_params, request_tools, sub_agent_id, "
                 "tenant_id, feature, environment, service_version, commit_sha, "
-                "prompt_template_id, prompt_template_version"
+                "prompt_template_id, prompt_template_version, pricing_source, "
+                "sub_agent_type"
                 ") VALUES "
                 "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
-                "$29,$30,$31,$32,$33,$34,$35)",
+                "$29,$30,$31,$32,$33,$34,$35,$36,$37)",
                 [
                     span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                     span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -1407,6 +1760,7 @@ class DuckDBBackend:
                     span.sub_agent_id,
                     span.tenant_id, span.feature, span.environment, span.service_version,
                     span.commit_sha, span.prompt_template_id, span.prompt_template_version,
+                    span.pricing_source, span.sub_agent_type,
                 ],
             )
 
@@ -1564,13 +1918,37 @@ class DuckDBBackend:
             for r in rows
         ]
 
-    def upsert_session(self, session: SessionRecord) -> None:
+    def upsert_session(
+        self, session: SessionRecord, *, accumulate_totals: bool = False,
+    ) -> None:
+        """Write a session row.
+
+        By default the incoming totals REPLACE the stored ones, because the
+        live path already accumulates in Python (`_build_or_update_session`
+        reads the row, adds the span, writes the new total back) and a second
+        accumulation in SQL would double every live figure.
+
+        `accumulate_totals=True` ADDS them instead, for a caller whose record
+        describes a DELTA rather than a session's whole life. The Claude Code
+        backfill is that caller: a session is split across files sharing one
+        session_id (main thread plus each `subagents/agent-*.jsonl`), so a
+        replacing write per file leaves the row describing only the last file
+        processed — `SUM(spans)` and `sessions.total_cost_usd` then disagree,
+        which is exactly the drift `session_cost_drift` reports. The delta is
+        computed over the spans that write actually INSERTED, so re-running a
+        file whose spans are all already present adds zero and idempotency
+        holds.
+
+        The two SQL bodies differ only in their totals assignments; the
+        interpolated fragment is a module constant, never user data.
+        """
+        totals = _SESSION_TOTALS_ACCUMULATE if accumulate_totals else _SESSION_TOTALS_REPLACE
         # plan_tier: promote unknown → known on conflict; never overwrite a
         # session that already has a known tier (backfill re-runs must not
         # clobber historical tiers when config plan changes).
         with self._write_lock:
             self.conn.execute(
-                """
+                f"""
                 INSERT INTO sessions (
                     session_id, agent_id, conversation_id, started_at, ended_at,
                     status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
@@ -1579,14 +1957,26 @@ class DuckDBBackend:
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                 ON CONFLICT (session_id) DO UPDATE SET
                     ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
-                    status = EXCLUDED.status,
-                    total_cost_usd = EXCLUDED.total_cost_usd,
-                    input_tokens = EXCLUDED.input_tokens,
-                    output_tokens = EXCLUDED.output_tokens,
-                    cache_tokens = EXCLUDED.cache_tokens,
-                    cache_write_tokens = EXCLUDED.cache_write_tokens,
-                    tool_call_count = EXCLUDED.tool_call_count,
-                    error_count = EXCLUDED.error_count,
+                    -- Refuse to downgrade a row the live path already marked
+                    -- 'active' when the incoming write's own last-activity is
+                    -- STALER than what's already stored -- e.g. a backfill/
+                    -- catch-up pass re-parsing a transcript whose on-disk
+                    -- snapshot lags spans the live OTLP path already recorded
+                    -- moments earlier. Only blocks the specific case of
+                    -- (stored='active', incoming!='active', incoming older);
+                    -- a genuinely newer completion always wins, and an
+                    -- explicit close never goes through this path at all
+                    -- (close_session_by_id / close_sessions_by_instance are
+                    -- direct UPDATEs, so they are never subject to this guard).
+                    status = CASE
+                        WHEN sessions.status = 'active'
+                         AND EXCLUDED.status != 'active'
+                         AND COALESCE(sessions.ended_at, sessions.started_at)
+                             > COALESCE(EXCLUDED.ended_at, EXCLUDED.started_at)
+                        THEN sessions.status
+                        ELSE EXCLUDED.status
+                    END,
+                    {totals}
                     plan_tier = CASE
                         WHEN COALESCE(sessions.plan_tier, 'unknown') != 'unknown'
                         THEN sessions.plan_tier
@@ -1847,6 +2237,32 @@ class DuckDBBackend:
                     [session_id, now],
                 )
         return count
+
+    def mark_sessions_completed(self, session_ids: list[str]) -> None:
+        """Correct raw `status='active'` rows to 'completed' for the given ids.
+
+        Used by the periodic zombie sweep (`transcript_sync.
+        sweep_stale_active_sessions`) to write back a terminal status for
+        sessions whose COMPUTED status (`SessionRecord.status_at` /
+        `status_with_transcript_mtime`) already reads as stale, so raw-column
+        consumers (MCP tools, `tj status`, the sessions route, relearn_apply)
+        stop overstating "active" indefinitely.
+
+        `AND status = 'active'` re-checks at write time (belt-and-braces
+        against a race with a concurrent explicit close or live span landing
+        between the sweep's read and this write) and never touches
+        `ended_at`, tokens, or cost -- status only. Idempotent: re-running
+        against ids already corrected (or since closed) is a no-op for them.
+        """
+        if not session_ids:
+            return
+        with self._write_lock:
+            placeholders = ", ".join(f"${i + 1}" for i in range(len(session_ids)))
+            self.conn.execute(
+                f"UPDATE sessions SET status = 'completed' "
+                f"WHERE session_id IN ({placeholders}) AND status = 'active'",
+                session_ids,
+            )
 
     def _trace_filter_where(self, filters: TraceFilters) -> tuple[str, list[object], int]:
         clauses: list[str] = []
@@ -2297,6 +2713,23 @@ class DuckDBBackend:
         ).fetchone()
         return float(result[0]) if result else 0.0
 
+    def get_daily_cost_for_agents(self, agent_ids: list[str], date: date) -> float:
+        """Summed daily cost across a SET of agent_ids for one UTC calendar
+        day — generalizes `get_daily_cost` for a coding-tool GROUP cap
+        (e.g. every `claude-code-<project>` variant), where the ceiling
+        applies to the group's combined spend, not any one member alone.
+        """
+        if not agent_ids:
+            return 0.0
+        placeholders = ", ".join(f"${i + 2}" for i in range(len(agent_ids)))
+        result = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans "
+            f"WHERE agent_id IN ({placeholders}) "
+            "AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $1",
+            [date, *agent_ids],
+        ).fetchone()
+        return float(result[0]) if result else 0.0
+
     def get_session_cost(self, session_id: str) -> float:
         result = self.conn.execute(
             "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans WHERE session_id = $1",
@@ -2315,12 +2748,28 @@ class DuckDBBackend:
 
     # -- issue #309: queries moved off direct db.conn access in callers --
 
-    def update_span_cost(self, span_id: str, cost_usd: float) -> None:
+    def update_span_cost(
+        self, span_id: str, cost_usd: float, pricing_source: str | None = None,
+    ) -> None:
+        """Persist a computed span cost, optionally stamping its provenance.
+
+        `pricing_source` is `None` for callers that only know the dollar
+        figure (existing tests, any future caller that hasn't adopted
+        provenance yet) — in that case the column is left untouched rather
+        than overwritten with NULL, so a span's recorded provenance from an
+        earlier call is never silently erased by a later cost-only update.
+        """
         with self._write_lock:
-            self.conn.execute(
-                "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
-                [cost_usd, span_id],
-            )
+            if pricing_source is not None:
+                self.conn.execute(
+                    "UPDATE spans SET cost_usd = $1, pricing_source = $2 WHERE span_id = $3",
+                    [cost_usd, pricing_source, span_id],
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
+                    [cost_usd, span_id],
+                )
 
     def increment_session_cost(self, session_id: str, delta_usd: float) -> None:
         with self._write_lock:
@@ -2397,7 +2846,13 @@ class DuckDBBackend:
                    COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
                                      THEN cost_usd ELSE 0 END), 0.0) AS cur_cost,
                    COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
-                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost
+                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost,
+                   COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
+                                     THEN input_tokens + output_tokens + cache_tokens
+                                          + cache_write_tokens ELSE 0 END), 0) AS cur_tokens,
+                   COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
+                                     THEN input_tokens + output_tokens + cache_tokens
+                                          + cache_write_tokens ELSE 0 END), 0) AS prev_tokens
             FROM spans
             WHERE (start_time >= $3 AND start_time < $2)
               AND {group_col} IS NOT NULL
@@ -2411,7 +2866,9 @@ class DuckDBBackend:
         ).fetchall()
         return [
             {"group": r[0], "current_cost": float(r[1]), "previous_cost": float(r[2]),
-             "delta": float(r[1]) - float(r[2])}
+             "delta": float(r[1]) - float(r[2]),
+             "current_tokens": int(r[3] or 0), "previous_tokens": int(r[4] or 0),
+             "tokens_delta": int(r[3] or 0) - int(r[4] or 0)}
             for r in rows
         ]
 
