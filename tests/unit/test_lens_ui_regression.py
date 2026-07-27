@@ -549,16 +549,27 @@ def test_meta_caption_class_is_defined(html):
     assert '<div class="meta" style="margin-top:-8px">${outlierNote}</div>' in html
 
 
-def test_trace_detail_costs_route_through_framing(html):
-    # Waterfall bar label, tooltip line, and the span-detail panel all reframe —
-    # no bare per-span fmtCost (the bar label + tooltip both used s.cost_usd).
-    assert "fmtCost(s.cost_usd)" not in html
-    assert "${fmtCost(sel.cost_usd)}" not in html
-    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
-    # The span-detail panel "Cost" is per-item → fmtPerItemCost (#249).
-    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html
-    # Trace detail pulls the framing block off the /traces/{id} response.
-    assert "setFraming(d.framing || null)" in html
+def _trace_detail_src(html: str) -> str:
+    start = html.index("function TraceDetailView")
+    end = html.index("function fmtFramedDollar", start)
+    return html[start:end]
+
+
+def test_trace_detail_is_token_first_with_no_framing_branch(html):
+    """The trace detail/waterfall page is part of the same Traces feature as
+    the list (reached by clicking a row there); it now shows token totals for
+    every account, matching the list's own display convention -- a property
+    of how traces are presented, not a consequence of plan tier. No bare
+    fmtCost either (that was the original #187/#249 bug: raw dollars with no
+    framing at all). TraceDetailView no longer fetches/stores framing, since
+    nothing in it reads pricing_mode any more."""
+    view = _no_comments(_trace_detail_src(html))
+    assert "fmtCost(s.cost_usd)" not in view
+    assert "fmtCost(sel.cost_usd)" not in view
+    assert "fmtFramedDollar(" not in view
+    assert "fmtPerItemCost(" not in view
+    assert "framing" not in view
+    assert "setFraming" not in view
 
 
 # --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
@@ -888,43 +899,53 @@ def test_analytics_leaderboard_shows_total_and_gap(html):
     assert "have a ${dimName}" in html
 
 
-# --- #215: cost-annotated trace waterfall ---------------------------------- #
+# --- #215: token-annotated trace waterfall ---------------------------------- #
 def test_trace_waterfall_cost_summary(html):
-    # A cost-first trace summary header (total cost + tokens + duration + spans).
+    """A token-first trace summary header (total + tokens + duration + spans).
+    A single trace's total is per-item, not a window aggregate -- per #249 it
+    is a plain token total (no "% of cycle" window-aggregate category error),
+    matching the Traces list's own unconditional token display -- a property
+    of how traces are presented, not a consequence of plan tier. This site
+    used to route through fmtPerItemCost (tokens for subscription/local,
+    dollars for api/unknown); it is now unconditional, like the list."""
     assert "wf-summary" in html
-    assert "Total cost" in html
+    assert "Total cost (tokens)" in html
     assert "wfTotalCostFramed" in html
-    # A single trace's total is per-item, not a window aggregate — per #249 it
-    # routes through fmtPerItemCost (tokens for subscription/local), not the
-    # window-level fmtFramedDollar "% of cycle".
-    assert "const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html
+    view = _trace_detail_src(html)
+    assert "const wfTotalCostFramed = fmtTokens(wfTotalInOut) + ' tok';" in view
 
 
-def test_trace_waterfall_per_span_cost_token_annotation(html):
-    # Per-span cost + tokens annotation column with a magnitude bar (not just the
-    # hover tooltip), so the timeline reads cost-first.
-    assert "wf-cost-bar" in html
-    assert "wf-cost-fill" in html
-    assert 'class="wf-cost-val"' in html
-    assert 'class="wf-cost-tok"' in html
+def test_trace_waterfall_per_span_token_annotation(html):
+    """Per-span token annotation column with a magnitude bar (not just the
+    hover tooltip). The sibling dollar annotation (.wf-cost-val) that used to
+    sit beside it is gone: this page shows tokens for every account now, so
+    that span always rendered empty and was removed as dead markup along
+    with its now-unused CSS rule."""
+    view = _trace_detail_src(html)
+    assert "wf-cost-bar" in view
+    assert "wf-cost-fill" in view
+    assert 'class="wf-cost-val"' not in view
+    assert 'class="wf-cost-tok"' in view
     # tokens summed per span and shown in the annotation
-    assert "const spanTokens = s =>" in html
-    assert "wf-cost-tok\">${sTok ? fmtTokens(sTok)" in html
+    assert "const spanTokens = s =>" in view
+    assert "wf-cost-tok\">${sTok ? fmtTokens(sTok)" in view
+    assert ".wf-cost-val {" not in html
 
 
-def test_trace_waterfall_magnitude_respects_framing(html):
-    """The magnitude bar (and summary) read on TOKEN volume when dollars are
-    suppressed — the suppression decision comes from the server framing
-    block, never re-derived in JS. LOCAL still suppresses (no marginal cost
-    to price at all). Subscription used to suppress here too; that
-    differentiation is gone by product decision (tj does not differentiate
-    subscription-billed from API-billed users) -- this site was not in the
-    founder's named list of four `useTokens` duplicates to convert, but it is
-    the exact same pattern on the trace detail/waterfall view (part of the
-    same Traces feature the list's Cost column belongs to), so it is
-    converted the same way for consistency; flagged in the session report."""
-    assert "const wfUseTokens = !!framing && framing.pricing_mode === 'local';" in html
-    assert "const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0)" in html
+def test_trace_waterfall_magnitude_is_token_first_unconditionally(html):
+    """The magnitude bar (and summary) read on TOKEN volume for every
+    account, with no branch on pricing_mode at all -- matching the Traces
+    list's own unconditional token display, since the waterfall is part of
+    the same Traces feature (reached by clicking a row in the list). This
+    site was not in the founder's named list of four `useTokens` duplicates
+    to convert; it was first converted to LOCAL-only (mirroring the other
+    four), then corrected to unconditional tokens once it was confirmed the
+    waterfall belongs to the Traces surface, not the general
+    subscription-vs-API dollar conversion -- see the session report."""
+    view = _no_comments(_trace_detail_src(html))
+    assert "wfUseTokens" not in view
+    assert "pricing_mode" not in view
+    assert "const wfMagOf = s => spanTokens(s);" in view
 
 
 # --- #217: KPI tiles → sparkline + period-over-period delta ----------------- #
@@ -1217,18 +1238,20 @@ def test_per_item_cost_helper_renders_tokens_for_subscription_local(html):
 
 
 def test_per_item_cost_surfaces_use_the_helper_not_framed_dollar(html):
-    # Every per-item dollar cell — Traces list, Status cards, span-detail, and
-    # the per-trace total — uses fmtPerItemCost, not the window-aggregate
-    # fmtFramedDollar. Guards against a regression reintroducing "% of cycle" at
-    # per-row granularity (the #249 bug: "466.7% of cycle").
-    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html        # traces list
+    """Every per-item dollar cell that still shows a dollar figure — Status
+    cards' "Cost today" — uses fmtPerItemCost, not the window-aggregate
+    fmtFramedDollar. Guards against a regression reintroducing "% of cycle"
+    at per-row granularity (the #249 bug: "466.7% of cycle"). The Traces
+    list, the trace detail/waterfall's span-detail panel, and its per-trace
+    total no longer call fmtPerItemCost at all: the whole Traces feature area
+    (list, detail, waterfall) shows unconditional token totals now (a display
+    convention, not a plan consequence), bypassing the tokens-vs-dollars
+    helper entirely rather than routing through it."""
     assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html  # status card
-    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html     # span detail
-    assert "fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html                # trace total
-    # these per-item surfaces must NOT call fmtFramedDollar on the row value
-    assert "${fmtFramedDollar(t.cost_usd, framing)}" not in html
     assert "${fmtFramedDollar(a.cost_today, data.framing)}" not in html
-    assert "${fmtFramedDollar(sel.cost_usd, framing)}" not in html
+    view = _trace_detail_src(html)
+    assert "fmtPerItemCost(" not in view
+    assert "fmtFramedDollar(" not in view
 
 
 def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
@@ -1251,15 +1274,19 @@ def test_waterfall_name_in_fixed_column_not_on_bar(html):
 
 
 def test_waterfall_bars_sized_by_magnitude_with_mode_toggle(html):
-    # Bars size by cost/token magnitude by default (the only thing that renders
-    # on duration-less backfill), with a cost/tokens/duration toggle. Cost-first
-    # default; tokens when $ is suppressed.
+    """Bars size by token magnitude by default (the only thing that renders
+    on duration-less backfill), with a tokens/duration toggle. Tokens is the
+    only magnitude mode now -- the "By cost" toggle option is gone along with
+    the dollar magnitude/annotation it drove, since this page shows tokens
+    for every account (no plan-based choice to offer any more)."""
     assert "const [wfMode, setWfMode] = useState(null)" in html
-    assert "const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost'" in html
-    assert "const magForMode = s =>" in html
-    assert "setWfMode('cost')" in html
-    assert "setWfMode('tokens')" in html
-    assert "setWfMode('duration')" in html
+    view = _trace_detail_src(html)
+    assert "const wfMode2 = wfMode || 'tokens';" in view
+    assert "const magForMode = s =>" in view
+    assert "setWfMode('cost')" not in view
+    assert "setWfMode('tokens')" in view
+    assert "setWfMode('duration')" in view
+    assert "By cost" not in view
 
 
 def test_waterfall_has_minimum_bar_width(html):
@@ -1292,10 +1319,15 @@ def test_waterfall_status_icons_and_kind_legend(html):
 
 
 def test_waterfall_cost_framing_preserved(html):
-    # Cost-first but plan-tier-safe: the per-span value still routes through the
-    # server framing block, never a raw fmtCost (guards #187/#249 regressions).
-    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
-    assert "fmtCost(s.cost_usd)" not in html
+    """Token-first, no framing branch at all: the per-span value used to
+    route through the server framing block (fmtFramedDollar); it is now an
+    unconditional token total for every account, matching the Traces list.
+    Guards against a regression reintroducing a raw fmtCost (the original
+    #187/#249 bug) OR a reintroduced framing/pricing_mode branch."""
+    view = _trace_detail_src(html)
+    assert "fmtCost(s.cost_usd)" not in view
+    assert "fmtFramedDollar(" not in view
+    assert "const label = fmtTokens(spanTokens(s)) + ' tok';" in view
 
 
 # --- #246: cache-savings chart redesign (answer-first, single-axis bars) ---- #

@@ -664,8 +664,7 @@ table.archive-list .a-id { color: var(--text); }
 .wf-cost-bar { width: 34px; height: 8px; background: var(--border); border-radius: 2px;
   overflow: hidden; flex-shrink: 0; }
 .wf-cost-fill { display: block; height: 100%; background: var(--accent); }
-.wf-cost-val { color: var(--text); min-width: 50px; text-align: right; }
-.wf-cost-tok { color: var(--text-dim); min-width: 46px; text-align: right; }
+.wf-cost-tok { color: var(--text); min-width: 46px; text-align: right; }
 
 /* #244: fixed span-name column (never clipped onto the bar), cost/token
    magnitude bars, status icons, kind legend, per-span offset + value labels. */
@@ -5318,10 +5317,11 @@ function dedup(traces) {
 // ============================
 function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
-  const [framing, setFraming] = useState(null);
   const [selected, setSelected] = useState(null);
-  // Waterfall bar-sizing mode (#244): cost / tokens / duration. null = follow
-  // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
+  // Waterfall bar-sizing mode (#244): tokens / duration. Tokens is the
+  // default and the only magnitude mode -- this page shows token totals for
+  // every account, matching the Traces list's own display convention (a
+  // property of how traces are presented, not a consequence of plan tier).
   const [wfMode, setWfMode] = useState(null);
   // Rank spans WITHIN this trace by cost (trace-cost-ranking): span_ids of the
   // costliest spans, most expensive first, so a runaway single span is
@@ -5332,7 +5332,7 @@ function TraceDetailView({ traceId }) {
   // tracked by span_id, so replacing the spans array preserves it.
   const load = useCallback(() => {
     api('/traces/' + traceId)
-      .then(d => { setSpans(d.spans || []); setFraming(d.framing || null); setTopCostSpanIds(d.top_cost_span_ids || []); })
+      .then(d => { setSpans(d.spans || []); setTopCostSpanIds(d.top_cost_span_ids || []); })
       .catch(() => {});
   }, [traceId]);
 
@@ -5370,34 +5370,28 @@ function TraceDetailView({ traceId }) {
   const rows = flatten(roots, 0);
   const nameW = 220;
 
-  // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
-  // (local -- no marginal cost to price; subscription no longer suppresses,
-  // product decision), the magnitude bar + summary read on TOKEN volume, never
-  // raw spend — the suppression decision comes from the server framing block, not
-  // re-derived here. Tokens are never suppressed, so they always annotate.
+  // Token-first annotation (#215): the magnitude bar + summary read on TOKEN
+  // volume for every account, matching the Traces list's own Cost column --
+  // a display convention for how traces are presented, not a consequence of
+  // plan tier, so there is no framing/pricing_mode branch here at all.
   const spanTokens = s => (s.input_tokens || 0) + (s.output_tokens || 0) + (s.cache_tokens || 0) + (s.cache_write_tokens || 0);
-  const wfUseTokens = !!framing && framing.pricing_mode === 'local';
-  const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
+  const wfMagOf = s => spanTokens(s);
   const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
 
-  // #244 bar sizing: cost-first by default (the differentiator + the only mode
-  // that works on duration-less backfilled spans), with a tokens/duration
-  // toggle. Cost is never offered when $ is suppressed — tokens leads there.
-  const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost';
-  const wfMode2 = wfMode || wfDefaultMode;
+  // #244 bar sizing: tokens by default (the only magnitude mode -- also the
+  // only one that works on duration-less backfilled spans), with a duration
+  // toggle alongside it.
+  const wfMode2 = wfMode || 'tokens';
   const wfHasDuration = rows.some(r => r.span.duration_ms != null && r.span.duration_ms > 0);
-  const magForMode = s => wfMode2 === 'duration' ? (s.duration_ms || 0)
-    : wfMode2 === 'tokens' ? spanTokens(s) : (s.cost_usd || 0);
+  const magForMode = s => wfMode2 === 'duration' ? (s.duration_ms || 0) : spanTokens(s);
   const maxMagMode = Math.max(0, ...rows.map(r => magForMode(r.span)));
 
-  const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
   const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
-  // A single trace's total is per-item, not a window aggregate (#249) — render
-  // it as in+out TOKENS for local (no marginal cost to price at all), dollars
-  // for api/subscription/unknown. ("% of cycle" for one trace is the same
-  // category error as the per-row cells.)
+  // A single trace's total is per-item and token-first, same as every other
+  // per-span figure on this page (#249) -- no window-aggregate "% of cycle"
+  // category error, and no dollar figure at all here any more.
   const wfTotalInOut = spans.reduce((a, s) => a + _costVal(s, true), 0);
-  const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing);
+  const wfTotalCostFramed = fmtTokens(wfTotalInOut) + ' tok';
 
   const sel = selected ? spans.find(s => s.span_id === selected) : null;
 
@@ -5410,7 +5404,7 @@ function TraceDetailView({ traceId }) {
     <div class="page-title">Trace details for ${agentName}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
     <div class="wf-summary">
-      <span>Total cost <b>${wfTotalCostFramed}</b></span>
+      <span>Total cost (tokens) <b>${wfTotalCostFramed}</b></span>
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
       <span>Duration <b>${fmtDur(traceDur)}</b></span>
       <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
@@ -5422,9 +5416,10 @@ function TraceDetailView({ traceId }) {
         ${topCostSpanIds.map((sid, i) => {
           const s = byId[sid];
           if (!s) return null;
-          // Plan-tier framed, same as every other per-span figure in this view
-          // (#187/#249): dollars for api/unknown, tokens when $ is suppressed.
-          const label = wfUseTokens ? fmtTokens(spanTokens(s)) + ' tok' : fmtFramedDollar(s.cost_usd, framing);
+          // Token-first, same as every other per-span figure on this page
+          // (#187/#249) -- the badge ranks by cost server-side (the
+          // underlying signal), but the label always shows the token total.
+          const label = fmtTokens(spanTokens(s)) + ' tok';
           return html`<span class="badge badge-warning" style="cursor:pointer" title=${'Rank #' + (i + 1) + ' by cost in this trace. Click to jump to it below.'} onClick=${() => setSelected(sid)}>#${i + 1} ${spanPrimaryName(s)} · ${label}</span>`;
         })}
       </div>
@@ -5437,7 +5432,6 @@ function TraceDetailView({ traceId }) {
         <span><i class="wf-kind-dot other"></i>Other</span>
       </div>
       <div class="view-toggle">
-        ${!wfUseTokens ? html`<button class=${wfMode2 === 'cost' ? 'active' : ''} onClick=${() => setWfMode('cost')}>By cost</button>` : null}
         <button class=${wfMode2 === 'tokens' ? 'active' : ''} onClick=${() => setWfMode('tokens')}>By tokens</button>
         <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency — bars will be flat'}>By duration</button>
       </div>
@@ -5446,7 +5440,7 @@ function TraceDetailView({ traceId }) {
       <div class="wf-name" style="width:${nameW}px;padding-left:8px">Span</div>
       <div class="wf-track">${wfMode2 === 'duration' ? 'Timeline' : ('Magnitude · by ' + wfMode2)}</div>
       <div class="wf-offset">Offset</div>
-      <div class="wf-cost">Cost / tokens</div>
+      <div class="wf-cost">Tokens</div>
     </div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
@@ -5471,14 +5465,6 @@ function TraceDetailView({ traceId }) {
         width = Math.max(1.5, Math.min(width, 100 - left));
         const barEnd = left + width;
         const valFlip = barEnd > 72;
-        // Plan-tier framed cost (#187): local \u2192 "\u2014" (suppressed, no
-        // marginal cost to price at all); api/subscription \u2192 "$X" (product
-        // decision: tj does not differentiate subscription-billed from
-        // API-billed users).
-        const costFramed = fmtFramedDollar(s.cost_usd, framing);
-        // Per-SPAN cost is per-item (#249): the token column already conveys
-        // per-span magnitude, so only show the $ value when it's not suppressed.
-        const costShown = !wfUseTokens && s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
         const sTok = spanTokens(s);
         const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
         // Value printed past the bar end reflects the active mode. Duration is
@@ -5486,9 +5472,7 @@ function TraceDetailView({ traceId }) {
         const durMissing = wfMode2 === 'duration' && s.duration_ms == null;
         const valLabel = wfMode2 === 'duration'
           ? (durMissing ? '\u2014' : fmtDur(s.duration_ms))
-          : wfMode2 === 'tokens'
-            ? (sTok ? fmtTokens(sTok) : '')
-            : (costShown ? costFramed : '');
+          : (sTok ? fmtTokens(sTok) : '');
         const valTitle = durMissing ? 'Duration not captured in backfilled data' : '';
         const absStart = isFinite(traceStart) && s.start_time ? new Date(s.start_time).toLocaleString() : '';
         const offsetLabel = '+' + fmtDur(st);
@@ -5503,7 +5487,6 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (!wfUseTokens && s.cost_usd != null && costFramed !== '\u2014') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
@@ -5522,7 +5505,6 @@ function TraceDetailView({ traceId }) {
             <div class="wf-offset" title=${absStart}>${offsetLabel}</div>
             <div class="wf-cost">
               <div class="wf-cost-bar"><div class="wf-cost-fill" style="width:${wfFrac.toFixed(1)}%"></div></div>
-              <span class="wf-cost-val">${costShown ? costFramed : ''}</span>
               <span class="wf-cost-tok">${sTok ? fmtTokens(sTok) : ''}</span>
             </div>
           </div>
@@ -5544,7 +5526,7 @@ function TraceDetailView({ traceId }) {
           ${sel.output_tokens != null ? html`<span class="dk">Output tokens</span><span class="dv">${fmtTokens(sel.output_tokens)}</span>` : null}
           ${sel.cache_tokens ? html`<span class="dk">Cache read</span><span class="dv">${fmtTokens(sel.cache_tokens)}</span>` : null}
           ${sel.cache_write_tokens ? html`<span class="dk">Cache write</span><span class="dv">${fmtTokens(sel.cache_write_tokens)}</span>` : null}
-          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}</span>` : null}
+          ${sel.cost_usd != null ? html`<span class="dk">Tokens (total)</span><span class="dv">${fmtTokens(_costVal(sel, true))} tok</span>` : null}
           ${sel.agent_id ? html`<span class="dk">Agent</span><span class="dv">${sel.agent_id}</span>` : null}
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
           ${sel.session_id ? html`<span class="dk">Session</span><span class="dv">${sel.session_id}</span>` : null}
