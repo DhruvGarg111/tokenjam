@@ -258,3 +258,62 @@ def test_the_day_bucket_sql_pins_utc_explicitly():
     non-UTC host the "day" would be a local day — which straddles UTC midnight
     by the offset, defeating the guarantee above."""
     assert "AT TIME ZONE 'UTC'" in SPAN_UTC_DAY_SQL
+
+
+# --------------------------------------------------------------------------
+# The required-instant rule, and its one labelled exception
+# --------------------------------------------------------------------------
+
+def test_only_the_labelled_call_site_prices_at_now():
+    """No analyzer may quietly reacquire a bare `get_rates`.
+
+    The defect this whole module addresses was invisible precisely because
+    `get_rates(provider, model)` is a perfectly ordinary-looking call whose
+    `at=None` default silently means "today". A new one would reintroduce it
+    with nothing to notice.
+
+    `cache_efficacy.estimate_cache_recoverable` is the sanctioned exception: its
+    row is a whole-window aggregate that is also the UI's display row, so it
+    prices at now and says so in its docstring. If you are adding a second
+    exception, the bar is a comment explaining why a real instant cannot be had
+    — not an entry in this list.
+    """
+    import re
+    from pathlib import Path
+
+    import tokenjam.core.optimize as optimize_pkg
+
+    allowed = {("cache_efficacy.py", "estimate_cache_recoverable")}
+    root = Path(optimize_pkg.__file__).parent
+
+    offenders: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "span_pricing.py":  # defines the wrappers
+            continue
+        source = path.read_text(encoding="utf-8")
+        enclosing = "<module>"
+        for lineno, line in enumerate(source.splitlines(), 1):
+            if m := re.match(r"\s*def\s+(\w+)", line):
+                enclosing = m.group(1)
+            code = line.split("#", 1)[0]
+            if re.search(r"\bget_rates\s*\(", code) and "at=" not in code:
+                if (path.name, enclosing) not in allowed:
+                    offenders.append(f"{path.name}:{lineno} in {enclosing}()")
+
+    assert not offenders, (
+        "bare get_rates (no at=) under core/optimize — these price PAST traffic "
+        f"at today's rate: {offenders}. Route through span_pricing, which makes "
+        "the instant a required argument."
+    )
+
+
+def test_the_sanctioned_exception_still_states_its_limitation():
+    """The exception is only acceptable while it is labelled. A silent one is
+    the original bug wearing a test's approval."""
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        estimate_cache_recoverable,
+    )
+
+    doc = estimate_cache_recoverable.__doc__ or ""
+    assert "KNOWN LIMITATION" in doc
+    assert "today" in doc.lower()

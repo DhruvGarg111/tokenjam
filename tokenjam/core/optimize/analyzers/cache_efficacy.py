@@ -24,13 +24,12 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
-from tokenjam.core.optimize.span_pricing import blended_rates, rates_at
+from tokenjam.core.optimize.span_pricing import blended_rates
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import STANDARD_VARIANT, ModelRates
+from tokenjam.core.pricing import STANDARD_VARIANT, ModelRates, get_rates
 
 # Minimum input volume to surface a recommendation. Below this, the
 # absolute savings are negligible regardless of efficacy.
@@ -65,12 +64,6 @@ class CacheEfficacyRow:
     efficacy:      float           # cache_tokens / (input_tokens + cache_tokens)
     support:       str             # full | best_effort | unsupported
     flagged:       bool            # surfaced as a recommendation candidate
-    # Earliest span in this (provider, model) group — the instant the row is
-    # priced at. A row is a whole-window aggregate with no instant of its own,
-    # and the pricing table has a time axis; without this the row would price at
-    # today's list rate no matter how old its traffic is. Defaulted for
-    # round-trip of payloads written before the field existed.
-    priced_at:     datetime | None = None
 
 
 # Realistic cache-read efficacy ceiling. The recoverable estimate measures the
@@ -112,8 +105,6 @@ class CacheEfficacyFinding:
 
 def estimate_cache_recoverable(
     rows: list[CacheEfficacyRow],
-    *,
-    window_start: datetime | None = None,
 ) -> tuple[float | None, int | None]:
     """Estimate recoverable spend from closing the cache-efficacy gap.
 
@@ -123,30 +114,32 @@ def estimate_cache_recoverable(
     Returns (usd, tokens) summed across rows, or (None, None) when no row has a
     caching dimension to recover against.
 
-    Each row is priced at its OWN earliest traffic (``priced_at``), not at
-    today's list rate — the pricing table has a time axis and this analyzer
-    looks backwards. A row is a whole-window aggregate, so this is the "window
-    bound nearest the traffic" fallback the convention in
-    `tokenjam.core.optimize.span_pricing` sanctions rather than the per-span
-    ideal: exact whenever the row's window holds one rate, and biased to the
-    older rate when it does not.
+    KNOWN LIMITATION — this prices at TODAY'S RATE, not at the rate that billed
+    the traffic. It is the one figure under `core/optimize` that still does, and
+    it is deliberate.
 
-    A row written before ``priced_at`` existed falls back to ``window_start``,
-    then to the earliest instant any sibling row carries (they all come from one
-    window). A row with none of the three is SKIPPED, not priced at today's
-    rate: an old payload should lose a term, not silently gain a wrong one.
+    A ``CacheEfficacyRow`` is a whole-window aggregate: one row per (provider,
+    model) covering every span in the window, with no instant of its own. The
+    per-span convention in :mod:`tokenjam.core.optimize.span_pricing` therefore
+    cannot be applied without splitting the row per rate era — and this row is
+    also the UI's display row, so splitting it is a change with its own blast
+    radius rather than a pricing fix. Carrying the group's EARLIEST span instead
+    was tried and rejected: a real timestamp stretched over 30 days of traffic
+    is still an approximation, and one that reads as principled while being
+    arbitrary is worse than an honest "now". So: price at now, and say so here.
+
+    What this costs: while no rate changes inside the analyzed window (true of
+    every window today) this is exact. Once one does, this figure prices the
+    whole window at the post-change rate. An era-exact version is filed
+    separately.
     """
-    fallback = window_start or min(
-        (r.priced_at for r in rows if r.priced_at is not None), default=None,
-    )
     total_usd = 0.0
     total_tokens = 0
     any_priced = False
     for r in rows:
-        at = r.priced_at or fallback
-        if at is None:
-            continue
-        rates = rates_at(r.provider, r.model, at)
+        # No `at=` — see the KNOWN LIMITATION above. This is the deliberate
+        # exception to the required-instant rule, not an overlooked call site.
+        rates = get_rates(r.provider, r.model)
         if rates is None or rates.cache_read_per_mtok <= 0:
             continue
         rate_delta = rates.input_per_mtok - rates.cache_read_per_mtok
@@ -185,8 +178,7 @@ def _compute_rows(
     rows = conn.execute(
         f"SELECT provider, model, "
         f"COALESCE(SUM(input_tokens), 0) AS in_tok, "
-        f"COALESCE(SUM(cache_tokens), 0) AS cache_tok, "
-        f"MIN(start_time) AS priced_at "
+        f"COALESCE(SUM(cache_tokens), 0) AS cache_tok "
         f"FROM spans WHERE {where} "
         f"GROUP BY provider, model "
         f"ORDER BY in_tok + cache_tok DESC",
@@ -194,7 +186,7 @@ def _compute_rows(
     ).fetchall()
 
     result: list[CacheEfficacyRow] = []
-    for provider, model, in_tok, cache_tok, priced_at in rows:
+    for provider, model, in_tok, cache_tok in rows:
         in_tok = int(in_tok or 0)
         cache_tok = int(cache_tok or 0)
         total = in_tok + cache_tok
@@ -216,7 +208,6 @@ def _compute_rows(
             efficacy=round(efficacy, 4),
             support=support,
             flagged=flagged,
-            priced_at=priced_at,
         ))
     return result
 
@@ -763,10 +754,7 @@ def run(ctx: AnalyzerContext) -> None:
     )
     if not rows and not uncached and not thrash and not lookback:
         return
-    rec_usd, rec_tokens = (
-        estimate_cache_recoverable(rows, window_start=ctx.since)
-        if rows else (None, None)
-    )
+    rec_usd, rec_tokens = estimate_cache_recoverable(rows) if rows else (None, None)
     ctx.report.findings["cache"] = CacheEfficacyFinding(
         rows=rows,
         flagged=[r for r in rows if r.flagged],

@@ -57,11 +57,8 @@ def _report():
         estimate_basis="downsize basis",
     )
     cache = CacheEfficacyFinding(
-        # Dated: estimate_cache_recoverable prices a row at its own instant, so
-        # an undated row contributes no dollar figure at all.
         flagged=[CacheEfficacyRow("anthropic", "claude-sonnet-5", 100_000, 5_000,
-                                  0.05, "full", True,
-                                  priced_at=utcnow() - timedelta(days=1))],
+                                  0.05, "full", True)],
         past_overspend_usd=1.2, estimate_basis="cache basis",
     )
     trim = PromptBloatFinding(

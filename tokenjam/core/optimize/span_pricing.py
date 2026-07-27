@@ -43,9 +43,21 @@ span, which is what :func:`rates_in_window` is for.
 
 A caller that genuinely holds no per-span timestamp — an already-aggregated SQL
 row — must widen its query to carry one rather than reach for a stand-in date.
-If that is impossible, the honest fallback is the window bound nearest the
-traffic, passed explicitly at the call site with a comment saying why; it is
-never ``None``.
+Usually that is one line: group by ``SPAN_UTC_DAY_SQL`` as well and select
+``MIN(start_time)`` per bucket.
+
+**Never invent an instant.** No window midpoint, no ``until``, no
+"representative" date. An approximated ``at=`` is worse than an honest "now",
+because it reads as principled while being arbitrary. Where a real per-span (or
+per-bucket) instant genuinely cannot be had, price at NOW and say so at the call
+site — a stated limitation someone can find and fix beats a plausible-looking
+number nobody questions.
+
+There is exactly one such site, and it is labelled: ``cache_efficacy
+.estimate_cache_recoverable``, whose row is a whole-window aggregate that is
+also the UI's display row, so splitting it per rate era is a change with its own
+blast radius rather than a pricing fix. Everything else here takes a real
+instant.
 
 
 AGGREGATES THAT MULTIPLY A TOTAL BY A RATE
