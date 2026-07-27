@@ -153,8 +153,7 @@ _RATIO_TARGET = (
     "a saving offered on one could never be realized. The per-file reduction "
     "assumes prose compresses to {pct:.0f}% of its words, which is the TARGET the "
     "rewriter is asked for — NOT a measured outcome. Nothing enforces it: there "
-    "is no retry and no gate on hitting the target, and observed rewrites have "
-    "delivered materially less reduction than asked. No verified rewrite sample "
+    "is no retry and no gate on hitting the target. No verified rewrite sample "
     "exists here yet ({samples:,} usable so far, {needed:,} needed), so this "
     "figure is an upper bound on the reduction half and should be read as one. "
     "It is replaced by the measured ratio automatically once enough rewrites "
@@ -369,8 +368,11 @@ class SummarizeFinding:
     #: The prose ratio behind every per-file reduction here, and whether it was
     #: MEASURED from verified rewrites on this machine or is the target the
     #: rewriter is merely asked for. The distinction is load-bearing: nothing
-    #: enforces the target, and observed rewrites deliver materially less, so an
-    #: unobserved figure is an upper bound rather than an expectation.
+    #: enforces the target, and rewrites observed while building this delivered
+    #: materially less than it, so an unobserved figure is an upper bound rather
+    #: than an expectation. That framing stays internal — the user-facing basis
+    #: says the target is unverified without asserting anything about rewrites
+    #: on THEIR machine, where by construction none have happened yet.
     prose_ratio: float = DEFAULT_TARGET_RATIO
     prose_ratio_observed: bool = False
     #: Structure-checked rewrites the ratio was derived from (0 when assumed).
@@ -395,9 +397,10 @@ class _LoadProfile:
 
     ``sessions_total`` is every DISTINCT session in the window (what a
     global-scope file is loaded by) — counted once across the whole window, not
-    summed from the per-``agent_id`` groups below, where a session that touched
-    two agent_ids appears in both and inflates the total (measured at 22% on a
-    real 30-day corpus, applied to every global candidate).
+    summed from the per-``agent_id`` groups below. Summing them was the defect:
+    a session that touched two repos appears in both groups, so every
+    multi-repo session was counted once per repo and inflated the window total
+    that every global-scope candidate is priced against.
     ``sessions_by_repo``/``calls_by_repo`` narrow that for a project-scope
     file; those per-repo counts stay per-``agent_id`` on purpose — a session
     that touched two repos really does load both repos' `CLAUDE.md`.
