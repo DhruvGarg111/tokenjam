@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
@@ -350,8 +350,11 @@ async def get_cost_components(
     subscription/local users see token-share, not raw dollars."""
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
 
     comp = _component_costs(conn, agent_id, since_dt, until_dt)
@@ -434,8 +437,11 @@ async def get_cost_cache(
     were expanded — never conflated, never called "saved" (Critical Rule 14)."""
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
 
     block = _cache_series(conn, agent_id, since_dt, until_dt)
@@ -539,8 +545,11 @@ async def get_cost(
 ) -> dict:
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     filters = CostFilters(
         agent_id=agent_id,
         since=since_dt,
@@ -619,8 +628,11 @@ async def get_cost_tenants(
     """
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
     end_dt = until_dt or utcnow()
 

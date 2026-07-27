@@ -347,6 +347,21 @@ async def test_get_traces_returns_list(client):
     assert len(data["traces"]) >= 1
 
 
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_get_traces_malformed_since_returns_400_not_500(client, bad_since):
+    """A malformed --since must degrade to a helpful 400, matching /optimize's
+    existing try/except pattern — not a bare 500 from an unhandled ValueError."""
+    resp = await client.get("/api/v1/traces", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
+async def test_get_traces_malformed_until_returns_400_not_500(client):
+    resp = await client.get("/api/v1/traces", params={"until": "abc"})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
 async def test_get_traces_returns_total_count_for_pagination(db, client):
     for idx in range(3):
         db.insert_span(make_llm_span(agent_id="a", trace_id=f"trace-{idx}"))
@@ -465,6 +480,19 @@ async def test_get_cost_returns_aggregated_rows(client):
     data = resp.json()
     assert "rows" in data
     assert "total_cost_usd" in data
+
+
+@pytest.mark.parametrize("path", [
+    "cost", "cost/components", "cost/cache", "cost/tenants",
+])
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_cost_endpoints_malformed_since_returns_400_not_500(client, path, bad_since):
+    """Every /cost* endpoint parses --since the same way; all four must
+    degrade to a helpful 400, matching /optimize's existing try/except
+    pattern, not a bare 500 from an unhandled ValueError."""
+    resp = await client.get(f"/api/v1/{path}", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
 
 
 async def test_trace_detail_includes_cache_write_tokens(db, client):
@@ -874,6 +902,15 @@ async def test_get_alerts_returns_list(client):
     data = resp.json()
     assert "alerts" in data
     assert isinstance(data["alerts"], list)
+
+
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_get_alerts_malformed_since_returns_400_not_500(client, bad_since):
+    """A malformed --since must degrade to a helpful 400, matching /optimize's
+    existing try/except pattern — not a bare 500 from an unhandled ValueError."""
+    resp = await client.get("/api/v1/alerts", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
 
 
 async def test_get_tools_returns_list(client):
