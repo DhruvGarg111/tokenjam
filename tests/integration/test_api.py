@@ -493,6 +493,22 @@ async def test_cost_rows_carry_cache_tokens(db, client):
     assert data["total_cache_write_tokens"] == 209000
 
 
+async def test_cost_total_tokens_includes_both_cache_types(db, client):
+    """`total_tokens` must sum all four token types, not just input+output.
+
+    Before the fix, `total_tokens` was `input_tokens + output_tokens` only,
+    which on a cache-heavy corpus undercounted by roughly two orders of
+    magnitude (a ~99.6% undercount was observed live: 9,964,627 vs the
+    matching /optimize window's 2,280,025,819 over the same 24h window).
+    """
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    data = (await client.get("/api/v1/cost?group_by=model")).json()
+    assert data["total_tokens"] == 2 + 465 + 243597 + 209000
+
+
 async def test_cost_includes_window_series_for_chart(client):
     """/api/v1/cost carries a window-bucketed series (per bucket+agent+model)
     plus the bucket size and window bounds so the chart can span the full

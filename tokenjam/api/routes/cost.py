@@ -553,7 +553,13 @@ async def get_cost(
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)
-    total_tokens = sum(r.input_tokens + r.output_tokens for r in rows)
+    # All four token types, always (Cache token types in aggregates, root
+    # CLAUDE.md): omitting cache_tokens/cache_write_tokens understates the
+    # true total by an order of magnitude on a cache-heavy corpus.
+    total_tokens = sum(
+        r.input_tokens + r.output_tokens + r.cache_tokens + r.cache_write_tokens
+        for r in rows
+    )
 
     # Plan-tier framing block — single source shared with the CLI (#110). Lets
     # the local web UI render the same suppressed/qualified dollar figures.
