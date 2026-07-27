@@ -1,9 +1,9 @@
 """Every model-name form a real agent run emits must resolve to a real rate.
 
-A benchmark replay of nine real agent runs (21,562 LLM calls across nine
-distinct model strings) found the cost figures wrong by 5-30x for seven of the
-nine models. Nothing was wrong with the arithmetic — the lookup simply never
-found the row. Two structural gaps produced all seven:
+A benchmark replay of nine real agent runs (21,562 LLM calls) found the cost
+figures wrong by 5-30x for seven of the nine model strings its per-model cost
+table breaks out. Nothing was wrong with the arithmetic — the lookup simply
+never found the row. Two structural gaps produced all seven:
 
   * the date-suffix stripper only understood Anthropic's compact `-YYYYMMDD`
     form, so OpenAI's dashed `-YYYY-MM-DD` (`gpt-4o-2024-08-06`) never fell
@@ -13,8 +13,10 @@ found the row. Two structural gaps produced all seven:
 
 Both failures are silent in the UI — one log warning per process, then a
 plausible-looking dollar figure computed at the flat default rate. This module
-pins each lookup form independently, and pins the whole corpus of real model
-strings against the rates they must resolve to.
+pins each lookup form independently, and pins the real model strings against
+the rates they must resolve to. `BENCHMARK_CORPUS_MODELS` states below exactly
+which of those strings the replay measured and which it did not — the list is
+longer than nine and the difference is provenance, not a bigger corpus.
 """
 
 from __future__ import annotations
@@ -77,24 +79,64 @@ def test_a_routing_prefix_does_not_invent_a_match_for_an_unknown_model():
 
 
 # ── The benchmark corpus ───────────────────────────────────────────────────
-# Every distinct `gen_ai.request.model` string observed across the nine
-# replayed agent runs, pinned to the input rate it must price at. These are the
-# strings that were mispriced; if any of them regresses to the default rate the
-# cost dashboard is wrong again by the same 5-30x.
+# The `gen_ai.request.model` strings this module pins, each to the input rate
+# it must price at. If any regresses to the default rate the cost dashboard is
+# wrong again by the same 5-30x.
+#
+# Provenance, stated exactly because a list that misdescribes its own corpus is
+# the defect class this codebase treats as first-order:
+#
+#   * The first NINE entries are the nine model strings the replay's per-model
+#     cost table breaks out — the nine whose rates were checked against HAL's
+#     own ground truth, and the population "seven of nine were mispriced"
+#     counts. That is where the module docstring's "nine" comes from.
+#   * `anthropic/claude-sonnet-4-5-20250929` is a real tenth corpus string,
+#     carried by a handful of calls in the corebench_hard run (`summary.usage`
+#     keys the same underlying model both bare and provider-prefixed within one
+#     run). It is below the table's reporting threshold, not absent from the
+#     corpus, and tj must still price it.
+#   * The two `claude-haiku-4-5` strings come from the SEEACT run, which was
+#     probed for cache usage but EXCLUDED from the nine-run corpus (its export
+#     has no per-call data left to inspect). They are pinned because they are
+#     real strings tj has to price, not because the replay measured them.
 
-BENCHMARK_CORPUS_MODELS = [
+# The nine model strings the replay's per-model cost table breaks out.
+_TABULATED_CORPUS_MODELS = [
     ("anthropic", "anthropic/claude-opus-4.1", 15.00),
     ("anthropic", "claude-opus-4-20250514", 15.00),
     ("anthropic", "claude-3-7-sonnet-20250219", 3.00),
     ("anthropic", "anthropic/claude-3.7-sonnet", 3.00),
     ("anthropic", "claude-sonnet-4-5-20250929", 3.00),
-    ("anthropic", "claude-haiku-4-5-20251001", 1.00),
-    ("anthropic", "anthropic/claude-haiku-4.5", 1.00),
     ("openai", "gpt-4.1-2025-04-14", 2.00),
     ("openai", "gpt-4o-2024-08-06", 2.50),
     ("openai", "gpt-4o-2024-11-20", 2.50),
     ("google", "gemini-2.0-flash", 0.10),
 ]
+
+# Below the table's reporting threshold, but present in the corpus.
+_LOW_VOLUME_CORPUS_MODELS = [
+    ("anthropic", "anthropic/claude-sonnet-4-5-20250929", 3.00),
+]
+
+# From the tenth run, probed but excluded from the measured corpus.
+_EXCLUDED_RUN_MODELS = [
+    ("anthropic", "claude-haiku-4-5-20251001", 1.00),
+    ("anthropic", "anthropic/claude-haiku-4.5", 1.00),
+]
+
+BENCHMARK_CORPUS_MODELS = [
+    *_TABULATED_CORPUS_MODELS,
+    *_LOW_VOLUME_CORPUS_MODELS,
+    *_EXCLUDED_RUN_MODELS,
+]
+
+
+def test_the_tabulated_corpus_is_the_nine_the_replay_measured():
+    """Pins the count the module docstring narrates, so the two cannot drift:
+    the replay's per-model table has nine rows, and any entry added beyond it
+    has to go in one of the explicitly-labelled extra lists instead of
+    silently inflating the population the "seven of nine" claim rests on."""
+    assert len(_TABULATED_CORPUS_MODELS) == 9
 
 
 @pytest.mark.parametrize("provider,model,expected_input", BENCHMARK_CORPUS_MODELS)
@@ -117,7 +159,11 @@ def test_no_benchmark_corpus_model_uses_the_default_fallback(provider, model, _e
 
 
 # ── Backfilled table entries ───────────────────────────────────────────────
-# Rates verified against the providers' published pricing pages, not invented.
+# These pin what `models.toml` says, which is all a test can do — a test
+# asserting its own inputs cannot establish that a rate is right. The auditable
+# provenance for each of the three lives next to its entry in
+# `tokenjam/pricing/models.toml`, including which one is flagged UNVERIFIED
+# because its provider retired it off every reachable published page.
 
 @pytest.mark.parametrize(
     "provider,model,input_rate,output_rate",
