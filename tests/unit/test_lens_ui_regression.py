@@ -1150,6 +1150,37 @@ def test_spend_tile_distinct_under_subscription(html):
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
 
 
+def test_tokens_tile_shows_dollar_headline_with_token_count_secondary(html):
+    """Founder request: the Tokens card leads with its dollar value, the
+    token count present but secondary (subtitle-scale, dimmer). Reuses the
+    same `spend` figure spendTileDisplay computed for the Spend card -- there
+    is only one dollar figure per window -- so when both cards render, they
+    show the identical dollar figure under two different labels (flagged, not
+    resolved, in the session report per the founder's own instruction). Falls
+    back to the plain token headline unchanged, with no secondary line, when
+    there is no known dollar figure at all (LOCAL -- spend is null there, no
+    marginal cost to price; or an unreported spend field, the UNKNOWN_FIGURE
+    placeholder) -- never fabricates one."""
+    assert "const tokensDollar = (spend && spend.value !== UNKNOWN_FIGURE) ? spend.value : null;" in html
+    assert "value: tokensDollar || kpiFigure(kpis.tokens, fmtTokens), sub: tokensSub," in html
+    assert "cost: !!tokensDollar," in html
+    assert "label: 'tokens', dim: true" in html
+    # Sparkline + delta are untouched -- still the token series/delta, not spend's.
+    assert "series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });" in html
+
+
+def test_kpi_sub_dim_is_an_additive_modifier_not_a_shared_restyle(html):
+    """The Tokens tile's dimmer token-count sub-line is a separate modifier
+    class (.kpi-sub-dim), not a change to .kpi-sub-val/.kpi-sub-lab
+    themselves -- the #318 breakdown-subtotal sub-line (sessions/events
+    tiles, `activeSub`) keeps its normal-brightness look, since it never
+    passes `dim`."""
+    assert ".kpi-sub-dim .kpi-sub-val { color: var(--text-dim)" in html
+    assert "sub=${t.sub || (t.key === metric ? activeSub : null)}" in html
+    # activeSub itself never sets `dim`, so it always renders at normal brightness.
+    assert "{ value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` }" in html
+
+
 def test_dashboard_triage_drills_into_optimize_card(html):
     # Recoverable-waste tiles navigate to the Optimize screen's matching
     # analyzer detail card — no longer an in-place Analytics explorer slice

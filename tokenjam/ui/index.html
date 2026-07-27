@@ -499,6 +499,12 @@ table.archive-list .a-id { color: var(--text); }
 .kpi-sub { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .kpi-sub-val { font-family: 'Geist Mono', monospace; font-size: 15px; font-weight: 600; color: var(--text); }
 .kpi-sub-lab { font-size: 11px; color: var(--text-dim); margin-left: 5px; }
+/* Additive modifier, not a change to the two rules above: the Tokens tile's
+   dollar-headline fallback (its token count moves here, secondary to the $
+   figure) asks for a visibly dimmer sub-line than the #318 breakdown
+   subtotal (sessions/events tiles) that .kpi-sub-val/.kpi-sub-lab serve by
+   default -- so only a tile that opts in with `sub.dim` gets this. */
+.kpi-sub-dim .kpi-sub-val { color: var(--text-dim); font-weight: 500; }
 .leaderboard { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
 .lb-row { display: grid; grid-template-columns: 24px minmax(80px, 160px) 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
 .lb-rank { color: var(--text-faint); font-family: 'Geist Mono', monospace; text-align: right; }
@@ -5722,7 +5728,7 @@ function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect
   // unaffected).
   return html`<div ...${props}>
     <div class="kpi-top">
-      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div>${sub ? html`<div class="kpi-sub"><span class="kpi-sub-val">${sub.value}</span><span class="kpi-sub-lab">${sub.label}</span></div>` : null}</div>
+      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div>${sub ? html`<div class=${'kpi-sub' + (sub.dim ? ' kpi-sub-dim' : '')}><span class="kpi-sub-val">${sub.value}</span><span class="kpi-sub-lab">${sub.label}</span></div>` : null}</div>
       <${Sparkline} values=${series} />
     </div>
     <${DeltaChip} pct=${delta} cost=${cost} prevThin=${prevThin} />
@@ -8382,6 +8388,19 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       const activeSub = ((metric === 'events' || metric === 'sessions')
         && breakdownTotal > 0 && breakdownTotal < (kpis[metric] || 0))
         ? { value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` } : null;
+      // Founder request: the Tokens card leads with its dollar value, token
+      // count secondary. Only when there's an actual known figure to show --
+      // never fabricated for LOCAL (spend is null there, no marginal cost to
+      // price at all) or an unreported spend field (spend.value is the
+      // unknown placeholder); both fall back to the plain token headline,
+      // unchanged, with no secondary line.
+      const tokensDollar = (spend && spend.value !== UNKNOWN_FIGURE) ? spend.value : null;
+      // `dim: true` is this call site's own request for a dimmer sub-line
+      // (the founder's "subtitle-scale, dimmer" spec); the #318 breakdown
+      // sub (activeSub above) keeps its normal-brightness look unchanged --
+      // .kpi-sub-dim is a separate, additive modifier class, not a change to
+      // the shared .kpi-sub-val/.kpi-sub-lab rules.
+      const tokensSub = tokensDollar ? { value: kpiFigure(kpis.tokens, fmtTokens), label: 'tokens', dim: true } : null;
       const tiles = [];
       if (spend) {
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
@@ -8389,7 +8408,8 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       }
       // kpiFigure, not the bare formatter: a field the payload omitted renders as
       // unknown rather than as fmtCount(null)'s "0" or fmtTokens(null)'s dash.
-      tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: kpiFigure(kpis.tokens, fmtTokens),
+      tiles.push({ key: 'tokens', label: 'Tokens', cost: !!tokensDollar,
+        value: tokensDollar || kpiFigure(kpis.tokens, fmtTokens), sub: tokensSub,
         series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
       tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: kpiFigure(kpis.sessions, fmtCount),
         series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
@@ -8399,7 +8419,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <div class="kpi-row">
           ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
               series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost}
-              sub=${t.key === metric ? activeSub : null}
+              sub=${t.sub || (t.key === metric ? activeSub : null)}
               prevThin=${prevThin} onSelect=${() => onMetric(t.key)} />`)}
         </div>
         ${kpiCaption ? html`<div class="kpi-caption">${kpiCaption}</div>` : null}`;
