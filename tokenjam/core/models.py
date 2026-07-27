@@ -140,6 +140,14 @@ class NormalizedSpan:
     # exists). template_id names the prompt; template_version is its revision.
     prompt_template_id:      str | None = None
     prompt_template_version: str | None = None
+    # Provenance for cost_usd: HOW the rate resolved, from
+    # pricing.classify_pricing_source — "exact" | "date_stripped" |
+    # "context_tag" | "override" | "default_fallback", or None when cost_usd
+    # itself was never computed (no provider/model, zero tokens). Set by
+    # CostEngine.process_span at ingest; makes a fallback-priced span
+    # recoverable after the fact instead of looking like a correctly-priced
+    # one once only the dollar figure remains.
+    pricing_source:          str | None = None
 
 
 @dataclass

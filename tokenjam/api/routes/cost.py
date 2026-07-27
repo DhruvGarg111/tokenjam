@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
@@ -350,8 +350,11 @@ async def get_cost_components(
     subscription/local users see token-share, not raw dollars."""
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
 
     comp = _component_costs(conn, agent_id, since_dt, until_dt)
@@ -432,8 +435,11 @@ async def get_cost_cache(
     were expanded — never conflated, never called "saved" (Critical Rule 14)."""
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
 
     block = _cache_series(conn, agent_id, since_dt, until_dt)
@@ -538,8 +544,11 @@ async def get_cost(
 ) -> dict:
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     filters = CostFilters(
         agent_id=agent_id,
         since=since_dt,
@@ -552,7 +561,13 @@ async def get_cost(
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)
-    total_tokens = sum(r.input_tokens + r.output_tokens for r in rows)
+    # All four token types, always (Cache token types in aggregates, root
+    # CLAUDE.md): omitting cache_tokens/cache_write_tokens understates the
+    # true total by an order of magnitude on a cache-heavy corpus.
+    total_tokens = sum(
+        r.input_tokens + r.output_tokens + r.cache_tokens + r.cache_write_tokens
+        for r in rows
+    )
 
     # Plan-tier framing block — single source shared with the CLI (#110). Lets
     # the local web UI render the same suppressed/qualified dollar figures.
@@ -612,8 +627,11 @@ async def get_cost_tenants(
     """
     db = request.app.state.db
     config = request.app.state.config
-    since_dt = parse_since(since) if since else None
-    until_dt = parse_since(until) if until else None
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
     end_dt = until_dt or utcnow()
 
@@ -622,6 +640,9 @@ async def get_cost_tenants(
         "total_cost_usd": 0.0,
         "attributed_cost_usd": 0.0,
         "unattributed_cost_usd": 0.0,
+        "total_tokens": 0,
+        "attributed_tokens": 0,
+        "unattributed_tokens": 0,
         "has_data": False,
         "attribute": "tokenjam.tenant_id",
         "window_start": int(since_dt.timestamp()) if since_dt is not None else None,
@@ -645,17 +666,25 @@ async def get_cost_tenants(
     # in one scan.
     totals_row = conn.execute(
         "SELECT COALESCE(SUM(cost_usd), 0.0), "
-        "COALESCE(SUM(cost_usd) FILTER (WHERE tenant_id IS NOT NULL), 0.0) "
+        "COALESCE(SUM(cost_usd) FILTER (WHERE tenant_id IS NOT NULL), 0.0), "
+        "COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0), "
+        "COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens) "
+        "FILTER (WHERE tenant_id IS NOT NULL), 0) "
         f"FROM spans WHERE {where}",
         params,
     ).fetchone()
     total_cost = float(totals_row[0] or 0.0) if totals_row else 0.0
     attributed_cost = float(totals_row[1] or 0.0) if totals_row else 0.0
     unattributed_cost = max(0.0, total_cost - attributed_cost)
+    total_tokens = int(totals_row[2] or 0) if totals_row else 0
+    attributed_tokens = int(totals_row[3] or 0) if totals_row else 0
+    unattributed_tokens = max(0, total_tokens - attributed_tokens)
 
     if attributed_cost <= 0.0:
         return {**empty, "total_cost_usd": round(total_cost, 8),
-                "unattributed_cost_usd": round(total_cost, 8)}
+                "unattributed_cost_usd": round(total_cost, 8),
+                "total_tokens": total_tokens,
+                "unattributed_tokens": total_tokens}
 
     top_rows = conn.execute(
         "SELECT tenant_id, "
@@ -713,6 +742,9 @@ async def get_cost_tenants(
         "total_cost_usd": round(total_cost, 8),
         "attributed_cost_usd": round(attributed_cost, 8),
         "unattributed_cost_usd": round(unattributed_cost, 8),
+        "total_tokens": total_tokens,
+        "attributed_tokens": attributed_tokens,
+        "unattributed_tokens": unattributed_tokens,
         "has_data": True,
         "attribute": "tokenjam.tenant_id",
         "window_start": int(since_dt.timestamp()) if since_dt is not None else None,

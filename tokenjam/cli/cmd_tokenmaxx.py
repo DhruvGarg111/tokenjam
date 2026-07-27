@@ -279,9 +279,9 @@ def _render(
         padding=(1, 2),
     ))
 
-    # Qualifier banner (plan-tier framing) + honesty caveat, below the panel.
-    if framing.qualifier_text:
-        console.print(f"  [dim]{framing.qualifier_text}[/dim]")
+    # Honesty caveat, below the panel. No billing-mode qualifier banner:
+    # product decision, no differentiated messaging between subscription and
+    # API users.
     console.print(f"  [dim]{diag.caveat}[/dim]")
 
     # Share prompt — outside the panel, teal, points at the brand handle.

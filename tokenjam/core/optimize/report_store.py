@@ -217,25 +217,59 @@ def stored_report_block(
     }
 
 
+def stored_report_dict(
+    config: TjConfig | None = None, *, path: Path | None = None,
+) -> dict[str, Any] | None:
+    """The stored report AS A DICT — the wire format, served verbatim.
+
+    **This is what routes should return.** The store holds exactly what
+    ``report_to_dict`` produced, and handing that straight to the client means
+    no rehydration step can sit between the analyzer and the reader. Even
+    though the round trip is lossless now (see ``runner.hydrate_dataclass`` and
+    ``tests/unit/test_report_roundtrip.py``), a route that rehydrates only to
+    re-serialize is doing work whose sole possible effect is to lose something.
+
+    ``None`` means COLD, never empty.
+    """
+    stored = read_report(path, config=config)
+    body = (stored or {}).get("report")
+    return body if isinstance(body, dict) else None
+
+
 def stored_report(
     config: TjConfig | None = None, *, path: Path | None = None,
 ) -> Any | None:
     """The stored report rebuilt into an ``OptimizeReport``, or ``None`` when
-    the store is cold (or the stored payload can't be rehydrated).
+    the store is cold (or the payload can't be rehydrated).
 
-    Routes that need typed findings (the cache overlay, the reuse skeleton) use
-    this instead of re-running the analyzer that produced them.
+    For the consumers that genuinely need typed objects — ranking, the
+    persona gate, `gather_planning_texts`. A route that only needs to SERVE the
+    report wants :func:`stored_report_dict` instead.
     """
     from tokenjam.core.optimize import report_from_dict
 
-    stored = read_report(path, config=config)
-    body = (stored or {}).get("report")
-    if not isinstance(body, dict):
+    body = stored_report_dict(config, path=path)
+    if body is None:
         return None
     try:
         return report_from_dict(body)
     except Exception:
         return None
+
+
+def stored_finding(
+    config: TjConfig | None = None, name: str = "", *, path: Path | None = None,
+) -> Any | None:
+    """One typed finding out of the stored report, or ``None``.
+
+    For the narrow case where a route needs a real dataclass to hand to a
+    helper (``gather_planning_texts`` wants a ``ReuseFinding``) while still
+    serving the stored dict verbatim on the wire.
+    """
+    report = stored_report(config, path=path)
+    if report is None:
+        return None
+    return (report.findings or {}).get(name)
 
 
 def seconds_since_last_run() -> float | None:
@@ -347,9 +381,20 @@ def trigger_background_recompute(
         try:
             backend = backend_factory()
             recompute_now(backend, config, path=path, window_days=window_days)
-        except Exception:
-            # Best-effort background job — never crash the scheduler thread.
-            pass
+        except Exception as exc:   # noqa: BLE001
+            # Never crash the scheduler thread — but never swallow the failure
+            # either. `relearn_store`'s equivalent job discards its exception
+            # entirely, so `POST /relearn/refresh` reports "started" whether
+            # the scan then succeeded or died; a rescan that failed looks
+            # identical to one that worked. Recording it here is what lets the
+            # UI say "the last refresh failed" instead of quietly showing stale
+            # numbers as though they were fresh. `recompute_now` records
+            # failures INSIDE the scan; this covers the ones outside it, i.e.
+            # the backend never opening at all.
+            try:
+                write_report_error(f"{type(exc).__name__}: {exc}", path, config=config)
+            except Exception:
+                pass
         finally:
             close = getattr(backend, "close", None)
             if callable(close):

@@ -50,6 +50,7 @@ from typing import Any, Iterator
 
 from tokenjam.core.backfill import _existing_span_ids
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.pricing import classify_pricing_source
 from tokenjam.core.models import (
     NormalizedSpan,
     SessionRecord,
@@ -258,7 +259,13 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
                 output_tokens=output_total,
                 cache_read_tokens=cached,
                 cache_write_tokens=0,
+                # Rollouts are history: price each turn at the rate in effect
+                # when it ran, not at today's.
+                at=start_time,
             )
+            # Provenance for cost_usd (mirrors CostEngine.process_span on the
+            # live path — Codex spans are pre-priced here and never reach it).
+            pricing_source = classify_pricing_source(_CODEX_PROVIDER, current_model or "unknown")
 
             spans_by_id[span_id] = NormalizedSpan(
                 span_id=span_id,
@@ -278,6 +285,7 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
                 cache_tokens=cached,
                 cache_write_tokens=0,
                 cost_usd=cost,
+                pricing_source=pricing_source,
                 request_type="completion",
                 conversation_id=sid,
                 attributes={"source": _CODEX_SOURCE},

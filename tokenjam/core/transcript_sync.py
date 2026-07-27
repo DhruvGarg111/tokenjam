@@ -378,6 +378,69 @@ def run_catch_up(
     return ingest_claude_code(db, root=base, since=since, config=config)
 
 
+def sweep_stale_active_sessions(
+    db,
+    root: Path | str | None = None,
+    idle_threshold: timedelta | None = None,
+) -> int:
+    """Correct raw ``status='active'`` rows that are actually dead zombies.
+
+    ``SessionRecord.status_at`` / ``effective_status`` already COMPUTE a stale
+    'active' row as "stale" at read time once its last activity is older than
+    ``idle_threshold``, but nothing ever writes that back — so every consumer
+    that filters the RAW ``status`` column instead of the computed one (MCP
+    tools, ``tj status``, the sessions route, ``relearn_apply``) keeps counting
+    a zombie as active forever. A common cause: a single dropped OTLP span
+    creates a session row that defaults to 'active' and never receives a
+    closing span or an explicit ``/sessions/close`` — nothing else ever
+    reclassifies it.
+
+    Reuses the SAME staleness definitions already in play elsewhere — no third
+    one is introduced here:
+      - ``SESSION_IDLE_THRESHOLD`` (or an explicit override) for "how old is
+        too old", identical to ``effective_status``'s default window.
+      - ``SessionRecord.status_with_transcript_mtime`` for the live-rescue
+        check, the exact function the read-time ``/status`` route already
+        calls (``_live_status``) — a Claude Code session whose on-disk
+        transcript is still being appended to is left alone even if its
+        spans look stale, matching FIX 1's mtime-based decision in
+        ``session_record_from_parsed``.
+
+    Conservative by construction: a row is corrected ONLY when both signals
+    (span recency AND, for CC sessions, transcript mtime) agree it has gone
+    fully quiet. Marks corrected rows 'completed' (never 'closed' — nobody
+    explicitly closed them) and never touches ``ended_at``, tokens, or cost —
+    status only. Returns the number of rows corrected.
+    """
+    from tokenjam.core.models import SESSION_IDLE_THRESHOLD, SessionRecord
+    from tokenjam.core.transcript import resolve_projects_root, session_transcript_mtime
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return 0
+    threshold = idle_threshold or SESSION_IDLE_THRESHOLD
+    projects_root = resolve_projects_root(root)
+
+    rows = conn.execute(
+        "SELECT session_id, started_at, ended_at FROM sessions WHERE status = 'active'"
+    ).fetchall()
+
+    stale_ids: list[str] = []
+    for session_id, started_at, ended_at in rows:
+        probe = SessionRecord(
+            session_id=session_id, agent_id="", started_at=started_at,
+            ended_at=ended_at, status="active",
+        )
+        mtime = session_transcript_mtime(session_id, projects_root)
+        if probe.status_with_transcript_mtime(mtime, threshold) == "stale":
+            stale_ids.append(session_id)
+
+    mark = getattr(db, "mark_sessions_completed", None)
+    if stale_ids and mark is not None:
+        mark(stale_ids)
+    return len(stale_ids)
+
+
 def start_catch_up(
     db_factory,
     config=None,
@@ -391,6 +454,10 @@ def start_catch_up(
     / cost-proposal jobs already follow in ``cmd_serve`` — it keeps the ingest
     off the request path and away from uvicorn's worker threads. Errors are
     logged, never raised: a failed catch-up must not take the daemon down.
+
+    Folds the zombie-sweep (:func:`sweep_stale_active_sessions`) into this same
+    scheduled job so it runs on the same cadence, the same connection, and the
+    same thread as the ingest catch-up — no separate scheduler entry needed.
     """
 
     def _run() -> None:
@@ -403,6 +470,17 @@ def start_catch_up(
                     "transcript catch-up ingested %d new session(s), %d span(s)",
                     result.sessions_new, result.spans_ingested,
                 )
+            try:
+                swept = sweep_stale_active_sessions(backend, root=root)
+                if swept:
+                    logger.info(
+                        "transcript catch-up corrected %d stale-active session(s)",
+                        swept,
+                    )
+            except Exception:
+                # Best-effort: a sweep failure must not affect the ingest
+                # result callers already received, nor take the daemon down.
+                logger.warning("stale-active session sweep failed", exc_info=True)
             if on_done is not None:
                 on_done(result)
         except Exception:

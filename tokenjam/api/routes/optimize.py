@@ -38,8 +38,7 @@ from tokenjam.core.framing import (
     compute_framing,
     plan_tier_mix,
 )
-from tokenjam.core.optimize import disabled_analyzers_for_persona, report_to_dict
-from tokenjam.core.optimize import report_store
+from tokenjam.core.optimize import disabled_analyzers_for_persona, report_store
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
@@ -103,17 +102,32 @@ def get_optimize(
     envelope["scan_enabled"] = getattr(config.optimize, "scan_enabled", True)
     envelope["ui_poll_seconds"] = getattr(config.optimize, "scan_ui_poll_seconds", 0)
 
-    report = report_store.stored_report(config)
-    if report is None:
+    body = report_store.stored_report_dict(config)
+    if body is None:
         # COLD (or error-only). No report body, no finding list, no rollups —
         # emphatically no zeros. Everything downstream must render this as
         # "not computed yet", which is a different claim from "found nothing".
         envelope["report_available"] = False
         return envelope
 
-    payload: dict[str, Any] = report_to_dict(report)
+    # The STORED DICT verbatim. Deliberately NOT `report_to_dict(rehydrated)`:
+    # the store already holds exactly what the serializer produced, so passing
+    # it through a rehydration step could only ever lose something. The typed
+    # report below is used for the two derivations that need real objects, and
+    # never re-serialized onto the wire.
+    payload: dict[str, Any] = dict(body)
     payload.update(envelope)
     payload["report_available"] = True
+
+    report = report_store.stored_report(config)
+    if report is None:
+        # The stored dict is present but un-rehydratable (a corrupt or
+        # far-future payload). Serve the body — it is what the analyzers
+        # wrote — and omit only the derivations that need typed objects.
+        payload["finding_rank"] = []
+        payload["persona_disabled_analyzers"] = []
+        payload["skipped_analyzers"] = []
+        return payload
 
     # `fast` no longer skips anything (nothing runs here), so nothing is
     # "skipped for speed". The key stays for wire compatibility.

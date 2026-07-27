@@ -51,6 +51,13 @@ from tokenjam.core.optimize.types import (
 _RETIRED_DOLLAR_FIELDS = frozenset({
     "estimated_recoverable_usd", "estimated_recoverable_tokens",
     "estimated_monthly_usd", "estimated_monthly_tokens",
+    # The total-observed-cost pair: `cost_of_waste_*` was the analyzer-side
+    # input, `observed_cost_*` the field it was published on. Deleted by founder
+    # decision — two analyzers of twelve emitted it, one rendered it, and the
+    # rollup total it fed covered 2 of the headline's 13 proposals while its
+    # disclosure called the headline a subset of it.
+    "cost_of_waste_usd", "cost_of_waste_tokens", "cost_of_waste_basis",
+    "observed_cost_usd", "observed_cost_tokens", "observed_cost_basis",
 })
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -76,15 +83,13 @@ def _resend_finding():
         past_overspend_usd=703.78,
         estimate_basis="resend basis",
         fix_compaction="Run /compact.",
-        cost_of_waste_usd=7_038.85,
-        cost_of_waste_tokens=14_382_971_851,
-        cost_of_waste_basis="observed; do NOT read this as a saving",
-        # The real analyzer always emits this alongside a cost figure (pinned
-        # by test_context_resend.py); stated here because this fixture builds
-        # the finding directly rather than running the analyzer.
+        # The real analyzer always emits this wherever the avoidable figure was
+        # computed over a subset (pinned by test_context_resend.py); stated here
+        # because this fixture builds the finding directly rather than running
+        # the analyzer.
         coverage_note=(
-            "COVERAGE. The cost figure covers every session with repeat volume; "
-            "the avoidable figure was computed over 12 of them."
+            "COVERAGE. 40 session(s) in this window carried repeat volume; the "
+            "avoidable figure was computed over 12 of them."
         ),
     )
 
@@ -92,12 +97,15 @@ def _resend_finding():
 def _relearn_finding():
     """A relearn finding shaped like a real gated run: some clusters have no
     fix template, some are net-negative to codify — both still cost real
-    money, which lands on this finding's ``past_overspend_*`` (a cost-only
-    figure; relearn never carries an avoidable one, see
-    ``cost_proposals._relearn_to_proposals``). Used to catch exactly the
-    defect this ticket exists for: `_relearn_to_proposals` shipped this
-    finding's cost figure with no `coverage_note` for every relearn card ever
-    rendered, because nothing enforced the module's own stated contract.
+    money, which lands on this finding's ``past_overspend_*``.
+
+    It produces NO ``CostProposal`` any more: relearn's one aggregate card
+    carried only the retired total-observed-cost field, so the card went with
+    the field (see
+    ``test_relearn_archive_and_cost.test_relearn_produces_no_cost_proposal_and_keeps_its_claim_on_its_clusters``).
+    The fixture stays because a report carrying a relearn finding must still
+    adapt cleanly and contribute nothing, which is the case a report built with
+    only resend would not exercise.
     """
     from tokenjam.core.optimize.analyzers.relearn import RelearnCluster
     from tokenjam.core.optimize.write_budget import REASON_NET_NEGATIVE, REASON_PLACEHOLDER
@@ -141,8 +149,6 @@ def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
     future analyzer that routes a cost figure into the headline slot fails here
     rather than shipping.
     """
-    from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
-
     window = WindowSummary(
         since=NOW - timedelta(days=30), until=NOW, days=30, sessions=200,
         spans=1_000, total_tokens=1, total_cost_usd=50.0, thin_data=False,
@@ -171,76 +177,78 @@ def test_the_waste_labelled_figure_never_exceeds_the_avoidable_figure():
             f"{p.analyzer} carries a second per-analyzer dollar field "
             f"({fields & _RETIRED_DOLLAR_FIELDS}) beside past_overspend_usd"
         )
-        if p.past_overspend_usd is None:
-            continue
-        if p.observed_cost_usd is not None:
-            # The cost figure is legitimately larger — it just may never be the
-            # one wearing the waste label, and it must arrive with its coverage
-            # stated rather than leaving the gap to imply necessity.
-            assert p.observed_cost_usd >= p.past_overspend_usd
-            assert p.coverage_note, f"{p.analyzer} ships a cost figure with no coverage note"
-
     block = past_overspend_rollup(props)
-    assert block["past_overspend_usd"] <= block["observed_cost_usd"]
+    # Every dollar figure the block publishes is the one canonical total.
+    dollar_keys = {k for k, v in block.items()
+                   if k.endswith("_usd") and isinstance(v, (int, float))}
+    assert dollar_keys == {"past_overspend_usd"}
 
 
-def test_every_proposal_carrying_observed_cost_has_a_coverage_note():
-    """The module's own contract, enforced rather than merely stated: every
-    ``CostProposal`` with ``observed_cost_usd`` set must carry a non-empty
-    ``coverage_note`` (``cost_proposals.py``'s module docstring, on the
-    ``coverage_note`` field: "Required whenever `observed_cost_usd` is set").
+def test_a_rollup_block_publishes_one_dollar_total_over_one_population():
+    """THE invariant the purge exposed: **any two figures published together in
+    one rollup block must cover the same set of proposals.**
 
-    This is deliberately its OWN test rather than folded into the guard above:
-    that guard's loop only reaches its `coverage_note` check for a proposal
-    that ALSO carries `past_overspend_usd` (an avoidable figure) — `continue`s
-    past a cost-ONLY card first. relearn is exactly such a card (it never sets
-    an avoidable figure at all, see `_relearn_to_proposals`), so that guard
-    could pass with a whole report full of relearn cards that shipped
-    `observed_cost_usd` and a blank `coverage_note` — precisely how this
-    defect reached production undetected. This test checks every
-    `observed_cost_usd`-bearing proposal directly, with no such gate.
+    The block used to publish two dollar totals. ``past_overspend_usd`` summed
+    every proposal carrying the canonical figure; ``observed_cost_usd`` summed
+    the 2 of 12 analyzers that also emitted a total-cost figure. They were
+    shipped adjacent, under a ``cost_disclosure`` reading "the avoidable figure
+    is a subset of it" — and on live data that was false: the headline summed 13
+    proposals while the cost total covered 2, and roughly $5,754 of the $6,163
+    headline came from proposals with no observed cost at all, so most of the
+    headline lay OUTSIDE the figure it was described as part of.
+
+    Stated as a rule rather than as a bug: a second total is summed over its own
+    population, the reader computes the ratio anyway, and the ratio of two
+    figures over two populations means nothing. So the guard is that there is
+    exactly ONE dollar total, and that every other published quantity is counted
+    over the proposals that total covers.
+
+    Written to catch a REGRESSION, not just today's shape: it builds proposals
+    where a divergent second population would be plainly visible (one proposal
+    carrying a large figure that the canonical total does not include) and
+    asserts no key reports it.
     """
-    window = WindowSummary(
-        since=NOW - timedelta(days=30), until=NOW, days=30, sessions=200,
-        spans=1_000, total_tokens=1, total_cost_usd=50.0, thin_data=False,
-        active_days=28,
-    )
-    report = OptimizeReport(window=window, downgrade=None)
-    report.findings["resend"] = _resend_finding()
-    report.findings["relearn"] = _relearn_finding()
-
-    props = cost_proposals_from_report(report)
-    priced_cost_only = [p for p in props if p.observed_cost_usd is not None]
-    assert priced_cost_only, "fixture produced no observed-cost card — the guard would be vacuous"
-    assert {p.analyzer for p in priced_cost_only} >= {"resend", "relearn"}
-    for p in priced_cost_only:
-        assert p.coverage_note, (
-            f"{p.analyzer} ships observed_cost_usd={p.observed_cost_usd} with "
-            "no coverage_note, violating cost_proposals.py's own stated contract"
-        )
-
-
-def test_the_rollup_headline_is_avoidable_and_the_cost_total_stays_separate():
     props = [
         _with_past_overspend(_proposal(
-            analyzer="resend", signature="cost:resend",
-            past_overspend_usd=398.41,
-            cost_of_waste_usd=6_972.80, cost_of_waste_basis="observed",
+            analyzer="resend", signature="cost:resend", past_overspend_usd=398.41,
             coverage_note="COVERAGE. ...",
         )),
         _with_past_overspend(_proposal(signature="cost:downsize",
                                        past_overspend_usd=40.0)),
+        # The shape that made the old claim false: a big contributor to the
+        # headline that a second, differently-populated total would have missed.
+        _with_past_overspend(_proposal(
+            analyzer="summarize", signature="cost:summarize",
+            past_overspend_usd=4_811.33,
+        )),
     ]
     block = past_overspend_rollup(props)
-    # The headline sums avoidable figures only — one meaning across analyzers.
-    assert block["past_overspend_usd"] == pytest.approx(438.41)
-    # The cost total ships, separately, and is never folded into the headline.
-    assert block["observed_cost_usd"] == pytest.approx(6_972.80)
-    assert block["past_overspend_usd"] != pytest.approx(6_972.80 + 438.41)
+
+    # ONE dollar total, and it sums exactly the proposals `proposal_count` names.
+    dollar_keys = {k for k, v in block.items()
+                   if k.endswith("_usd") and isinstance(v, (int, float))}
+    assert dollar_keys == {"past_overspend_usd"}
+    assert block["past_overspend_usd"] == pytest.approx(398.41 + 40.0 + 4_811.33)
+    assert block["proposal_count"] == 3
+
+    # The per-analyzer breakdown covers that same set and carries no second
+    # dollar key of its own, so a renderer cannot reconstruct one from it.
     by_analyzer = {a["analyzer"]: a for a in block["by_analyzer"]}
-    assert by_analyzer["resend"]["usd"] == 398.41
-    assert by_analyzer["resend"]["observed_cost_usd"] == 6_972.80
-    assert by_analyzer["downsize"]["observed_cost_usd"] is None
+    assert set(by_analyzer) == {"resend", "downsize", "summarize"}
+    assert sum(a["usd"] for a in by_analyzer.values()) == pytest.approx(
+        block["past_overspend_usd"]
+    )
+    for entry in by_analyzer.values():
+        # Exactly these keys. A second dollar key here is how a renderer would
+        # rebuild the removed total per-analyzer even with the top-level one gone.
+        assert set(entry) == {"analyzer", "count", "usd", "tokens"}
+
+    # And the disclosure that existed only to explain the removed figure is gone
+    # rather than orphaned. An orphaned disclosure is worse than none: it
+    # describes a relationship between figures the reader can no longer see.
+    assert "cost_disclosure" not in block
+    assert not [k for k in block if "observed_cost" in k]
+    assert block["disclosure"]      # the surviving one, about the figure shown
 
 
 def _report():
@@ -279,28 +287,21 @@ def _report():
 
 # --- 1. never summed into a recoverable total ------------------------------ #
 
-def test_the_headline_total_never_absorbs_the_observed_cost_total():
-    # The two answer different questions ("what of this could I have avoided"
-    # vs "what did this behaviour cost in total"), and the first is a SUBSET of
-    # the second, so no key may carry the cost figure or the sum of the pair.
+def test_a_retired_cost_field_cannot_be_set_on_a_proposal_at_all():
+    # The strongest form of "never summed": the field a caller would sum does not
+    # exist, so an adapter that tried to attach a total-cost figure raises rather
+    # than quietly shipping an untracked number a later rollup might pick up.
+    for retired in sorted(_RETIRED_DOLLAR_FIELDS):
+        with pytest.raises(TypeError):
+            _proposal(**{retired: 7_038.85})
+
     prop = _with_past_overspend(_proposal(
         analyzer="resend", signature="cost:resend",
         past_overspend_usd=703.78, past_overspend_tokens=1_400_000_000,
-        cost_of_waste_usd=7_038.85, cost_of_waste_tokens=14_382_971_851,
-        cost_of_waste_basis="observed",
     ))
-    assert prop.past_overspend_usd == 703.78
-    assert prop.observed_cost_usd == 7_038.85
-
     rollup = past_overspend_rollup([prop])
     assert rollup["past_overspend_usd"] == 703.78
     assert rollup["past_overspend_tokens"] == 1_400_000_000
-    for key, value in rollup.items():
-        if key.startswith("observed_cost"):
-            continue
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            assert value != pytest.approx(7_038.85), f"{key} leaked the observed figure"
-            assert value != pytest.approx(7_038.85 + 703.78), f"{key} summed the two"
 
 
 def test_there_is_exactly_one_rollup_and_one_per_analyzer_dollar_field():
@@ -327,23 +328,20 @@ def test_there_is_exactly_one_rollup_and_one_per_analyzer_dollar_field():
     assert block["deduplicated_proposal_count"] == 2  # both still render
 
 
-def test_the_two_totals_are_never_added_to_each_other():
-    # They overlap by construction — the avoidable total is a SUBSET of the
-    # cost total — so any surface adding them double-counts the avoidable part.
-    props = [
-        _with_past_overspend(_proposal(
-            analyzer="resend", signature="cost:resend",
-            past_overspend_usd=703.78,
-            cost_of_waste_usd=7_038.85, cost_of_waste_basis="observed",
-        )),
-        _with_past_overspend(_proposal(signature="cost:downsize",
-                                       past_overspend_usd=40.0)),
-    ]
-    block = past_overspend_rollup(props)
-    combined = 7_038.85 + 743.78
-    for key, value in block.items():
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            assert value != pytest.approx(combined), f"{key} summed the two totals"
+def test_a_stale_cache_cannot_resurrect_a_retired_cost_figure():
+    # A cache written before the purge still carries the retired keys, and it also
+    # carries `past_overspend_basis` — which is the early-return condition of the
+    # read-time migration. So the strip has to happen BEFORE that return, or a
+    # warm daemon keeps rendering a deleted figure for a whole recompute interval.
+    warm = backfill_legacy_past_overspend_fields({
+        "analyzer": "resend", "signature": "cost:resend",
+        "past_overspend_usd": 703.78, "past_overspend_basis": "already stamped",
+        "observed_cost_usd": 7_038.85, "observed_cost_basis": "observed",
+        "cost_of_waste_usd": 7_038.85,
+    })
+    assert warm["past_overspend_usd"] == 703.78
+    assert warm["past_overspend_basis"] == "already stamped"
+    assert not (set(warm) & _RETIRED_DOLLAR_FIELDS)
 
 
 # --- 2. never paced ---------------------------------------------------------#
@@ -396,33 +394,31 @@ def test_past_overspend_reads_the_netted_figure_not_the_gross_one():
 
 # --- the single-number vs paired-number rule ------------------------------- #
 
-def test_only_a_finding_with_its_own_observed_cost_renders_two_numbers():
-    # Verified against the analyzer sources: for 6 of the 7 CC-eligible
-    # analyzers the "recoverable" figure IS the observed window avoidable
-    # spend, so rendering both would show one quantity twice. Only resend
-    # computes a separate TOTAL cost of the behaviour it flags, so only resend
-    # gets a second number.
+def test_every_card_renders_exactly_one_number():
+    # There is no paired-number shape left. `resend` was the one analyzer that had
+    # a second, larger figure to show; with it deleted, every card is the
+    # single-number shape and the stamper has one basis string to attach.
     single = _with_past_overspend(_proposal(past_overspend_usd=12.0,
                                             past_overspend_tokens=99,
                                             estimate_basis="downsize basis"))
     assert single.past_overspend_usd == 12.0
-    assert single.observed_cost_usd is None
-    assert single.observed_cost_tokens is None
     assert "downsize basis" in single.past_overspend_basis
 
-    paired = _with_past_overspend(_proposal(
+    resend = _with_past_overspend(_proposal(
         analyzer="resend", past_overspend_usd=703.78,
         estimate_basis="resend basis",
-        cost_of_waste_usd=7_038.85, cost_of_waste_basis="Do NOT read this as a saving.",
     ))
-    assert paired.past_overspend_usd == 703.78
-    assert paired.observed_cost_usd == 7_038.85
-    # Each basis travels WITH the figure it qualifies, unweakened.
-    assert "resend basis" in paired.past_overspend_basis
-    assert "Do NOT read this as a saving." in paired.observed_cost_basis
+    assert resend.past_overspend_usd == 703.78
+    assert "resend basis" in resend.past_overspend_basis
+    row = asdict(resend)
+    # `gross_recoverable_usd` (the netting disclosure's pre-net figure) is not set
+    # here, so the canonical field is the only one carrying a number at all.
+    assert {f for f in row if f.endswith("_usd") and row[f] is not None} == {
+        "past_overspend_usd"
+    }
 
 
-def test_resend_adapter_carries_both_observed_figures_end_to_end():
+def test_resend_adapter_carries_one_figure_and_promises_no_second_one():
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
     prop = _with_past_overspend(
@@ -430,15 +426,15 @@ def test_resend_adapter_carries_both_observed_figures_end_to_end():
     )
     assert prop.past_overspend_usd == 703.78
     assert prop.past_overspend_tokens == 1_400_000_000
-    assert prop.observed_cost_usd == 7_038.85
-    assert prop.past_overspend_usd < prop.observed_cost_usd
-    # The evidence line states the observation without recovery vocabulary,
-    # and without asserting that the rest of the cost was unavoidable.
+    # The evidence line states the observation without recovery vocabulary, and no
+    # longer promises a cost figure "reported below": there is nothing below to
+    # report it, so the sentence would have pointed at an empty slot.
     assert "recoverable" not in prop.evidence
-    assert "as cost, not waste" in prop.evidence
+    assert "as cost, not waste" not in prop.evidence
+    assert "reported below" not in prop.evidence
     assert "inherently re-sends" not in prop.evidence
-    # The cost figure is stated exactly once on the card, on its own COST line.
-    assert "7,038.85" not in prop.evidence
+    # The coverage question that sentence gestured at is still answered, in words.
+    assert "COVERAGE" in prop.coverage_note
 
 
 def test_legacy_cached_proposal_migrates_the_old_field_names_on_read():
@@ -456,14 +452,15 @@ def test_legacy_cached_proposal_migrates_the_old_field_names_on_read():
     assert single["past_overspend_tokens"] == 700
     assert "cache basis" in single["past_overspend_basis"]
     assert not (set(single) & _RETIRED_DOLLAR_FIELDS)
-    assert single.get("observed_cost_usd") is None
 
-    paired = backfill_legacy_past_overspend_fields(
+    # A legacy entry carrying the retired cost keys migrates its canonical figure
+    # and DROPS them: there is no field left to migrate them onto.
+    with_cost = backfill_legacy_past_overspend_fields(
         {"analyzer": "resend", "estimated_recoverable_usd": 703.78,
          "cost_of_waste_usd": 7_038.85, "cost_of_waste_basis": "observed"}
     )
-    assert paired["past_overspend_usd"] == 703.78
-    assert paired["observed_cost_usd"] == 7_038.85
+    assert with_cost["past_overspend_usd"] == 703.78
+    assert not (set(with_cost) & _RETIRED_DOLLAR_FIELDS)
 
     # A legacy entry carrying ONLY the paced figure renders no dollar figure —
     # the honest degradation, until the next recompute.
@@ -682,8 +679,7 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
     by_analyzer = {a["analyzer"] for a in block["by_analyzer"]}
 
     priced_analyzers = {
-        p.analyzer for p in props
-        if p.past_overspend_usd is not None or p.cost_of_waste_usd is not None
+        p.analyzer for p in props if p.past_overspend_usd is not None
     }
     assert priced_analyzers  # sanity: the fixture actually produced priced cards
     assert priced_analyzers <= by_analyzer, (
@@ -730,61 +726,90 @@ def test_the_observed_figure_renders_from_the_server_block_only(ui):
     assert ui.count("<${PastOverspendTile}") == 1
     assert "PastOverspendBand" not in ui, "the removed band must not linger"
     assert "setCostPastOverspend(r.past_overspend || null)" in ui
-    assert "setHeroPast((r && r.past_overspend) || null)" in ui
-    # The hero fetches on its OWN effect rather than inside the Dashboard's
-    # triage Promise.all: that batch resolves only when its slowest member
-    # does (a 30-day analyzer sweep), and a headline that waits on an analyzer
-    # sweep is a headline nobody sees. Verified live: the triage band was
-    # still showing its loading shimmer minutes after the page settled.
-    assert "api('/relearn/cost-proposals')\n      .then(r => { if (live) setHeroPast" in ui
+    # One render site now has exactly one reader. The Dashboard used to keep its
+    # own `heroPast` copy of this read for a band it no longer renders, so the
+    # page paid for a request per mount and displayed nothing from it; it is gone.
+    # This assertion is the same guarantee stated the other way round: nothing may
+    # read that block except the surface that renders it.
+    assert "setHeroPast" not in ui
+    dash = ui[ui.index("function DashboardView"):ui.index("// Two lenses, one router")]
+    # The FETCH, not the string: a comment in that view still names the endpoint,
+    # deliberately, to say where the figure must come from if it is re-added.
+    assert "api('/relearn/cost-proposals')" not in dash
+    # If a Dashboard summary of this figure is ever re-added, it must read the
+    # server's own `past_overspend` block rather than reduce over rendered cards.
+    # That rule now lives in a comment at the old render site, so keep it findable.
+    assert "past_overspend` block, the same one" in ui
 
 
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
     band = ui[ui.index("function PastOverspendTile"):]
     band = band[:band.index("\n}")]
-    # The headline is the AVOIDABLE amount, and says so — it is no longer
-    # labelled as everything the behaviour cost.
+    # The headline is the AVOIDABLE amount, and the tile's own label says so.
     assert "What you could have avoided" in band
-    assert "was avoidable" in band
     assert "recoverable" not in band
     assert "could save" not in ui
     # No ratio framing ("recovering $X of a $Y problem") anywhere.
     assert "recovering $" not in ui
-    # The cost line survived the band's removal: still present, still past
-    # tense, still worded as COST rather than waste. It is terser and its long
-    # form moved into the figure's hover text, but rule 30's disclosure is not
-    # something a layout change is allowed to drop.
-    assert "total cost" in band
-    assert "that is cost, not waste" in band.lower()
-    assert "That is cost, not waste" in band
-    fn = ui[ui.index("function observedCostSentence"):]
-    fn = fn[:fn.index("\n}")]
-    assert "this behaviour cost " in fn
-    assert "recoverable" not in fn
-    assert "wasted" not in fn
+
+    # INVERTED, and this half used to assert the DEFECT. The tile rendered
+    # "... 13 causes of $7,653.24 total cost — that is cost, not waste", and this
+    # test required both the "was avoidable" wording and that whole clause to be
+    # present. Measured on the live block, the clause was false as rendered:
+    # `past_overspend_usd` sums 13 proposals while `observed_cost_usd` covers 2
+    # (resend + relearn), so it attached a two-proposal denominator to "13 causes".
+    # It is also not the part-of-a-whole relationship `cost_disclosure` claimed:
+    # summarize alone contributes ~4,811 of avoidable from a proposal with NO
+    # observed cost, so most of the avoidable total lies outside the 7,653 entirely.
+    #
+    # Rule 30's disclosure is not being dropped, it is being made unnecessary: with
+    # no companion total on the tile there is no adjacency to misread. The
+    # PER-ROW disclosure is a different quantity, true of a single proposal, and is
+    # asserted intact below.
+    assert "was avoidable" not in band
+    assert "total cost" not in band
+    assert "cost, not waste" not in band.lower()
+    # Scoped to the RETURNED markup: the comment above the render names the removed
+    # field to explain why it went, and a whole-function check matches that
+    # explanation instead of the render.
+    markup = band[band.index("return html`"):]
+    assert "observed_cost_usd" not in markup
+    # And no orphaned disclosure describing a figure the tile no longer shows.
+    assert "cost_disclosure" not in markup
+    # The per-row cost sentence is gone with the field it reported. Asserted as an
+    # absence, not re-pointed: the helper that built it no longer exists, and a
+    # test looking it up would fail on the lookup rather than on the claim.
+    assert "function observedCostSentence" not in ui
+    # Matched on the RENDERED string, not the phrase: the comment where the helper
+    # used to live quotes the sentence while explaining why it went, and a bare
+    # phrase check matches the explanation instead of a render.
+    assert "'In total, this behaviour cost '" not in ui
 
 
-def test_no_ui_surface_labels_the_total_cost_figure_as_waste(ui):
-    # The `observed_cost_*` fields carry the unavoidable-inclusive total. No
-    # rendering of them may sit next to waste/overspend wording, because the
-    # part they exceed the avoidable figure by was never shown to be avoidable.
-    for marker in ("observed_cost_usd", "observed_cost_tokens"):
-        for idx in _all_indices(ui, marker):
-            around = ui[max(0, idx - 400): idx + 400].lower()
-            for forbidden in ("wasted", "waste you", "overspent", "overspend you"):
-                assert forbidden not in around, (
-                    f"{marker} is rendered within 400 chars of '{forbidden}'"
-                )
+def test_no_ui_surface_reads_a_retired_cost_field(ui):
+    # The total-observed-cost fields are deleted from the contract, so the payload
+    # never carries them. A branch still reading one would be dead on a fresh
+    # recompute and, worse, alive on a stale cache — which is exactly how a
+    # deleted figure comes back on screen. Comments naming the fields to explain
+    # the removal are fine and are what the `${...}` scoping here allows for.
+    for marker in ("observed_cost_usd", "observed_cost_tokens",
+                   "observed_cost_basis", "cost_of_waste_usd"):
+        for template in ("${prop." + marker, "${item." + marker,
+                         "item." + marker + " !=", "prop." + marker + " !="):
+            assert template not in ui, f"the UI still reads {marker}"
 
 
-def test_the_card_states_the_two_figures_differing_coverage(ui):
-    # A cost spanning every session shown beside an avoidable figure spanning a
-    # filtered subset must never be presented as two views of one quantity: the
-    # ratio between them would otherwise read as "94% of this was unavoidable".
+def test_the_card_states_what_its_figure_does_not_cover(ui):
+    # The avoidable figure is computed over a filtered subset, so the card has to
+    # say which sessions it covered. This used to be the second half of a pair
+    # (the note explained the gap to a total-cost figure beside it); the total is
+    # deleted and the note is not, because the filtering it describes still
+    # happens and is invisible without it.
     card = ui[ui.index("function CostProposalCard"):]
     card = card[:card.index("\n// The headline band")]
     assert "${prop.coverage_note}" in card
-    assert "observedCostSentence(prop)" in card
+    assert "<summary>What this figure does and does not cover</summary>" in card
+    assert "observedCostSentence" not in card
 
 
 def _all_indices(haystack: str, needle: str):
@@ -811,8 +836,10 @@ def test_the_basis_is_reachable_from_the_card_not_only_on_hover(ui):
 def test_the_observed_figure_is_visually_separated_from_recoverable_tiles(ui):
     # Not the same colour treatment: every "what you could get back" surface is
     # accent-blue (.rec-amount) or success-green; this one renders in plain body
-    # text. Asserted over the rules that actually render — .po-amount carries
-    # the figure and .po-observed-tag its label.
+    # text. Asserted over the rule that actually renders it, `.po-amount`. The
+    # companion `.po-observed-tag` rule that used to sit in this range is gone
+    # with the chip it styled, so the range now covers `.po-amount` alone — which
+    # is the figure, and the figure is what must not be coloured like a claim.
     css = ui[ui.index(".po-amount {"):ui.index(".po-basis {")]
     assert "var(--accent)" not in css
     assert "var(--success)" not in css

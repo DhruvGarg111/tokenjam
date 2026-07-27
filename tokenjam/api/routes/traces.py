@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.framing import (
@@ -56,10 +56,15 @@ async def list_traces(
     min_cost_usd: float | None = None,
 ) -> dict:
     db = request.app.state.db
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     filters = TraceFilters(
         agent_id=agent_id,
-        since=parse_since(since) if since else None,
-        until=parse_since(until) if until else None,
+        since=since_dt,
+        until=until_dt,
         limit=limit,
         offset=offset,
         status=status,

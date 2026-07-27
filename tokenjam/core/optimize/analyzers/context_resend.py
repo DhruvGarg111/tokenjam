@@ -35,20 +35,17 @@ Honesty discipline (CLAUDE.md Rule 14 / anti-pattern #22): `repeat_share`
 itself is a measured token-share, not a savings claim; it is shown
 regardless of pricing or caching state.
 
-**Two dollar figures live on this finding, they are NEVER summed, and only
-ONE of them may ever be called waste.**
+**ONE dollar figure lives on this finding, and it is the avoidable one.**
 
-`cost_of_waste_usd` is an OBSERVATION and is COST, not waste: what the
-re-sent volume actually cost over the window, priced per token class at the
-rates it really billed at (cache reads at the cache-read rate, uncached
-repeat at the input rate). Nothing is projected and nothing is discounted,
-because nothing is being claimed — this answers "what did re-sending context
-cost me", which is a question the data answers exactly.
+A second, larger figure used to sit beside it: `cost_of_waste_usd`, the full
+observed cost of the re-sent volume across every session with repeat volume.
+It is DELETED (founder decision). The pairing was the problem, not the
+wording: the avoidable figure is computed over a filtered subset, so the ratio
+of the two read as "94% of this money was shown to be unavoidable", which was
+never measured and was never true.
 
-**It must never be rendered as "wasted" or "overspent".** Waste is only ever
-the portion that could have been avoided; unavoidable spend is cost. The
-difference between this figure and `past_overspend_usd` is NOT a
-measurement of how much re-sending was inherently necessary. Most of it is
+What the avoidable figure does NOT cover is still measured and still stated,
+because that is the part a reader actually needs. The money outside it is
 simply OUTSIDE the avoidability analysis:
 
   * sessions handed to `downsize`'s driver-role case (Critical Rule 27) are
@@ -62,9 +59,11 @@ simply OUTSIDE the avoidability analysis:
 None of those three establish that the excluded money was unavoidable — only
 that this analyzer did not analyse it. The coverage fields below
 (`cost_in_scope_usd` / `cost_driver_role_usd` / `cost_no_lever_usd`,
-`offload_ceiling_usd`, `coverage_note`) exist so a surface can state that
-explicitly instead of letting the ratio of the two headline numbers imply a
-94%-unavoidable claim the data never made.
+`offload_ceiling_usd`, `coverage_note`) exist so a surface can state that in
+words. They partition observed cost by the SAME predicate the avoidable figure
+uses, so they survived the deletion of the total: each one names a specific
+population and what happened to it, which is a statement, not a total inviting
+a ratio.
 
 `past_overspend_usd` is what the fix actually returns, is derived from
 THIS user's corpus rather than a cross-corpus constant, and is THE figure any
@@ -243,21 +242,6 @@ def _offloadable_share_disclosure(measured: OffloadableShare) -> str:
         f"delegability measure is computed anywhere today.{spread}"
     )
 
-RESEND_COST_OF_WASTE_BASIS = (
-    "OBSERVED COST, not waste and not recoverable: what re-sent context "
-    "actually cost over the window, priced per token class at the rates it "
-    "really billed at — cache reads at the cache-read rate, the still-uncached "
-    "share of the repeat volume at the input rate. Nothing here is projected or "
-    "discounted because nothing is being claimed. Do NOT read this as a saving, "
-    "and do NOT read the gap between it and the avoidable figure as a "
-    "measurement of what was unavoidable: multi-turn work does inherently "
-    "re-send some context, but most of the gap is simply outside the "
-    "avoidability analysis (sessions analysed on the model-role card, sessions "
-    "below the context floor, and the volume outside the compaction-bounded "
-    "main-thread tail). The figure a fix actually returns is "
-    "past_overspend_usd, which is smaller and derived separately."
-)
-
 COMPACTION_FIX = (
     "Run /compact (or start a fresh session) once accumulated context crosses "
     "your working set. The repeated volume this finding measures is the same "
@@ -366,13 +350,6 @@ class ResendFinding:
     estimate_confidence: str = "heuristic"
     past_overspend_tokens: int | None = None
     past_overspend_usd:    float | None = None
-    # COST OF WASTE — an observation, never a saving, and NEVER summed with
-    # `past_overspend_usd` anywhere. See the module docstring and
-    # `RESEND_COST_OF_WASTE_BASIS`. `None` when no turn in the window carried a
-    # priced model (a zero would read as "re-sending context is free").
-    cost_of_waste_usd:      float | None = None
-    cost_of_waste_tokens:   int = 0
-    cost_of_waste_basis:    str = RESEND_COST_OF_WASTE_BASIS
     # The two halves of the compound recoverable claim, kept visible so the
     # headline is never a black box. They ARE summed into
     # `past_overspend_usd` — unlike cost-of-waste, these price the same
@@ -393,14 +370,14 @@ class ResendFinding:
     offloadable_share_sessions:       int = 0
     offloadable_share_sessions_total: int = 0
     offloadable_share_median:         float | None = None
-    # --- Coverage: the two dollar figures' POPULATIONS -----------------------
-    # `cost_of_waste_usd` is priced over EVERY session with repeat volume;
-    # `past_overspend_usd` only over the sessions that survive the
-    # driver-role partition and the context floor. Presenting the two as
-    # views of one quantity (and letting their ratio read as "94% of it was
-    # unavoidable") is only honest if the differing coverage is stated, so the
-    # split is measured here rather than left implicit. The three cost fields
-    # partition `cost_of_waste_usd` exactly, up to rounding.
+    # --- Coverage: WHICH sessions the avoidable figure was computed over ------
+    # `past_overspend_usd` is priced only over the sessions that survive the
+    # driver-role partition and the context floor. The three cost fields below
+    # partition observed cost across EVERY session with repeat volume, by the
+    # same predicate, so a surface can say what happened to the money outside the
+    # avoidable figure instead of leaving the reader to assume it was
+    # unavoidable. They are the reason no single total is needed: a partition
+    # states where the money went; a total only invites a ratio.
     #: Observed cost inside the sessions the avoidable figure WAS computed over.
     cost_in_scope_usd:     float | None = None
     #: Observed cost in the sessions ceded whole to `downsize`'s driver-role
@@ -558,20 +535,33 @@ def _coverage_class(
 def _coverage_note(finding: ResendFinding) -> str:
     """State, in words, what the avoidable figure does and does not cover.
 
-    The defect this exists to close: a cost figure spanning every session
-    shown beside an avoidable figure spanning a filtered subset invites the
-    reader to compute a ratio and conclude the remainder was unavoidable. It
-    was not — it was analysed elsewhere, filtered out, or outside the tail
-    definition. None of those is a finding of necessity, and the card has to
-    say so rather than leaving the ratio to speak.
+    The defect this exists to close: an avoidable figure computed over a
+    filtered subset invites the reader to assume everything outside it was
+    unavoidable. It was not — it was analysed elsewhere, filtered out, or
+    outside the tail definition. None of those is a finding of necessity, and
+    the card has to say so.
+
+    It originally corrected a stronger version of the same defect, where the
+    subset figure sat beside the full observed cost and their ratio made the
+    claim outright. That total is deleted; this note is not, because the
+    filtering it describes is still happening and is still invisible without it.
+
+    Gated on the COVERAGE PARTITION rather than on a total: the three cost
+    buckets are what this note actually reads, and they are populated by the same
+    pass that priced them. A gate on the deleted total would have had to be
+    replaced with a re-derived sum, which is a total again by another name.
     """
-    cost = finding.cost_of_waste_usd
-    if cost is None or cost <= 0:
+    sessions_total = (
+        finding.sessions_in_scope
+        + finding.sessions_no_lever
+        + finding.driver_role_sessions
+    )
+    if not sessions_total:
         return ""
     parts = [
-        f"COVERAGE. The cost figure covers every session with repeat volume; "
-        f"the avoidable figure was computed over {finding.sessions_in_scope:,} "
-        f"of them."
+        f"COVERAGE. {sessions_total:,} session(s) in this window carried repeat "
+        f"volume; the avoidable figure was computed over "
+        f"{finding.sessions_in_scope:,} of them."
     ]
     if finding.driver_role_sessions and finding.cost_driver_role_usd:
         parts.append(
@@ -810,8 +800,6 @@ def run(ctx: AnalyzerContext) -> None:
     finding.past_overspend_tokens = round(
         AVOIDABLE_FRACTION_OF_REPEAT * finding.repeat_tokens
     )
-    finding.cost_of_waste_usd = round(waste_usd_total, 6) if any_waste_priced else None
-    finding.cost_of_waste_tokens = waste_tokens_total
     finding.offloadable_share = (
         round(offloadable_share, 4) if offloadable_share is not None else None
     )
@@ -832,7 +820,7 @@ def run(ctx: AnalyzerContext) -> None:
         finding.rightsize_recoverable_usd = round(rightsize_usd_total, 6)
         # The two halves compound: offloading decides where the work runs,
         # right-sizing decides what it runs on. Neither cancels the other, so
-        # they sum — unlike cost-of-waste, which never enters this figure.
+        # they sum.
         finding.past_overspend_usd = round(
             offload_usd_total + rightsize_usd_total, 6
         )
@@ -850,8 +838,7 @@ def run(ctx: AnalyzerContext) -> None:
             f"{driver_role_sessions} context-heavy session(s) in this window "
             "were driven inline by a premium-tier model that never dispatched "
             "a subagent. Their offload saving is claimed by the model-role "
-            "card instead of here, so the two never price the same tokens; "
-            "the cost figure above still covers them."
+            "card instead of here, so the two never price the same tokens."
         )
     finding.estimate_basis = RESEND_ESTIMATE_BASIS + (
         _offloadable_share_disclosure(measured_share) if measured_share is not None else ""

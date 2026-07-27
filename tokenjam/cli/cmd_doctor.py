@@ -80,6 +80,9 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     still recoverable only until Claude Code prunes the transcript.
     checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"]))
 
+    # 17. Cost integrity — sessions.total_cost_usd vs SUM(spans.cost_usd)
+    checks.append(_check_cost_integrity(ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -377,6 +380,54 @@ def _check_schema_integrity(db: object) -> dict:
             "message": "All expected columns and tables present."}
 
 
+def _check_cost_integrity(db: object) -> dict:
+    """Flag sessions whose stored cost disagrees with their spans' sum.
+
+    ``sessions.total_cost_usd`` and ``SUM(spans.cost_usd)`` are two figures the
+    UI can show side by side — a session card next to a span-derived total — so
+    they have to agree, and ``recompute_session_totals_from_spans`` already
+    names the span sum as the source of truth. Historical rows can still hold a
+    stale total from a path that moved one side without the other; this surfaces
+    that instead of leaving the user to notice a 3.8% discrepancy between two
+    screens. The repair is the existing idempotent recompute, so no cost is
+    invented and no span is touched.
+    """
+    from tokenjam.core.db import session_cost_drift
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Cost integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        count, total_drift, worst = session_cost_drift(conn)
+    except duckdb.Error as e:
+        return {"name": "Cost integrity", "level": "info",
+                "message": f"Skipped — could not inspect cost totals: {e}"}
+    if not count:
+        return {"name": "Cost integrity", "level": "ok",
+                "message": "Every session's stored cost matches the sum of its spans."}
+    biggest = ""
+    if worst:
+        session_id, stored, span_sum = worst[0]
+        biggest = (
+            f" Largest: session {session_id} stores ${stored:,.2f} against "
+            f"${span_sum:,.2f} of spans."
+        )
+    return {
+        "name": "Cost integrity",
+        "level": "warning",
+        "message": (
+            f"{count} session(s) store a total that disagrees with the sum of "
+            f"their spans, ${total_drift:,.2f} apart in all. Cost shown per "
+            f"session and cost derived from spans will not match."
+            f"{biggest} Run `tj doctor --repair` to reconcile each session to "
+            f"its spans (idempotent, spans untouched)."
+        ),
+        "repair_action": "heal_session_costs",
+    }
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -508,9 +559,11 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
 def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
+        SESSION_COST_DRIFT_TOLERANCE_USD,
         ensure_expected_columns,
         ensure_expected_tables,
         repair_spans_stats,
+        session_cost_drift,
     )
 
     conn = getattr(db, "conn", None)
@@ -542,6 +595,52 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                 summary = ", ".join(repaired) if repaired else "nothing (already healthy)"
                 console.print(
                     f"  [green]Schema reconciled — added {summary}.[/green]"
+                )
+            continue
+        if action == "heal_session_costs":
+            recompute = getattr(db, "recompute_session_totals_from_spans", None)
+            if conn is None or recompute is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # Re-read the drifted set here rather than trusting the check's
+                # truncated `worst` list, which is capped for display.
+                count, _total, _worst = session_cost_drift(conn)
+                drifted = [
+                    str(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT s.session_id
+                        FROM sessions AS s
+                        LEFT JOIN (
+                            SELECT session_id, SUM(cost_usd) AS span_cost
+                            FROM spans WHERE session_id IS NOT NULL
+                            GROUP BY session_id
+                        ) AS agg ON agg.session_id = s.session_id
+                        WHERE ABS(COALESCE(agg.span_cost, 0.0)
+                                  - COALESCE(s.total_cost_usd, 0.0)) > $1
+                        """,
+                        [SESSION_COST_DRIFT_TOLERANCE_USD],
+                    ).fetchall()
+                ]
+                recompute(drifted)
+                after, _after_total, _ = session_cost_drift(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Cost repair failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                console.print(
+                    f"  [green]Session costs reconciled — {count - after} of "
+                    f"{count} session(s) now match their spans.[/green]"
                 )
             continue
         if action == "rebuild_spans":

@@ -7,6 +7,7 @@ bug's fix so a future edit that reintroduces it fails here.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,32 @@ _UI = Path(__file__).parent.parent.parent / "tokenjam" / "ui" / "index.html"
 @pytest.fixture(scope="module")
 def html() -> str:
     return _UI.read_text(encoding="utf-8")
+
+
+def _no_comments(text: str) -> str:
+    """`text` with `//` line comments stripped, for absence assertions.
+
+    This file is heavily commented BY DESIGN: the UI records why each decision was
+    made, including the wording of strings that were deliberately removed. A plain
+    `assert "X" not in html` therefore matches the explanation and fails on correct
+    code. That trap bit seven separate assertions during the inbox redesign before
+    this helper existed, each time costing a debug cycle to rediscover.
+
+    Deliberately naive about `//`: it drops from `//` to end of line only when
+    `//` is the first non-whitespace on the line, so a `//` inside a URL or a
+    regex literal is left alone.
+
+    JSX-style `${/* ... */ \'\'}` interpolations ARE stripped, because that is
+    where the render's own tombstones live — the inbox records the exact wording of
+    labels it removed, inside the markup, right where they used to render. Without
+    this, a ban on a removed label matches its own explanation. Plain `/* */` block
+    comments outside an interpolation are left alone.
+    """
+    text = re.sub(r"\$\{/\*.*?\*/\s*''\}", "", text, flags=re.S)
+    return "\n".join(
+        "" if line.lstrip().startswith("//") else line
+        for line in text.splitlines()
+    )
 
 
 def test_traces_window_select_exposes_longer_supported_windows(html):
@@ -36,6 +63,45 @@ def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
     assert "function tracesHrefForWindow" in html
     assert "tracesHrefForWindow(since)" in html
     assert 'label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"' not in html
+
+
+def test_dashboard_window_options_derive_from_data_span(html):
+    # The Dashboard window selector used to be a fixed 24h/7d/30d/90d list with
+    # no relation to how much telemetry the store actually holds -- offering
+    # 90d over a two-month corpus, and unable to reach past 90d on a longer
+    # one. It must now derive from core/data_span.py's `available_days`
+    # (served on /drift and /relearn/proposals), not a hardcoded list.
+    const_start = html.index("const DASHBOARD_STANDARD_WINDOWS")
+    start = html.index("function dashboardWindowOptions")
+    end = html.index("function DashboardView", start)
+    consts = html[const_start:start]
+    fn = html[start:end]
+
+    # The always-safe floor entry exists and is what an unknown span falls
+    # back to.
+    assert "{ value: '24h', label: 'Last 24h', days: 1 }" in consts
+
+    # Unknown span (not yet read) offers only the always-safe floor, never a
+    # wrong option set asserted ahead of the data.
+    assert "if (availableDays == null) return [DASHBOARD_STANDARD_WINDOWS[0]];" in fn
+
+    # Known span: only windows at-or-under the available span, plus one final
+    # option at the real span itself.
+    assert "w.days <= availableDays" in fn
+    assert "value: `${availableDays}d`" in fn
+
+    dash_start = html.index("function DashboardView")
+    dash_end = html.index("function ", dash_start + 1)
+    dash_view = html[dash_start:dash_end]
+
+    # Wired to the server-provided data_span, not re-derived client-side.
+    assert "driftRead.data.data_span" in dash_view
+    assert "relearnRead.data.data_span" in dash_view
+    assert "dashboardWindowOptions(availableDays)" in dash_view
+
+    # The old unconditional four-option list is gone from the picker itself.
+    assert '<option value="24h">Last 24h</option>\n      <option value="7d">Last 7d</option>' not in dash_view
+    assert "winOptionsWithCurrent.map(w => html`<option value=${w.value}>${w.label}</option>`)" in dash_view
 
 
 # --- #126: Downsize typed slot always rendered ----------------------------- #
@@ -275,15 +341,168 @@ def test_overview_fetches_in_parallel(html):
     assert "await Promise.all([" in html
 
 
+def _analytics_view_src(html: str) -> str:
+    """Just AnalyticsView's own body."""
+    start = html.index("function AnalyticsView")
+    return html[start:html.index("\nfunction ", start + 1)]
+
+
+def test_analytics_view_drops_a_stale_pivot_settle(html):
+    # AnalyticsView's `load` re-fetches /analytics on every metric/group_by/
+    # stack/chart/since/filter change (the Dashboard's embedded "Explore"
+    # pivot, and the standalone Analytics screen). It has no polling of its
+    # own, but a rapid pivot change (e.g. switching "By: Model" -> "By:
+    # Tenant") fires a NEW request while an older one can still be in flight.
+    # A slower EARLIER request (grouping by model touches more rows) landing
+    # AFTER a faster LATER one (grouping by tenant, which this corpus has none
+    # of) used to unconditionally overwrite state — the chart/KPIs would show
+    # the new dimension's (near-empty) data while something derived from the
+    # stale response lingered, and more generally the displayed pivot could
+    # silently disagree with the selector. Only a settle whose generation
+    # still matches the current one may write state, mirroring useTriageRead's
+    # drop-stale-settle rule.
+    src = _analytics_view_src(html)
+    assert "const gen = useRef(0);" in src
+    assert "const g = ++gen.current;" in src
+    assert "if (gen.current === g) setSt({ loading: false, error: null, resp });" in src
+    assert "if (gen.current === g) setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));" in src
+
+
+def _dashboard_src(html: str) -> str:
+    """Just DashboardView's own body, for assertions about what this page fetches."""
+    start = html.index("function DashboardView")
+    return html[start:html.index("// Two lenses, one router", start)]
+
+
+def _cost_view_src(html: str) -> str:
+    """Just CostView's own body."""
+    start = html.index("function CostView")
+    return html[start:html.index("\nfunction TopTenantsPanel", start)]
+
+
+def test_cost_view_load_never_stacks_on_a_slow_backend(html):
+    # CostView's 30s poll used to call `load`/`loadTenants` with no in-flight
+    # guard at all, unlike useTriageRead's own reads. On a slow backend (a
+    # large real corpus) a poll tick firing before the previous cycle settled
+    # queued ANOTHER concurrent /cost + /cost/compare + /cost/cache request on
+    # top of whatever was still running, with no cap — and because the header
+    # renders `total`/`totalTokens` unconditionally (not gated on having ever
+    # received an answer), the page showed a fabricated "$0.0000 (0 tokens)"
+    # for as long as the pile-up kept every request from ever finishing,
+    # looking identical to "no spend" even though the real figure was sitting
+    # in a request that never got to run. Both `load` and `loadTenants` now
+    # guard the same way useTriageRead's `refresh` does.
+    src = _cost_view_src(html)
+    assert "if (loadInFlight.current) return;" in src
+    assert "if (tenantsInFlight.current) return;" in src
+    # The header must never claim a figure before the first answer lands.
+    assert "const hasCostData = costResp != null;" in src
+    assert "!hasCostData ? null : useTokens" in src
+
+
+def _budget_src(html: str) -> str:
+    """Just BudgetView's own body."""
+    start = html.index("function BudgetView")
+    end = html.index("\nfunction ", start + 1)
+    return html[start:end]
+
+
+def test_budget_non_essential_alerts_reads_never_reach_the_outer_catch(html):
+    """Both /alerts reads already catch their own failures and resolve to []
+    -- the ONLY read that can still reach the outer .catch is /budget itself,
+    the essential one. A transient blip on either alerts read must never take
+    the whole page down with it."""
+    budget = _budget_src(html)
+    assert budget.count(".catch(() => [])") == 2
+    assert "api('/alerts', { type: 'cost_budget_daily', since: '24h' })\n      .then(d => d.alerts || [])\n      .catch(() => [])" in budget
+    assert "api('/alerts', { type: 'cost_budget_session', since: '24h' })\n      .then(d => d.alerts || [])\n      .catch(() => [])" in budget
+
+
+def test_budget_essential_read_failure_names_the_request(html):
+    """api() throws a bare `API <status>` (no context on which request it
+    was); that information used to be discarded on a /budget failure, which
+    surfaced as an unlabeled generic message. /budget's own .catch now names
+    the request before it reaches setError."""
+    budget = _budget_src(html)
+    assert "api('/budget').catch(e => { throw new Error('/budget failed: ' + e.message); })" in budget
+
+
+def test_budget_view_failure_does_not_blank_content_it_already_has(html):
+    """The error branch used to be a bare `if (error) return <blank page>`,
+    so ANY later failed refresh (this view polls every 10s) discarded the
+    last successfully loaded budget data and replaced the whole page with one
+    unlabeled red string. Now the full-page error only fires when there is no
+    prior answer at all (`error && !data`); once data has landed once, a
+    later failure renders as a scoped .band-msg.err banner ABOVE the still-
+    rendered tables, same pattern the Dashboard uses for its own /cost
+    failures, and setError(null) on a successful load clears a stale banner."""
+    budget = _budget_src(html)
+    assert "if (error && !data) return html`<div class=\"empty\" style=\"color:var(--error)\">${error}</div>`;" in budget
+    assert "if (error) return html`<div class=\"empty\"" not in budget
+    assert 'class="band-msg err"' in budget
+    assert "Couldn't refresh budget data." in budget
+    assert "setError(null);" in budget
+    # The per-agent and provider tables still render below the banner --
+    # the banner never replaces them.
+    banner_idx = budget.index('class="band-msg err"')
+    assert budget.index("Per-agent budget caps", banner_idx) > banner_idx
+    assert budget.index("Provider spend forecast", banner_idx) > banner_idx
+
+
 def test_overview_error_handling_is_asymmetric(html):
     # /cost is load-bearing: NO .catch, so its failure surfaces the error state.
-    # The other five panels keep .catch fallbacks so one failing panel renders
-    # empty instead of blanking the Overview. Don't unify these (#124 review).
+    # The other panels still degrade individually so one failing panel never
+    # blanks the Dashboard. Don't unify these (#124 review).
     assert "api('/cost', { since, group_by: 'day' }).catch" not in html  # no catch on /cost
-    assert "api('/cost', { since, group_by: 'day' })," in html           # bare, inside Promise.all
-    assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
-    assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" in html
-    assert "api('/drift').catch(() => ({ agents: [] }))" in html
+    assert "api('/cost', { since, group_by: 'day' })," in html
+    # /cost/compare is no longer fetched by this page at all. It fed `d.compare`,
+    # which nothing rendered (the run-rate comparison it was added for now comes
+    # from the explorer's own kpi_deltas), so once the shared batch was split into
+    # one read per source there was nowhere left to put a read whose result was
+    # never displayed. On a page where every request costs tens of seconds of DB
+    # time, a per-poll read nothing renders is not worth keeping.
+    assert "api('/cost/compare'" not in _dashboard_src(html)
+    # How they degrade changed: a read that feeds a tile making a factual claim
+    # is settled into a tagged {ok, data} outcome rather than an empty default,
+    # because an empty default let a failed read publish a zero and its
+    # reassuring caption ("0 unread alerts / all clear"). See
+    # test_lens_dashboard_states.py for the rule and the behavioural tests.
+    #
+    # There is no longer a shared batch at all: each read settles on its own
+    # useTriageRead, whose ('loading' | 'ready' | 'error', data) pair is the
+    # contract every panel renders from. That replaced BOTH the empty-default
+    # fallbacks and the Promise.all, since a batch resolves only when its slowest
+    # member does and these members range from 13s to several minutes.
+    # The property under test is the SHAPE: one useTriageRead per read, settling
+    # into a tagged outcome instead of an empty default. /drift now also sends
+    # the page's window and depends on it (the selector used to govern three of
+    # the five Health tiles and silently skip this one), so the literal moved;
+    # what it is catching has not. The no-empty-default claim is asserted
+    # independently two lines below and is untouched.
+    assert "const driftRead = useTriageRead(() => api('/drift', { since }), [since]);" in html
+    assert "function useTriageRead(run, deps) {" in html
+    assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" not in html
+    assert "api('/drift').catch(() => ({ agents: [] }))" not in html
+
+
+def test_triage_read_settle_only_clears_in_flight_for_its_own_generation(html):
+    # useTriageRead's `refresh()` guards against stacking a poll on a slow read
+    # via `inFlight.current` — but a window/filter change (a `deps` change) also
+    # bumps `gen.current` and clears `inFlight.current` early (in the effect's
+    # cleanup) so the REPLACEMENT request can start immediately without waiting
+    # behind the superseded one. If the superseded request's OWN `.then()` later
+    # unconditionally cleared `inFlight.current` again, it would falsely mark the
+    # guard idle while the replacement request was still genuinely in flight, and
+    # a poll tick landing in that window would stack a second query on top of it.
+    # Both settle branches (success and error) must gate the clear on the
+    # generation still matching, exactly like they already gate the `setSt` call.
+    fn = html[html.index("function useTriageRead(run, deps) {"):]
+    fn = fn[:fn.index("\n}\n") + 3]
+    assert "if (gen.current === g) inFlight.current = false;" in fn
+    # The naive/buggy form: an unconditional clear as the first statement of a
+    # settle branch, with no generation check anywhere in that branch.
+    assert "(data) => {\n        inFlight.current = false;" not in fn
+    assert "(err) => {\n        inFlight.current = false;" not in fn
 
 
 def test_overview_empty_gate_considers_historical_cost(html):
@@ -292,23 +511,30 @@ def test_overview_empty_gate_considers_historical_cost(html):
     # A DB whose sessions are all >24h old (e.g. a user upgrading to review past
     # spend) has 0 active agents but a full cost history, so the default landing
     # screen falsely read empty while Cost/Analytics/Optimize rendered fine.
-    ov_start = html.index("const setWin = v => navigate('dashboard'")
-    ov_end = html.index("const winPicker = html`", ov_start)
-    ov = html[ov_start:ov_end]
+    # Sliced to the whole view: the empty gate now sits with the other derived
+    # values, below the window picker it used to precede.
+    ov = _dashboard_src(html)
 
     # Buggy pattern GONE: empty was gated purely on active-agent count with an
     # early return before /cost was fetched.
     assert "if (!status.agents || status.agents.length === 0) {" not in ov
     assert "const status = await api('/status');" not in ov  # /status no longer fetched first + serially
 
-    # Fix pattern PRESENT: /cost is fetched in the parallel fan-out, and the
-    # empty gate considers historical cost/tokens (not just agents/traces).
-    assert "const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;" in ov
-    assert "const empty = !hasCost && !hasAgents && !hasTraces;" in ov
-    # /cost stays load-bearing (no .catch) inside the fan-out.
-    assert "api('/cost', { since, group_by: 'day' })," in ov
-    # /status is now degradable (moved into the parallel fetch with a .catch).
-    assert "api('/status').catch(() => ({ agents: [] }))" in ov
+    # Fix pattern PRESENT: the empty gate considers historical cost/tokens (not
+    # just agents/traces), and /cost is read independently rather than serially.
+    assert "const hasCost = !!costData && ((cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0);" in ov
+    assert "const costRead = useTriageRead(() => api('/cost', { since, group_by: 'day' }), [since]);" in ov
+    # The gate has since been tightened twice more. First, all three of its
+    # inputs must have actually ANSWERED before it may claim there is no
+    # telemetry, so a failed or outstanding read can no longer show "No data yet"
+    # to a user with a full history. Second, the reads are independent, so
+    # "answered" is checked per read rather than off one shared load flag.
+    assert "const emptyKnown = !!costData && !!statusRead.data && !!tracesRead.data;" in ov
+    assert "const isEmpty = emptyKnown && !hasCost && !statusAgents.length && !traceList.length;" in ov
+    # None of them degrades to an empty default any more, so a failure can no
+    # longer be read as "this user has no agents / no traces".
+    assert "api('/status').catch(() => ({ agents: [] }))" not in ov
+    assert "api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] }))" not in ov
 
 
 # --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
@@ -366,14 +592,41 @@ def test_cost_table_cells_route_through_framing(html):
     assert "${useTokens ? fmtTokens(totalTokens) : fmtFramedDollar(total, framing)}" in html
 
 
-def test_traces_list_cost_routes_through_framing(html):
-    # Traces list COST column must consume the framing block, not raw fmtCost.
-    # Per #249 it now goes through fmtPerItemCost (per-item → tokens for
-    # subscription/local), not the window-aggregate fmtFramedDollar "% of cycle".
-    assert "<td>${fmtCost(t.cost_usd)}</td>" not in html
-    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html
-    # The screen actually pulls the framing block off the /traces response.
-    assert "setFraming(td.framing || null)" in html
+def test_traces_list_cost_column_is_unconditionally_tokens(html):
+    """Product decision: the Traces list's Cost column always shows token
+    totals, for every account -- a display convention for how traces are
+    presented, not a consequence of plan tier. It used to route through
+    fmtPerItemCost(..., framing), which chose tokens-vs-dollars per
+    subscription/local/api framing (#249); that conditional is gone from this
+    screen, so the column no longer reads `framing` at all, and TracesListView
+    no longer fetches/stores it either."""
+    view_start = html.index("function TracesListView")
+    view_end = html.index("function dedup", view_start)
+    view = html[view_start:view_end]
+    assert "<td>${fmtCost(t.cost_usd)}</td>" not in view
+    assert "fmtPerItemCost(" not in view
+    assert "${fmtTokens(_costVal(t, true) || 0)} tok" in view
+    assert "framing" not in view
+    assert "Cost (tokens) " in view
+
+
+def test_traces_outlier_explanation_never_mentions_plan(html):
+    """The outlier note/tooltip used to branch on `outlierDollarsShown`
+    (`!perItemUsesTokens(framing)`): a token-only explanation for
+    subscription/local, or the rule's own $ Q1/Q3/threshold figures for
+    api/unknown. Now that the Cost column is unconditionally tokens for every
+    account (see test_traces_list_cost_column_is_unconditionally_tokens), the
+    explanation must match it for every account too -- no more "Dollar
+    amounts aren't shown on your plan" (that attributes token display to plan,
+    which is exactly the differentiation being removed), and no more
+    plan-conditional $ branch either."""
+    view_start = html.index("function TracesListView")
+    view_end = html.index("function dedup", view_start)
+    view = html[view_start:view_end]
+    assert "Dollar amounts" not in view
+    assert "your plan" not in view
+    assert "outlierDollarsShown" not in view
+    assert "not a fraud or error signal." in view
 
 
 def test_traces_list_surfaces_pagination(html):
@@ -384,29 +637,66 @@ def test_traces_list_surfaces_pagination(html):
     assert "offset" in html
 
 
-def test_trace_detail_costs_route_through_framing(html):
-    # Waterfall bar label, tooltip line, and the span-detail panel all reframe —
-    # no bare per-span fmtCost (the bar label + tooltip both used s.cost_usd).
-    assert "fmtCost(s.cost_usd)" not in html
-    assert "${fmtCost(sel.cost_usd)}" not in html
-    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
-    # The span-detail panel "Cost" is per-item → fmtPerItemCost (#249).
-    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html
-    # Trace detail pulls the framing block off the /traces/{id} response.
-    assert "setFraming(d.framing || null)" in html
+def test_meta_caption_class_is_defined(html):
+    """`.meta` (the "Showing N of M traces" line + the outlier-rule note
+    beneath it, and the trace detail view's costliest-spans line) used to have
+    NO matching CSS rule at all, so those divs fell through to the body's
+    default sans-serif font/size/line-height instead of the app's small
+    monospace caption style — a mismatch from every other caption on the page.
+    A second, unrelated bug compounded it: the outlier note's inline
+    `margin-top:-8px` assumed a same-size sibling with its own margin-bottom
+    to collapse against; with no such margin, the negative offset pulled the
+    (much taller, default-sized) note up and over the line above it, so
+    glyphs overlapped. Declaring `.meta` with `margin-bottom: 8px` gives the
+    negative top margin exactly 8px to collapse against — net 0 gap, flush
+    but never overlapping, regardless of how many lines either caption wraps
+    to at a narrow width."""
+    m = re.search(r"\.meta\s*\{([^}]*)\}", html)
+    assert m, ".meta has no CSS rule"
+    rule = m.group(1)
+    assert "font-family: 'Geist Mono', monospace" in rule
+    assert "margin-bottom: 8px" in rule
+    # The two Traces-list captions that were colliding.
+    assert '<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>' in html
+    assert '<div class="meta" style="margin-top:-8px">${outlierNote}</div>' in html
+
+
+def _trace_detail_src(html: str) -> str:
+    start = html.index("function TraceDetailView")
+    end = html.index("function fmtFramedDollar", start)
+    return html[start:end]
+
+
+def test_trace_detail_is_token_first_with_no_framing_branch(html):
+    """The trace detail/waterfall page is part of the same Traces feature as
+    the list (reached by clicking a row there); it now shows token totals for
+    every account, matching the list's own display convention -- a property
+    of how traces are presented, not a consequence of plan tier. No bare
+    fmtCost either (that was the original #187/#249 bug: raw dollars with no
+    framing at all). TraceDetailView no longer fetches/stores framing, since
+    nothing in it reads pricing_mode any more."""
+    view = _no_comments(_trace_detail_src(html))
+    assert "fmtCost(s.cost_usd)" not in view
+    assert "fmtCost(sel.cost_usd)" not in view
+    assert "fmtFramedDollar(" not in view
+    assert "fmtPerItemCost(" not in view
+    assert "framing" not in view
+    assert "setFraming" not in view
 
 
 # --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
 def test_status_card_cost_today_routes_through_framing(html):
     # Status agent cards' "Cost today" must consume the /status framing block,
-    # not render raw fmtCost(a.cost_today). Per #249 it's per-item → tokens for
-    # subscription/local via fmtPerItemCost (not fmtFramedDollar "% of cycle").
+    # not render raw fmtCost(a.cost_today). Per #249 it's per-item, so it
+    # routes through fmtPerItemCost (tokens for LOCAL only now -- subscription
+    # no longer suppresses, product decision), not fmtFramedDollar "% of cycle".
     assert "${fmtCost(a.cost_today)}" not in html
     assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html
 
 
 def test_optimize_window_comparison_routes_through_framing(html):
-    # The window-comparison cost delta must reframe for subscription/local.
+    # The window-comparison cost delta must reframe (LOCAL suppresses; api and
+    # subscription both render the dollar figure -- product decision).
     assert "${fmtCost(Math.abs(st.cmp.cost_delta_usd))}" not in html
     assert "${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)}" in html
 
@@ -422,9 +712,10 @@ def test_optimize_budget_projection_routes_through_framing(html):
 
 
 def test_optimize_cluster_avg_cost_routes_through_framing(html):
-    # The script cluster table "Avg cost" cell is per-item, so per #260 it routes
-    # through fmtPerItemCost (tokens for subscription/local), not the raw $ nor
-    # the window-aggregate fmtFramedDollar "% of cycle".
+    # The script cluster table "Avg cost" cell is per-item, so per #260 it
+    # routes through fmtPerItemCost (tokens for LOCAL only now -- subscription
+    # no longer suppresses, product decision), not the raw $ nor the
+    # window-aggregate fmtFramedDollar "% of cycle".
     assert "${fmtCost(c.avg_cost_usd)}" not in html
     assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" not in html
     assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
@@ -442,9 +733,13 @@ def test_stacked_bar_chart_present(html):
 
 
 def test_stacked_bar_chart_uses_framing_tokens(html):
-    # Stacked chart respects plan-tier framing: subscription/local -> tokens.
+    """Stacked chart respects plan-tier framing: LOCAL -> tokens (no marginal
+    cost to price at all). Subscription used to switch to tokens here too;
+    that differentiation is gone by product decision (tj does not
+    differentiate subscription-billed from API-billed users), so subscription
+    now renders dollars like api/unknown."""
     assert "fmtY=${fmtY}" in html  # fmtY = useTokens ? fmtTokens : fmtCost
-    assert "const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
+    assert "const useTokens = !!framing && framing.pricing_mode === 'local'" in html
 
 
 def test_cache_savings_chart_present(html):
@@ -458,8 +753,10 @@ def test_cache_savings_chart_present(html):
 
 def test_cache_savings_honesty_framing(html):
     # #246 dropped the "estimated recoverable" overlay from this chart (noise;
-    # it lives on Optimize). The cache card now reports MEASURED savings, framed:
-    # api → "$X saved", subscription/local → cached-token VOLUME (never raw $).
+    # it lives on Optimize). The cache card now reports MEASURED savings,
+    # framed: api and subscription → "$X saved" (product decision: no
+    # subscription differentiation), LOCAL → cached-token VOLUME (never raw
+    # $, no marginal cost to price at all).
     assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
     assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
     # the recoverable overlay is no longer wired into the cache chart
@@ -516,13 +813,17 @@ def test_component_waste_honesty_estimated_not_saved(html):
 
 
 def test_component_waste_recoverable_routes_through_framing(html):
-    # Per-analyzer recoverable must reframe (subscription/local → token-share),
-    # mirroring the existing recoverable band — not raw fmtCost.
+    """Per-analyzer recoverable must reframe (LOCAL -> token-share; local has
+    no marginal cost to price at all), mirroring the existing recoverable
+    band — not raw fmtCost. Subscription used to switch to token-share here
+    too; that differentiation is gone by product decision (tj does not
+    differentiate subscription-billed from API-billed users)."""
     assert "fmtFramedSavings(r.usd, r.tokens, compFraming)" in html
     # the measured-cost total uses the dollar framing helper, not raw fmtCost
     assert "fmtFramedDollar(st.comp.total_cost_usd" in html
     # plan-tier toggle drives tokens-vs-dollars for the whole surface
-    assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html
+    assert "compFraming.pricing_mode === 'local'" in html
+    assert "compFraming.pricing_mode === 'subscription'" not in html
 
 
 # --- trim card: provenance + flagged text on the web card, not just the CLI - #
@@ -641,11 +942,18 @@ def test_analytics_consumes_endpoint_not_reimplements(html):
 
 
 def test_analytics_respects_plan_tier_framing(html):
-    # spend metric switches to token volume for subscription/local (dollars
-    # suppressed); never re-derives the suppression rule — reads framing.
-    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
-    # The Spend KPI tile reframes via spendTileDisplay (implied-value multiplier
-    # for subscription, #262) rather than fmtFramedDollar's "% of cycle".
+    """The chart/leaderboard's own spend metric switches to token volume for
+    LOCAL only (dollars suppressed -- no marginal cost to price at all); it
+    used to switch for subscription too, that differentiation is gone by
+    product decision (tj does not differentiate subscription-billed from
+    API-billed users) -- never re-derives the suppression rule, reads
+    framing. The Spend KPI tile is separate: it still reframes via
+    spendTileDisplay (implied-value multiplier for subscription, #262)
+    rather than fmtFramedDollar's "% of cycle" -- that tile's multiplier is a
+    genuinely different metric, not a suppression mechanism, so it was never
+    part of the de-differentiation (see test_lens_dashboard_states.py's
+    spendTileDisplay tests)."""
+    assert "isSpend && !!framing && framing.pricing_mode === 'local'" in html
     assert "spendTileDisplay(kpis.spend, framing)" in html
 
 
@@ -707,36 +1015,53 @@ def test_analytics_leaderboard_shows_total_and_gap(html):
     assert "have a ${dimName}" in html
 
 
-# --- #215: cost-annotated trace waterfall ---------------------------------- #
+# --- #215: token-annotated trace waterfall ---------------------------------- #
 def test_trace_waterfall_cost_summary(html):
-    # A cost-first trace summary header (total cost + tokens + duration + spans).
+    """A token-first trace summary header (total + tokens + duration + spans).
+    A single trace's total is per-item, not a window aggregate -- per #249 it
+    is a plain token total (no "% of cycle" window-aggregate category error),
+    matching the Traces list's own unconditional token display -- a property
+    of how traces are presented, not a consequence of plan tier. This site
+    used to route through fmtPerItemCost (tokens for subscription/local,
+    dollars for api/unknown); it is now unconditional, like the list."""
     assert "wf-summary" in html
-    assert "Total cost" in html
+    assert "Total cost (tokens)" in html
     assert "wfTotalCostFramed" in html
-    # A single trace's total is per-item, not a window aggregate — per #249 it
-    # routes through fmtPerItemCost (tokens for subscription/local), not the
-    # window-level fmtFramedDollar "% of cycle".
-    assert "const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html
+    view = _trace_detail_src(html)
+    assert "const wfTotalCostFramed = fmtTokens(wfTotalInOut) + ' tok';" in view
 
 
-def test_trace_waterfall_per_span_cost_token_annotation(html):
-    # Per-span cost + tokens annotation column with a magnitude bar (not just the
-    # hover tooltip), so the timeline reads cost-first.
-    assert "wf-cost-bar" in html
-    assert "wf-cost-fill" in html
-    assert 'class="wf-cost-val"' in html
-    assert 'class="wf-cost-tok"' in html
+def test_trace_waterfall_per_span_token_annotation(html):
+    """Per-span token annotation column with a magnitude bar (not just the
+    hover tooltip). The sibling dollar annotation (.wf-cost-val) that used to
+    sit beside it is gone: this page shows tokens for every account now, so
+    that span always rendered empty and was removed as dead markup along
+    with its now-unused CSS rule."""
+    view = _trace_detail_src(html)
+    assert "wf-cost-bar" in view
+    assert "wf-cost-fill" in view
+    assert 'class="wf-cost-val"' not in view
+    assert 'class="wf-cost-tok"' in view
     # tokens summed per span and shown in the annotation
-    assert "const spanTokens = s =>" in html
-    assert "wf-cost-tok\">${sTok ? fmtTokens(sTok)" in html
+    assert "const spanTokens = s =>" in view
+    assert "wf-cost-tok\">${sTok ? fmtTokens(sTok)" in view
+    assert ".wf-cost-val {" not in html
 
 
-def test_trace_waterfall_magnitude_respects_framing(html):
-    # The magnitude bar (and summary) read on TOKEN volume when dollars are
-    # suppressed (subscription/local) — the suppression decision comes from the
-    # server framing block, never re-derived in JS.
-    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
-    assert "const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0)" in html
+def test_trace_waterfall_magnitude_is_token_first_unconditionally(html):
+    """The magnitude bar (and summary) read on TOKEN volume for every
+    account, with no branch on pricing_mode at all -- matching the Traces
+    list's own unconditional token display, since the waterfall is part of
+    the same Traces feature (reached by clicking a row in the list). This
+    site was not in the founder's named list of four `useTokens` duplicates
+    to convert; it was first converted to LOCAL-only (mirroring the other
+    four), then corrected to unconditional tokens once it was confirmed the
+    waterfall belongs to the Traces surface, not the general
+    subscription-vs-API dollar conversion -- see the session report."""
+    view = _no_comments(_trace_detail_src(html))
+    assert "wfUseTokens" not in view
+    assert "pricing_mode" not in view
+    assert "const wfMagOf = s => spanTokens(s);" in view
 
 
 # --- #217: KPI tiles → sparkline + period-over-period delta ----------------- #
@@ -914,7 +1239,11 @@ def test_analytics_alias_preserves_query_params_and_deep_links_to_explore(html):
 def test_dashboard_spend_deduped(html):
     # Spend shown ONCE (explorer's Spend KPI tile + chart); the old separate
     # run-rate headline chart is gone, folded into a caption under the KPI row.
-    assert "const kpiCaption = (!d.loading && !d.empty && !d.error && projection" in html
+    # The caption's gate moved onto the /cost read's own answer when the page's
+    # single load flag was split into one read per source; `projection` is null
+    # until `costData` exists, so the caption still cannot be built from an
+    # unanswered read.
+    assert "const kpiCaption = (projection && projection !== '—')" in html
     assert 'class="kpi-caption"' in html
 
 
@@ -933,6 +1262,44 @@ def test_spend_tile_distinct_under_subscription(html):
     assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
     assert "if (spend) {" in html
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
+
+
+def test_tokens_tile_shows_dollar_headline_with_token_count_secondary(html):
+    """Founder request: the Tokens card leads with its dollar value, the
+    token count present but secondary (subtitle-scale, dimmer). Computed
+    independently of `spend` (card 1), NOT reused from it: card 1 renders an
+    implied-value MULTIPLIER for SUBSCRIPTION ("43.5x plan value"), a
+    different metric entirely, not a dollar figure -- reusing spend.value
+    would have put that multiplier text on the Tokens card too. LOCAL is the
+    only pricing mode with no marginal cost to price at all; every other mode
+    (api / subscription / unknown) shows the real dollar amount here, so for
+    a SUBSCRIPTION account the two cards intentionally show different things
+    (card 1 the multiplier, card 2 the dollar amount) -- no duplication
+    there. For an API/unknown account both cards show the identical dollar
+    figure under two different labels (flagged, not resolved, in the session
+    report per the founder's own instruction). Falls back to the plain token
+    headline unchanged, with no secondary line, when there is no known
+    dollar figure at all (LOCAL, or an unreported spend field) -- never
+    fabricates one."""
+    assert "const spendMode = framing && framing.pricing_mode;" in html
+    assert "const tokensDollar = (kpis.spend != null && spendMode !== 'local') ? fmtDashUsd(kpis.spend) : null;" in html
+    assert "value: tokensDollar || kpiFigure(kpis.tokens, fmtTokens), sub: tokensSub," in html
+    assert "cost: !!tokensDollar," in html
+    assert "label: 'tokens', dim: true" in html
+    # Sparkline + delta are untouched -- still the token series/delta, not spend's.
+    assert "series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });" in html
+
+
+def test_kpi_sub_dim_is_an_additive_modifier_not_a_shared_restyle(html):
+    """The Tokens tile's dimmer token-count sub-line is a separate modifier
+    class (.kpi-sub-dim), not a change to .kpi-sub-val/.kpi-sub-lab
+    themselves -- the #318 breakdown-subtotal sub-line (sessions/events
+    tiles, `activeSub`) keeps its normal-brightness look, since it never
+    passes `dim`."""
+    assert ".kpi-sub-dim .kpi-sub-val { color: var(--text-dim)" in html
+    assert "sub=${t.sub || (t.key === metric ? activeSub : null)}" in html
+    # activeSub itself never sets `dim`, so it always renders at normal brightness.
+    assert "{ value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` }" in html
 
 
 def test_dashboard_triage_drills_into_optimize_card(html):
@@ -1005,30 +1372,38 @@ def test_status_archive_cost_column_respects_framing(html):
 
 # --- #249: "% of cycle" is window-level; per-item cost must render as tokens -- #
 def test_per_item_cost_helper_renders_tokens_for_subscription_local(html):
-    # The per-item formatter: subscription/local → token total (the in+out basis
-    # via _costVal), api/unknown → dollars. "% of cycle" (a window aggregate) is
-    # never produced at per-item granularity.
+    """The per-item formatter: LOCAL only -> token total (the in+out basis via
+    _costVal); api / subscription / unknown -> dollars uniformly. Subscription
+    used to also render tokens here; that branch is gone by product decision
+    (tj does not differentiate subscription-billed from API-billed users).
+    Local is a structurally different case, not a differentiation choice --
+    local inference incurs no marginal dollar cost at all -- so it still
+    renders tokens. "% of cycle" (a window aggregate) is never produced at
+    per-item granularity, regardless."""
     assert "function perItemUsesTokens(framing)" in html
     assert "function fmtPerItemCost(costUsd, tokenTotal, framing)" in html
+    assert "return !!framing && framing.pricing_mode === 'local';" in html
     assert "if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';" in html
     # the only "% of cycle" string in the codebase lives in fmtFramedDollar, which
     # per-item surfaces no longer call directly for the row value.
-    assert "return fmtFramedDollar(costUsd, framing); // api / unknown → dollars" in html
+    assert "return fmtFramedDollar(costUsd, framing); // api / subscription / unknown → dollars" in html
 
 
 def test_per_item_cost_surfaces_use_the_helper_not_framed_dollar(html):
-    # Every per-item dollar cell — Traces list, Status cards, span-detail, and
-    # the per-trace total — uses fmtPerItemCost, not the window-aggregate
-    # fmtFramedDollar. Guards against a regression reintroducing "% of cycle" at
-    # per-row granularity (the #249 bug: "466.7% of cycle").
-    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html        # traces list
+    """Every per-item dollar cell that still shows a dollar figure — Status
+    cards' "Cost today" — uses fmtPerItemCost, not the window-aggregate
+    fmtFramedDollar. Guards against a regression reintroducing "% of cycle"
+    at per-row granularity (the #249 bug: "466.7% of cycle"). The Traces
+    list, the trace detail/waterfall's span-detail panel, and its per-trace
+    total no longer call fmtPerItemCost at all: the whole Traces feature area
+    (list, detail, waterfall) shows unconditional token totals now (a display
+    convention, not a plan consequence), bypassing the tokens-vs-dollars
+    helper entirely rather than routing through it."""
     assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html  # status card
-    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html     # span detail
-    assert "fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html                # trace total
-    # these per-item surfaces must NOT call fmtFramedDollar on the row value
-    assert "${fmtFramedDollar(t.cost_usd, framing)}" not in html
     assert "${fmtFramedDollar(a.cost_today, data.framing)}" not in html
-    assert "${fmtFramedDollar(sel.cost_usd, framing)}" not in html
+    view = _trace_detail_src(html)
+    assert "fmtPerItemCost(" not in view
+    assert "fmtFramedDollar(" not in view
 
 
 def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
@@ -1051,15 +1426,19 @@ def test_waterfall_name_in_fixed_column_not_on_bar(html):
 
 
 def test_waterfall_bars_sized_by_magnitude_with_mode_toggle(html):
-    # Bars size by cost/token magnitude by default (the only thing that renders
-    # on duration-less backfill), with a cost/tokens/duration toggle. Cost-first
-    # default; tokens when $ is suppressed.
+    """Bars size by token magnitude by default (the only thing that renders
+    on duration-less backfill), with a tokens/duration toggle. Tokens is the
+    only magnitude mode now -- the "By cost" toggle option is gone along with
+    the dollar magnitude/annotation it drove, since this page shows tokens
+    for every account (no plan-based choice to offer any more)."""
     assert "const [wfMode, setWfMode] = useState(null)" in html
-    assert "const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost'" in html
-    assert "const magForMode = s =>" in html
-    assert "setWfMode('cost')" in html
-    assert "setWfMode('tokens')" in html
-    assert "setWfMode('duration')" in html
+    view = _trace_detail_src(html)
+    assert "const wfMode2 = wfMode || 'tokens';" in view
+    assert "const magForMode = s =>" in view
+    assert "setWfMode('cost')" not in view
+    assert "setWfMode('tokens')" in view
+    assert "setWfMode('duration')" in view
+    assert "By cost" not in view
 
 
 def test_waterfall_has_minimum_bar_width(html):
@@ -1092,10 +1471,15 @@ def test_waterfall_status_icons_and_kind_legend(html):
 
 
 def test_waterfall_cost_framing_preserved(html):
-    # Cost-first but plan-tier-safe: the per-span value still routes through the
-    # server framing block, never a raw fmtCost (guards #187/#249 regressions).
-    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
-    assert "fmtCost(s.cost_usd)" not in html
+    """Token-first, no framing branch at all: the per-span value used to
+    route through the server framing block (fmtFramedDollar); it is now an
+    unconditional token total for every account, matching the Traces list.
+    Guards against a regression reintroducing a raw fmtCost (the original
+    #187/#249 bug) OR a reintroduced framing/pricing_mode branch."""
+    view = _trace_detail_src(html)
+    assert "fmtCost(s.cost_usd)" not in view
+    assert "fmtFramedDollar(" not in view
+    assert "const label = fmtTokens(spanTokens(s)) + ' tok';" in view
 
 
 # --- #246: cache-savings chart redesign (answer-first, single-axis bars) ---- #
@@ -1104,8 +1488,8 @@ def test_cache_chart_leads_with_answer_headline(html):
     # series). The card title is "Caching".
     assert '<div class="cache-headline">' in html
     assert "cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate" in html
-    assert "saved this window" in html          # api framing
-    assert "cached reads this window" in html    # subscription framing (no raw $)
+    assert "saved this window" in html          # api / subscription framing
+    assert "cached reads this window" in html    # local framing (no raw $)
 
 
 def test_cache_chart_is_single_axis_per_period_bars(html):
@@ -1179,8 +1563,13 @@ def test_analytics_spend_tile_uses_value_multiplier_for_subscription(html):
     # subscription, never "% of cycle" and never raw $ — plan VALUE, not spend.
     assert "function spendTileDisplay(spendUsd, framing)" in html
     assert "+ '× plan value'" in html
-    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd
-    assert "(spendUsd || 0) / framing.plan_monthly_usd" in html
+    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd. The `|| 0`
+    # that used to sit on the numerator is gone deliberately: it turned an
+    # unreported spend field into "0.0x plan value", so the null case is now
+    # caught before the division and renders as unknown instead (see
+    # test_lens_dashboard_states.py).
+    assert "const mult = spendUsd / framing.plan_monthly_usd;" in html
+    assert "const unknown = spendUsd == null;" in html
     # the tile no longer renders fmtFramedDollar (the "% of cycle") for spend
     assert "const spendVal = fmtFramedDollar(kpis.spend, framing);" not in html
     assert "const spend = spendTileDisplay(kpis.spend, framing);" in html
@@ -1191,8 +1580,10 @@ def test_analytics_count_tiles_have_thousand_separators(html):
     # raw String() integers.
     assert "function fmtCount(n)" in html
     assert "toLocaleString('en-US')" in html
-    assert "value: fmtCount(kpis.sessions)" in html
-    assert "value: fmtCount(kpis.events)" in html
+    # Routed through kpiFigure so an omitted field reads as unknown rather than
+    # as fmtCount(null)'s "0"; the formatter itself is unchanged.
+    assert "value: kpiFigure(kpis.sessions, fmtCount)" in html
+    assert "value: kpiFigure(kpis.events, fmtCount)" in html
     assert "value: String(kpis.sessions)" not in html
     assert "value: String(kpis.events)" not in html
 
@@ -1237,6 +1628,24 @@ def test_status_coding_archive_renders_in_coding_zone(html):
     assert "No active coding sessions" in view
     # No leftover view-toggle machinery.
     assert "viewMode" not in view
+
+
+def test_status_archive_count_renders_the_real_total_honestly(html):
+    """ARCHIVE_LIMIT caps the archive list at 50 server-side (api/routes/
+    status.py); the zone-header count and the <details> summary's count used
+    to render codingArchived.length with no qualifier, so a capped 50 read
+    as the complete archive. Both sites now route through
+    archivedCountLabel(shown, data.archived_total), which states the real
+    total when the backend supplies it and falls back to a no-total-claim
+    wording when it does not (see test_archived_count_label_* in
+    test_lens_dashboard_states.py for the function's own behaviour)."""
+    start = html.index("function StatusView")
+    end = html.index("function TracesListView", start)
+    view = html[start:end]
+    assert "${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived" in view
+    assert "${archivedCountLabel(codingArchived.length, data.archived_total)}</span>" in view
+    assert "${codingArchived.length} archived" not in view
+    assert "(closed / stale) · ${codingArchived.length}" not in view
 
 
 # --- #306: right-click to rename a session card ----------------------------- #
@@ -1537,11 +1946,14 @@ def test_index_html_has_no_nul_bytes():
 
 # --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
 # Route the two dollar-bearing cells left on bare fmtCost through
-# fmtFramedDollar(value, framing) so subscription users see "% of cycle" and
-# only api-plan users see raw $ — matching Traces/Cost/Optimize.
+# fmtFramedDollar(value, framing) — matching Traces/Cost/Optimize. (fmtFramedDollar
+# used to render "% of cycle" for subscription; that differentiation is gone by
+# product decision, so api and subscription now render the same dollar figure —
+# see test_fmt_framed_dollar_renders_identically_for_subscription_and_api in
+# test_lens_dashboard_states.py. Only LOCAL still renders "—".)
 def test_session_detail_cost_cell_routes_through_framing(html):
-    # The "Cost & Tokens" / "Implied API value" panel must consume the
-    # /sessions/{id} framing block, not render raw fmtCost(s.total_cost_usd).
+    # The "Cost & Tokens" panel must consume the /sessions/{id} framing block,
+    # not render raw fmtCost(s.total_cost_usd).
     assert "<span class=\"value\">${fmtCost(s.total_cost_usd)}</span>" not in html
     assert "<span class=\"value\">${fmtFramedDollar(s.total_cost_usd, framing)}</span>" in html
     # The view actually pulls the framing block off the /sessions/{id} response.
@@ -2286,7 +2698,15 @@ def test_cost_proposals_wired_into_review_inbox(html):
     assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
-    assert "Cost advisories" in html
+    # INVERTED (was `assert "Cost advisories" in html`). The inbox no longer
+    # splits its open rows by which analyzer produced them: the cost proposals
+    # and the relearn clusters are one list ranked by money, so a "Cost
+    # advisories" tab existing again would be the regression, not its absence.
+    assert "Cost advisories" not in html
+    assert "Recurring mistakes (" not in html
+    # The count is conditional now, because printing "(0)" before the page knows
+    # its own numbers reads as "you are all clear" on a non-empty inbox.
+    assert "Open ${openCountKnown ? html`(${shownItems.length})`" in html
 
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
@@ -2357,7 +2777,16 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "useState(prop.target_path || '')" in row
     # The guidance is gated on there being no resolved path, and names both exits.
     assert "!prop.target_path ? html`" in row
-    assert "paste the project's" in row
+    # Both exits are still named. The wording went from a numbered list, to one
+    # sentence, to a clause on the label line itself, each time because it was the
+    # largest non-snippet contributor to row height and each time keeping both
+    # exits. Asserted on the exits, not on the layout: the layout is what keeps
+    # changing and the exits are what must not be lost.
+    assert "<code>CLAUDE.md</code> you paste below" in row
+    assert "register it once with" in row
+    # The reversibility fact rides the same line and is NOT trimmed with the rest:
+    # it is what makes a one-click write to the reader's own file acceptable.
+    assert "writes a reversible rung-1 note" in row
     # The register-command is one-click copyable, not just prose.
     assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
     # Smarter UX: "no path yet" is not an error. The buttons are disabled until
@@ -2442,6 +2871,50 @@ def test_review_inbox_ignores_dollar_suppression(html):
     # page from calling it, it doesn't remove or weaken the function.
     assert "function dollarsSuppressed(framing)" in html
     assert html.count("dollarsSuppressed(") >= 2   # at least one other caller survives
+
+
+def _fmt_framed_savings_src(html: str) -> str:
+    start = html.index("function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost)")
+    return html[start: html.index("\n}\n", start)]
+
+
+def test_fmt_framed_savings_never_renders_a_bare_dollar_when_framing_is_unknown(html):
+    """`framing == null` means "not yet known" (the read that would carry it
+    hasn't landed), NOT "no suppression needed". Before the fix,
+    dollarsSuppressed(null) returned false, so an unknown framing fell
+    through to a bare dollar figure — on a subscription-billed account that
+    reads as real money billed, exactly what framing exists to prevent
+    (root CLAUDE.md's "UI asserts more than its data supports" defect class).
+
+    `dollarFmt` (added for the Dashboard's at-most-2dp rule) defaults to
+    fmtCost, so every existing caller's behaviour is unchanged; only the
+    Dashboard passes fmtDashUsd. This test still pins the null-guard logic
+    against the default formatter.
+
+    The suppressed path's own "% of cycle tokens" branch for subscription is
+    gone: dollarsSuppressed() can no longer be true for subscription (that
+    differentiation was removed), so the only pricing_mode that ever reaches
+    the suppressed path now is local, which just wants the plain token total.
+    """
+    fn = _fmt_framed_savings_src(html)
+    # The null/undefined guard must run BEFORE dollarsSuppressed() is even
+    # consulted, and must not fall through to a bare dollar figure.
+    assert "if (framing == null) {" in fn
+    guard_idx = fn.index("if (framing == null) {")
+    suppressed_idx = fn.index("if (dollarsSuppressed(framing)) {")
+    assert guard_idx < suppressed_idx
+    guard_body = fn[guard_idx: suppressed_idx]
+    assert "fmtCost(" not in guard_body
+    assert "dollarFmt(" not in guard_body
+    assert "fmtTokens(tokens) + ' tokens'" in guard_body
+
+    # Behaviour for a KNOWN framing must be untouched: the suppressed path's
+    # tokens-only fallback, and the show-with-qualifier path's dollar figure
+    # (via dollarFmt, fmtCost by default), both still follow the null guard.
+    # (The code's own comment explaining the removal legitimately mentions
+    # the retired string, so check the CODE only, not the comment.)
+    assert "% of cycle tokens" not in _no_comments(fn)
+    assert "return usd == null ? '—' : dollarFmt(usd);" in fn
 
 
 def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html):
@@ -2530,15 +3003,18 @@ def test_applied_item_row_respects_dollar_suppression(html):
 
 
 def test_dollars_suppressed_reads_the_server_display_rule(html):
-    # The suppress/show decision is server-side (core/framing.py); the UI reads
-    # display_rule rather than re-deriving the rule in JS.
+    """The suppress/show decision is server-side (core/framing.py); the UI
+    reads display_rule rather than re-deriving the rule in JS.
+    'suppress_dollars_for_subscription_share' was removed from the suppressed
+    set by product decision: tj does not differentiate subscription-billed
+    from API-billed users, so a subscription window is never suppressed to
+    tokens-only any more. core/framing.py's compute_framing already stopped
+    producing that display_rule value; this pins the JS side dropping it too,
+    so the two do not silently drift back out of agreement."""
     assert "function dollarsSuppressed" in html
-    for rule in (
-        "'suppress_dollars_for_subscription_share'",
-        "'tokens_only'",
-        "'suppress_dollars_unknown'",
-    ):
+    for rule in ("'tokens_only'", "'suppress_dollars_unknown'"):
         assert rule in html, f"missing suppressing display_rule {rule}"
+    assert "'suppress_dollars_for_subscription_share'" not in html
 
 
 # --- the headline is the server's past-overspend band, not a JS sum -------- #
@@ -2682,14 +3158,18 @@ def test_old_pending_relearn_stat_line_replaced_by_the_combined_stat_tiles(html)
 def test_select_all_checkbox_sits_beside_the_bulk_dismiss_button(html):
     # Inbox redesign: the Recurring-mistakes tab dropped its <table> for flat
     # rows (RecurringMistakeRow, matching the mockup's card-style layout), so
-    # the select-all box now sits in the tab's listhead beside "Dismiss
-    # checked" rather than inside a <thead><th>.
+    # the select-all box now sits in the listhead beside "Dismiss checked"
+    # rather than inside a <thead><th>.
     assert "function SelectAllCheckbox" in html
+    # It governs `bulkRelearn` (the rows tj can apply AND the review queue can
+    # drive), not every listed row: the single-list redesign put rows with no
+    # apply path on the same list, and a select-all spanning them would hand the
+    # bulk buttons a scope they cannot act on.
     assert (
-        "<${SelectAllCheckbox} total=${shownRelearn.length} "
+        "<${SelectAllCheckbox} total=${bulkRelearn.length} "
         "selected=${selectedCount} onToggle=${toggleAll} />"
     ) in html
-    # The per-row checkbox is still present, just inside a flat row now.
+    # The per-row checkbox is still present, just inside a card now.
     assert 'checked=${checked} onChange=${onToggle} />' in html
 
 
@@ -2712,22 +3192,25 @@ def test_select_all_toggles_off_when_everything_is_selected(html):
     fn = html[start:end]
     assert "if (all) next.delete(sig)" in fn
     assert "else next.add(sig)" in fn
-    # The component delegates to it over the RENDERED row set.
+    # The component delegates to it over the SELECTABLE row set.
     assert (
-        "nextSelectAllSelection(shownRelearn.map(c => c.signature), prev)"
+        "nextSelectAllSelection(bulkRelearn.map(c => c.signature), prev)"
     ) in html
 
 
 def test_select_all_applies_only_to_the_rendered_rows(html):
     # THE load-bearing one. The list filters out locally-dismissed rows and rows
     # already applied (in this session OR any earlier one), so select-all must
-    # iterate `visible`, never the unfiltered d.clusters, or it would dismiss
-    # rows the user never saw.
-    start = html.index("const selectedVisible =")
-    end = html.index("const modalCluster =", start)
+    # iterate the rendered set, never the unfiltered d.clusters, or it would
+    # dismiss rows the user never saw. On the single list that rendered set is
+    # narrowed once more, to the rows a bulk action can actually reach.
+    start = html.index("const bulkRelearn = shownItems.filter(")
+    end = html.index("const renderRow =", start)
     block = html[start:end]
-    assert "shownRelearn.filter(c => checked.has(c.signature))" in block
-    assert "shownRelearn.map(c => c.signature)" in block
+    assert "shownItems.filter(" in block
+    assert "inboxCanApply(i)" in block
+    assert "bulkRelearn.filter(c => checked.has(c.signature))" in block
+    assert "bulkRelearn.map(c => c.signature)" in block
     assert "d.clusters" not in block
     # The filter that makes `visible` a strict subset is still in place. This
     # previously pinned the `!appliedSigs.has(...)` form verbatim, which meant
@@ -2769,9 +3252,9 @@ def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
     # `checked` is not pruned when a row leaves the list, so dismissing the raw
     # set would sweep along a signature that is no longer on screen.
     start = html.index("const dismissChecked =")
-    end = html.index("const modalCluster =", start)
+    end = html.index("const renderRow =", start)
     fn = html[start:end]
-    assert "shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "bulkRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
     assert "...checked]" not in fn
 
 
@@ -2800,13 +3283,13 @@ def test_select_all_adds_no_bulk_approve(html):
     # writes anything. The invariant this pin defends is that no bulk control
     # can APPROVE; it is not a cap on the number of buttons, so a third
     # non-writing control may be added, but a writing one may not.
-    # Scoped to the whole Recurring-mistakes tab block, not just its listhead:
-    # the two bulk buttons now sit BELOW the scroll box (they used to be in the
-    # head, beside select-all), so a head-only slice would miss them entirely
-    # and pass vacuously.
+    # Scoped to the whole open-list tab block, not just its listhead: the two
+    # bulk buttons sit BELOW the list (they used to be in the head, beside
+    # select-all), so a head-only slice would miss them entirely and pass
+    # vacuously.
     view = html[html.index("function ReviewInboxView"):]
-    start = view.index("tab === 'mistakes' ? html`")
-    end = view.index("tab === 'advisories' ? html`", start)
+    start = view.index("tab === 'open' ? html`")
+    end = view.index("tab === 'applied' ? html`", start)
     head = view[start:end]
     assert "dismissChecked" in head
     assert "startReview(selectedVisible.map(c => c.signature))" in head
@@ -2836,28 +3319,553 @@ def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
 # item's headline still showed tokens, and a token count at billion scale
 # rendered as an ugly "11062.0M" instead of "11.3B".
 
-def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
-    # The old bug: ranking flipped to dollars the moment ANY item in the list
-    # had a dollar figure, leaving every other (tokens-only) item tied at
-    # rank 0 and rendered in whatever order the API happened to return them
-    # (adapter-insertion order) — a real observed bug. Tokens
-    # are the one figure every item carries, priced or not, so the fix ranks
-    # by tokens uniformly; dollars stay a per-item DISPLAY choice.
+# --- Single-list inbox: the mechanism axis --------------------------------- #
+def test_the_mechanism_axis_is_two_orthogonal_facts_not_one_enum(html):
+    # The open list is no longer split by which analyzer produced a row. The axis
+    # that replaced the tabs is what tj can DO about a row.
     #
-    # `sortByEstMonthly` was renamed to `sortByPastOverspend` when relearn's
-    # forward claim was retired: a relearn cluster's `past_overspend_tokens`
-    # is now on the SAME basis a cost proposal's is, so one ranking function
-    # serves both tabs — there is no more `estimated_monthly_tokens` fallback
-    # to rank by.
-    assert "function sortByEstMonthly" not in html
-    start = html.index("function sortByPastOverspend")
+    # It must NOT be an enum. `CostProposalCard` has always rendered
+    # `${prop.suggestion ? ...}` and `${prop.apply_capable ? ...}` as two
+    # INDEPENDENT conditionals, and deadweight's mcp_remove proposal is the
+    # overlap case: it shows a copyable snippet AND a confirm-target apply
+    # control together. An enum has to pick one of those to report, so it
+    # necessarily misreports that row. Two booleans cannot.
+    can_start = html.index("function inboxCanApply(item)")
+    snip_start = html.index("function inboxHasSnippet(item)")
+    tomb_start = html.index("// A `MechanismTags` component")
+    can_fn = html[can_start:snip_start]
+    snip_fn = html[snip_start:tomb_start]
+
+    # Each predicate reads exactly the flags its own fix block is gated on.
+    assert "!item.advise_only && item.write_offered !== false" in can_fn
+    assert "item.apply_capable" in can_fn
+    assert "item.advise_snippet_offered" in snip_fn
+    assert "item.suggestion" in snip_fn
+    # They must not consult each other: orthogonal means neither can suppress
+    # the other, which is what made the enum lie about the overlap row.
+    assert "inboxHasSnippet" not in can_fn
+    assert "inboxCanApply" not in snip_fn
+
+    # "Nothing actionable" is DERIVED from both being false where it is needed, never
+    # stored as a peer value. Both rows gate their no-action copy on it inline.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "!canApply && !hasSnippet" in row
+
+    # Neither the retired enum nor the retired BADGES may come back. The action
+    # button is the row's only promise now; a label restating it over-promised on
+    # every row that still needed a pasted path first.
+    for dead in ("MECH_WRITE", "MECH_SNIPPET", "MECH_NONE", "MechanismBadge",
+                 "inboxMechanism(", "MechanismTags", "MECHANISM_TAG_COPY",
+                 "inboxNothingActionable"):
+        assert dead not in _no_comments(html), f"must not be reintroduced: {dead}"
+    # The badge labels are gone from the CODE, though the tombstone comment still
+    # names them to record why. Checked against comment-stripped source.
+    code = _no_comments(html)
+    for label in ("TJ CAN APPLY", "COPY THE FIX", "NO FIX YET"):
+        assert label not in code, f"badge label must not be rendered again: {label}"
+    # One category badge per row, no mechanism tag beside it.
+    for comp, end in (("function RecurringMistakeRow", "function RelearnApplyModal"),
+                      ("function CostProposalCard", "function InboxStatTiles")):
+        block = html[html.index(comp):html.index(end)]
+        assert block.count('class="badge') == 1, "one category badge per row, no mechanism tag"
+
+    # Never keyed on analyzer identity: the day a downsize proposal becomes
+    # apply-capable its rows gain the apply control with no edit here.
+    for analyzer in ("'downsize'", "'deadweight'", "'resend'", "'subagent'"):
+        assert analyzer not in can_fn + snip_fn, f"must not be keyed on {analyzer}"
+
+
+def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html):
+    # deadweight's mcp_remove proposal is exactly this row: `apply_capable` AND a
+    # `suggestion`. The two facts are orthogonal, so BOTH affordances must render.
+    # This used to assert two BADGES; the badges are gone (the action button says
+    # what it does), so it now asserts the behaviour the badges only described.
+    tag_start = html.index("function inboxMechanismTag(item)")
+    tag_fn = html[tag_start:html.index("\n}", tag_start)]
+    assert "if (inboxCanApply(item)) parts.push('apply')" in tag_fn
+    assert "if (inboxHasSnippet(item)) parts.push('snippet')" in tag_fn
+    assert "parts.join(' ')" in tag_fn
+    # No early return that would make the two mutually exclusive.
+    assert "else" not in tag_fn
+
+    # The card's two blocks are independent conditionals, not a chain, which is what
+    # lets one row show a copy box AND a confirm-target apply control together.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "${prop.suggestion ? (canApply ? html`" in card
+    # Three apply shapes now, so the chain leads with the register-then-apply one.
+    assert "${canApply ? (needsSourcePath ? html`" in card
+    assert "hasApplyKind ? html`" in card
+    # The snippet block is gated on `prop.suggestion` ALONE — `canApply` only picks
+    # which of the two shapes it takes, so an apply control can never suppress it.
+    # Asserted structurally rather than on the outer conditional's exact text,
+    # because that text is what changed when the second shape was added.
+    snippet_block = card[card.index("${prop.suggestion ? (canApply"):card.index("${canApply ? (needsSourcePath")]
+    assert snippet_block.count("<${CopySnippetButton} text=${prop.suggestion} />") == 2
+    assert snippet_block.count('<div class="sz-copybox">${prop.suggestion}</div>') == 2
+    # On a row that offers BOTH, the manual command is the secondary exit and sits
+    # in a collapsed disclosure: rendering both open made deadweight's row the
+    # tallest on the list while offering strictly less than its neighbours. Still
+    # present, still copyable, no longer competing for the row's height.
+    assert "<summary>Or copy the command and run it yourself</summary>" in snippet_block
+
+
+def test_snippet_rows_render_the_snippet_as_the_deliverable(html):
+    # THE failure this redesign exists to fix: a row whose fix is a copyable
+    # change must show that change, not a bare "Mark applied" with nothing above
+    # it. Both ledgers put the fix in a copy box with a Copy button, gated on the
+    # snippet fact alone so an apply control never suppresses it.
+    #
+    # The Copy control moved INSIDE the box (`.sz-fixbox` positions it top-right)
+    # when its label line turned out to be 20px spent rendering the word "Fix" next
+    # to a code block. Asserted on the pairing rather than on the old layout: what
+    # matters is that the snippet renders AND is copyable, not where the button sits.
+    row_start = html.index("function RecurringMistakeRow")
+    row_end = html.index("function RelearnApplyModal", row_start)
+    row = html[row_start:row_end]
+    assert "${hasSnippet ? html`" in row
+    assert "<${CopySnippetButton} text=${fixText} />" in row
+    assert '<div class="sz-copybox">${fixText}</div>' in row
+    assert 'class="sz-fixbox"' in row
+
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "${prop.suggestion} />" in card
+    assert "${prop.suggestion}</div>" in card
+    # The button is reserved room inside the box rather than overlapping the text.
+    assert ".inbox-row .sz-fixbox > .sz-copybox { padding-right: 74px; }" in html
+    # The cost card's "Mark applied" is reachable only as the snippet follow-up.
+    # It used to be the catch-all `else`, which asked a reader with no fix on
+    # screen to confirm having applied one.
+    assert "` : hasSnippet ? html`" in card
+
+
+def test_relearn_rows_never_offer_mark_applied(html):
+    # There is no apply path for an advise-only cluster at all: the modal itself
+    # says "Nothing to approve". A Mark-applied button there is a false promise
+    # and would write a ledger entry for a fix that does not exist. This is 50 of
+    # 55 clusters, the common case rather than an edge case.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    # Asserted on the AFFORDANCE, not on the phrase: the row's comments explain
+    # at length why there is deliberately no marker button here, so a bare
+    # substring check on "Mark applied" matches the explanation and fails on
+    # correct code. What must be absent is a control that fires one.
+    assert ">Mark applied<" not in row
+    assert "'Mark applied'" not in row
+    assert "onMark" not in row
+    assert "/apply'" not in row and "cost-proposals/apply" not in row
+    # The modal's own gate, which the can-apply predicate mirrors, still stands.
+    assert "Nothing to approve: this recommendation is yours to apply." in html
+    # A non-applyable row states the budget's REAL reason, not a compressed label,
+    # so the reader learns what to do instead of just that a gate fired.
+    assert "cluster.advise_only_reason" in row
+    # It now lives in its own collapsed disclosure rather than an inline paragraph:
+    # it is a paragraph of write economics, and the mechanism tag already says the
+    # row has no writer.
+    assert "<summary>Why there is no permanent fix on offer</summary>" in row
+    assert "<p>${cannotApplyReason}</p>" in row
+    # The compressed one-liner is gone from the UI. Asserted on the DEFINITION
+    # and the string it produced, not on the bare name: a tombstone comment
+    # deliberately still names the removed helper and points at its surviving
+    # server-side field, which is documentation rather than a leftover.
+    assert "function writeGateNote" not in html
+    assert "'No permanent fix offered: '" not in html
+    # `write_blocked_short` itself is not dead: the CLI's dense relearn list
+    # still renders it, so the UI must not read it any more but the field stays.
+    assert "cluster.write_blocked_short" not in html
+
+
+def test_no_row_renders_a_dead_end(html):
+    # Where there genuinely is no fix, say so. An empty action area reads as a
+    # bug, and a marker button there asks the reader to confirm doing something
+    # the card never told them to do.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "${!canApply && !hasSnippet && !cannotApplyReason ? html`" in row
+    assert "There is nothing to apply here yet" in row
+    assert "See the example sessions" in row
+
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    # summarize keeps its own hop into the curate/diff/apply flow. That punt is
+    # deliberate and code-documented (`_summarize_to_proposals`: "Deliberately
+    # never `apply_capable`"), because an LLM call sits mid-pipeline between
+    # prepare() and a staged rewrite, so no single button can span it.
+    assert "Review in Summarize" in card
+    # Everything else with no apply path and no snippet points at the analyzer's
+    # own detail card, never the marker button. The generic sentence is a
+    # last-resort fallback, gated on the row carrying no reason AND no
+    # description, so it can never talk over the server's own wording.
+    assert "${!blockedReason && !description ? html`" in card
+    assert "optimizeFindingHref(prop.analyzer)" in card
+
+
+def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
+    # Founder feedback on the running page: a row's description stopped well short
+    # of the card edge, leaving a wide empty gutter with the amount stranded in the
+    # far corner. Cause was the global `.sz-note { max-width: 74ch }`.
+    #
+    # That cap must SURVIVE: `.sz-note` is the whole app's standalone-paragraph
+    # class (page intros, Optimize section notes) and 74ch is the right measure for
+    # reading. Only the inbox row overrides it, because there the text sits in a
+    # bordered card whose width the reader has already accepted.
+    assert ".sz-note { font-size: 13px; color: var(--text-dim); line-height: 1.55; max-width: 74ch; margin: 0; }" in html
+    assert ".inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }" in html
+    # Scoped by a class the row components set, NOT by lifting the cap or by
+    # overloading `data-mechanism` (which is a state/debug attribute, not a
+    # styling hook).
+    assert "[data-mechanism] .sz-note" not in html
+    # Both row components carry the class, so the collapsed tail and the
+    # below-the-fold group inherit it: they render through these same components.
+    assert 'class="opt-section inbox-row" data-mechanism=' in html
+    assert "'opt-section inbox-row' + (focused ? ' rev-focus' : '')" in html
+    # The relearn Approve MODAL renders outside the row and keeps its measure: it
+    # is a reading surface, not a dense card.
+    modal = html[html.index("function RelearnApplyModal"):html.index("function daysAgoLabel")]
+    assert "inbox-row" not in modal
+
+
+def test_a_recompute_never_blanks_rows_the_page_already_has(html):
+    # THE correctness bug. Both endpoints serve their CACHED result immediately and
+    # merely flag `status: "computing"` while a refresh runs, so the page had 55
+    # clusters and 16 proposals in hand while printing a bare "Loading…", omitting
+    # the avoided tile, and rendering the tab as "Open (0)". Zero is the most
+    # misleading value this page can print: it reads as "you are all clear".
+    view = html[html.index("function ReviewInboxView"):]
+
+    # "Has this page had an answer yet" is a DIFFERENT question from "is a scan
+    # running", and conflating them is what caused the bug.
+    assert "const firstLoad = d.loading || !costLoaded" in view
+    assert "const scanning = d.status === 'computing' || costStatus === 'computing'" in view
+    # `costStatus` cannot stand in for "loaded": it initialises to 'never_run',
+    # indistinguishable from a real fresh install.
+    assert "const [costLoaded, setCostLoaded] = useState(false)" in view
+    assert "finally { setCostLoaded(true); }" in view
+
+    # Rows render unconditionally; only the EMPTY branch is gated. So a recompute
+    # can never blank a list that has rows.
+    assert "${topOpen.map(renderRow)}" in view
+    assert "${openItems.length === 0 ? (" in view
+    # Skeletons are for the two states that genuinely have nothing: still
+    # fetching, or a real first scan in flight.
+    assert "const showSkeleton = openItems.length === 0 && (firstLoad || (scanning && d.status !== 'never_run'))" in view
+    assert "<${InboxSkeletonRow} key=${i} />" in view
+    assert "Loading…" not in view, "the bare loading string must be gone"
+
+
+def test_no_count_or_tile_is_rendered_before_the_page_knows_it(html):
+    # A count the page does not know is not printed as 0, and the tiles hold their
+    # final positions so nothing shifts when the numbers land.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "const openCountKnown = !firstLoad" in view
+    assert "const appliedCountKnown = appliedLoaded" in view
+    # A PARTIAL count is as wrong as a zero: it would be replaced a moment later,
+    # which is the layout jump this rule exists to prevent. So both ledgers must
+    # have answered, not just one.
+    assert "d.loading || !costLoaded" in view
+    # Shimmer chips reserve the digits' width in both tabs.
+    assert view.count('class="shimmer" style="display:inline-block;width:20px') == 2
+
+    tile = html[html.index("function InboxStatTiles"):html.index("function ReviewInboxView")]
+    # The band-level skeleton now also fires while the APPLIED read is outstanding,
+    # not only on the page-wide flag: the two tiles are fed by reads with wildly
+    # different latencies, and one flag could not describe both.
+    assert "if ((loading || !appliedKnown) && openItems.length === 0 && appliedCount === 0 && !hasExcluded)" in tile
+    assert "loading=${firstLoad}" in view
+
+    # Reused the app's existing shimmer primitive rather than inventing a loader,
+    # and nothing fakes progress on a scan of unknown length. Asserted on MARKUP,
+    # not on words: the components' own comments name the things they avoid, so a
+    # bare substring ban matches the explanation and fails on correct code.
+    assert ".shimmer {" in html
+    skel = html[html.index("function InboxSkeletonRow"):html.index("function InboxLoadingNote")]
+    assert 'class="shimmer"' in skel
+    assert "animation" not in skel, "the skeleton must not roll its own animation"
+    assert "<progress" not in html
+    # One animation in the app, the pre-existing shimmer. A second @keyframes
+    # would mean a new loader was invented here.
+    assert html.count("@keyframes shimmer") == 1
+    # Motion is suppressed for a reader who asked for none.
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert ".shimmer { animation: none; }" in html
+
+    # The state says what it is doing, from what the server actually reported, and
+    # never invents a number or a percentage.
+    note = html[html.index("function InboxLoadingNote"):html.index("// --- The row's description block")]
+    assert "sessionsScanned != null" in note
+    assert "A scan is running now" in note
+
+
+def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
+    # Founder feedback: description lengths were wildly uneven (resend concatenated
+    # evidence + advise_text + caveat into ~15 lines while a downsize row had one),
+    # so the list was ragged and could not be scanned.
+    #
+    # Clamped on LINES, so the collapsed height does not depend on how the text
+    # happens to wrap at the current width.
+    assert "-webkit-line-clamp: 2" in html
+    assert ".inbox-desc.is-open" in html
+    assert "-webkit-line-clamp: unset" in html
+    # min-height matches the clamp, which is the half that stops the raggedness
+    # simply MOVING to the short rows: a row with little or no prose has to occupy
+    # the same space as one with a wall of it.
+    assert "min-height: calc(2 * 1.55 * 13px)" in html
+    assert ".inbox-desc.is-open" in html and "min-height: 0" in html
+
+    # The prose is trimmed TEXTUALLY at a sentence boundary, not merely clipped:
+    # a pure CSS clamp gave equal heights but cut mid-clause, and the founder asked
+    # for the collapsed state to read as a short complete thought.
+    split = html[html.index("function splitLead(text, budget"):]
+    split = split[:split.index("\n// The description block")]
+    # Boundary is punctuation FOLLOWED BY whitespace, which is what keeps
+    # "$1,842.56 of that cost" and "claude-4.7" from being treated as sentence ends.
+    assert "if (j + 1 >= full.length || /\\s/.test(full[j + 1])) ends.push(j + 1)" in split
+    # Never mid-word either: text with no sentence boundary at all (a raw error
+    # dump) falls back to a word-boundary cut.
+    assert "full.lastIndexOf(' ', budget)" in split
+    # THE lead must be a PREFIX of the text, sliced at a collected boundary offset.
+    # Accumulating `/[^.!?]+[.!?]+(?:\s+|$)/g` matches instead silently dropped
+    # everything before the first MATCHABLE sentence: a description opening
+    # "`posthog` MCP server (configured at .../.mcp.json) made 0 tool calls." has
+    # its only period followed by a letter, so `exec` found nothing at index 0,
+    # advanced, and the row rendered "json) made 0 tool calls" as its opening
+    # words. Two of eight live rows read that way. The banned construct is the
+    # assertion, because a prefix-slice implementation cannot reproduce the bug.
+    # Banned on the MECHANISM, not on the old regex literal: the source comment
+    # quotes that literal while explaining the bug, so a text ban on it would match
+    # the explanation. `exec` in a `g`-flagged scan is the part that skips.
+    assert "re.exec(full)" not in split, \
+        "a match-accumulating scan skips text before the first matchable sentence"
+    assert "full.slice(0, cut)" in split
+    # The expanded state renders the WHOLE text, never lead + rest concatenated,
+    # because the fallback lead carries a trailing ellipsis.
+    assert "return { lead, full, more: lead !== full }" in split
+
+    fn = html[html.index("function TrimmedDescription({ text })"):]
+    fn = fn[:fn.index("\n}")]
+    assert "${open ? full : lead}" in fn
+    assert "${more ? html`" in fn
+    # Per row, local, not persisted, not expanded by default.
+    assert "useState(false)" in fn
+    assert "localStorage" not in fn and "sessionStorage" not in fn
+    assert "'Read less' : 'Read more'" in fn
+
+    # The server's strings are split, never rewritten: a paraphrase in the UI would
+    # be a second drifting copy of the analyzer's claim.
+    assert "splitLead(text)" in fn
+
+    # Both row shapes wrap their prose in it, so the collapsed tail and the
+    # below-the-fold group inherit the rhythm through the same components.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "<${TrimmedDescription} text=${relearnDescription(cluster)} />" in row
+    assert "<${TrimmedDescription} text=${description} />" in card
+
+    # A relearn cluster has no analyzer prose, so its block leads with the facts it
+    # does have (requirement: give every row a first line worth reading).
+    assert "Recurred ${cluster.occurrences} time" in row
+    assert "across ${cluster.sessions} session" in row
+
+    # A DESCRIPTION has to be WORDS. One live cluster's captured snippet was the
+    # bare identifier `gen_ai.tool.call`, which answers "what is this" for nobody,
+    # and a non-empty check accepted it. Two words is the gate, and a snippet that
+    # fails it falls through to the derived fix rather than being dressed up.
+    prose = html[html.index("function isProse(s)"):html.index("\n}", html.index("function isProse(s)"))]
+    assert "split(/\\s+/).filter(Boolean).length >= 2" in prose
+    desc_fn = html[html.index("function relearnDescription(cluster)"):]
+    desc_fn = desc_fn[:desc_fn.index("\n}")]
+    assert "isProse(e.snippet)" in desc_fn
+    assert "candidates.find(isProse)" in desc_fn
+
+    # The operative facts stay OUTSIDE the clamp: a reader must not expand anything
+    # to learn why a row has no Apply button, and a <details> is already collapsed.
+    # Matched on the RENDERED markup, not the phrase: a comment above the
+    # component explains the same rule in prose and would match first, making the
+    # ordering check compare a comment against the clamp.
+    desc_at = card.index("<${TrimmedDescription} text=${description} />")
+    assert card.index(">tokenjam cannot apply this one: ${blockedReason}<") > desc_at, \
+        "the blocker reason must not be inside the trimmed description"
+    assert card.index("<summary>How this number was derived</summary>") > desc_at
+    # COVERAGE keeps its OWN disclosure rather than being folded into Read more: it
+    # answers what was NOT analysed, which is the whole point of it, and on resend it
+    # is a five-line block, the reason that row was four times its neighbours' height.
+    assert "<summary>What this figure does and does not cover</summary>" in card
+    assert card.index("<summary>What this figure does and does not cover</summary>") > desc_at
+
+
+def test_a_row_tj_cannot_apply_states_the_servers_own_blocker_reason(html):
+    # A row tokenjam cannot apply must say WHY, and must say it in the words the
+    # refusing adapter used. `apply_blocked_reason` carries e.g. "no local source
+    # path is registered for this agent, so there is nothing to edit. Register one
+    # with source_path under the agent in your tj config, or paste the change
+    # yourself" — which names the blocker AND the two exits. A paraphrase here
+    # would drift from both the CLI and the actual refusal.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "prop.apply_blocked_reason" in card
+    assert "tokenjam cannot apply this one: ${blockedReason}" in card
+    # Shown exactly once. Some adapters already append the reason into
+    # `advise_text` server-side ("Applying it here is not on offer: ..."), others
+    # only set the field, so the guard checks the RENDERED description rather
+    # than guessing which adapter produced the row.
+    assert "!description.includes(blockedReason)" in card
+    assert "const showBlockedReason = !canApply" in card
+    # And the model-swap honesty caveat travels in `advise_text`/`caveat`, both of
+    # which the description paragraph renders unconditionally (Critical Rule 14).
+    assert "[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')" in card
+
+    # The relearn half has the same obligation and its own field for it.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "cluster.advise_only_reason" in row
+
+
+def test_bulk_controls_vanish_when_nothing_is_apply_capable(html):
+    # For the SDK persona relearn offers no write at all
+    # (`write_offered = persona in {claude-code, mixed}`), so the selectable set
+    # can be empty. A select-all governing nothing is worse than no select-all:
+    # it implies the list is selectable when it is not. Both the checkbox and the
+    # bulk bar are gated on the set being non-empty.
+    view = html[html.index("function ReviewInboxView"):]
+    assert view.count("${bulkRelearn.length > 0 ? html`") == 2
+    # The per-row checkbox is gated on the same predicate, so a row that no bulk
+    # action can reach never shows one.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert '${canApply ? html`<input type="checkbox"' in row
+    # The bulk button still names its count.
+    assert "${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}" in html
+    assert "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}" in html
+
+
+def test_bulk_mark_applied_can_never_post_a_relearn_row_to_the_cost_ledger(html):
+    # The collapsed tail is now mixed, and the bulk marker only speaks the cost
+    # ledger's endpoint. Filtered inside markManyApplied rather than at the call
+    # site, so a future caller cannot hand it a mixed list and quietly POST the
+    # wrong ledger.
+    start = html.index("const markManyApplied = async (props)")
+    end = html.index("const modalCluster =", start)
+    fn = html[start:end]
+    assert "props.filter(x => x.kind !== 'relearn' && !x.apply_capable)" in fn
+
+
+def test_the_per_row_amount_caption_is_gone(html):
+    # INVERTED (was test_every_row_discloses_the_span_its_figure_was_observed_over).
+    # The caption under each row's dollar figure ("avoidable over the last 30 days ·
+    # ~12.3B tok") was removed on founder instruction, which retires the per-row
+    # span disclosure with it. Its RETURN is the regression now.
+    assert "function inboxSpan" not in html
+    assert "spans=${spans}" not in html
+    assert "avoidable ' + span.text" not in html
+    assert "'already cost ' + span.text" not in html
+    # Both row shapes keep the figure itself and nothing under it.
+    for comp, end in (("function RecurringMistakeRow", "function RelearnApplyModal"),
+                      ("function CostProposalCard", "function InboxStatTiles")):
+        block = html[html.index(comp):html.index(end)]
+        assert 'class="po-amount"' in block
+        assert 'style="font-size:10px"' not in block, "the caption line must not come back"
+
+    # The asymmetry the caption used to disclose is real and did not go away, so the
+    # scan's own description of its corpus stays on the payload state for whoever
+    # states it next.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "windowDays: f.window_days" in view
+    assert "corpusBasis: f.corpus_basis" in view
+
+
+def test_the_headline_tile_caption_reads_one_population(html):
+    # The tile's caption used to read "was avoidable over the last 30 days · ~21.9B
+    # tok · 13 causes of $7,653.24 total cost — that is cost, not waste". The
+    # total-cost clause was FALSE as rendered: `observed_cost_usd` covers 2 of the
+    # 13 proposals (resend + relearn), so it attached a two-proposal denominator to
+    # "13 causes", and summarize alone contributes ~4,811 of avoidable from a
+    # proposal carrying no observed cost at all.
+    tile = html[html.index("function PastOverspendTile"):html.index("// A `writeGateNote")
+                if "// A `writeGateNote" in html else html.index("function PastOverspendTile") + 3000]
+    tile = html[html.index("function PastOverspendTile"):]
+    tile = tile[:tile.index("\nfunction ")]
+    # Survives: window, tokens and cause count, all summed over the same proposals.
+    assert "over ${win}" in tile
+    assert "fmtTokens(toks)" in tile
+    assert "causes + ' cause'" in tile
+    # Gone: the leading "was avoidable" wording and the whole total-cost clause.
+    assert "was avoidable over" not in tile
+    assert "total cost" not in tile
+    assert "block.observed_cost_usd" not in tile
+    assert "cost_disclosure" not in tile, "no orphaned disclosure for a removed figure"
+    # Not hardcoded. Scoped to the RETURNED markup: the surrounding comment quotes
+    # the real figures to explain why the old caption was false, and a whole-function
+    # literal check matches the explanation instead of the render.
+    markup = tile[tile.index("return html`"):]
+    for lit in ("21.9", "7,653", "6163", "13 cause"):
+        assert lit not in markup
+    # The figure stays. The OBSERVED chip does NOT: removed on founder call
+    # because the tile's own past-tense title and its window-and-population
+    # caption already say what the chip restated, both of which are asserted
+    # above and are now the only things carrying the tense.
+    assert "po-observed-tag" not in tile
+    assert "fmtUsd(usd)" in tile
+
+
+def test_the_ordering_key_cannot_reach_a_projection(html):
+    # Two bugs, one key. The FIRST was ranking flipping to dollars the moment
+    # any item had a dollar figure, leaving tokens-only items tied at rank 0 in
+    # adapter-insertion order. The SECOND, fixed by the single-list redesign, was
+    # the key's fallback: `past_overspend_tokens ?? estimated_monthly_tokens`
+    # let a forward 30-day PROJECTION compete for position against past
+    # OBSERVATIONS inside one sort. Latent (every real row carries the observed
+    # figure) but structural, and unfixable by inspection once shipped, because
+    # nothing on screen says which kind of number placed a row.
+    #
+    # The key now reads ONE field and has no fallback at all; a row without it
+    # cannot enter the ranked list.
+    start = html.index("function observedRankTokens")
     end = html.index("function splitTopAndTail", start)
     fn = html[start:end]
-    assert "i.past_overspend_tokens || 0" in fn
-    # The old dollars-if-any gate must not survive a regression re-adding it.
-    assert "anyUsd" not in fn
-    assert "estimated_monthly_usd" not in fn
+    assert "item.past_overspend_tokens" in fn
+    # No projection, no dollars, no second field of any kind may appear in the
+    # ranking block.
     assert "estimated_monthly_tokens" not in fn
+    assert "estimated_monthly_usd" not in fn
+    assert "estimated_recoverable" not in fn
+    assert "anyUsd" not in fn
+    # The unranked rows are PARTITIONED OUT rather than sorted to the bottom, so
+    # no comparator change can ever interleave them.
+    assert "function partitionByObservedOverspend" in fn
+    assert "ranked: items.filter(i => observedRankTokens(i) != null)" in fn
+    assert "unobserved: items.filter(i => observedRankTokens(i) == null)" in fn
+    # And the view splits before it sorts.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "const { ranked, unobserved } = partitionByObservedOverspend(shownItems)" in view
+    assert "const sortedOpen = sortByPastOverspend(ranked)" in view
+    # The retired key must not come back under either retired name. Upstream
+    # renamed it to `sortByPastOverspend` when relearn's forward claim was
+    # retired; this branch had independently grown a `sortByObservedOverspend`
+    # computing the identical thing, and that duplicate is deleted in favour of
+    # upstream's name rather than kept in parallel.
+    assert "sortByEstMonthly" not in html
+    assert "sortByObservedOverspend" not in html
+    assert "function sortByPastOverspend" in html
+
+
+def test_ordering_key_rejects_a_projection_only_row(html):
+    # A behavioural contract for the guard above, reimplemented in Python from
+    # the pinned JS so a divergence fails loudly rather than only when the
+    # string changes. A row carrying ONLY a forward projection is unrankable;
+    # it must land in `unobserved`, never at the top of the ranked list.
+    def observed_rank_tokens(item):
+        t = item.get("past_overspend_tokens")
+        return t if isinstance(t, (int, float)) and not isinstance(t, bool) else None
+
+    def partition(items):
+        return (
+            [i for i in items if observed_rank_tokens(i) is not None],
+            [i for i in items if observed_rank_tokens(i) is None],
+        )
+
+    projection_only = {"title": "forward only", "estimated_monthly_tokens": 10**12}
+    observed_small = {"title": "small but real", "past_overspend_tokens": 5_000}
+    observed_big = {"title": "big and real", "past_overspend_tokens": 9_000_000}
+
+    ranked, unobserved = partition([projection_only, observed_small, observed_big])
+    assert unobserved == [projection_only]
+    ranked.sort(key=lambda i: i["past_overspend_tokens"], reverse=True)
+    assert [i["title"] for i in ranked] == ["big and real", "small but real"]
+    # The old fallback would have put the trillion-token projection first.
+    assert ranked[0] is not projection_only
 
 
 def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
@@ -2874,6 +3882,47 @@ def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
     fn = html[start:end]
     assert "past_overspend_usd" in fn
     assert "already spent, combined" in fn
+
+
+def _collapsed_tail_row_src(html: str) -> str:
+    start = html.index("function CollapsedTailRow")
+    end = html.index("\n}\n", start) + 2
+    return html[start:end]
+
+
+def test_collapsed_tail_row_is_a_toggle_command_not_a_static_description(html):
+    """The collapse row used to read "N smaller items" in BOTH states (only
+    the ▸/▾ arrow changed), the same word BelowFloorNote uses for items below
+    the $5 noise floor -- but this row's items are ranked below the top 8
+    while still worth $5+ each, the opposite of "smaller" meaning skippable.
+    It is now the toggle CONTROL it actually is: "Show N more" while
+    collapsed, "Show less" once expanded, so it never claims there is more to
+    show once the items are already on screen. No noun/pluralization is
+    needed since "more"/"less" don't inflect."""
+    fn = _collapsed_tail_row_src(html)
+    assert "itemLabel" not in fn
+    assert "smaller" not in fn
+    assert "const label = open ? 'Show less' : ('Show ' + tail.length + ' more');" in fn
+    assert "${open ? '▾' : '▸'} ${label}${summary ? ' · ' + summary : ''}" in fn
+
+
+def test_collapsed_tail_row_callers_no_longer_pass_a_noun(html):
+    # Both call sites used to compute an itemLabel via pluralItems() (one with
+    # an extra " with nothing measured yet" suffix); CollapsedTailRow no
+    # longer takes or renders one, so neither caller needs to supply it.
+    # pluralItems() itself survives -- BelowFloorNote (the $5-floor line,
+    # deliberately unchanged) still calls it.
+    assert "itemLabel=${pluralItems(tailOpen.length)}" not in html
+    assert 'itemLabel=${pluralItems(unobserved.length) + " with nothing measured yet"}' not in html
+    assert "<${CollapsedTailRow} tail=${tailOpen} suppressed=${suppressed}" in html
+    assert "<${CollapsedTailRow} tail=${unobserved} suppressed=${suppressed}" in html
+    assert "label=${pluralItems(floorItems.length)}" in html  # BelowFloorNote, unchanged
+
+
+def test_below_floor_note_still_says_smaller_under_the_floor(html):
+    # The ONE line that should still carry a size claim: it states its own
+    # $5 threshold, which is what makes "smaller" unambiguous there.
+    assert "${items.length} smaller ${label} under ${fmtUsd(INBOX_MIN_USD)}" in html
 
 
 def test_fmt_tokens_renders_billion_scale_human_readable(html):
@@ -2917,7 +3966,7 @@ def test_fmt_tokens_billion_scale_matches_a_real_reported_figure():
 def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
     # A Python-side contract test pinning the SAME "rank by
     # estimated_monthly_tokens descending" algorithm the JS now implements
-    # (sortByEstMonthly, pinned above), run against real numbers from the bug
+    # (sortByPastOverspend, pinned above), run against real numbers from the bug
     # report — the exact dataset that exposed the original "adapter insertion
     # order" bug. Proves the fixed algorithm produces a genuinely monotonic
     # order for real, not synthetic, data.
@@ -2944,17 +3993,19 @@ def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
 def test_split_top_and_tail_slices_an_already_sorted_list(html):
     # The long-tail collapse (requirement #3) must absorb the BOTTOM of the
     # sorted list, not an arbitrary suffix of the unsorted API order — it
-    # slices whatever sortByPastOverspend already produced, never re-sorts or
-    # re-orders on its own.
+    # slices whatever the ranking already produced, never re-sorts or re-orders
+    # on its own.
     start = html.index("function splitTopAndTail")
     end = html.index("function relearnObservedFigure", start)
     fn = html[start:end]
     assert "sorted.slice(0, max)" in fn
     assert "sorted.slice(max)" in fn
     assert "sort(" not in fn   # no independent re-sort inside the split itself
+    # ONE call, over the one merged open list — there is no longer a per-tab
+    # collapse, because there is no longer a per-analyzer tab.
     view = html[html.index("function ReviewInboxView"):]
-    assert "splitTopAndTail(sortedRelearn)" in view
-    assert "splitTopAndTail(sortedCost)" in view
+    assert "splitTopAndTail(sortedOpen)" in view
+    assert view.count("splitTopAndTail(") == 1
 
 
 def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
@@ -3042,78 +4093,489 @@ def test_cost_view_tenants_panel_shares_refresh_and_poll_cadence(html):
     assert "load(opts);" in fn and "loadTenants(opts);" in fn
 
 
-# --- Analyzer scan: cold must never render as zero or an absence claim ----- #
-# Every analyzer-fed surface now reads a STORED report (no route runs an
-# analyzer). That makes a fourth state possible on screen -- "never computed"
-# -- and collapsing it into "found nothing" is this product's worst failure
-# mode: zero reads as reassurance. These pin the distinction in the render
-# layer, where a static grep is the only guard CI can run.
+def test_a_model_swap_row_asks_for_the_path_instead_of_offering_mark_applied(html):
+    """The design bar: "Mark applied" is the exception, not the default.
 
-def test_recoverable_tiles_yield_nothing_on_a_cold_scan(html):
+    Ten live `downsize` model-swap rows carried a measured, deterministic fix and
+    offered nothing but a copy box and a "Mark applied" that recorded the user
+    doing it by hand. The cause was a single missing input — where the agent's
+    source lives — which tokenjam will not infer (`config.AgentConfig.source_path`
+    is opt-in by design). A missing input is a question, so the row asks it.
+    """
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+
+    # Checked BEFORE `hasApplyKind`, because such a row deliberately carries no
+    # apply_kind yet: with no registered path there is no deterministic edit, so
+    # it must not reach the endpoint that assumes one.
+    assert "${canApply ? (needsSourcePath ? html`" in card
+    assert card.index("needsSourcePath ? html`") < card.index("hasApplyKind ? html`")
+    assert "const needsSourcePath = !!prop.needs_source_path;" in card
+
+    # It ASKS: an input, a preview that writes nothing, and an apply.
+    assert "/relearn/cost-proposals/register-source-path" in card
+    assert "registerSourcePath(false)" in card and "registerSourcePath(true)" in card
+    assert "Apply swap →" in card
+    # Never pre-filled: the whole premise is that nothing here knows the path, and
+    # a plausible default would be tokenjam inferring it by another name.
+    assert "useState('')" in card
+    assert "prop.needs_source_path ? prop.target_path" not in card
+
+    # A precheck failure AFTER the path is given is stated on the row, in the
+    # server's own words, rather than failing silently.
+    assert "setSpErr(e.message || String(e))" in card
+
+    # THE CAVEAT IS OUTSIDE THE COLLAPSED DESCRIPTION. A one-click write makes it
+    # easier to lose the distinction between "the cost delta is measured" and "the
+    # cheaper model is as good" (Critical Rule 14), and a caveat behind a
+    # "Read more" does not count as visible.
+    desc_at = card.index("<${TrimmedDescription} text=${description} />")
+    caveat_at = card.index("${prop.apply_caveat ? html`")
+    assert caveat_at > desc_at
+    assert '<div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>' in card
+
+
+def test_the_avoided_tile_carries_no_observed_chip(html):
+    # Removed on founder call: the chip restated what the surrounding copy already
+    # says. The tense now rests ENTIRELY on the title and the caption, so both are
+    # pinned here — the title must stay past tense and the caption must keep naming
+    # the window and the population, or the removal would have cost real
+    # provenance rather than just chrome.
+    tile = html[html.index("function PastOverspendTile"):html.index("function combinedObservedCost")]
+    # Scoped to the RETURNED markup: the comment above the render names the removed
+    # class to record why it went, and a whole-function check would match that
+    # explanation rather than the render.
+    markup = _no_comments(tile[tile.index("return html`"):])
+    assert "po-observed-tag" not in markup
+    assert "What you could have avoided" in tile
+    assert "over ${win}" in tile
+    assert "fmtTokens(toks)" in tile
+    assert "causes + ' cause'" in tile
+    # And the rule is gone too, not merely unused, since nothing else styled with it.
+    assert ".po-observed-tag {" not in html
+
+
+def test_applied_rows_carry_no_enforcement_label(html):
+    # Internal jargon, repeated identically on every enforcement row, earning none
+    # of the space it took. Removed rather than restyled or abbreviated.
+    row = html[html.index("function AppliedItemRow"):html.index("// ---- Cost proposals")]
+    # Scoped to the RENDERED markup for the same reason as the tile above: the
+    # tombstone comment quotes the label it replaced.
+    markup = _no_comments(row[row.index("return html`"):])
+    assert "enforcement ENABLED" not in markup
+    assert "ENABLED" not in markup
+    # The ACTIONABLE half is still stated, as a verb, where you act on it: the row
+    # offers "Disable enforcement" when it is on and "Enable enforcement…" when it
+    # is not, so the state stays legible without a constant label.
+    assert "Disable enforcement" in row
+    assert "Enable enforcement…" in row
+
+
+def test_a_reverted_row_shows_reverted_where_its_amount_would_be(html):
+    # A reverted fix saved nothing, so a green plus-signed figure on that row
+    # asserts a benefit that did not occur. It rendered "+$358.50 est." beside a
+    # REVERTED badge. The figure is not greyed or de-emphasised, it is NOT
+    # RENDERED: the slot answers "what did this yield" and the truthful answer for
+    # a reverted row is the word.
+    row = html[html.index("function AppliedItemRow"):html.index("// ---- Cost proposals")]
+    assert "const isReverted = rec.state === 'reverted';" in row
+    # The amount slot branches on it FIRST, so no amount can be reached.
+    assert "${isReverted ? html`" in row
+    amount_at = row.index("${isReverted ? html`")
+    plus_at = row.index("+${(!suppressed && usd != null)")
+    assert amount_at < plus_at, "the reverted branch must precede the amount"
+    # The now-redundant mid-row chip is gone for the reverted case only: any other
+    # non-default state has nowhere better to put it.
+    assert "rec.state !== 'applied' && !isReverted ?" in row
+
+    # NOT an over-correction: a non-reverted row still renders its figure, both the
+    # dollar form and the token fallback, and still suppresses dollars for a
+    # subscription plan. Asserted because the live corpus cannot show it -- all five
+    # non-reverted records carry None for past_overspend_usd, past_overspend_tokens
+    # AND the legacy estimated_monthly_usd, so they rendered no amount before this
+    # change either. The only record with a figure is the reverted one.
+    assert "(usd != null || toks != null) ? html`" in row
+    assert "+${(!suppressed && usd != null) ? fmtUsd(usd) : (toks != null ? '~' + fmtTokens(toks) + ' tok' : fmtUsd(usd))}" in row
+    # The revert REASON and the applied metadata are the genuinely useful parts and
+    # must survive: they are what tell the reader why it came back.
+    assert "${error}" in row
+    assert "Applied ${daysAgoLabel(rec.applied_at)}" in row
+    assert "rec.target_path" in row and "rec.git_commit" in row
+
+
+def test_the_applied_estimate_caveat_is_one_section_line_not_a_per_row_badge(html):
+    # The founder asked for the per-row `est.` badge to go. Deleting it alone would
+    # have left bare green plus-signed figures, which read as measured savings --
+    # exactly the claim an earlier commit removed an unbounded verify layer to
+    # avoid. So the caveat moves to ONE line at the section header.
+    row = html[html.index("function AppliedItemRow"):html.index("// ---- Cost proposals")]
+    assert "estimated-tag" not in row, "no per-row estimate badge"
+    assert "est.<" not in row and ">est.</span>" not in row
+
+    view = html[html.index("function ReviewInboxView"):]
+    panel = view[view.index("${tab === 'applied' ? html`"):]
+    panel = panel[:panel.index("<${RelearnApplyModal}")]
+    line = "Each figure below is that row's own estimate from the moment it was applied. Nothing here is re-measured afterwards."
+    assert line in panel
+    # Stated in the markup, NOT hidden in a title attribute: a tooltip is a hidden
+    # disclosure and does not count as stating the caveat.
+    assert 'class="sz-note"' in panel[:panel.index(line)]
+    assert f'title="{line}"' not in panel
+    # Once for the section, not once per row.
+    assert panel.count(line) == 1
+    # And it may never be worded as a realized claim.
+    for banned in ("verified", "measured saving", "confirmed", "realized"):
+        assert banned not in line.lower()
+    # No em dashes in user-facing copy.
+    assert "—" not in line
+
+
+def test_no_inbox_empty_state_can_render_before_its_own_read_resolves(html):
+    """THE RULE, not a fourth patch. An absence claim may never render before the
+    read that would refute it, because absence reads as reassurance and is the most
+    dangerous thing on this page to guess wrong.
+
+    Three instances of this bug shipped: `Open (0)`, the bare "Loading…" that
+    replaced cached rows, and "Nothing applied yet." So this is written as a SWEEP
+    over every absence-claiming string in the inbox region rather than as a check
+    on the one just fixed, and it fails on a NEW ungated one.
+    """
+    view = html[html.index("function ReviewInboxView"):html.index("function DashboardView")]
+
+    # Every absence-claiming string the inbox can render, with the flag that has to
+    # gate it. `showSkeleton` covers the open list: it is true whenever there are no
+    # rows and the page has not had an answer, so it pre-empts both open-list empty
+    # states in the same conditional chain.
+    gated = {
+        "No scan has run yet.": "showSkeleton",
+        "Nothing open. The last scan found nothing worth a row": "showSkeleton",
+        "Nothing applied yet.": "appliedCountKnown",
+    }
+    for claim, flag in gated.items():
+        assert claim in view, f"the sweep is stale: {claim!r} is no longer rendered"
+        # The gate must appear in the same conditional chain, BEFORE the claim.
+        before = view[:view.index(claim)]
+        assert flag in before, f"{claim!r} renders without consulting {flag}"
+
+    # No NEW absence claim may appear ungated. Any future one has to be added to the
+    # map above with its gate, which is the point: the sweep is the rule.
+    import re as _re
+    found = {
+        m.group(1).strip()
+        for m in _re.finditer(r">(\s*(?:No |Nothing |None\b)[^<${]*)", _no_comments(view))
+    }
+    unknown = {f for f in found if not any(f.startswith(k[:18]) for k in gated)}
+    assert not unknown, f"ungated absence claim(s) in the inbox: {unknown}"
+
+
+def test_the_applied_panel_gates_on_its_own_read_not_a_page_wide_flag(html):
+    # `/relearn/applied` is the slowest of the four inbox reads, so a page-wide
+    # flag clears long before it answers -- which is exactly how the tile came to
+    # print "0 / most recent unknown" beside a tab count that was already a
+    # shimmer. Both applied reads count, because the number is a merge of the two
+    # ledgers and a count over half a population is as wrong as a zero.
+    view = html[html.index("function ReviewInboxView"):html.index("function DashboardView")]
+    assert "const appliedCountKnown = appliedLoaded && costAppliedLoaded;" in view
+    # `/relearn/cost-applied` had no loaded flag at all before this.
+    assert "setCostAppliedLoaded(true)" in view
+    assert "const [costAppliedLoaded, setCostAppliedLoaded] = useState(false);" in view
+    # Not derived from the page-wide flag, which is the mistake being prevented.
+    assert "appliedCountKnown = !firstLoad" not in view
+    assert "appliedKnown=${appliedCountKnown}" in view
+
+    # The tile holds BOTH its figure and its sub-line until then. "most recent
+    # unknown" is a settled value too, and it was rendering off a date the page did
+    # not have yet.
+    tile = html[html.index("function InboxStatTiles"):html.index("function ReviewInboxView")]
+    assert "appliedKnown" in tile.split("\n")[tile.split("\n").index(next(
+        l for l in tile.split("\n") if l.startswith("function InboxStatTiles")))]
+    assert "${appliedKnown\n          ? html`<div style=\"font-size:24px" in tile
+    assert "most recent ${daysAgoLabel(lastAppliedAt)" in tile
+    before_recent = tile[:tile.index("most recent ${daysAgoLabel(lastAppliedAt)")]
+    assert before_recent.count("appliedKnown") >= 2, \
+        "the sub-line must be held back with the figure, not rendered beside a shimmer"
+    # An unknown count may not be read as an empty band either, or the whole band
+    # disappears instead of shimmering.
+    assert "if (openItems.length === 0 && appliedKnown && appliedCount === 0" in tile
+
+    # The section disclosure says "each figure below", so it may not sit above a
+    # skeleton, above an empty state, or above rows that carry no figure at all.
+    # Re-anchored to the stronger property: gating on the row COUNT was not enough,
+    # because rows and figures are different populations. A reverted row renders the
+    # word "reverted" instead of a number, and an applied record can arrive with no
+    # estimate whatsoever (measured on a real corpus: four applied hooks plus a trim
+    # record, all with usd and tokens null), so a row-count gate still let the line
+    # qualify nothing.
+    assert "appliedCountKnown && combinedApplied.some(" in view
+    disclosure_gate = view[view.index("appliedCountKnown && combinedApplied.some("):]
+    disclosure_gate = disclosure_gate[: disclosure_gate.index("Each figure below")]
+    assert "state === 'reverted'" in disclosure_gate, \
+        "a reverted row shows the word, not a figure, so it may not satisfy the gate"
+    assert "appliedEstimate(r)" in disclosure_gate, \
+        "the gate must consult the row's actual estimate, not merely its presence"
+
+    # The skeleton mirrors the real row's geometry, so content fills in rather than
+    # replacing a differently-shaped block.
+    assert "function AppliedSkeletonRow()" in html
+    skel = html[html.index("function AppliedSkeletonRow()"):html.index("function AppliedItemRow(")]
+    assert 'class="sz-runrow"' in skel
+    assert 'aria-hidden="true"' in skel
+    assert skel.count("shimmer") == 4
+
+
+# --- Dashboard qualifier banner: removed by product decision ---------------- #
+def test_dashboard_qualifier_banner_is_removed(html):
+    """The subscription-billed qualifier banner ("N% of sessions are
+    subscription-billed...") no longer renders on the Dashboard: subsidized AI
+    pricing is common knowledge now, so the caveat was removed by product
+    decision. `earlyFraming` (the /relearn/proposals early-read wiring that
+    existed only to make this banner appear sooner) is dead with it."""
+    dash = _dashboard_src(html)
+    assert "earlyFraming" not in dash
+    assert "qualifier_text" not in dash
+    assert 'class="qualifier"' not in dash
+    assert "qualifier-skel" not in dash
+    # Every other framing consumer in DashboardView is untouched — the removal
+    # was scoped to the banner only, never to `framing` itself. (The trailing
+    # `, fmtDashUsd` on the two dollar formatters is the Dashboard's separate
+    # at-most-2dp precision override, not a framing change. `useTokens` itself
+    # is now LOCAL-only, a separate product decision removing subscription
+    # differentiation -- see test_dashboard_use_tokens_is_local_only.)
+    assert "const useTokens = !!framing && framing.pricing_mode === 'local'" in dash
+    assert "fmtFramedDollar(projected, framing, fmtDashUsd)" in dash
+    assert "<${PlanBadge} framing=${framing} />" in dash
+    assert "fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)" in dash
+
+
+def test_dashboard_use_tokens_is_local_only(html):
+    """DashboardView's `useTokens` used to switch to token display for BOTH
+    subscription and local. Subscription no longer suppresses (product
+    decision: tj does not differentiate subscription-billed from API-billed
+    users, and dollars price all traffic at API list rates regardless of
+    plan); local still does (no marginal cost to price at all -- a
+    structurally different case, not a differentiation choice)."""
+    dash = _dashboard_src(html)
+    assert "framing.pricing_mode === 'subscription'" not in dash
+
+
+def _summarize_engine_view(html: str) -> str:
+    """The `phase === 'engine'` render — the back link, heading, intro
+    paragraph, and the three API/Claude CLI/Manual mode cards."""
+    start = html.index("if (phase === 'engine') {")
+    end = html.index("if (phase === 'run' && engine !== 'manual') {", start)
+    return html[start:end]
+
+
+def test_summarize_back_link_is_not_the_brand_blue_sz_link(html):
+    # The back link is page chrome, not an in-flow action, so per founder
+    # instruction it must NOT ride the shared brand-blue .sz-link class used
+    # for every other clickable string on this screen (and across the app).
+    # It gets its own class so this stays a one-hunk, page-local change.
+    view = _summarize_engine_view(html)
+    assert '<a class="sz-back-link" href="#/optimize">← Optimize</a>' in view
+    assert '<a class="sz-link" href="#/optimize">← Optimize</a>' not in view
+    # Founder instruction, verbatim: the back link and its text must be white.
+    # It's full-brightness (var(--text)) at rest — NOT var(--text-dim) — with
+    # the underline-on-hover as its non-color clickable affordance, since a
+    # brighten-on-hover signal isn't available once the resting state is
+    # already full strength.
+    assert ".sz-back-link { color: var(--text); text-decoration: none; }" in html
+    assert ".sz-back-link { color: var(--text-dim); text-decoration: none; }" not in html
+    assert ".sz-back-link:hover { text-decoration: underline; }" in html
+
+
+def test_summarize_back_link_has_breathing_room_before_heading(html):
+    # The back link and the "Summarize" heading were cramped together at
+    # margin:0 0 4px; this must be widened so the two are visually separated.
+    view = _summarize_engine_view(html)
+    assert '<div style="margin:0 0 4px"><a class="sz-back-link"' not in view
+    assert '<div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>' in view
+
+
+def test_summarize_disabled_reason_is_not_amber(html):
+    # "set TJ_ANTHROPIC_API_KEY to enable" used to render in var(--warn)
+    # (amber/yellow) via a bespoke .sz-eng-off color rule. Founder instruction,
+    # repeated: this text must be white, not just "not amber" — so it keeps
+    # the .badge-closed pill's recessed background (still legible with white
+    # text in both themes) but its own .sz-eng-off.badge-closed rule pins the
+    # text color back to var(--text), overriding .badge-closed's normal
+    # var(--text-dim).
+    assert ".sz-eng-off { font-size: 12px; color: var(--warn); margin-top: 10px; }" not in html
+    assert ".sz-eng-off.badge-closed { color: var(--text); }" in html
+    view = _summarize_engine_view(html)
+    assert '<div class="sz-eng-off badge badge-closed">${cap.reason}</div>' in view
+
+
+def test_summarize_disabled_card_is_a_deliberate_state_not_uniform_dimming(html):
+    # Blanket opacity:.5 on the whole disabled <button> dimmed the title
+    # equally with everything else, so "unavailable" read as "broken" and
+    # conflated disabled with less-important. The disabled state is now a
+    # dashed border + recessed fill, leaving title/description at full
+    # legibility.
+    assert ".sz-engine:disabled { opacity: .5; cursor: not-allowed; }" not in html
+    assert "border-style: dashed" in html
+    assert ".sz-engine:disabled { cursor: not-allowed; background: var(--surface2); border-style: dashed; }" in html
+
+
+def test_summarize_engine_cards_share_height(html):
+    # The three cards (API/Claude CLI/Manual) have different description
+    # lengths and only the API card carries the extra disabled-reason badge,
+    # so without an explicit stretch the row read as uneven card heights.
+    assert ".sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; align-items: stretch; }" in html
+    assert "display: flex; flex-direction: column; height: 100%;" in html
+
+
+def test_summarize_engine_tags_are_monochrome_not_accent(html):
+    # "$ at cost · your key" / "against your Claude limits" / "no outbound
+    # calls" are card SUBTITLES, not interactive controls, but were rendered
+    # in the brand-blue accent color — the same color this app's terminal
+    # taste reserves for "typeable or clickable." Moved onto the monochrome
+    # (--text-dim) scale so accent keeps one meaning app-wide.
+    assert ".sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 4px; }" in html
+    assert ".sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); margin-top: 4px; }" not in html
+
+
+def test_summarize_engine_view_has_no_em_dashes(html):
+    # Standing project rule: no em dashes in user-facing copy. This view had
+    # three: the intro paragraph, the Claude CLI card description, and the
+    # staged-rewrite tally / undo hints.
+    view = _summarize_engine_view(html)
+    assert "—" not in view
+
+
+def test_summarize_engine_view_has_no_unrendered_backticks(html):
+    # The Claude CLI card read "Runs the local `claude` CLI." with literal
+    # backtick characters because the string was never passed through <code>.
+    # It must now render as a real <code> element with no stray backticks
+    # left in the source strings for this view.
+    view = _summarize_engine_view(html)
+    assert "`claude`" not in view
+    assert "<code>claude</code>" in view
+    assert "Runs the local <code>claude</code> CLI against your Claude limits, with no dollar cost. Local host only." in view
+
+
+def test_summarize_tj_keep_token_is_escaped_and_code_styled(html):
+    # `<tj-keep>` used to be interpolated as a bare JS string (`${'<tj-keep>'}`)
+    # which rendered as plain, unstyled angle-bracket text sitting oddly in
+    # the sentence. It's still inserted as escaped text (never a real
+    # unknown-tag risk to htm's parser), but now explicitly HTML-escaped and
+    # wrapped in <code> so it reads as a token, not stray prose.
+    view = _summarize_engine_view(html)
+    assert "<code>&lt;tj-keep&gt;</code>" in view
+    assert "${'<tj-keep>'}" not in view
+    assert "Rewrites prose only: code, tables, and <code>&lt;tj-keep&gt;</code> blocks stay verbatim." in view
+
+
+def test_summarize_engine_intro_uses_colon_not_em_dash(html):
+    view = _summarize_engine_view(html)
+    assert "Rewrites prose only —" not in view
+    assert "Rewrites prose only: code, tables, and" in view
+
+
+def _top_tenants_src(html: str) -> str:
+    start = html.index("function TopTenantsPanel({ tenants, framing })")
+    return html[start: html.index("\n}\n", start)]
+
+
+def test_cost_tenants_table_shows_tokens_and_never_mislabels_call_count(html):
+    """The Top-tenants-by-spend table rendered `call_count` (a raw call
+    count) through `fmtTokens` -- a token formatter -- with no unit at all,
+    and had no Tokens column even though /cost/tenants already returns
+    per-row input/output/cache token sums. Pin both fixes: `fmtCount` for
+    Calls, and a Tokens column summing all four token fields."""
+    panel = _top_tenants_src(html)
+    assert "fmtTokens(r.call_count)" not in panel
+    assert "fmtCount(r.call_count)" in panel
+    assert "<th>Tokens</th>" in panel
+    assert (
+        "fmtTokens((r.input_tokens || 0) + (r.output_tokens || 0) "
+        "+ (r.cache_tokens || 0) + (r.cache_write_tokens || 0))"
+    ) in panel
+
+
+# --- Analyzer scan: a COLD store is not an empty result -------------------- #
+# The phase machine above answers "did the READ answer?". Once analyzer results
+# come from a background scan there is a second question it structurally cannot
+# see: "does the STORE hold a result?" A cold store answers its HTTP request
+# perfectly well (phase 'ready', data truthy) while holding nothing, so without
+# an explicit check the band reaches `tileCount > 0`, finds 0, and prints
+# "No recoverable candidates." for a scan that has never run. These pin the
+# compute-layer half so it composes with the display-layer half rather than
+# opening a new door into the same false-absence claim.
+
+def test_recoverable_tiles_yield_nothing_on_a_cold_store(html):
     fn_start = html.index("function recoverableTiles(opt)")
     fn_end = html.index("\nfunction ", fn_start + 1)
     fn = html[fn_start:fn_end]
-    # A cold store must short-circuit BEFORE any tile is built, so no caller
-    # can render a zeroed grid off a scan that never ran.
-    assert "!opt.report_available" in fn
+    assert "opt.report_available === false" in fn
 
 
-def test_scan_state_separates_cold_computing_and_ready(html):
-    fn_start = html.index("function scanState(opt)")
-    fn_end = html.index("\n// What a surface renders", fn_start)
+def test_band_state_checks_cold_before_it_can_reach_the_none_branch(html):
+    fn_start = html.index("function recoverableBandState(phase, data, tileCount)")
+    fn_end = html.index("\n// Why a tile has no figure", fn_start)
     fn = html[fn_start:fn_end]
-    for field in ("cold", "computing", "known", "fetchFailed", "computedAt"):
-        assert field in fn, f"scanState must expose `{field}`"
-    # `cold` is derived from whether a result EXISTS, never from whether the
-    # findings list happens to be empty.
-    assert "cold: !known" in fn
-
-
-def test_dashboard_recoverable_band_gates_its_empty_state_on_the_scan(html):
-    """`No recoverable candidates.` may only render when a scan actually
-    completed. Before this it rendered whenever the tile list was empty, which
-    included the never-scanned case."""
-    idx = html.index("No recoverable candidates.")
-    window = html[idx - 1400:idx]
-    assert "scan.cold ?" in window, (
-        "the empty-state string must sit on the NOT-cold branch of a scan check"
+    # Anchored on the CODE, not on prose: the explanatory comment above the
+    # guard mentions the none-branch by name, so a plain substring search
+    # would find the comment first and pass regardless of ordering.
+    cold_at = fn.index("if (data && data.report_available === false)")
+    none_at = fn.index("return tileCount > 0")
+    assert cold_at < none_at, (
+        "the cold check must precede the tiles/none decision, or a never-run "
+        "scan renders as 'we scanned and found nothing'"
     )
-    assert "Not computed yet" in window
+    assert "'cold'" in fn
 
 
-def test_budgets_at_risk_tile_shows_a_dash_not_zero_on_a_cold_scan(html):
-    idx = html.index('label="Budgets at risk"')
-    window = html[idx:idx + 400]
-    assert "scan.known ? budgetAttn : '—'" in window
-    # The attention flag must not fire off an unknown value either.
-    assert "attention=${scan.known && budgetAttn > 0}" in window
+def test_scan_state_treats_a_payload_without_the_field_as_known(html):
+    """An older server predating the store sends no `report_available`. Reading
+    that as cold would invent a not-yet-computed state for a real report."""
+    fn_start = html.index("function scanState(opt)")
+    fn_end = html.index("\n// Start a background scan", fn_start)
+    fn = html[fn_start:fn_end]
+    assert "opt.report_available !== false" in fn
+    assert "cold: !fetchFailed && !known" in fn
 
 
-def test_every_analyzer_surface_carries_a_rescan_control(html):
-    # The Dashboard band and the Optimize view both mount the shared ScanBar,
-    # so provenance and the re-run control travel together rather than one
-    # surface silently rendering undated figures.
+def test_budgets_at_risk_cannot_report_ready_off_a_cold_store(html):
+    idx = html.index("const budgetStatus =")
+    line = html[idx:idx + 200]
+    assert "scan.known ? 'ready'" in line, (
+        "budgetStatus must gate on the STORE, not merely on optData being truthy"
+    )
+    assert "cold: 'not scanned yet'" in html
+
+
+def test_both_analyzer_surfaces_carry_provenance_and_a_rescan_control(html):
+    # The Dashboard band and the Optimize view both mount the shared ScanBar, so
+    # neither can render figures without saying when they were computed.
     assert html.count("<${ScanBar}") >= 2
-    assert "async function rescanAnalyzers() { return apiPost('/optimize/rescan', {}); }" in html
+    # A rescan that FAILED must not look like one that succeeded, so the POST
+    # goes through the helper that surfaces the server's reason.
+    assert "apiPostOrDetail('/optimize/rescan', {})" in html
+    assert "rescan failed: " in html
 
 
 def test_auto_rescan_is_visibility_gated_and_killable(html):
     fn_start = html.index("function useAutoRescan(scan, rescan)")
     fn_end = html.index("\nfunction recoverableTiles", fn_start)
     fn = html[fn_start:fn_end]
-    # A hidden tab must never ask the daemon to scan.
     assert "document.visibilityState === 'visible'" in fn
-    # 0 seconds (or scan_enabled=false) turns it off entirely -- the kill switch.
     assert "scan.scanEnabled ? scan.pollSeconds : 0" in fn
     assert "if (!seconds || seconds <= 0) return undefined;" in fn
+
+
+def test_optimize_is_not_in_the_client_response_cache(html):
+    """The store carries its own computed-at, which the page displays. A 45s
+    client-side staleness window on top would be a second, invisible freshness
+    mechanism disagreeing with the timestamp on screen."""
+    start = html.index("const CACHEABLE_READ_PREFIXES = [")
+    end = html.index("]", start)
+    assert "'/optimize'" not in html[start:end]
 
 
 def test_optimize_view_renders_a_cold_state_instead_of_empty_cards(html):
     fn_start = html.index("function OptimizeView({ params })")
     fn_end = html.index("\n// Two lenses, one router", fn_start)
     fn = html[fn_start:fn_end]
-    # The analyzer cards render only when a completed scan exists...
     assert "${!st.loading && scan.known && st.opt ? html`" in fn
-    # ...and the cold branch says so explicitly rather than showing nothing.
     assert "No analyzer scan has completed yet." in fn
     assert "this is not a report of zero waste" in fn

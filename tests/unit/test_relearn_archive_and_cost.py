@@ -308,7 +308,20 @@ class _Report:
         self.findings = {"relearn": finding}
 
 
-def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
+def test_relearn_produces_no_cost_proposal_and_keeps_its_claim_on_its_clusters(db):
+    """relearn contributes NO ``CostProposal``, and that is the whole design.
+
+    It used to emit exactly one aggregate card whose only figure was
+    ``observed_cost_usd`` — the retired total-observed-cost field —
+    with ``past_overspend_usd`` deliberately ``None``, because relearn's re-read
+    tail is the same re-sent context ``resend`` already claims in full and two
+    analyzers claiming one span is CLAUDE.md rule 27. With that field deleted the
+    card had no number left to lead with, so the card is deleted too.
+
+    ``relearn`` stays in ``COST_ANALYZERS``: membership is what keeps the analyzer
+    running inside the inbox recompute, which the write budget and relearn's own
+    per-cluster rows both depend on. What must not come back is a proposal.
+    """
     from tokenjam.core.optimize.cost_proposals import (
         COST_ANALYZERS,
         cost_proposals_from_report,
@@ -330,125 +343,23 @@ def test_relearn_reaches_the_cost_proposals_and_the_past_overspend_rollup(db):
         [], conn=db.conn, distill_enabled=False, extra_failures=failures,
         persona="claude-code",
     )
+    # The MEASUREMENT is untouched: relearn still prices what the recurrences
+    # already cost. Only the card that republished it as a second aggregate total
+    # is gone.
     assert finding.clusters and finding.past_overspend_usd
 
     proposals = cost_proposals_from_report(_Report(finding))
-    relearn_cards = [p for p in proposals if p.analyzer == "relearn"]
-
-    assert len(relearn_cards) == 1, "one aggregate card, never one per cluster"
-    card = relearn_cards[0]
-    # relearn carries no avoidable claim (see below), so its observed past
-    # cost lands on `observed_cost_usd` and the avoidable-only
-    # `past_overspend_usd` headline field stays None — "not priced", never a
-    # 0.0 that would read as "worth nothing".
-    assert card.observed_cost_usd == pytest.approx(finding.past_overspend_usd)
-    assert card.observed_cost_basis
-    # coverage_note is REQUIRED whenever observed_cost_usd is set (this
-    # module's own stated contract) — this card carries a cost with no
-    # avoidable figure beside it, exactly the shape that must never ship
-    # unexplained.
-    assert card.coverage_note
-    assert "COVERAGE" in card.coverage_note
-    assert card.past_overspend_usd is None
-    assert not card.apply_capable and card.advise_only
-    # No forward claim on this card: relearn's re-read tail is the same re-sent
-    # context `resend` already claims, and two analyzers claiming one span in
-    # `past_overspend_rollup` is CLAUDE.md rule 27.
-    assert card.past_overspend_usd is None
-    assert card.past_overspend_tokens is None
-    # relearn no longer carries a forward claim at all — a relearn cluster
-    # shows its PAST figure only, so there is no `relearn_claim_*` key on the
-    # card's `baseline` any more (retired alongside `estimated_recoverable_*`
-    # / `estimated_monthly_*`).
-    assert "relearn_claim_usd" not in card.baseline
-    assert "relearn_claim_tokens" not in card.baseline
+    assert [p for p in proposals if p.analyzer == "relearn"] == []
 
     rollup = past_overspend_rollup(proposals)
-    # Cost, not avoidable: relearn's figure sums into the separate
-    # `observed_cost_usd` rollup total, never into the waste-labelled
-    # `past_overspend_usd` headline.
-    assert rollup["observed_cost_usd"] == pytest.approx(finding.past_overspend_usd)
-    assert "relearn" in {a["analyzer"] for a in rollup["by_analyzer"]}
+    assert "relearn" not in {a["analyzer"] for a in rollup["by_analyzer"]}
+    # No retired key survives on the block under any name.
+    assert not [k for k in rollup if "observed_cost" in k or k == "cost_disclosure"]
 
-
-def test_relearn_card_survives_a_finding_whose_clusters_all_lack_a_fix(db):
-    """The rollup case that motivated the whole ticket: every cluster gated out
-    of a claim, so the OLD code contributed exactly nothing to any total, while
-    the observed cost was real."""
-    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
-
-    failures = []
-    for i in range(MIN_RECURRING_SESSIONS):
-        _priced_session(db, f"g{i}")
-        failures.append(_episode(
-            f"g{i}", "Unclassifiable widget explosion",
-            ts=(BASE + timedelta(days=i)).isoformat(),
-        ))
-    finding = analyze_relearns(
-        [], conn=db.conn, distill_enabled=False, persona="claude-code",
-        extra_failures=failures,
-    )
-    assert not hasattr(finding, "estimated_recoverable_tokens")
-    assert all(not c.write_offered for c in finding.clusters)  # nothing claimable
-    assert finding.past_overspend_usd and finding.past_overspend_usd > 0
-
-    cards = [p for p in cost_proposals_from_report(_Report(finding)) if p.analyzer == "relearn"]
-    assert len(cards) == 1
-    # The observed cost is real even though nothing was claimable.
-    assert cards[0].observed_cost_usd > 0
-    # The second number (what a fix would return) is correctly zero/absent —
-    # they are different quantities and only one of them is gated.
-    assert not cards[0].past_overspend_usd
-    # And the card says why there is no avoidable figure at all, rather than
-    # leaving that gap to imply the cost was unavoidable.
-    assert cards[0].coverage_note
-
-
-def test_relearn_coverage_note_breaks_down_gated_clusters_by_reason(db):
-    """The durable half of the fix: `_relearn_to_proposals` must name WHY the
-    gated clusters carry no fix, not just that the card has a `coverage_note`
-    at all. Mirrors a real measurement (55 clusters, 50 gated: 29 with no fix
-    template, 17 net-negative, 4 budget-deferred) with a smaller fixture of
-    the same three reasons.
-    """
-    from tokenjam.core.optimize.cost_proposals import _relearn_to_proposals
-    from tokenjam.core.optimize.write_budget import (
-        REASON_BUDGET_FULL,
-        REASON_NET_NEGATIVE,
-        REASON_PLACEHOLDER,
-    )
-
-    def _cluster(sig, reason, offered=False):
-        return RelearnCluster(
-            signature=sig, family_key=None, title=sig, sessions=1,
-            occurrences=1, repos=["demo"], rung=1, scope="project",
-            proposed_fix="fix" if offered else "",
-            write_offered=offered, write_blocked_reason=reason,
-        )
-
-    clusters = (
-        [_cluster(f"nofix{i}", REASON_PLACEHOLDER) for i in range(2)]
-        + [_cluster(f"neg{i}", REASON_NET_NEGATIVE) for i in range(3)]
-        + [_cluster("budget0", REASON_BUDGET_FULL)]
-        + [_cluster("offered0", "", offered=True)]
-    )
-    finding = RelearnFinding(
-        clusters=clusters, past_overspend_usd=46.30, past_overspend_tokens=1_000,
-        past_overspend_basis="observed",
-    )
-    proposals = _relearn_to_proposals(finding)
-    assert len(proposals) == 1
-    note = proposals[0].coverage_note
-    assert note
-    assert "2 have no derived fix template" in note
-    # "modelled as", not a bare "are": the net-negative verdict is arithmetic
-    # over quantities we can count, and it does not count what the rule saves
-    # by preventing the failure (write_budget's module docstring).
-    assert "3 are modelled as net-negative" in note
-    assert "1 are budget-deferred" in note
-    # The load-bearing closing sentence: absence of a figure is not evidence
-    # of necessity.
-    assert "not a measurement of what was unavoidable" in note
+    # And the claim is not lost: every cluster still carries its own figure, on
+    # the canonical field, which is what the Review inbox rows render.
+    assert all(c.past_overspend_usd is not None or c.past_overspend_tokens
+               for c in finding.clusters)
 
 
 # --------------------------------------------------------------------------- #
@@ -519,11 +430,11 @@ def test_short_reason_covers_every_suppression_reason():
     assert wb.short_reason("something new") == "no permanent fix offered"
 
 
-def test_cli_relearn_row_leads_with_observed_cost_not_the_gated_claim(db):
+def test_cli_relearn_row_leads_with_what_it_cost_not_the_gated_claim(db):
     """The CLI row states what the recurrence already cost, and never states a
     suppressed write's gross saving as though it were claimable."""
     from tokenjam.cli.cmd_optimize import (
-        _relearn_observed_cost,
+        _relearn_past_overspend,
         _relearn_write_gate_line,
     )
     from tokenjam.core.optimize.analyzers.relearn import cluster_failures
@@ -548,7 +459,7 @@ def test_cli_relearn_row_leads_with_observed_cost_not_the_gated_claim(db):
     # No write is offered — no forward field exists to be zero...
     assert not p.write_offered
     # ...and yet the row still shows a non-empty observed cost.
-    cost = _relearn_observed_cost(p, pricing_mode="api")
+    cost = _relearn_past_overspend(p, pricing_mode="api")
     assert cost, "a suppressed cluster must still render what it cost"
     assert cost not in ("$0.00", "~0 tok")
     # And it says WHY no fix is offered, with the arithmetic.
@@ -557,7 +468,7 @@ def test_cli_relearn_row_leads_with_observed_cost_not_the_gated_claim(db):
     assert "no permanent fix offered" in gate
     assert "payback" in gate
     # A subscription user sees tokens, never a price they were not charged.
-    assert _relearn_observed_cost(p, pricing_mode="subscription").endswith("tok")
+    assert _relearn_past_overspend(p, pricing_mode="subscription").endswith("tok")
 
 
 def test_offered_cluster_has_no_gate_line(db):
@@ -624,6 +535,67 @@ def test_short_label_is_derived_on_read_for_an_older_cache():
     # Pure: the input dict is never mutated (the stamper runs inside a cache
     # write and must never surprise its caller).
     assert "write_blocked_short" not in legacy["clusters"][0]
+
+
+def test_advise_snippet_offered_separates_a_real_fix_from_the_placeholder():
+    """The Review inbox routes every row onto a three-valued mechanism axis: tj
+    applies it, tj hands over the exact change, or there is honestly nothing to
+    hand over. The middle bucket is the biggest one on a real corpus, and it must
+    never render as a dead end, so the UI needs to be able to tell a cluster
+    whose `proposed_fix` is a genuine derived recommendation from one whose fix
+    text is the "no fix template matched" placeholder.
+
+    That distinction is `build_proposals`' own `has_real_fix`, and the only trace
+    of it on the payload is which reason blocked the write. Deriving it here
+    keeps the UI from keying on a sentence this package owns the wording of.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+    from tokenjam.core.optimize.relearn_proposals import (
+        advise_snippet_offered,
+        stamp_proposal_ids,
+    )
+
+    # A write WAS offered, so there is nothing to hand over: a cluster's
+    # `proposed_fix` is the same content the write would write, unlike a cost
+    # proposal where `suggestion` and the apply path are separate things. A row
+    # tokenjam is about to write must not also advertise "copy this" and print its
+    # own fix twice.
+    assert advise_snippet_offered({
+        "proposed_fix": "PreToolUse hook: block a busy-wait sleep chain.",
+        "write_offered": True,
+    }) is False
+    # Blocked because a permanent rule is uneconomic, or because this window's
+    # rule budget is spent. The RECOMMENDATION is still real and the user can
+    # apply it themselves, which is exactly what advise_only_reason tells them.
+    for blocked in (wb.REASON_NET_NEGATIVE, wb.REASON_BUDGET_FULL):
+        assert advise_snippet_offered({
+            "proposed_fix": "Use absolute paths in parallel Bash calls.",
+            "write_offered": False, "write_blocked_reason": blocked,
+        }) is True, blocked
+    # Blocked because nothing was derived at all. There is no snippet to copy,
+    # and offering the placeholder as one would be the dead end the axis exists
+    # to prevent.
+    assert advise_snippet_offered({
+        "proposed_fix": "Review examples, no known fix template matched.",
+        "write_offered": False, "write_blocked_reason": wb.REASON_PLACEHOLDER,
+    }) is False
+    # No fix text at all is never a snippet, whatever gated the write.
+    assert advise_snippet_offered({"proposed_fix": "", "write_offered": True}) is False
+    assert advise_snippet_offered({"write_offered": False}) is False
+
+    # Stamped on read, like proposal_id / advise_only_reason, so a cache written
+    # before the field existed classifies correctly on the first read with no
+    # recompute — and without mutating the caller's dict.
+    legacy = {"clusters": [
+        {"signature": "a", "proposed_fix": "do the thing",
+         "write_offered": False, "write_blocked_reason": wb.REASON_NET_NEGATIVE},
+        {"signature": "b", "proposed_fix": "placeholder",
+         "write_offered": False, "write_blocked_reason": wb.REASON_PLACEHOLDER},
+    ]}
+    out = stamp_proposal_ids(legacy)["clusters"]
+    assert out[0]["advise_snippet_offered"] is True
+    assert out[1]["advise_snippet_offered"] is False
+    assert "advise_snippet_offered" not in legacy["clusters"][0]
 
 
 def test_relearn_finding_round_trips_its_observed_dollar_figure():
