@@ -188,6 +188,45 @@ def _build_archive(
     return archived
 
 
+def _count_archived(db, cutoff, agent_id: str | None) -> int:
+    """Exact count of the archive's TRUE population, uncapped.
+
+    Mirrors `_build_archive`'s row-selection predicate exactly: the same
+    terminal-or-stale-active SQL clause, the same `agent_id` scoping, AND the
+    same 0-signal-zombie exclusion `_build_archive` applies in Python after the
+    fetch (expressed here in SQL so a single ``COUNT(*)`` can cover it). This
+    is what makes `archived_total` safe to publish next to the capped
+    `archived` list as "showing latest ARCHIVE_LIMIT of N" -- the two figures
+    describe the same population, never a subtly different one (the
+    mixed-basis defect class this codebase has hit before).
+
+    Deliberately does NOT apply `_build_archive`'s ARCHIVE_CANDIDATE_FACTOR
+    recency pre-scan window -- that window bounds how many candidate ROWS the
+    list scans before applying the zombie filter + ARCHIVE_LIMIT cap (a list
+    perf optimization), not which rows qualify as "archived". This count
+    answers "how many sessions truly match", independent of that scan bound.
+    """
+    if not hasattr(db, "conn"):
+        return 0
+    params: list = list(TERMINAL_STATUSES)
+    terminal_placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+    params.append(cutoff)
+    clause = (
+        f"status IN ({terminal_placeholders}) "
+        f"OR (status = 'active' AND COALESCE(ended_at, started_at) <= ${len(params)})"
+    )
+    zero_signal = (
+        "COALESCE(input_tokens, 0) = 0 AND COALESCE(output_tokens, 0) = 0 "
+        "AND COALESCE(tool_call_count, 0) = 0 AND COALESCE(total_cost_usd, 0) = 0"
+    )
+    sql = f"SELECT COUNT(*) FROM sessions WHERE ({clause}) AND NOT ({zero_signal})"
+    if agent_id:
+        params.append(agent_id)
+        sql += f" AND agent_id = ${len(params)}"
+    row = db.conn.execute(sql, params).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
     """SDK (non-interactive) agents seen recently, each with per-minute cost /
     error sparkline series + a live/went_quiet/long_dormant lifecycle keyed on
@@ -397,10 +436,15 @@ async def get_status(
         db, config, session_labels, idle_threshold, current_cutoff, agent_id,
         db_labels,
     )
+    # True total behind the capped `archived` list above (same predicate, same
+    # population, no ARCHIVE_LIMIT) -- lets the UI show "latest N of TOTAL"
+    # honestly instead of presenting the capped page as the whole archive.
+    archived_total = _count_archived(db, current_cutoff, agent_id)
 
     return {
         "agents": agents_data,
         "archived": archived,
+        "archived_total": archived_total,
         "sdk_services": sdk_services,
         "has_active_alerts": has_active_alerts,
         "framing": framing.to_dict(),
