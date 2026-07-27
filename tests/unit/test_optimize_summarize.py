@@ -910,3 +910,71 @@ def test_nested_roots_stack_but_parallel_checkouts_collapse(db, monkeypatch):
         "/code/myrepo/CLAUDE.md", "/code/myrepo/myrepo/CLAUDE.md",
     }
     assert f.duplicate_copies_collapsed == 1
+
+
+def test_basis_calls_the_target_ratio_an_ask_not_a_measurement(db, monkeypatch):
+    """Critical Rule 14: nothing enforces the target the rewriter is asked for —
+    there is no retry and no gate on hitting it — so with no verified sample the
+    basis must say the reduction is an upper bound, not an expectation."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True))
+
+    assert "TARGET" in basis
+    assert "NOT a measured outcome" in basis
+    assert "upper bound" in basis
+    assert "Symlinked files are excluded" in basis
+
+
+def test_basis_switches_to_the_measured_ratio_when_one_exists(db, monkeypatch):
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(
+        InvocationCounts(observed=True), None, 0, 0.82, True, 7,
+    )
+
+    assert "ACTUALLY delivered" in basis
+    assert "7 structure-checked" in basis
+    assert "upper bound" not in basis
+
+
+def test_measured_ratio_supersedes_the_target_in_the_figure(db, monkeypatch, tmp_path):
+    """The measured ratio is fed to the scan, so the reduction shrinks to what
+    rewrites really deliver rather than what they are asked for."""
+    import json
+
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.summarize.session import results_dir
+
+    # tmp-scoped storage: `results_dir` hangs off the storage path, and a test
+    # must never read or unlink the developer's own staged results.
+    cfg = TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+    seen: dict = {}
+
+    def fake_scan(**kw):
+        seen.update(kw)
+        return ScanResult(candidates=[], root=".", recursive=False,
+                          globals_checked=0, walk_capped=False, note="")
+
+    monkeypatch.setattr(
+        "tokenjam.core.summarize.candidates.list_candidates", fake_scan,
+    )
+    d = results_dir(cfg)
+    d.mkdir(parents=True, exist_ok=True)
+    for n in ("a", "b", "c"):
+        (d / f"{n}.json").write_text(json.dumps({
+            "path": f"/x/{n}.md", "staged": True, "prose_words_before": 1_000,
+            "words_before": 1_200, "words_after": 1_100,
+        }), encoding="utf-8")
+    _seed_window(db)
+    since, until = _window()
+    report = build_report(db=db, config=cfg, since=since, until=until,
+                          findings=["summarize"])
+
+    f = report.findings["summarize"]
+    assert seen["ratio"] == pytest.approx(0.9)      # 300 removed of 3,000 prose words
+    assert f.prose_ratio == pytest.approx(0.9)
+    assert f.prose_ratio_observed is True
+    assert f.prose_ratio_samples == 3

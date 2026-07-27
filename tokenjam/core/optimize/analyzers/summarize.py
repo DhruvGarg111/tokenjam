@@ -92,6 +92,11 @@ from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+from tokenjam.core.summarize.estimate import (
+    DEFAULT_TARGET_RATIO,
+    MIN_OBSERVED_SAMPLES,
+    observed_prose_ratio,
+)
 from tokenjam.core.summarize.invocations import InvocationCounts
 from tokenjam.core.summarize.repo_roots import ResolvedRoots, resolve_roots
 
@@ -136,9 +141,43 @@ SUMMARIZE_ESTIMATE_BASIS = (
     "figure here; its one-time per-call reduction still appears in "
     "`file_reduction_tokens` and each candidate's own `est_tokens_saved`. A "
     "file MEASURED to be resident in no session and invoked zero times is not "
-    "listed at all, rather than listed at zero. {population} Advisory; review "
-    "each rewrite before applying."
+    "listed at all, rather than listed at zero. {population} {ratio} Advisory; "
+    "review each rewrite before applying."
 )
+
+#: Reduction half of the basis (Critical Rule 14): how much of each file the
+#: figure assumes goes away. Kept separate because the honest answer depends on
+#: whether any rewrite has actually been verified on this machine.
+_RATIO_TARGET = (
+    "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
+    "a saving offered on one could never be realized. The per-file reduction "
+    "assumes prose compresses to {pct:.0f}% of its words, which is the TARGET the "
+    "rewriter is asked for — NOT a measured outcome. Nothing enforces it: there "
+    "is no retry and no gate on hitting the target, and observed rewrites have "
+    "delivered materially less reduction than asked. No verified rewrite sample "
+    "exists here yet ({samples:,} usable so far, {needed:,} needed), so this "
+    "figure is an upper bound on the reduction half and should be read as one. "
+    "It is replaced by the measured ratio automatically once enough rewrites "
+    "have been staged and structure-checked."
+)
+_RATIO_OBSERVED = (
+    "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
+    "a saving offered on one could never be realized. The per-file reduction "
+    "uses the ratio rewrites have ACTUALLY delivered on this machine — prose to "
+    "{pct:.0f}% of its words, measured across {samples:,} structure-checked "
+    "rewrite(s), weighted by prose volume — rather than the target the rewriter "
+    "is asked for, which nothing enforces and which observed rewrites do not "
+    "reach."
+)
+
+
+def _ratio_basis(ratio: float, observed: bool, samples: int) -> str:
+    """How much of each file the figure assumes goes away, stated truthfully."""
+    if observed:
+        return _RATIO_OBSERVED.format(pct=ratio * 100, samples=samples)
+    return _RATIO_TARGET.format(
+        pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+    )
 
 #: Population half of the basis (Critical Rule 14): which files were even looked
 #: at. Stated separately because the honest answer changes with the corpus — how
@@ -182,6 +221,9 @@ def _estimate_basis(
     invocations: "InvocationCounts | None",
     roots: "ResolvedRoots | None" = None,
     roots_scanned: int = 0,
+    ratio: float = DEFAULT_TARGET_RATIO,
+    ratio_observed: bool = False,
+    ratio_samples: int = 0,
 ) -> str:
     """The basis string with the evidence actually used spelled out.
 
@@ -204,6 +246,7 @@ def _estimate_basis(
     return SUMMARIZE_ESTIMATE_BASIS.format(
         invocation_source=source,
         population=_population_basis(roots, roots_scanned),
+        ratio=_ratio_basis(ratio, ratio_observed, ratio_samples),
     )
 
 # Mandatory caveat (Rule 14) — carried as the dataclass default like the other
@@ -323,6 +366,15 @@ class SummarizeFinding:
     #: per worktree). Each distinct content is charged once, at the copy with
     #: the most observed loading sessions.
     duplicate_copies_collapsed: int = 0
+    #: The prose ratio behind every per-file reduction here, and whether it was
+    #: MEASURED from verified rewrites on this machine or is the target the
+    #: rewriter is merely asked for. The distinction is load-bearing: nothing
+    #: enforces the target, and observed rewrites deliver materially less, so an
+    #: unobserved figure is an upper bound rather than an expectation.
+    prose_ratio: float = DEFAULT_TARGET_RATIO
+    prose_ratio_observed: bool = False
+    #: Structure-checked rewrites the ratio was derived from (0 when assumed).
+    prose_ratio_samples: int = 0
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -754,6 +806,13 @@ def run(ctx: AnalyzerContext) -> None:
     invocations = _invocation_counts(ctx)
     roots = resolve_roots(invocations.session_cwds)
 
+    # How much of each file the reduction assumes goes away. The target ratio is
+    # what the rewriter is ASKED for and nothing enforces it, so a measured
+    # ratio from verified rewrites on this machine supersedes it whenever one
+    # exists; the basis says which is in force either way (Critical Rule 14).
+    measured_ratio, ratio_samples = observed_prose_ratio(ctx.config)
+    ratio = measured_ratio if measured_ratio is not None else DEFAULT_TARGET_RATIO
+
     try:
         # Project scope spans every repo the window actually worked in — not the
         # one directory this process happens to sit in, which contributed $0.00
@@ -763,7 +822,7 @@ def run(ctx: AnalyzerContext) -> None:
         # every `*.md` in a directory and would price `README.md` / `CHANGELOG.md`
         # as if the harness auto-loaded them (Critical Rule 22).
         scan = list_candidates(  # read-only, never writes
-            config=ctx.config, project_roots=roots.roots or None,
+            config=ctx.config, project_roots=roots.roots or None, ratio=ratio,
         )
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the
@@ -781,9 +840,13 @@ def run(ctx: AnalyzerContext) -> None:
     profile = _load_profile(ctx)
     finding.estimate_basis = _estimate_basis(
         invocations, roots, scan.project_roots_scanned,
+        ratio, measured_ratio is not None, ratio_samples,
     )
     finding.project_roots_scanned = scan.project_roots_scanned
     finding.project_roots_vanished = roots.vanished
+    finding.prose_ratio = round(ratio, 4)
+    finding.prose_ratio_observed = measured_ratio is not None
+    finding.prose_ratio_samples = ratio_samples
     finding.invocations_observed = invocations.observed
     finding.invocations_total = invocations.total_invocations
     finding.transcripts_examined = invocations.sessions_scanned

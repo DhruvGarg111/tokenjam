@@ -239,6 +239,14 @@ def _read(path: Path) -> str | None:
 
 def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
                ratio: float, scan_root: Path | None = None) -> Candidate | None:
+    # A symlink is not a candidate, because the FIX refuses it: `session.prepare`
+    # and `apply` both call `_refuse_symlink` rather than rewrite through a link
+    # (the write could land outside where you expect). Listing one anyway offers
+    # a saving that can never be realized through the offered path — a figure the
+    # user cannot act on (Critical Rule 22). Measured on a real `~/.claude`:
+    # 10 of 16 candidates were symlinked skill files, ~19% of the claim.
+    if path.is_symlink():
+        return None
     text = _read(path)
     if text is None:
         return None

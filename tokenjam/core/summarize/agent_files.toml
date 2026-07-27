@@ -27,6 +27,18 @@ global_paths = [
     "~/.claude/rules/**/*.md",
     "~/.claude/agents/*.md", "~/.claude/skills/*/SKILL.md", "~/.claude/commands/*.md",
 ]
+# DELIBERATELY ABSENT: ~/.claude/plugins/**. It looks like the obvious next entry —
+# thousands of SKILL.md files structurally identical to ~/.claude/skills/*/SKILL.md,
+# sitting right beside it — and adding it would fabricate a large number. Whether a
+# plugin's surface ever reaches the model is decided by two gates that leave no trace
+# on disk: `enabledPlugins` in ~/.claude/settings.json (a disabled plugin contributes
+# nothing) and install SCOPE (a project-scoped plugin loads only for that project).
+# Observed on a live session: 15 of 814 plugin SKILL.md files were resident; a naive
+# entry would have priced all 814. Existing on disk is not evidence of being loaded.
+# Plugin files are also third-party, under plugins/cache/<marketplace>/<plugin>/<version>/,
+# so a rewrite is reverted by the next plugin update — a fix that appears to succeed
+# and then silently regresses. If plugins are ever priced, it belongs in an analyzer
+# that reads the enablement + scope gates, not in this catalog.
 
 [gemini]                 # Gemini CLI
 project_files = ["GEMINI.md"]

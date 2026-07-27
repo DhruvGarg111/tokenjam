@@ -325,3 +325,27 @@ def test_is_safe_scan_root_refuses_home_and_bare_top_levels(tmp_path, monkeypatc
     deep = tmp_path / "code" / "proj"
     deep.mkdir(parents=True)
     assert candidates.is_safe_scan_root(deep) is True
+
+
+def test_symlinked_candidates_are_excluded(tmp_path, monkeypatch, iso):
+    """`session.prepare`/`apply` refuse to rewrite through a link, so a symlink
+    can never realize the saving the scan would offer on it. Listing one is a
+    figure the user cannot act on (Critical Rule 22). Measured on a real
+    `~/.claude`, 10 of 16 candidates were symlinked skill files."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    real = tmp_path / "store" / "AGENTS.md"
+    real.parent.mkdir()
+    real.write_text("instructions " * 200)
+    (root / "CLAUDE.md").write_text("instructions " * 200)
+    (root / "AGENTS.md").symlink_to(real)
+
+    res = candidates.list_candidates(config=None, project_roots=[root])
+    paths = {c.path for c in res.candidates}
+
+    assert str(root / "CLAUDE.md") in paths
+    assert str(root / "AGENTS.md") not in paths
+    # The link target itself is a perfectly good candidate when scanned directly —
+    # it is the LINK that the fix refuses, not the file behind it.
+    direct = candidates.list_candidates(config=None, project_roots=[real.parent])
+    assert str(real) in {c.path for c in direct.candidates}
