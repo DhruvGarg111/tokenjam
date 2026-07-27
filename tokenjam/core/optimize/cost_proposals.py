@@ -1722,6 +1722,12 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     if finding is None:
         return []
     proposals: list[CostProposal] = []
+    # Whole-window blind spot (a recorded session cwd that no longer exists
+    # on disk, so this analyzer could not check that project's MCP config at
+    # all), not per-server -- same string on every server's card below, since
+    # deadweight emits N proposals (one per dead server) rather than the
+    # single card `resend`/`relearn` attach their own `coverage_note` to.
+    coverage_note = str(getattr(finding, "coverage_note", "") or "")
     for server in getattr(finding, "dead_servers", []) or []:
         evidence = (
             f"`{server.name}` MCP server ({server.scope} scope, configured at "
@@ -1771,6 +1777,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             past_overspend_tokens=server.estimated_tax_tokens_window or None,
             past_overspend_usd=server.estimated_tax_usd_window,
             estimate_basis=server.tax_construction,
+            coverage_note=coverage_note,
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
             apply_kind=str(plumbing.get("apply_kind", "")),

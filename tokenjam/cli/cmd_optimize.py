@@ -2439,6 +2439,10 @@ def _render_deadweight(
             f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
             f"configured, so nothing is being injected.[/dim]"
         )
+        if finding.coverage_note:
+            console.print(
+                f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
+            )
         return
 
     if not finding.dead_servers:
@@ -2511,6 +2515,10 @@ def _render_deadweight(
 
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.coverage_note:
+        console.print(
+            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
+        )
     if finding.caveat:
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 

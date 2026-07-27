@@ -13,10 +13,24 @@ right-sizing candidates (honesty discipline, CLAUDE.md Rule 14 — candidate
 flags only, never a quality judgment):
 
   * over_powered     — ran on a premium-tier model (Fable or Opus, via the
-                       shared model_tiers predicate) but produced little output
-                       and made few tool calls; a cheaper same-family model is
-                       worth a look (mirrors the downsize heuristic, scoped to
-                       one subagent).
+                       shared model_tiers predicate); a cheaper same-family
+                       model is worth a look, REGARDLESS of how much output it
+                       produced or how many tool calls it made. This gate used
+                       to also require output_tokens < 2,000 AND tool_calls <=
+                       5 — but a Claude Code Task subagent is a full agent loop
+                       (100-400 LLM calls, cache-read in the hundreds of
+                       millions of tokens across a session), not one dispatch/
+                       one answer, so cost compounds with output length AND
+                       tool-call count. Requiring both to stay SMALL made the
+                       worst offenders (the ones that did the most work) the
+                       LEAST eligible to be flagged — the exact gate inversion
+                       CLAUDE.md Critical Rule 29 warns about. Measured on a
+                       real corpus: of premium-tier subagent spend, only 6.5%
+                       cleared BOTH clauses; loosening either threshold instead
+                       of dropping them (a sensitivity sweep up to output <
+                       25,000 with no tool-call limit) still only reached 18%
+                       of subagent spend. Dropping both clauses and pricing the
+                       swap over the full premium population is the fix.
   * over_provisioned — was handed a large context (input + cache reads) yet
                        produced little output; the prompt it was dispatched
                        with is likely larger than the task needed.
@@ -31,6 +45,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core.cost import calculate_cost
 from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.registry import register
@@ -38,10 +53,9 @@ from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.pricing import get_rates
 
 # "Produced little": total output tokens below this look like a small task.
+# Used by over_provisioned only — over_powered dropped this clause (see module
+# docstring; CLAUDE.md Critical Rule 29's gate-inversion note).
 SMALL_OUTPUT_TOKENS = 2_000
-
-# "Did little tool work": at or below this many tool calls.
-FEW_TOOL_CALLS = 5
 
 # "Handed a large context": input + cache-read tokens at or above this.
 CONTEXT_HEAVY_TOKENS = 50_000
@@ -70,9 +84,11 @@ SUBAGENT_HONESTY_CAVEAT = (
 )
 
 # estimate_basis for the savings contract (#111). Two quantified components:
-# over_powered is the token-cost delta of routing each flagged subagent
-# (premium model, little output) to its cheaper same-family model over the
-# SAME tokens — a model-swap counterfactual with no token-count change and no
+# over_powered is the token-cost delta of routing each flagged subagent (ANY
+# premium-tier subagent above the noise floor — see module docstring for why
+# this gate no longer restricts by output size or tool-call count) to its
+# one-tier-down swap target (see SUBAGENT_DOWNGRADE_TARGET) over the SAME
+# tokens — a model-swap counterfactual with no token-count change and no
 # quality claim. over_provisioned is the context EXCESS over its dispatch
 # cohort's own median (same calling agent + model — the like-shaped peer
 # group, mirrors output_verbosity.py's per-task-shape median), priced at the
@@ -81,12 +97,13 @@ SUBAGENT_HONESTY_CAVEAT = (
 # pricing data, or no cohort baseline (fewer than min_cohort_sessions
 # like-shaped peers) contributes nothing to that component.
 SUBAGENT_ESTIMATE_BASIS = (
-    "over_powered subagents priced at their cheaper same-family model over the "
-    "same tokens (a model-swap delta, structural fit only) plus "
-    "over_provisioned subagents priced on their context excess over their "
-    "dispatch cohort's own median (same calling agent + model), at the "
-    "cache-read rate; no quality validation, review before re-dispatching. "
-    "No guaranteed saving."
+    "over_powered subagents (any premium-tier subagent above the noise floor) "
+    "priced at claude-sonnet-5 (one tier down, not model_downgrade's "
+    "two-tier opus-to-haiku jump) over the same tokens, a model-swap delta, "
+    "structural fit only, plus over_provisioned subagents priced on their "
+    "context excess over their dispatch cohort's own median (same calling "
+    "agent + model), at the cache-read rate; no quality validation, review "
+    "before re-dispatching. No guaranteed saving."
 )
 
 
@@ -145,7 +162,7 @@ class SubagentRightsizingFinding:
 
 
 def _flags_for(
-    *, model: str, output_tokens: int, tool_calls: int,
+    *, model: str, output_tokens: int,
     input_tokens: int, cache_tokens: int, cost_usd: float,
     min_flag_cost_usd: float = MIN_FLAG_COST_USD,
 ) -> list[str]:
@@ -153,8 +170,7 @@ def _flags_for(
     if cost_usd < min_flag_cost_usd:
         return []
     flags: list[str] = []
-    is_premium = is_premium_tier(model)
-    if is_premium and output_tokens < SMALL_OUTPUT_TOKENS and tool_calls <= FEW_TOOL_CALLS:
+    if is_premium_tier(model):
         flags.append("over_powered")
     if (input_tokens + cache_tokens) >= CONTEXT_HEAVY_TOKENS and output_tokens < SMALL_OUTPUT_TOKENS:
         flags.append("over_provisioned")
@@ -204,7 +220,7 @@ def _compute_rows(
         model = str(model or "unknown")
         provider = str(provider or "unknown")
         flags = _flags_for(
-            model=model, output_tokens=out_tok, tool_calls=int(tool_calls or 0),
+            model=model, output_tokens=out_tok,
             input_tokens=in_tok, cache_tokens=cache_tok, cost_usd=cost,
             min_flag_cost_usd=min_flag_cost_usd,
         )
@@ -226,29 +242,62 @@ def _compute_rows(
     return result
 
 
+# Swap target this analyzer prices over_powered subagents against: one tier
+# down from the premium tier, NOT model_downgrade.lookup_downgrade's opus ->
+# haiku (a two-tier jump). That ladder is tuned for analyze_model_downgrade's
+# whole-session premium quota audit, which only ever flags structurally
+# Sonnet-shaped sessions (tiny input/output/tool-call counts) and can afford
+# an aggressive drop. A subagent flagged here can be a full agent loop that
+# did real, extensive work, just possibly on too expensive a model — so it
+# earns the narrower, defensible one-tier-down step instead: claude-sonnet-5,
+# $2/$10 per Mtok, one tier below Opus/Fable, current-generation pricing that
+# survives an audit. Anthropic-only for now; other providers fall back to
+# model_downgrade's shared ladder (openai/google), which this analyzer has no
+# reason to override.
+SUBAGENT_DOWNGRADE_TARGET: dict[str, str] = {
+    "anthropic": "claude-sonnet-5",
+}
+
+
+def _subagent_downgrade_target(provider: str, model: str) -> str | None:
+    """The swap target priced for an over_powered subagent on ``(provider,
+    model)``. See :data:`SUBAGENT_DOWNGRADE_TARGET` for why this is an
+    explicit one-tier-down choice rather than a passthrough to
+    ``model_downgrade.lookup_downgrade``."""
+    target = SUBAGENT_DOWNGRADE_TARGET.get(provider)
+    if target:
+        return target
+    return lookup_downgrade(provider, model)
+
+
 def _alt_cost_for_row(r: SubagentRow, alt_model: str) -> float | None:
     """Cost of ``r``'s exact token mix priced at ``alt_model``, or ``None`` when
-    the alternative has no pricing data. Prices EVERY token class the original
-    was billed for (input + output + cache read + cache write) so the delta
-    reflects only the rate difference — never an artificial saving from dropping
-    a token class the cheaper model would still be charged for."""
+    the alternative has no pricing data. Routes through
+    :func:`tokenjam.core.cost.calculate_cost` — the ONE place that prices all
+    four token classes (input + output + cache read + cache write) — rather
+    than hand-rolling the arithmetic here a second time (a second hand-rolled
+    pricer is exactly how `model_downgrade._alt_unit_cost` silently dropped
+    cache-write from its alternative side while pricing it on the actual
+    side). Every token class the original was billed for is priced on the
+    alternative side too, so the delta reflects only the rate difference —
+    never an artificial saving from dropping a token class the cheaper model
+    would still be charged for."""
     rates = get_rates(r.provider, alt_model)
     if rates is None:
         return None
-    return (
-        r.input_tokens / 1_000_000 * rates.input_per_mtok
-        + r.output_tokens / 1_000_000 * rates.output_per_mtok
-        + r.cache_tokens / 1_000_000 * rates.cache_read_per_mtok
-        + r.cache_write_tokens / 1_000_000 * rates.cache_write_per_mtok
+    return calculate_cost(
+        r.provider, alt_model, r.input_tokens, r.output_tokens,
+        cache_read_tokens=r.cache_tokens, cache_write_tokens=r.cache_write_tokens,
     )
 
 
 def _over_powered_recoverable(rows: list[SubagentRow]) -> tuple[float, int]:
     """Conservative recoverable estimate over the over_powered subagents.
 
-    For each subagent flagged ``over_powered`` (a premium-tier model that did
-    little work), price its same-family cheaper alternative over the identical
-    token mix and take the POSITIVE cost delta — a pure model-swap
+    For each subagent flagged ``over_powered`` (ran on a premium-tier model,
+    above the noise floor), price its one-tier-down swap target (see
+    :func:`_subagent_downgrade_target`) over the identical token mix and take
+    the POSITIVE cost delta — a pure model-swap
     counterfactual, no token-count change and no quality claim. A subagent with
     no cheaper alternative or no pricing data contributes nothing (we refuse to
     invent a number). ``over_provisioned`` is priced separately, by
@@ -266,7 +315,7 @@ def _over_powered_recoverable(rows: list[SubagentRow]) -> tuple[float, int]:
     for r in rows:
         if "over_powered" not in r.flags:
             continue
-        alt = lookup_downgrade(r.provider, r.model)
+        alt = _subagent_downgrade_target(r.provider, r.model)
         if not alt:
             continue
         alt_cost = _alt_cost_for_row(r, alt)
