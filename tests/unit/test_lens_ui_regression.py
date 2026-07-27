@@ -140,6 +140,62 @@ def test_window_selectors_derive_from_data_span(html):
     assert 'value="7d">Last 7d</option>\n        <option value="30d">Last 30d' not in opt_view
 
 
+def test_detail_views_show_a_layout_shaped_skeleton_not_bare_loading_text(html):
+    # Session/Run/Trace detail and Status/Drift/Budget's "still loading" state
+    # used to be a bare centered "Loading X..." replacing the whole page —
+    # the weaker half of the not-yet-known/known-and-empty/known-and-populated
+    # distinction this file otherwise enforces everywhere else (a bare
+    # placeholder doesn't assert a wrong number, but it still throws away the
+    # real layout's shape, so content visibly jumps in when it finally
+    # arrives). Each now renders a skeleton shaped like its own real layout
+    # (CardGridSkeleton / TableRowsSkeleton / a purpose-built one) instead.
+    stripped = _no_comments(html)
+    for bare in (
+        "Loading session...", "Loading run...", "Loading trace...",
+        "Loading history…",
+    ):
+        assert bare not in stripped
+
+    # Status/Drift/Budget's bare "Loading..." literal must not survive either
+    # -- narrower than a blanket ban on the word "Loading" (which legitimately
+    # appears in InboxLoadingNote's stated-not-animated caption, a DIFFERENT,
+    # already-correct pattern: a caption alongside skeleton tiles that are
+    # already rendering, not a replacement for them).
+    assert '<div class="empty">Loading...</div>' not in stripped
+
+    assert "function CardGridSkeleton(count, rows = 3)" in html
+    assert "function TableRowsSkeleton(headers, rowCount)" in html
+    assert "function SessionDetailSkeleton({ backBtn })" in html
+
+    status_start = html.index("function StatusView")
+    status_end = html.index("\nfunction ", status_start + 1)
+    assert "CardGridSkeleton(6)" in html[status_start:status_end]
+
+    drift_start = html.index("function DriftView")
+    drift_end = html.index("\nfunction ", drift_start + 1)
+    assert "TableRowsSkeleton(" in html[drift_start:drift_end]
+
+    budget_start = html.index("function BudgetView")
+    budget_end = html.index("\nfunction ", budget_start + 1)
+    assert "TableRowsSkeleton(" in html[budget_start:budget_end]
+
+    session_start = html.index("function SessionDetailView")
+    session_end = html.index("\nfunction ", session_start + 1)
+    assert "<${SessionDetailSkeleton} backBtn=${backBtn} />" in html[session_start:session_end]
+
+    run_start = html.index("function RunDetailView")
+    run_end = html.index("\nfunction ", run_start + 1)
+    assert "TableRowsSkeleton(" in html[run_start:run_end]
+
+    trace_start = html.index("function TraceDetailView")
+    trace_end = html.index("\nfunction ", trace_start + 1)
+    assert "shimmer" in html[trace_start:trace_end]
+
+    expect_start = html.index("function ExpectationHistory")
+    expect_end = html.index("\nfunction ", expect_start + 1)
+    assert "TableRowsSkeleton(['When', 'Outcome', 'Run', 'Note'], 2)" in html[expect_start:expect_end]
+
+
 # --- #126: Downsize typed slot always rendered ----------------------------- #
 def test_downsize_section_always_renders(html):
     # The no-candidates branch renders a literal Downsize section id instead of

@@ -2782,6 +2782,44 @@ function archivedCountLabel(shown, total) {
   return shown + ' of ' + total.toLocaleString('en-US');
 }
 
+// A generic "N card tiles in a grid" skeleton, shaped like the `.cards`/
+// `.card`/`.card-header`/`.card-row` geometry every card-grid screen already
+// uses (Status's session tiles, Session/Run detail's overview cards) --
+// content fills these in rather than replacing a differently-shaped block.
+// `rows` is how many `.card-row`-shaped lines each tile shows.
+function CardGridSkeleton(count, rows = 3) {
+  return html`
+    <div class="cards" aria-hidden="true">
+      ${Array.from({ length: count }, (_, i) => html`
+        <div class="card" key=${i}>
+          <div class="card-header"><span class="shimmer" style="display:inline-block;height:13px;width:60%"></span></div>
+          ${Array.from({ length: rows }, (_, j) => html`
+            <div class="card-row" key=${j}>
+              <span class="shimmer" style="display:inline-block;height:11px;width:${40 + (j * 11) % 30}%"></span>
+              <span class="shimmer" style="display:inline-block;height:11px;width:${25 + (j * 7) % 20}%"></span>
+            </div>`)}
+        </div>`)}
+    </div>`;
+}
+
+// A generic table-shaped skeleton (header row + N shimmer rows), for screens
+// whose loaded content is a plain data table (Drift's per-agent metrics,
+// Budget's per-agent/per-provider caps) -- same fill-in-don't-replace
+// convention as CardGridSkeleton above, just table-shaped instead of card-grid
+// shaped.
+function TableRowsSkeleton(headers, rowCount) {
+  return html`
+    <table aria-hidden="true">
+      <thead><tr>${headers.map((h, i) => html`<th key=${i}>${h}</th>`)}</tr></thead>
+      <tbody>
+        ${Array.from({ length: rowCount }, (_, i) => html`
+          <tr key=${i}>
+            ${headers.map((_, j) => html`<td key=${j}><span class="shimmer" style="display:inline-block;height:11px;width:${j === 0 ? 70 : 40 + (j * 13) % 25}%"></span></td>`)}
+          </tr>`)}
+      </tbody>
+    </table>`;
+}
+
 // ============================
 // Status View
 // ============================
@@ -2819,7 +2857,7 @@ function StatusView({ params }) {
   // Restore scroll position when returning from a session/run detail page.
   useScrollMemory('status', !!data);
 
-  if (!data) return html`<div class="empty">Loading...</div>`;
+  if (!data) return html`<div class="page-title">Sessions</div>${CardGridSkeleton(6)}`;
   const sdkServices = data.sdk_services || [];
   if (!data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
@@ -4715,6 +4753,50 @@ function MapBoardSection({ sessionId }) {
   `;
 }
 
+// The session-detail loading placeholder, shaped like the real layout below
+// (back button, title, the two overview/cost cards' row geometry, the tab bar,
+// a few table-row placeholders) so real content FILLS IN rather than replacing
+// a bare centered "Loading session..." with a differently-shaped block -- the
+// same convention `AppliedSkeletonRow` uses. Kept immediately above
+// `SessionDetailView` so the two shapes are edited together; a skeleton that
+// drifts from the layout it stands in for causes exactly the visible jump it
+// exists to prevent.
+function SessionDetailSkeleton({ backBtn }) {
+  const cardRow = (labelW, valueW) => html`
+    <div class="card-row">
+      <span class="shimmer" style=${'display:inline-block;height:11px;width:' + labelW}></span>
+      <span class="shimmer" style=${'display:inline-block;height:11px;width:' + valueW}></span>
+    </div>`;
+  return html`
+    ${backBtn}
+    <div class="shimmer" style="height:22px;width:220px;margin-top:12px"></div>
+    <div class="shimmer" style="height:11px;width:160px;margin:8px 0 16px"></div>
+    <div class="cards">
+      <div class="card" aria-hidden="true">
+        <div class="card-header"><span class="shimmer" style="display:inline-block;height:13px;width:70px"></span></div>
+        ${cardRow('50px', '90px')}
+        ${cardRow('60px', '70px')}
+        ${cardRow('50px', '110px')}
+        ${cardRow('70px', '60px')}
+        ${cardRow('60px', '80px')}
+      </div>
+      <div class="card" aria-hidden="true">
+        <div class="card-header"><span class="shimmer" style="display:inline-block;height:13px;width:100px"></span></div>
+        ${cardRow('40px', '70px')}
+        ${cardRow('80px', '60px')}
+        ${cardRow('80px', '60px')}
+        ${cardRow('70px', '50px')}
+      </div>
+    </div>
+    <div class="tab-bar" aria-hidden="true">
+      <span class="shimmer" style="display:inline-block;height:13px;width:110px"></span>
+      <span class="shimmer" style="display:inline-block;height:13px;width:70px;margin-left:14px"></span>
+      <span class="shimmer" style="display:inline-block;height:13px;width:60px;margin-left:14px"></span>
+    </div>
+    <div class="shimmer" style="height:200px;margin-top:16px"></div>
+  `;
+}
+
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -4737,7 +4819,7 @@ function SessionDetailView({ sessionId }) {
   const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/sessions'}>← Back to sessions</button>`;
 
   if (error) return html`<div>${backBtn}<div class="empty">Session not found.<code>${sessionId}</code></div></div>`;
-  if (!data) return html`<div>${backBtn}<div class="empty">Loading session...</div></div>`;
+  if (!data) return html`<${SessionDetailSkeleton} backBtn=${backBtn} />`;
 
   const s = data.session;
   const tools = data.tools || [];
@@ -5086,7 +5168,7 @@ function ExpectationHistory({ expectation }) {
     <div class="card" style="margin-bottom:12px">
       <div class="card-header">${expectation.name}</div>
       ${expectation.description ? html`<div style=${{ ...label, marginBottom: '8px' }}>${expectation.description}</div>` : null}
-      ${runs == null ? html`<div style=${label}>Loading history…</div>`
+      ${runs == null ? TableRowsSkeleton(['When', 'Outcome', 'Run', 'Note'], 2)
         : runs.length === 0 ? html`<div style=${label}>No reruns recorded yet.</div>`
         : html`<div class="table-wrap"><table>
             <thead><tr><th>When</th><th>Outcome</th><th>Run</th><th>Note</th></tr></thead>
@@ -5125,7 +5207,12 @@ function RunDetailView({ runId }) {
   const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/sessions'}>← Back to sessions</button>`;
 
   if (error) return html`<div>${backBtn}<div class="empty">Run not found.<code>${runId}</code></div></div>`;
-  if (!data) return html`<div>${backBtn}<div class="empty">Loading run...</div></div>`;
+  if (!data) return html`
+    <div>
+      ${backBtn}
+      <div class="shimmer" style="height:22px;width:180px;margin-top:12px"></div>
+      ${TableRowsSkeleton(['Session', 'Status', 'Project', 'Tokens', 'Tool calls', 'Cost', 'Last seen', ''], 5)}
+    </div>`;
 
   const r = data.run;
   const sessions = data.sessions || [];
@@ -5375,7 +5462,17 @@ function TraceDetailView({ traceId }) {
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
-  if (!spans.length) return html`<div class="empty">Loading trace...</div>`;
+  // Waterfall-shaped: staggered-indent, staggered-width shimmer bars standing
+  // in for the span tree rows below, so the real waterfall fills in rather
+  // than replacing a differently-shaped centered line.
+  if (!spans.length) return html`
+    <div aria-hidden="true" style="padding:8px 0">
+      ${[0, 1, 1, 2, 1, 0].map((depth, i) => html`
+        <div key=${i} style=${'display:flex;align-items:center;gap:8px;padding:6px 0;padding-left:' + (depth * 22) + 'px'}>
+          <span class="shimmer" style=${'display:inline-block;height:11px;width:' + (160 - depth * 20) + 'px'}></span>
+          <span class="shimmer" style=${'display:inline-block;height:9px;flex:' + (5 - depth) + ' 1 0'}></span>
+        </div>`)}
+    </div>`;
 
   // Build tree
   const byId = {};
@@ -6347,7 +6444,9 @@ function DriftView({ params }) {
     return () => clearInterval(t);
   }, [agentId]);
 
-  if (!data) return html`<div class="empty">Loading...</div>`;
+  if (!data) return html`
+    <div class="page-title">Drift Detection</div>
+    ${TableRowsSkeleton(['Metric', 'Baseline', 'Latest', 'Z-score', ''], 4)}`;
 
   // /drift returns a single-agent shape when agent_id is set; normalize to a list.
   const agents = data.agents || (data.agent_id ? [data] : []);
@@ -6592,7 +6691,9 @@ function BudgetView({ params }) {
   // data still on screen -- it renders as a scoped banner above the content
   // instead, same pattern the Dashboard uses for its own /cost failures.
   if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
-  if (!data) return html`<div class="empty">Loading...</div>`;
+  if (!data) return html`
+    <div class="page-title">Budget</div>
+    ${TableRowsSkeleton(['Scope', 'Daily (USD)', 'Per-session (USD)', ''], 4)}`;
 
   const agentEntries = Object.entries(data.agents || {});
   const providerBudgets = data.provider_budgets || {};
