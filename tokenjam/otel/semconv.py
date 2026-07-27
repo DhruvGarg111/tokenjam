@@ -332,6 +332,26 @@ class TjAttributes:
     PROMPT_TEMPLATE_ID      = "tokenjam.prompt.template_id"
     PROMPT_TEMPLATE_VERSION = "tokenjam.prompt.template_version"
 
+    # -- Streaming usage data-quality --
+    # A streamed response only reports its token usage in a FINAL payload: the
+    # `message_delta`/`message_stop` pair on Anthropic, and — only when the
+    # caller opted in with `stream_options={"include_usage": true}` — a trailing
+    # usage chunk on OpenAI-compatible APIs. If the caller abandons the iterator
+    # early (a client disconnect, a `break`, an exception) or never opted in,
+    # that payload never arrives and the call is recorded with no token counts
+    # at all. Nothing about the recorded span distinguishes that from a call
+    # that genuinely cost nothing, so the spend total silently reads LOW.
+    #
+    # These three are set by every code path that observes a stream (the SDK
+    # provider patches and the proxy's SSE tap) so the `stream-usage` analyzer
+    # can tell the three states apart: not a stream at all, a stream that
+    # reported usage, and a stream that produced content and then closed
+    # without reporting any. Metadata about the observation itself, not
+    # content, so they are NOT gated by a [capture] toggle.
+    STREAMING             = "tokenjam.llm.streaming"
+    STREAM_USAGE_REPORTED = "tokenjam.llm.stream_usage_reported"
+    STREAM_CONTENT_CHUNKS = "tokenjam.llm.stream_content_chunks"
+
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"
     EGRESS_HOST      = "tokenjam.sandbox.egress_host"
