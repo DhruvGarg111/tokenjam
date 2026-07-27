@@ -752,3 +752,161 @@ def test_basis_keeps_the_two_terms_distinguishable(db, monkeypatch, tmp_path):
     assert c.on_demand_tokens_saved == 600
     assert "always_resident_tokens_saved" in f.estimate_basis
     assert "on_demand_tokens_saved" in f.estimate_basis
+
+
+# --------------------------------------------------------------------------- #
+# File population: many repo roots, and one charge per file however many
+# checkouts of it exist on disk.
+# --------------------------------------------------------------------------- #
+
+def _repo_window(db, repo: str, sessions: int, calls: int = 2) -> None:
+    """`sessions` sessions in `repo`, each making `calls` LLM calls."""
+    agent_id = f"claude-code-{repo}"
+    for n in range(sessions):
+        sid = f"{repo}-{n}"
+        db.upsert_session(make_session(session_id=sid, agent_id=agent_id))
+        for _ in range(calls):
+            db.insert_span(make_llm_span(
+                session_id=sid, agent_id=agent_id, provider="anthropic",
+                model="claude-haiku-4-5", input_tokens=100, output_tokens=10,
+                start_time=utcnow() - timedelta(days=1),
+            ))
+
+
+def _rooted(path: str, root: str, saved: int) -> Candidate:
+    """A project-scope candidate that remembers the root it was scanned under."""
+    from dataclasses import replace
+
+    return replace(_cand(path, saved, scope="project"), scan_root=root)
+
+
+def test_one_charge_per_file_however_many_checkouts_hold_it(db, monkeypatch):
+    """A git worktree carries its repo's directory name, so every checkout of one
+    `CLAUDE.md` matches the SAME sessions by ancestor name. Charging each would
+    multiply one file's cost by however many checkouts happen to exist — money
+    the user cannot act on. Copies drift, so this must hold for copies whose
+    CONTENT differs, not just byte-identical ones."""
+    _repo_window(db, "myrepo", sessions=4)
+    _patch_scan(monkeypatch, [
+        _rooted("/code/myrepo/CLAUDE.md", "/code/myrepo", 1_000),
+        # Same repo label, same slot, DIFFERENT size (a drifted checkout).
+        _rooted("/code/wt/branch-a/myrepo/CLAUDE.md", "/code/wt/branch-a/myrepo", 1_400),
+        _rooted("/code/wt/branch-b/myrepo/CLAUDE.md", "/code/wt/branch-b/myrepo", 900),
+    ])
+    f = _run(db)
+
+    assert f.files == 1
+    assert f.duplicate_copies_collapsed == 2
+    # The retained copy is the shallowest path — the working copy, not a
+    # worktree cut from it — so the file named for the fix is the actionable
+    # one, and an incidental larger checkout cannot inflate the figure.
+    assert f.candidates[0].path == "/code/myrepo/CLAUDE.md"
+    assert f.candidates[0].sessions_loading == 4
+
+
+def test_same_slot_in_different_repos_is_charged_twice(db, monkeypatch):
+    """The collapse keys on the LOADING POPULATION, not the file's content: two
+    repos' `CLAUDE.md` are loaded by different sessions and genuinely cost twice,
+    even when their bytes are identical."""
+    _repo_window(db, "alpha", sessions=3)
+    _repo_window(db, "beta", sessions=3)
+    _patch_scan(monkeypatch, [
+        _rooted("/code/alpha/CLAUDE.md", "/code/alpha", 1_000),
+        _rooted("/code/beta/CLAUDE.md", "/code/beta", 1_000),
+    ])
+    f = _run(db)
+
+    assert f.files == 2
+    assert f.duplicate_copies_collapsed == 0
+    assert {c.path for c in f.candidates} == {
+        "/code/alpha/CLAUDE.md", "/code/beta/CLAUDE.md",
+    }
+
+
+def test_different_slots_in_one_repo_are_charged_separately(db, monkeypatch):
+    """Same repo, different files — a `CLAUDE.md` and a command are two real
+    files, and the collapse must not merge them just because they share a
+    session population."""
+    _repo_window(db, "myrepo", sessions=3)
+    _patch_scan(monkeypatch, [
+        _rooted("/code/myrepo/CLAUDE.md", "/code/myrepo", 1_000),
+        _rooted("/code/myrepo/AGENTS.md", "/code/myrepo", 800),
+    ])
+    f = _run(db)
+
+    assert f.files == 2
+    assert f.duplicate_copies_collapsed == 0
+
+
+def test_global_files_are_never_collapsed(db, monkeypatch):
+    """Two distinct `~/.claude` files share no repo label and are each real."""
+    _repo_window(db, "myrepo", sessions=2)
+    _patch_scan(monkeypatch, [
+        _cand("~/.claude/CLAUDE.md", 900, scope="global"),
+        _cand("~/.claude/rules/style.md", 700, scope="global"),
+    ])
+    f = _run(db)
+
+    assert f.files == 2
+    assert f.duplicate_copies_collapsed == 0
+
+
+def test_unmatched_project_file_is_never_collapsed(db, monkeypatch):
+    """A file whose loading sessions could not be identified carries no window
+    figure. "Not measured" is not evidence of sameness, so two of them must not
+    silently merge into one."""
+    _repo_window(db, "myrepo", sessions=2)
+    _patch_scan(monkeypatch, [
+        _rooted("/elsewhere/one/CLAUDE.md", "/elsewhere/one", 900),
+        _rooted("/elsewhere/two/CLAUDE.md", "/elsewhere/two", 900),
+    ])
+    f = _run(db)
+
+    assert f.files == 2
+    assert f.duplicate_copies_collapsed == 0
+    assert all(c.est_usd_saved is None for c in f.candidates)
+    assert all(c.est_tokens_saved_window is None for c in f.candidates)
+
+
+def test_basis_states_the_scanned_population(db, monkeypatch):
+    """Critical Rule 14: the basis must say which files were even looked at —
+    how many roots, and that vanished ones are excluded rather than guessed."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+    from tokenjam.core.summarize.repo_roots import ResolvedRoots
+
+    roots = ResolvedRoots(roots=(), recorded=9, vanished=3)
+    basis = _estimate_basis(InvocationCounts(observed=True), roots, roots_scanned=6)
+    assert "6 project root(s)" in basis
+    assert "3" in basis and "no longer exist on disk" in basis
+
+    # No root observed at all: say so, rather than implying the whole corpus
+    # was scanned when only the process's own directory was.
+    cwd_only = _estimate_basis(InvocationCounts(observed=True), roots, roots_scanned=0)
+    assert "only in the directory this process runs from" in cwd_only
+
+    # Every root present: no vanished-root claim is made.
+    clean = _estimate_basis(
+        InvocationCounts(observed=True), ResolvedRoots(recorded=4), roots_scanned=4,
+    )
+    assert "no longer exist on disk" not in clean
+
+
+def test_nested_roots_stack_but_parallel_checkouts_collapse(db, monkeypatch):
+    """A meta-repo's `CLAUDE.md` and the `CLAUDE.md` of a sub-repo checked out
+    inside it are BOTH loaded — the harness reads the working directory's file
+    and its ancestors'. A worktree cut from that sub-repo lives in a parallel
+    tree and is the same file seen twice. Same repo label and same slot for all
+    three, so only the nesting tells them apart."""
+    _repo_window(db, "myrepo", sessions=3)
+    _patch_scan(monkeypatch, [
+        _rooted("/code/myrepo/CLAUDE.md", "/code/myrepo", 500),           # meta
+        _rooted("/code/myrepo/myrepo/CLAUDE.md", "/code/myrepo/myrepo", 1_200),
+        _rooted("/wt/branch/myrepo/CLAUDE.md", "/wt/branch/myrepo", 1_100),
+    ])
+    f = _run(db)
+
+    assert {c.path for c in f.candidates} == {
+        "/code/myrepo/CLAUDE.md", "/code/myrepo/myrepo/CLAUDE.md",
+    }
+    assert f.duplicate_copies_collapsed == 1

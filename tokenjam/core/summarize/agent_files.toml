@@ -9,13 +9,22 @@
 [claude]                 # Claude Code
 project_files = ["CLAUDE.md", "CLAUDE.local.md"]   # .local = historical local override
 project_globs = [
+    # Rules are matched RECURSIVELY: real rule trees nest (`rules/ecc/common/*.md`)
+    # and a single-level `rules/*.md` silently prices none of them. The
+    # single-level pattern is kept alongside so a path that only ever matched it
+    # keeps matching (`Path.match` handles it without `**` semantics).
     ".claude/rules/*.md",
+    ".claude/rules/**/*.md",
     ".claude/skills/*/SKILL.md",
     ".claude/commands/*.md",
     ".claude/agents/*.md",
 ]
 global_paths = [
     "~/.claude/CLAUDE.md", "/etc/claude-code/CLAUDE.md",
+    # `~/.claude/rules/**` was missing here while the project-side equivalent was
+    # listed, so a user's global rule tree — always-resident text, re-sent at the
+    # head of every session — was scanned on no scope at all.
+    "~/.claude/rules/**/*.md",
     "~/.claude/agents/*.md", "~/.claude/skills/*/SKILL.md", "~/.claude/commands/*.md",
 ]
 
