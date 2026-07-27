@@ -680,3 +680,75 @@ def test_render_summarize_labels_on_demand_files(db, monkeypatch, tmp_path, caps
     # The old, now-false claim that every one of these files is re-sent on
     # every call must not come back.
     assert "re-send these files on every call" not in out
+
+
+def test_a_file_measured_to_cost_nothing_is_not_listed_at_all(
+    db, monkeypatch, tmp_path,
+):
+    """Critical Rule 22: a `.claude/commands/x.md` with no frontmatter that was
+    never invoked is resident in no session and delivered on no call. It is not
+    a candidate worth `$0.00` — rendering that zero would read as "we looked for
+    a saving and found none", when the truth is there is nothing to summarize
+    here this window. It drops out of `files`, the aggregate and the %s too.
+    """
+    _seed_calls(db, sessions=3, calls=4)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("ship")]})
+    _patch_scan(monkeypatch, [
+        # No frontmatter (resident=0), never invoked.
+        _cand("~/.claude/commands/dormant.md", 700, scope="global",
+              load_class="command", resident=0, on_demand=700),
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=40, on_demand=600),
+    ])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    assert [c.path for c in f.candidates] == ["~/.claude/skills/ship/SKILL.md"]
+    assert f.files == 1
+    # The suppressed file's one-time reduction leaves the aggregate with it.
+    assert f.file_reduction_tokens == 640
+    assert f.past_overspend_usd is not None and f.past_overspend_usd > 0
+
+
+def test_an_unmeasured_file_is_kept_even_though_it_carries_no_figure(
+    db, monkeypatch, tmp_path,
+):
+    """The inverse of the rule above, and the reason it is keyed on a MEASURED
+    zero: a candidate whose window figure degraded to None must NOT be
+    suppressed. "Not measured" is not "worth nothing", and dropping it would
+    hide a file the analyzer simply failed to price."""
+    _seed_calls(db, sessions=3, calls=4)
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(tmp_path / "absent"))
+    monkeypatch.setenv("TJ_TRANSCRIPT_CACHE_DIR", str(tmp_path / "tcache"))
+    _patch_scan(monkeypatch, [
+        _cand("~/.claude/commands/dormant.md", 700, scope="global",
+              load_class="command", resident=0, on_demand=700),
+    ])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    assert f.files == 1
+    assert f.candidates[0].est_usd_saved is None
+    assert f.candidates[0].est_tokens_saved_window is None
+
+
+def test_basis_keeps_the_two_terms_distinguishable(db, monkeypatch, tmp_path):
+    """The two terms must stay separable by a reader: collapsing them back into
+    one is how both the always-on and the frontmatter-only errors get made."""
+    _seed_calls(db, sessions=3, calls=4)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("ship")]})
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=40, on_demand=600),
+    ])
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    c = f.candidates[0]
+    assert c.always_resident_tokens_saved == 40
+    assert c.on_demand_tokens_saved == 600
+    assert "always_resident_tokens_saved" in f.estimate_basis
+    assert "on_demand_tokens_saved" in f.estimate_basis

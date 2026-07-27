@@ -110,11 +110,19 @@ SUMMARIZE_ESTIMATE_BASIS = (
     "observed invocations is a measurement and prices that body at zero, whereas "
     "an absent transcript corpus carries NEITHER figure for that file. The "
     "on-demand term is a floor: an invoked body stays in that session's context "
-    "afterwards and those re-reads are not counted. A file whose loading "
-    "sessions cannot be identified carries neither figure here; its one-time "
-    "per-call reduction still appears in `file_reduction_tokens` and each "
-    "candidate's own `est_tokens_saved`. Advisory; review each rewrite before "
-    "applying."
+    "afterwards and those re-reads are not counted. The two terms are reported "
+    "separately per file (`always_resident_tokens_saved` / "
+    "`on_demand_tokens_saved`, alongside `load_class` and `invocations`) and "
+    "must not be collapsed back into one: on this corpus the always-resident "
+    "term dominates, because a small frontmatter re-read on every call of every "
+    "session outweighs a large body delivered a handful of times — which is "
+    "exactly why charging only the frontmatter, or only the body, would both be "
+    "wrong. A file whose loading sessions cannot be identified carries neither "
+    "figure here; its one-time per-call reduction still appears in "
+    "`file_reduction_tokens` and each candidate's own `est_tokens_saved`. A "
+    "file MEASURED to be resident in no session and invoked zero times is not "
+    "listed at all, rather than listed at zero. Advisory; review each rewrite "
+    "before applying."
 )
 
 
@@ -320,6 +328,13 @@ def _load_profile(ctx: AnalyzerContext) -> _LoadProfile | None:
     calls_by_repo: dict[str, int] = {}
     sessions_total = int((totals or (0, 0))[0] or 0)
     calls_total = int((totals or (0, 0))[1] or 0)
+    # DO NOT "fix" the per-repo counts below to match `sessions_total`. They
+    # are deliberately NOT distinct across repos, and that is correct: a
+    # session that touched two repos really does load BOTH repos' `CLAUDE.md`,
+    # so it belongs to both per-repo counts. Only the WINDOW total had to be
+    # counted once — summing these groups to get it was the defect (it made a
+    # multi-repo session inflate every global candidate). The two numbers
+    # answer different questions and are supposed to disagree.
     for agent_id, sessions, calls in rows:
         sessions = int(sessions or 0)
         calls = int(calls or 0)
@@ -473,6 +488,27 @@ def _load_split(candidate: Any) -> tuple[int, int]:
     return resident, on_demand
 
 
+def _is_measured_zero(candidate: SummarizeCandidate) -> bool:
+    """True when this file was MEASURED to cost nothing over the window.
+
+    A `.claude/commands/x.md` with no frontmatter that was never invoked is
+    resident in no session and delivered on no call: not a candidate at all,
+    rather than a candidate worth `$0.00`. Rendering the zero would invite the
+    reader to think the analyzer looked for a saving and found none, when the
+    truth is there is nothing here to summarize this window (Critical Rule 22 —
+    never show a figure the user cannot act on).
+
+    Deliberately keyed on a MEASURED zero, never on a missing one: a candidate
+    whose window figure degraded to ``None`` (no loading session observed, or
+    no transcript corpus) is kept, because "not measured" is not "worth
+    nothing" and suppressing it would hide a file we simply failed to price.
+    """
+    return (
+        candidate.est_tokens_saved_window == 0
+        and candidate.est_usd_saved == 0
+    )
+
+
 def _invocation_counts(ctx: AnalyzerContext) -> InvocationCounts:
     """Observed skill/command/agent invocations for the window.
 
@@ -559,7 +595,7 @@ def run(ctx: AnalyzerContext) -> None:
                 getattr(c, "invocation_key", "") or "",
             )
         priceable = profile is not None and measured_invocations is not None
-        candidates.append(SummarizeCandidate(
+        candidate = SummarizeCandidate(
             path=c.path,
             kind="prompt" if c.is_prompt else "other",
             scope=c.scope,
@@ -588,7 +624,10 @@ def run(ctx: AnalyzerContext) -> None:
                 )
                 if priceable else None
             ),
-        ))
+        )
+        if _is_measured_zero(candidate):
+            continue
+        candidates.append(candidate)
     finding.candidates = candidates
     finding.files = len(finding.candidates)
     if finding.candidates:
