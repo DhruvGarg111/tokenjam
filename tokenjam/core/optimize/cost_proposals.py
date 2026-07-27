@@ -2826,6 +2826,29 @@ def past_overspend_rollup(
     dedup rule for overlapping CLAIMS lives one layer down, in each analyzer's
     adapter — see CLAUDE.md rule 27).
 
+    **EVERY ROW OF THE REVIEW INBOX, THROUGH THE SAME DOOR.** The inbox is one
+    list fed by more than one producer, and this total has to cover all of it or
+    every sentence derived from the list (the collapsed tail's combined figure,
+    the below-floor "still counted in the total above" note) is false for the
+    part it cannot see. So a producer that is not the cost pipeline contributes
+    by handing ROWS to this function on the canonical field — see
+    ``core/optimize/inbox_contribution.py``, which builds relearn's clusters into
+    exactly that shape on the window this rollup is labelled with. This is
+    deliberately the ONLY way in: the retired mechanism was a relearn-only
+    ``relearn_clusters=`` parameter that computed a figure INSIDE here on a
+    second time basis and published it in its own key, and that parameter is
+    still guarded against by ``test_cost_proposals.
+    test_the_rollup_has_no_per_analyzer_side_channel``. No per-analyzer parameter
+    belongs on this signature, ever.
+
+    ``proposal_count`` / ``deduplicated_proposal_count`` / ``by_analyzer``
+    therefore count inbox ROWS, which is what they have always counted: they
+    describe the population this total was summed over, so a contributing row
+    that came from a non-cost producer is counted and named like any other. A
+    contribution that is NOT reflected in these counts would be a delta a reader
+    cannot attribute, which is the failure mode the ``observed_cost_usd`` note
+    below records.
+
     This is the AVOIDABLE portion of what the flagged behaviours already cost
     over the analyzed window, every token priced at the rate it genuinely
     billed at. Waste is only ever what could have been avoided, so this — not
@@ -2914,7 +2937,7 @@ def past_overspend_rollup(
     deduplicated_proposal_count = len(seen)
     if usd_count == 0:
         basis = (
-            f"no open (not yet applied) cost proposal currently carries an "
+            f"no open (not yet applied) Review inbox row currently carries an "
             f"observed dollar figure for the last {window_days} days."
         )
     else:
@@ -2925,14 +2948,14 @@ def past_overspend_rollup(
         basis = (
             f"sum of the AVOIDABLE window figure (past_overspend_usd) across "
             f"{usd_count} of {deduplicated_proposal_count} open (not yet "
-            f"applied), deduplicated-by-signature cost proposal(s), observed "
+            f"applied), deduplicated-by-signature Review inbox row(s), observed "
             f"over the last {window_days} days; contributing analyzers: "
             f"{breakdown}."
         )
     if token_count:
         basis += (
             f" Token figure: sum of past_overspend_tokens across "
-            f"{token_count} of {deduplicated_proposal_count} proposal(s); the "
+            f"{token_count} of {deduplicated_proposal_count} row(s); the "
             f"rest carry no token figure, so it is a floor, not a total."
         )
     return {
