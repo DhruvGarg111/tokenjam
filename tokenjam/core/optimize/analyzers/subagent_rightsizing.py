@@ -129,11 +129,16 @@ class SubagentRow:
     # `_dispatch_cohort_key`). Defaulted for round-trip of older payloads.
     agent_id:           str = ""
     # The STABLE identity: the agent TYPE that was dispatched. `sub_agent_id`
-    # above is per-DISPATCH and never recurs across sessions, so it can name no
-    # agent definition and form no cohort; this is the name that resolves to a
-    # `.claude/agents/<name>.md` file. Empty when the span carries no type
-    # (pre-migration-19 history, or a per-dispatch instance label — see
-    # `backfill._subagent_type_for`). Defaulted for round-trip of older payloads.
+    # above is per-DISPATCH, so it belongs to one session by construction and
+    # can neither form a cross-session cohort nor name an agent definition;
+    # this is the name that addresses `.claude/agents/<name>.md`. Both are kept
+    # because they answer different questions — grouping stays on
+    # `(session_id, sub_agent_id)` so two concurrent dispatches of the SAME
+    # type remain separate rows, while cohorting and file resolution key on the
+    # type. Empty when the span carries no type: history ingested before the
+    # column existed, or a deliberate non-recording (see
+    # `backfill._PER_DISPATCH_TASK_KINDS`). Defaulted for round-trip of older
+    # payloads.
     sub_agent_type:     str = ""
     # When this subagent's earliest span ran. Carried so the row can be priced
     # at the rate that actually billed it rather than at today's list price —
@@ -284,7 +289,19 @@ def _subagent_downgrade_target(provider: str, model: str) -> str | None:
     """The swap target priced for an over_powered subagent on ``(provider,
     model)``. See :data:`SUBAGENT_DOWNGRADE_TARGET` for why this is an
     explicit one-tier-down choice rather than a passthrough to
-    ``model_downgrade.lookup_downgrade``."""
+    ``model_downgrade.lookup_downgrade``.
+
+    Note what the override does to the ``model`` argument on a provider that
+    HAS an entry: nothing. It is ignored, and every model on that provider maps
+    to the one target. A consequence worth knowing before reasoning about the
+    two analyzers together: this analyzer therefore never consults
+    ``lookup_downgrade``'s table for such a provider, and so is immune to that
+    table's coverage. A premium model with no row there still gets a target
+    here, and ADDING a row there changes this analyzer's output not at all —
+    it moves ``downsize``'s numbers only. Reading a downgrade-table change as
+    though it flowed through to both is the easy mistake; the fallthrough on
+    the last line is reached only by providers absent from the override.
+    """
     target = SUBAGENT_DOWNGRADE_TARGET.get(provider)
     if target:
         return target

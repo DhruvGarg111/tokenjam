@@ -1478,14 +1478,20 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 #: A Claude Code DISPATCH id — ``a`` + an optional caller-chosen instance label
-#: + a 16-17 hex-char suffix (``af8b26e872b7184a7``,
-#: ``aw-ratehistory-7e1dd2a1642d7c29``). These are minted per dispatch and name
-#: no file. The slug shape above does NOT exclude them: measured on a real
-#: corpus, 3,645 of 3,659 dispatch ids (99.6%) matched ``_AGENT_NAME_RE``, so a
-#: slug check alone filtered essentially nothing and every lookup went hunting
-#: for a ``.claude/agents/a<hex>.md`` that can never exist. The stable identity
-#: (``sub_agent_type``) is what this module resolves against; this pattern is
-#: the belt-and-braces guard that a dispatch id can never be mistaken for one.
+#: + a hex suffix (``af8b26e872b7184a7``, ``aw-ratehistory-7e1dd2a1642d7c29``).
+#: Minted per dispatch; names no file.
+#:
+#: WHY THIS IS NOT REDUNDANT with ``_AGENT_NAME_RE`` above, which it may look
+#: like: a dispatch id is a lowercase letter followed by hex and dashes, which
+#: IS a well-formed plain slug. So the slug check matches essentially every
+#: dispatch id and rejects essentially none — it reads as a filter while
+#: filtering nothing, and that is precisely how the agent-file lookup came to
+#: spend its life hunting for a ``.claude/agents/a<hex>.md`` that cannot exist.
+#: Without this note the stricter predicate below looks like defensive
+#: over-engineering and the obvious "simplification" is to drop it, which
+#: restores the bug. The real fix is that this module resolves against
+#: ``sub_agent_type``, never a dispatch id; this pattern is the guard that
+#: keeps a dispatch id from being mistaken for a definition name anyway.
 _DISPATCH_ID_RE = re.compile(r"^a.*[0-9a-f]{16,17}$")
 
 #: Cap on transcripts read to locate the repos a finding's sessions ran in.
@@ -1537,6 +1543,22 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
     dispatch and cannot: it looks like a slug, so it used to pass the name check
     and send every lookup after a ``.claude/agents/a<hex>.md`` that can never
     exist, which is why this path resolved nothing at all.
+
+    EXPECT THIS TO RETURN ``{}`` ON A CODING-AGENT WINDOW, AND DO NOT TREAT THAT
+    AS A BUG IN THE LOOKUP. Measured on a real coding-agent corpus, every type
+    actually dispatched was a Claude Code BUILT-IN (``general-purpose``,
+    ``Explore``, ``fork`` and friends). A built-in has no
+    ``.claude/agents/<name>.md`` — there is nothing on disk to open, whether or
+    not the user has an agents directory at all — so the ``model:`` write branch
+    below is unreachable in practice and the card degrades to the rubric that
+    ``_subagent_to_proposals`` falls back to.
+
+    That is a fact about how people USE the tool (they dispatch built-ins rather
+    than authoring named agent definitions), not a defect in the resolution
+    above: fed a user-defined type whose file exists, this resolves it. A reader
+    who sees the empty result and starts debugging the lookup, loosening the
+    name predicate, or widening the scope search is chasing a working mechanism.
+    Recorded at more length in the persona matrix under product-state.
 
     Scope routing is relearn's: sessions concentrated in one repo write into
     that repo's ``.claude/agents/``, sessions spanning repos write into the
