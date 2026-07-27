@@ -145,3 +145,36 @@ def test_a_nameless_invocation_is_not_counted(tmp_path, blank):
     counts = count_invocations(since, until, projects_root=tmp_path)
     assert counts.total_invocations == 0
     assert counts.counts == {}
+
+
+def test_collects_each_session_recorded_working_directory(tmp_path):
+    """The corpus walk is the expensive part, so the working directories come
+    back from the pass that was already reading every record. They are what
+    `core/summarize/repo_roots` turns into the scanned file population."""
+    _write(tmp_path, "-repo-a", "s1", [
+        {"cwd": "/code/alpha"},
+        _tool_use("Skill", {"skill": "browse"}),
+        {"cwd": "/code/alpha"},
+    ])
+    _write(tmp_path, "-repo-b", "s2", [
+        _tool_use("Skill", {"skill": "ship"}),
+        {"cwd": "/code/beta"},
+    ])
+    since, until = _window()
+
+    counts = count_invocations(since, until, projects_root=tmp_path)
+
+    assert set(counts.session_cwds) == {"/code/alpha", "/code/beta"}
+    assert counts.total_invocations == 2       # cwd collection changes no count
+
+
+def test_transcripts_without_a_working_directory_contribute_none(tmp_path):
+    """Empty means "the transcripts carried no cwd", not "the sessions ran
+    nowhere" — no path is invented for them."""
+    _write(tmp_path, "-repo-a", "s1", [_tool_use("Skill", {"skill": "browse"})])
+    since, until = _window()
+
+    counts = count_invocations(since, until, projects_root=tmp_path)
+
+    assert counts.session_cwds == ()
+    assert counts.observed is True

@@ -1471,14 +1471,42 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
     return proposals
 
 
-#: A ``sub_agent_id`` only names an agent definition when it is a plain slug.
-#: Claude Code stamps a UUID for inline Task dispatches, and there is no file to
-#: edit for those: that is the guidance-block fallback case, not a lookup to
-#: guess at.
+#: A name only addresses an agent definition file (``.claude/agents/<name>.md``)
+#: when it is a plain lowercase slug. Built-in dispatch types that carry no
+#: definition file (``Explore``, ``Plan``) fail this on their capital letter,
+#: which is correct — there is nothing on disk to edit for those.
 _AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
+#: A Claude Code DISPATCH id — ``a`` + an optional caller-chosen instance label
+#: + a 16-17 hex-char suffix (``af8b26e872b7184a7``,
+#: ``aw-ratehistory-7e1dd2a1642d7c29``). These are minted per dispatch and name
+#: no file. The slug shape above does NOT exclude them: measured on a real
+#: corpus, 3,645 of 3,659 dispatch ids (99.6%) matched ``_AGENT_NAME_RE``, so a
+#: slug check alone filtered essentially nothing and every lookup went hunting
+#: for a ``.claude/agents/a<hex>.md`` that can never exist. The stable identity
+#: (``sub_agent_type``) is what this module resolves against; this pattern is
+#: the belt-and-braces guard that a dispatch id can never be mistaken for one.
+_DISPATCH_ID_RE = re.compile(r"^a.*[0-9a-f]{16,17}$")
+
 #: Cap on transcripts read to locate the repos a finding's sessions ran in.
+#: Counted in DISTINCT sessions — the flagged rows are one per (session,
+#: dispatch) and a session commonly fans out to a dozen-plus subagents, so
+#: slicing the raw row list capped the scope decision at a small fraction of the
+#: sessions it was meant to cover.
 _MAX_SCOPE_SESSIONS = 20
+
+
+def _names_agent_definition(name: str) -> bool:
+    """Whether ``name`` could address a ``.claude/agents/<name>.md`` file.
+
+    Rejects the empty string, anything that is not a plain lowercase slug, and
+    any Claude Code per-dispatch id (which satisfies the slug shape but names no
+    file). A True here is a shape check only — the caller still has to find the
+    file on disk.
+    """
+    if not name or _DISPATCH_ID_RE.match(name):
+        return False
+    return bool(_AGENT_NAME_RE.match(name))
 
 
 def _session_cwds(session_ids: list[str], config: Any) -> dict[str, str]:
@@ -1493,19 +1521,30 @@ def _session_cwds(session_ids: list[str], config: Any) -> dict[str, str]:
 
     override = getattr(getattr(config, "loop", None), "transcript_path", None)
     root = resolve_projects_root(override)
-    pairs = [(sid, sid) for sid in session_ids[:_MAX_SCOPE_SESSIONS]]
+    # Dedupe BEFORE the cap: callers pass one entry per flagged ROW, and a
+    # session that fanned out to N subagents contributes N identical ids, so
+    # slicing the raw list spent the whole budget on a handful of sessions.
+    unique = list(dict.fromkeys(session_ids))[:_MAX_SCOPE_SESSIONS]
+    pairs = [(sid, sid) for sid in unique]
     return _repo_cwd_map_for(pairs, root)
 
 
 def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any]:
     """Whether a flagged subagent has a definition file whose model can be set.
 
+    Keyed on the row's ``sub_agent_type`` — the agent TYPE that was dispatched,
+    which is the only identity that names a file. ``sub_agent_id`` is minted per
+    dispatch and cannot: it looks like a slug, so it used to pass the name check
+    and send every lookup after a ``.claude/agents/a<hex>.md`` that can never
+    exist, which is why this path resolved nothing at all.
+
     Scope routing is relearn's: sessions concentrated in one repo write into
     that repo's ``.claude/agents/``, sessions spanning repos write into the
     user-global one. The flagged rows are cost-ordered, so the first subagent
     with a real definition file is the most expensive one that can be fixed
-    outright. No file means the guidance block stays the fix, which is the
-    inline Task-tool case.
+    outright. No file means the guidance block stays the fix — that covers the
+    built-in dispatch types (``general-purpose``, ``Explore``) as well as a
+    type whose definition lives outside the resolved scope.
     """
     from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
     from tokenjam.core.optimize.analyzers.relearn import _scope_for
@@ -1516,7 +1555,7 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
 
     named = [
         r for r in over_powered
-        if _AGENT_NAME_RE.match(str(getattr(r, "sub_agent_id", "") or ""))
+        if _names_agent_definition(str(getattr(r, "sub_agent_type", "") or ""))
     ]
     if not named or config is None:
         return {}
@@ -1529,7 +1568,7 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
         proposed = lookup_downgrade(str(row.provider), str(row.model))
         if not proposed:
             continue
-        name = str(row.sub_agent_id)
+        name = str(row.sub_agent_type)
         path = default_agent_file_path(scope, repo_cwd, name)
         if not path or not Path(path).is_file():
             continue
@@ -1749,11 +1788,20 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             )
         scope_flag = "user" if server.scope == "user" else "project"
         plumbing = _mcp_remove_plumbing(server)
-        advise = (
-            server.fix + " Removing (or project-scoping) it is reversible "
-            "and loses no data; it only stops the standing schema-injection "
-            "tax on future sessions."
+        # "(or project-scoping)" is only a real second option for a
+        # USER-scoped (global) server; a server already at project scope has
+        # nothing left to narrow, so offering it there would be a no-op that
+        # delivers $0 of the claim (see `server.fix`'s own conditional
+        # wording in deadweight.py, mirrored here).
+        reversible_note = (
+            " Removing (or project-scoping) it is reversible and loses no "
+            "data; it only stops the standing schema-injection tax on "
+            "future sessions."
+            if server.scope == "user" else
+            " Removing it is reversible and loses no data; it only stops "
+            "the standing schema-injection tax on future sessions."
         )
+        advise = server.fix + reversible_note
         if plumbing.get("apply_capable"):
             advise += (
                 f" tokenjam can remove this exact entry from "
@@ -1762,6 +1810,20 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             )
         elif plumbing.get("apply_blocked_reason"):
             advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
+        if server.other_sources:
+            # The one-paste `claude mcp remove` fallback (and, for that
+            # matter, the deterministic auto-apply above) both edit exactly
+            # ONE file. Neither reaches the other independently-declared
+            # copies, so a reader must be told to repeat the command at each
+            # of them rather than assuming one run closed out the claim.
+            advise += (
+                f" `claude mcp remove` (and the auto-apply above, if "
+                f"offered) only edit {server.source}; the same command "
+                f"needs to be run again from each of the "
+                f"{len(server.other_sources)} other location(s) that "
+                f"independently declare `{server.name}` to stop the rest "
+                f"of the claimed tax."
+            )
         proposals.append(CostProposal(
             kind="cost",
             analyzer="deadweight",
@@ -1779,6 +1841,8 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 "source": server.source,
                 "example_sessions": list(server.example_sessions),
                 "priced_model": server.priced_model,
+                "other_sources": list(server.other_sources),
+                "primary_source_sessions": server.primary_source_sessions,
             },
             advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",

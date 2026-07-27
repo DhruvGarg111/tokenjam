@@ -72,6 +72,12 @@ class InvocationCounts:
     counts: dict[str, int] = field(default_factory=dict)
     sessions_scanned: int = 0
     observed: bool = False
+    #: The distinct working directories the scanned sessions recorded. Collected
+    #: on this pass rather than by a second walk purely because the corpus walk
+    #: is the expensive part and this one is already reading every record;
+    #: ``core/summarize/repo_roots`` turns them into scan roots. Empty means the
+    #: transcripts carried no ``cwd``, not that the sessions ran nowhere.
+    session_cwds: tuple[str, ...] = ()
     #: Distinct invocation EVENTS counted, before the bare-suffix aliasing
     #: below — summing ``counts.values()`` would double-count every
     #: plugin-namespaced name, which is only ever a display figure.
@@ -139,6 +145,12 @@ def _scan_record(record: dict[str, Any], counts: dict[str, int]) -> int:
     return events
 
 
+def _record_cwd(record: dict[str, Any]) -> str:
+    """The working directory one transcript record carries, or ``""``."""
+    cwd = record.get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else ""
+
+
 def count_invocations(
     since: datetime,
     until: datetime,
@@ -153,6 +165,11 @@ def count_invocations(
     the window, sidechain (``subagents/``) transcripts skipped so a spawned
     child is not counted as its own session.
 
+    Also returns each scanned session's recorded working directory
+    (``session_cwds``). That is a different question from invocation counting,
+    but it is answered from the same records on the same pass: the corpus walk
+    is what costs, and asking a second walk for the cwds would double it.
+
     Never raises: a missing root, an unreadable transcript, or a malformed
     record degrades to fewer counts, and a missing root degrades to
     ``observed=False`` so the caller reports no figure rather than a zero.
@@ -164,6 +181,7 @@ def count_invocations(
         return InvocationCounts()
 
     counts: dict[str, int] = {}
+    cwds: set[str] = set()
     sessions = 0
     events = 0
 
@@ -182,14 +200,20 @@ def count_invocations(
         except Exception:
             logger.debug("invocation scan: unreadable transcript %s", path, exc_info=True)
             continue
+        session_cwd = ""
         for record in records:
-            if isinstance(record, dict):
-                events += _scan_record(record, counts)
+            if not isinstance(record, dict):
+                continue
+            events += _scan_record(record, counts)
+            if not session_cwd:
+                session_cwd = _record_cwd(record)
+        if session_cwd:
+            cwds.add(session_cwd)
 
     # A corpus that exists but held no session in this window is still an
     # observation: nothing was invoked because nothing ran. Only a missing
     # root (returned above) is "not measured".
     return InvocationCounts(
         counts=counts, sessions_scanned=sessions, observed=True,
-        total_invocations=events,
+        total_invocations=events, session_cwds=tuple(sorted(cwds)),
     )
