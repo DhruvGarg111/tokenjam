@@ -245,6 +245,7 @@ def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
                 "req_per_min": req_per_min,
                 "err_rate": err_rate,
                 "window_cost": s.get("window_cost", 0.0),
+                "window_tokens": s.get("window_tokens", 0),
             })
 
         # Live first, then went_quiet, then long_dormant; each newest-seen first.
