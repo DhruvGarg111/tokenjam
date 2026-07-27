@@ -646,13 +646,31 @@ def _build_finding_constructors() -> dict:
         )
 
     def _relearn(d: dict) -> RelearnFinding:
+        from tokenjam.core.optimize.relearn_window import (
+            observations_from_dict,
+            totals_from_dict,
+        )
+
         clusters = []
         for c in d.get("clusters") or []:
             cc = dict(c)
             cc["examples"] = [RelearnExample(**e) for e in cc.get("examples") or []]
+            # The bounded window figures are nested dataclasses, so they arrive
+            # as plain dicts and have to be revived explicitly. Reviving them
+            # rather than passing the dicts through keeps a rehydrated cluster
+            # the same TYPE as a locally computed one; leaving them out entirely
+            # would repeat the drop the comment below records, one field later.
+            if "past_overspend_windows" in cc:
+                cc["past_overspend_windows"] = observations_from_dict(
+                    cc["past_overspend_windows"],
+                )
             clusters.append(RelearnCluster(**cc))
         return RelearnFinding(
             clusters=clusters,
+            # Restored for the same reason the USD twin below is: a figure this
+            # module knows how to carry and silently doesn't is indistinguishable
+            # to every downstream reader from a figure that was never computed.
+            past_overspend_windows=totals_from_dict(d.get("past_overspend_windows")),
             sessions_scanned=int(d.get("sessions_scanned", 0)),
             failures_examined=int(d.get("failures_examined", 0)),
             distilled_clusters=int(d.get("distilled_clusters", 0)),

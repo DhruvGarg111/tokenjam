@@ -227,6 +227,57 @@ def sum_windowed(
     )
 
 
+def _revive(cls: type, raw: Any) -> Any | None:
+    """One serialized bucket back into ``cls``, or ``None`` if it cannot be.
+
+    A bucket missing any field it needs is UNKNOWN, not a zero-filled one, so it
+    is dropped rather than defaulted: a figure defaulted to 0 would publish "this
+    window cost nothing" on the strength of an absent key. Unknown extra keys are
+    ignored, so a payload from a NEWER producer still loads here.
+    """
+    from dataclasses import fields
+
+    if not isinstance(raw, dict):
+        return None
+    names = {f.name for f in fields(cls)}
+    if not names.issubset(raw.keys()):
+        return None
+    try:
+        return cls(**{k: raw[k] for k in names})
+    except (TypeError, ValueError):
+        return None
+
+
+def observations_from_dict(
+    raw: Any,
+) -> dict[str, RelearnWindowedObservation] | None:
+    """A cluster's serialized windowed figures back into dataclasses.
+
+    ``None`` for anything absent, empty or unreadable, which is what a cache or
+    an HTTP payload written before these fields existed produces. Absent means
+    UNKNOWN here and every reader must treat it that way.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out = {
+        label: revived for label, value in raw.items()
+        if (revived := _revive(RelearnWindowedObservation, value)) is not None
+    }
+    return out or None
+
+
+def totals_from_dict(raw: Any) -> dict[str, RelearnWindowTotal] | None:
+    """A finding's serialized windowed totals back into dataclasses. Same
+    absent-is-unknown rule as ``observations_from_dict``."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    out = {
+        label: revived for label, value in raw.items()
+        if (revived := _revive(RelearnWindowTotal, value)) is not None
+    }
+    return out or None
+
+
 def window_report(
     *,
     since: str | None,

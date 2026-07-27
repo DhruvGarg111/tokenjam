@@ -310,6 +310,47 @@ def test_a_cache_written_before_windowing_loads_and_reads_unknown():
 
 # --- days of data available ------------------------------------------------- #
 
+def test_the_daemon_to_cli_round_trip_keeps_the_windowed_figures():
+    """``report_to_dict`` / ``report_from_dict`` is the daemon-to-CLI boundary.
+
+    Nested dataclasses cross it as plain dicts, so they have to be revived
+    explicitly. A field this module knows how to carry and silently drops is
+    indistinguishable downstream from one that was never computed, which is the
+    exact bug the neighbouring comment in ``runner._relearn`` records about
+    relearn's dollar figure.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import analyze_relearns
+    from tokenjam.core.optimize.runner import _finding_constructor_for
+    from dataclasses import asdict
+
+    finding = analyze_relearns(
+        [], extra_failures=[_failure(f"s{i}", d) for i, d in enumerate([1, 2, 3])],
+        distill_enabled=False, min_sessions=3,
+        window_labels=("7d",), window_anchor=ANCHOR,
+    )
+    revived = _finding_constructor_for("relearn")(asdict(finding))
+    assert revived.past_overspend_windows is not None
+    assert revived.past_overspend_windows["7d"].past_overspend_tokens == \
+        finding.past_overspend_windows["7d"].past_overspend_tokens
+    assert revived.clusters[0].past_overspend_windows["7d"].occurrences == 3
+    # And the revived bucket is the same TYPE, not a bare dict.
+    assert revived.clusters[0].past_overspend_windows["7d"].label == "7d"
+
+
+def test_an_older_payload_without_the_windowed_keys_revives_as_unknown():
+    from tokenjam.core.optimize.relearn_window import (
+        observations_from_dict,
+        totals_from_dict,
+    )
+
+    for absent in (None, {}, "nonsense", []):
+        assert observations_from_dict(absent) is None
+        assert totals_from_dict(absent) is None
+    # A bucket missing fields is UNKNOWN, never zero-filled: a defaulted 0 would
+    # publish "this window cost nothing" off an absent key.
+    assert observations_from_dict({"30d": {"label": "30d"}}) is None
+
+
 def test_an_ancient_outlier_row_does_not_stretch_the_available_span():
     """The naive measure is wrong here and this is the row that proves it.
 
