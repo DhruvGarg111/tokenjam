@@ -1823,6 +1823,20 @@ function fmtCost(usd) {
   if (usd === 0) return '$0.0000';
   return usd < 0.001 ? '$' + usd.toFixed(6) : '$' + usd.toFixed(4);
 }
+// Dashboard-only currency formatter: at most 2 decimal places (product
+// decision, "use just two decimals at most throughout dashboard"), with
+// thousands grouping for readability -- the same 2dp convention fmtUsd
+// already uses elsewhere in the app, just without fmtUsd's own <$1 branch
+// that still renders 4 decimals. A genuine zero still renders "$0.00"; any
+// nonzero amount that would otherwise round away to "$0.00" renders
+// "< $0.01" instead, since a real incurred cost must never read as free.
+// Scoped to the Dashboard: fmtCost/fmtUsd elsewhere (Optimize, Summarize,
+// Sessions, the Review inbox, ...) are unchanged.
+function fmtDashUsd(v) {
+  const n = Number(v || 0);
+  if (n > 0 && n < 0.01) return '< $0.01';
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function fmtTokens(n) {
   if (n == null) return '-';
   if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
@@ -5531,15 +5545,19 @@ function TraceDetailView({ traceId }) {
 // ============================
 // Render a dollar value with the server-decided plan-tier framing (#110). The
 // rule (which mode) is server-side; this only formats per that decision —
-// mirrors core/framing.render_dollar.
-function fmtFramedDollar(v, framing) {
-  if (!framing) return fmtCost(v);
+// mirrors core/framing.render_dollar. `dollarFmt` defaults to fmtCost (every
+// existing caller's behaviour is unchanged); the Dashboard is the one caller
+// that passes fmtDashUsd, so its figures stay at most 2dp without touching
+// this formatter's precision anywhere else it is used (Sessions, Cost,
+// Optimize, ...).
+function fmtFramedDollar(v, framing, dollarFmt = fmtCost) {
+  if (!framing) return dollarFmt(v);
   const m = framing.pricing_mode;
   if (m === 'local') return '—';
   if (m === 'subscription') {
     return framing.plan_monthly_usd ? (100 * v / framing.plan_monthly_usd).toFixed(1) + '% of cycle' : '—';
   }
-  return fmtCost(v); // api / unknown
+  return dollarFmt(v); // api / unknown
 }
 
 // Per-ITEM (per-row) cost rendering (#249). "% of cycle" is a WINDOW-LEVEL
@@ -5595,7 +5613,7 @@ function spendTileDisplay(spendUsd, framing) {
   const mode = framing && framing.pricing_mode;
   // An unreported spend field is unknown, not zero. Both branches below would
   // otherwise manufacture one: `(null || 0) / fee` renders "0.0× plan value" and
-  // fmtCost(null) renders "$0.0000", and on a spend tile a zero reads as "this
+  // fmtDashUsd(null) renders "$0.00", and on a spend tile a zero reads as "this
   // window cost you nothing". Checked before the mode branches so neither can.
   const unknown = spendUsd == null;
   if (mode === 'subscription') {
@@ -5605,8 +5623,10 @@ function spendTileDisplay(spendUsd, framing) {
     return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
   }
   if (mode === 'local') return null;                     // no plan fee to multiply against
-  // api / unknown → dollars
-  return { label: 'Spend', value: unknown ? UNKNOWN_FIGURE : fmtCost(spendUsd) };
+  // api / unknown → dollars, at most 2dp (Dashboard's own precision rule --
+  // this tile has exactly one caller, AnalyticsView, which only ever renders
+  // embedded on the Dashboard).
+  return { label: 'Spend', value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };
 }
 
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
@@ -6653,11 +6673,15 @@ function capitalize(name) {
 // decision). The `window_total_tokens` token-share fallback stays for the
 // rare case a payload only carries `display_rule`-less legacy framing
 // (pricing_mode-only fallback below).
-function fmtFramedSavings(usd, tokens, framing) {
+// `dollarFmt` defaults to fmtCost so every existing caller (Optimize,
+// Summarize) is byte-identical; the Dashboard passes fmtDashUsd so its
+// Recoverable-waste tiles stay at most 2dp without changing this formatter's
+// precision anywhere else it's used.
+function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost) {
   // `framing == null` means "not yet known" (the read that would carry it
   // hasn't landed), NOT "no suppression needed" — dollarsSuppressed(null)
   // returns false, so without this guard an unknown framing fell through to
-  // a bare, unqualified fmtCost(usd) below. On a subscription-billed account
+  // a bare, unqualified dollar figure below. On a subscription-billed account
   // that reads as real money billed, which is exactly what framing exists to
   // prevent (the UI-asserts-more-than-data-supports defect class). Fall back
   // to the same tokens-only form the suppressed path already uses rather
@@ -6673,7 +6697,7 @@ function fmtFramedSavings(usd, tokens, framing) {
     }
     return fmtTokens(tokens) + ' tokens';
   }
-  return usd == null ? '—' : fmtCost(usd);
+  return usd == null ? '—' : dollarFmt(usd);
 }
 
 // Is the server telling us NOT to lead with dollars? Reads the explicit
@@ -8215,7 +8239,11 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const isSpend = metric === 'spend';
   const useTokens = isSpend && !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   const valueIsDollars = isSpend && !useTokens;
-  const fmtV = valueIsDollars ? fmtCost : fmtTokens;
+  // fmtDashUsd (at most 2dp), not fmtCost: this view only ever renders
+  // embedded on the Dashboard (see the router's dashboard/analytics alias
+  // note above), so its chart tooltip and leaderboard values follow the
+  // Dashboard's precision rule.
+  const fmtV = valueIsDollars ? fmtDashUsd : fmtTokens;
   const fmtVal = v => (metric === 'sessions' || metric === 'events') ? fmtTokens(v).replace(/ tokens$/, '') : fmtV(v);
   const axisFmt = valueIsDollars ? fmtAxisUsd : fmtTokens;
 
@@ -10867,7 +10895,7 @@ function DashboardView({ params }) {
   if (series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
     const projected = runRateProjection(windowTotal, since, 1) * cyc.days;
-    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
+    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing, fmtDashUsd);
   }
 
   // ---- The front door's own claim ------------------------------------------ //
@@ -11023,7 +11051,7 @@ function DashboardView({ params }) {
                       // (#229). The recoverable number's evidence
                       // and next step live there, not in a chart.
                       const href = optimizeFindingHref(t.name, since);
-                      const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing)
+                      const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)
                         : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
                         : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
                       const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok' : 'rec-tile muted');

@@ -2589,7 +2589,7 @@ def test_review_inbox_ignores_dollar_suppression(html):
 
 
 def _fmt_framed_savings_src(html: str) -> str:
-    start = html.index("function fmtFramedSavings(usd, tokens, framing)")
+    start = html.index("function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost)")
     return html[start: html.index("\n}\n", start)]
 
 
@@ -2597,27 +2597,33 @@ def test_fmt_framed_savings_never_renders_a_bare_dollar_when_framing_is_unknown(
     """`framing == null` means "not yet known" (the read that would carry it
     hasn't landed), NOT "no suppression needed". Before the fix,
     dollarsSuppressed(null) returned false, so an unknown framing fell
-    through to a bare fmtCost(usd) — on a subscription-billed account that
+    through to a bare dollar figure — on a subscription-billed account that
     reads as real money billed, exactly what framing exists to prevent
     (root CLAUDE.md's "UI asserts more than its data supports" defect class).
+
+    `dollarFmt` (added for the Dashboard's at-most-2dp rule) defaults to
+    fmtCost, so every existing caller's behaviour is unchanged; only the
+    Dashboard passes fmtDashUsd. This test still pins the null-guard logic
+    against the default formatter.
     """
     fn = _fmt_framed_savings_src(html)
     # The null/undefined guard must run BEFORE dollarsSuppressed() is even
-    # consulted, and must not fall through to fmtCost(usd).
+    # consulted, and must not fall through to a bare dollar figure.
     assert "if (framing == null) {" in fn
     guard_idx = fn.index("if (framing == null) {")
     suppressed_idx = fn.index("if (dollarsSuppressed(framing)) {")
     assert guard_idx < suppressed_idx
     guard_body = fn[guard_idx: suppressed_idx]
     assert "fmtCost(" not in guard_body
+    assert "dollarFmt(" not in guard_body
     assert "fmtTokens(tokens) + ' tokens'" in guard_body
 
     # Behaviour for a KNOWN framing (either branch) must be untouched: the
     # suppressed path's tokens-only/percent-of-cycle fallback, and the
-    # show-with-qualifier path's plain fmtCost(usd), both still follow the
-    # null guard unchanged.
+    # show-with-qualifier path's dollar figure (via dollarFmt, fmtCost by
+    # default), both still follow the null guard unchanged.
     assert "return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';" in fn
-    assert "return usd == null ? '—' : fmtCost(usd);" in fn
+    assert "return usd == null ? '—' : dollarFmt(usd);" in fn
 
 
 def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html):
@@ -3994,8 +4000,10 @@ def test_dashboard_qualifier_banner_is_removed(html):
     assert 'class="qualifier"' not in dash
     assert "qualifier-skel" not in dash
     # Every other framing consumer in DashboardView is untouched — the removal
-    # was scoped to the banner only, never to `framing` itself.
+    # was scoped to the banner only, never to `framing` itself. (The trailing
+    # `, fmtDashUsd` on the two dollar formatters is the Dashboard's separate
+    # at-most-2dp precision override, not a framing change.)
     assert "const useTokens = !!framing && (framing.pricing_mode" in dash
-    assert "fmtFramedDollar(projected, framing)" in dash
+    assert "fmtFramedDollar(projected, framing, fmtDashUsd)" in dash
     assert "<${PlanBadge} framing=${framing} />" in dash
-    assert "fmtFramedSavings(t.usd, t.tokens, framing)" in dash
+    assert "fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)" in dash

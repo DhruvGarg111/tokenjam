@@ -283,13 +283,16 @@ def test_an_unreported_kpi_field_is_unknown_not_zero(html):
 
 
 def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
-    # `(null || 0) / fee` rendered "0.0× plan value" and fmtCost(null) rendered
-    # "$0.0000"; on a spend tile a zero reads as "this window cost you nothing".
+    # `(null || 0) / fee` rendered "0.0× plan value" and fmtDashUsd(null) would
+    # render "$0.00"; on a spend tile a zero reads as "this window cost you
+    # nothing". fmtDashUsd (at most 2dp, the Dashboard's own precision rule)
+    # replaced fmtCost here since this tile has exactly one caller and it only
+    # ever renders on the Dashboard -- the unknown-guard behaviour is unchanged.
     spend = html[html.index("function spendTileDisplay"):]
     spend = spend[:spend.index("function PlanBadge")]
     assert "const unknown = spendUsd == null;" in spend
     assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
-    assert "value: unknown ? UNKNOWN_FIGURE : fmtCost(spendUsd)" in spend
+    assert "value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
     assert "(spendUsd || 0) / framing.plan_monthly_usd" not in spend
 
 
@@ -418,3 +421,47 @@ def test_placeholder_bars_keep_the_primitive_s_own_corner_radius(html):
 def test_the_shimmer_primitive_honors_reduced_motion(html):
     block = html[html.index("@media (prefers-reduced-motion: reduce)"):]
     assert ".shimmer { animation: none;" in block[:400]
+
+
+# --------------------------------------------------------------------------- #
+# fmtDashUsd: the Dashboard's at-most-2dp currency rule, run under node
+# --------------------------------------------------------------------------- #
+# The Recoverable-waste tiles rendered $412.7580, $4858.9766, $59.8732 -- fmtCost's
+# 4-6dp precision, shared app-wide and used everywhere else on purpose (Optimize,
+# Summarize, Sessions, ...). fmtDashUsd is a separate, Dashboard-only formatter
+# (product decision: "use just two decimals at most throughout dashboard") that
+# fmtFramedDollar/fmtFramedSavings/spendTileDisplay/the Analytics chart tooltip
+# now accept as an override, defaulting to fmtCost everywhere else.
+def _fmt_dash_usd_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function fmtDashUsd(v)")
+    end = src.index("\n}\n", start) + 2
+    return src[start:end]
+
+
+def _dash_usd(v):
+    script = _fmt_dash_usd_source() + "\nconsole.log(JSON.stringify(fmtDashUsd(%s)));" % json.dumps(v)
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+@_node
+def test_fmt_dash_usd_never_exceeds_two_decimal_places():
+    assert _dash_usd(412.758) == "$412.76"
+    assert _dash_usd(4858.9766) == "$4,858.98"
+    assert _dash_usd(1234567.891) == "$1,234,567.89"
+
+
+@_node
+def test_fmt_dash_usd_never_prints_a_real_cost_as_free():
+    # A genuine zero still renders honestly as "$0.00". A nonzero sub-cent
+    # figure that would otherwise round away to "$0.00" must not silently read
+    # as free (root CLAUDE.md's "UI asserts more than its data supports"
+    # defect class) -- it renders "< $0.01" instead.
+    assert _dash_usd(0) == "$0.00"
+    assert _dash_usd(0.0031) == "< $0.01"
+    assert _dash_usd(0.009) == "< $0.01"
+    assert _dash_usd(0.01) == "$0.01"
