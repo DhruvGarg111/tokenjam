@@ -767,7 +767,19 @@ def _downsize_agent_proposals(
         proposals.append(CostProposal(
             kind="cost",
             analyzer="downsize",
-            signature=f"cost:downsize:{row.agent_id}",
+            # The signature has to be as fine-grained as the ROW, or the rollup's
+            # dedup-by-signature silently drops money that still renders.
+            # `build_agent_price_rows` groups by (agent, provider, model,
+            # alt_model), so one agent that ran two over-sized models yields two
+            # rows — two distinct inbox cards, two distinct titles, two distinct
+            # figures. Keyed on the agent alone they collided, and
+            # `past_overspend_rollup` kept whichever sorted first and discarded
+            # the rest, so the headline understated a total whose parts the user
+            # could see listed underneath it. Mirror the grouping key exactly.
+            signature=(
+                f"cost:downsize:{row.agent_id}:{row.provider}:"
+                f"{row.model}:{row.alt_model}"
+            ),
             title=f"Model over-sizing in {row.agent_id} ({row.model} to {row.alt_model})",
             target_key={
                 "agent_id": row.agent_id,
