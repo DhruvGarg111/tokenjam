@@ -94,10 +94,22 @@ class CostEngine:
         ):
             return
 
-        # Record whether the span was already pre-priced before we compute.
-        # Pre-priced spans have their session cost handled by _build_or_update_session
-        # in ingest.py; updating the session again here would double-count.
-        was_pre_priced = span.cost_usd is not None
+        # Whatever cost the span arrived carrying has ALREADY been added to the
+        # session total by `_build_or_update_session` in ingest.py (it does
+        # `existing.total_cost_usd += span.cost_usd` for any non-None value, and
+        # seeds a new session's total from it). An unpriced span contributed
+        # nothing, so its prior contribution is 0.
+        #
+        # This used to be a boolean skip: pre-priced spans got no session update
+        # at all, on the reasoning that ingest had already handled them. But we
+        # then OVERWRITE `spans.cost_usd` with tj's own figure below, so the
+        # session kept the upstream number while the span row carried ours, and
+        # `SUM(spans.cost_usd)` — which `recompute_session_totals_from_spans`
+        # documents as the source of truth — permanently disagreed with
+        # `sessions.total_cost_usd`. Incrementing by the DELTA instead makes the
+        # session follow the span row under every combination (unpriced,
+        # pre-priced, or re-priced) with no special case and no extra read.
+        prior_cost = span.cost_usd or 0.0
 
         cost = calculate_cost(
             provider=span.provider,
@@ -119,11 +131,13 @@ class CostEngine:
             return
         update(span.span_id, cost)
 
-        # Only accumulate into the session total when we computed the cost here.
-        # Skip the session update for pre-priced spans to avoid double-counting
-        # (their session cost is handled by ingest's _build_or_update_session).
-        if span.session_id and not was_pre_priced:
-            self.db.increment_session_cost(span.session_id, cost)
+        # Move the session total by exactly what this span's stored cost moved,
+        # so `sessions.total_cost_usd` tracks `SUM(spans.cost_usd)` for the
+        # session. A zero delta (we agreed with the incoming figure, or the span
+        # is being reprocessed with the same rates) writes nothing.
+        delta = cost - prior_cost
+        if span.session_id and delta:
+            self.db.increment_session_cost(span.session_id, delta)
 
 
 # ---------------------------------------------------------------------------
