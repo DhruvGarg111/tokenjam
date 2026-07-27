@@ -9,6 +9,8 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+from tokenjam.utils.time_parse import utcnow
+
 import pytest
 
 from tokenjam.core.config import AgentConfig, StorageConfig, TjConfig
@@ -54,6 +56,7 @@ def _price_rows(agent_id="svc-a"):
         "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
         "input_tokens": 100_000, "output_tokens": 20_000,
         "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+        "started_at": utcnow() - timedelta(days=1),
     }], 30.0)
 
 

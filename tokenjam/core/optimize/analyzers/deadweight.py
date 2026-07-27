@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import blended_rates, price_span, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_projects_root
 from tokenjam.core.usage import AssistantUsage, assistant_message_key, parse_usage
@@ -843,29 +844,33 @@ def _session_usage_from_records(records: list[dict[str, Any]]) -> AssistantUsage
     return total
 
 
-def _session_actual_usd(usage: AssistantUsage, model: str) -> float | None:
+def _session_actual_usd(
+    usage: AssistantUsage, model: str, *, at: datetime,
+) -> float | None:
     """Real dollar cost of one session's ACTUAL usage, priced through
     core/pricing.py at ``model`` — all four token buckets (input, output,
     cache-read, AND cache-write; see root CLAUDE.md's "cache token types in
     aggregates" note on why both cache buckets must be included or the total
     is silently short). ``None`` when ``model`` is empty or unpriced — never
     a fabricated rate.
+
+    ``at`` is when the session ran, and is required: this is an OBSERVED cost,
+    so it must use the rate that actually billed it rather than today's.
     """
     if not model:
         return None
-    from tokenjam.core.pricing import get_rates, provider_for_model
+    from tokenjam.core.pricing import provider_for_model
 
-    provider = provider_for_model(model) or "unknown"
-    rates = get_rates(provider, model)
-    if rates is None:
-        return None
-    usd = (
-        usage.input_tokens * rates.input_per_mtok
-        + usage.output_tokens * rates.output_per_mtok
-        + usage.cache_read_tokens * rates.cache_read_per_mtok
-        + usage.cache_write_tokens * rates.cache_write_per_mtok
-    ) / 1_000_000
-    return round(usd, 6)
+    usd = price_span(
+        provider_for_model(model) or "unknown", model, at=at,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+    )
+    # Kept at 6dp (price_span rounds to 8) so the per-session figures this
+    # returns are bit-for-bit what they were before the pricer swap.
+    return None if usd is None else round(usd, 6)
 
 
 def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
@@ -957,6 +962,11 @@ def compute_deadweight_finding(
         return finding
 
     session_paths: list[tuple[str, Path]] = []
+    # Transcript mtime per session — the only time signal this analyzer has (it
+    # reads JSONL files, not spans) and the instant its dollar figures are
+    # priced at. Without it every session would price at today's list rate; see
+    # `tokenjam.core.optimize.span_pricing` for the convention.
+    session_mtimes: dict[str, datetime] = {}
     for path in sorted(root.rglob("*.jsonl")):
         # Subagent/sidechain transcripts live at
         # `<parent-session-dir>/subagents/agent-<id>.jsonl` (core/transcript.py)
@@ -975,6 +985,7 @@ def compute_deadweight_finding(
         if mtime < since or mtime >= until:
             continue
         session_paths.append((path.stem, path))
+        session_mtimes[path.stem] = mtime
 
     finding.sessions_scanned = len(session_paths)
     if not session_paths:
@@ -1014,7 +1025,10 @@ def compute_deadweight_finding(
             usage = session_usages.get(session_id, AssistantUsage())
             unresolvable_tokens += usage.total
             model = _dominant_model(per_session[session_id].models)
-            usd = _session_actual_usd(usage, model)
+            usd = _session_actual_usd(
+                usage, model,
+                at=span_instant(session_mtimes.get(session_id), window_start=since),
+            )
             if usd is None:
                 unpriced_sessions += 1
             else:
@@ -1032,7 +1046,7 @@ def compute_deadweight_finding(
     if not configured:
         return finding
 
-    from tokenjam.core.pricing import get_rates, provider_for_model
+    from tokenjam.core.pricing import provider_for_model
 
     tax_rows: list[ContextTaxRow] = []
     reminder_bucket_totals: dict[str, list[int]] = {}
@@ -1044,6 +1058,10 @@ def compute_deadweight_finding(
         primary_source_sessions = 0
         example_sessions: list[str] = []
         model_counts: dict[str, int] = {}
+        # (when a present session ran, how many of this server's priced calls it
+        # carried) — the weights `blended_rates` needs to give this server ONE
+        # rate that equals pricing each session at its own instant and summing.
+        model_volume_at: list[tuple[datetime | None, float]] = []
         # (deferred_calls, full_calls) per present session — each session's
         # OWN call count feeds its own cache-read multiplier below; never a
         # global mean/median (call-count distribution is severely
@@ -1078,6 +1096,7 @@ def compute_deadweight_finding(
                 example_sessions.append(session_id)
             for model, count in signal.models.items():
                 model_counts[model] = model_counts.get(model, 0) + count
+                model_volume_at.append((session_mtimes.get(session_id), float(count)))
 
             total_calls = max(signal.assistant_turns, 1)
             if deferred_here:
@@ -1103,7 +1122,12 @@ def compute_deadweight_finding(
         cache_read_ratio = 0.0
         if priced_model:
             provider = provider_for_model(priced_model) or "unknown"
-            rates = get_rates(provider, priced_model)
+            # One rate for the server's whole present population, blended across
+            # the sessions' own dates and weighted by their call volume — the
+            # aggregate-safe form of "price each session at its own rate, then
+            # sum" (see span_pricing). Identical to a single lookup whenever no
+            # rate moved inside the window, which is the usual case.
+            rates = blended_rates(provider, priced_model, model_volume_at)
             if rates is not None and rates.input_per_mtok > 0:
                 input_per_mtok = rates.input_per_mtok
                 cache_read_ratio = rates.cache_read_per_mtok / rates.input_per_mtok

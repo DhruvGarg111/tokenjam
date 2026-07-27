@@ -106,8 +106,8 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
     session_context_tokens,
 )
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
 
 # A window needs at least this many sessions and this many total LLM turns
 # before the aggregate repeat-share means anything: a 1-2 session sample is
@@ -766,9 +766,16 @@ def run(ctx: AnalyzerContext) -> None:
         # rate; the still-uncached share billed at that turn's input rate.
         # Nothing discounted, nothing projected — this is what it cost, not
         # what a fix returns. NEVER summed with the recoverable figures below.
+        #
+        # ...and at that turn's own TIMESTAMP, not today's. The pricing table
+        # carries a rate history, so a window that straddles a price change
+        # must bill each turn at the rate that actually billed it — see
+        # `tokenjam.core.optimize.span_pricing` for the convention (price each
+        # span at its own instant, then sum the dollars) this follows.
         session_waste_usd = 0.0
         for t in session_turns:
-            turn_rates = get_rates(t.provider or "unknown", t.model)
+            at = span_instant(t.start_time, window_start=ctx.since)
+            turn_rates = rates_at(t.provider, t.model, at)
             if turn_rates is None or turn_rates.input_per_mtok <= 0:
                 continue  # this turn's model unpriced: contributes no dollar figure
             uncached_repeat = repeat_tokens * (t.new_input_tokens / s_sum) if s_sum else 0.0
@@ -812,7 +819,8 @@ def run(ctx: AnalyzerContext) -> None:
         if offloadable_share is None:  # pragma: no cover - implied by klass
             continue
         for t, tail_tokens in zip(main_turns, _resend_tail_tokens_per_turn(main_turns)):
-            turn_rates = get_rates(t.provider or "unknown", t.model)
+            at = span_instant(t.start_time, window_start=ctx.since)
+            turn_rates = rates_at(t.provider, t.model, at)
             if turn_rates is None or turn_rates.cache_read_per_mtok <= 0:
                 continue
             offloadable_tail = tail_tokens * offloadable_share
@@ -834,7 +842,11 @@ def run(ctx: AnalyzerContext) -> None:
             # made the two fields answer different questions before).
             offloaded_material = _introduced_tokens(t) * offloadable_share
             alt = lookup_downgrade(t.provider or "unknown", t.model)
-            alt_rates = get_rates(t.provider or "unknown", alt) if alt else None
+            # Same instant as the turn it is a counterfactual for: an
+            # alternative priced at a different date than the model it replaces
+            # would make the gap between them part rate-change, part model
+            # choice, with no way to tell which.
+            alt_rates = rates_at(t.provider, alt, at) if alt else None
             if alt_rates is not None:
                 rate_gap = max(0.0, turn_rates.input_per_mtok - alt_rates.input_per_mtok)
                 if rate_gap > 0:
