@@ -10997,25 +10997,49 @@ const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];
 // same one list instead of each hardcoding its own 24h/7d/30d/90d options —
 // which is what let those three screens offer a window the machine had no
 // data for while being unable to offer its actual full span.
+//
+// These are the ALWAYS-candidate base rungs (clamped to the span below);
+// 90d+ live in INTERMEDIATE_RUNG_DAYS instead -- see standardWindowOptions.
 const STANDARD_WINDOWS = [
   { value: '24h', label: 'Last 24h', days: 1 },
   { value: '7d', label: 'Last 7d', days: 7 },
   { value: '30d', label: 'Last 30d', days: 30 },
-  { value: '90d', label: 'Last 90d', days: 90 },
 ];
 
+// Candidate rungs for the ONE intermediate option between the 30d base rung
+// and the exact-span option. Only the LARGEST candidate STRICTLY BELOW the
+// span is ever added -- never every candidate under the span. That distinction
+// is load-bearing: a naive "every standard rung under the span" reading would
+// offer 24h/7d/30d/60d/90d/112d on a 112-day corpus, when the operator's own
+// worked example wants 24h/7d/30d/90d/112d (no 60d) -- 112 has TWO qualifying
+// candidates (60 and 90) and only the larger one may render.
+const INTERMEDIATE_RUNG_DAYS = [60, 90, 120, 180, 365];
+
 // The window <option> list for a selector, derived from the data span rather
-// than hardcoded. `availableDays` is null while the span hasn't been read yet
-// -- in that not-yet-known state only the always-safe floor (24h) is offered,
-// so the selector never asserts an option set it can't yet back up (the same
-// not-yet-known / known-and-empty / known-and-populated distinction the rest
-// of this file uses for other panels). Once known, every standard window at
-// or under the available span is offered, plus one final option at the real
-// span itself (e.g. 66 days of data -> 24h, 7d, 30d, 66d) unless a standard
-// window already lands on that exact day count.
+// than hardcoded. `availableDays` is null (or non-positive -- a measurement
+// that can't back up even the 24h floor) while the span hasn't been read yet
+// or isn't usable -- in that not-yet-known state only the always-safe floor
+// (24h) is offered, so the selector never asserts an option set it can't yet
+// back up (the same not-yet-known / known-and-empty / known-and-populated
+// distinction the rest of this file uses for other panels).
+//
+// Once known: every base rung (24h/7d/30d) at or under the span; below 30
+// days that means fewer than three base rungs survive at all (e.g. a 12-day
+// corpus offers only 24h/7d, then the exact span -- never a rung with nothing
+// behind it, which was the original defect). Then the one largest
+// INTERMEDIATE_RUNG_DAYS candidate strictly below the span, if any (worked
+// examples: 67 days -> ...,30d,60d,67d; 112 days -> ...,30d,90d,112d, not
+// both 60d and 90d; 42 days -> ...,30d,42d, no intermediate at all since 42
+// clears no INTERMEDIATE_RUNG_DAYS candidate). Finally the exact span itself,
+// unless a rung already landed on that exact day count (never a duplicate
+// entry for a span that lands exactly on 30d, 60d, ...).
 function standardWindowOptions(availableDays) {
-  if (availableDays == null) return [STANDARD_WINDOWS[0]];
+  if (availableDays == null || availableDays <= 0) return [STANDARD_WINDOWS[0]];
   const options = STANDARD_WINDOWS.filter(w => w.days <= availableDays);
+  const intermediateDays = INTERMEDIATE_RUNG_DAYS.filter(d => d < availableDays).pop();
+  if (intermediateDays != null) {
+    options.push({ value: `${intermediateDays}d`, label: `Last ${intermediateDays}d`, days: intermediateDays });
+  }
   const largest = options[options.length - 1];
   if (!largest || largest.days !== availableDays) {
     options.push({ value: `${availableDays}d`, label: `Last ${availableDays}d`, days: availableDays });

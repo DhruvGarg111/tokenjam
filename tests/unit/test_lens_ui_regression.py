@@ -94,9 +94,9 @@ def test_window_selectors_derive_from_data_span(html):
     # back to.
     assert "{ value: '24h', label: 'Last 24h', days: 1 }" in consts
 
-    # Unknown span (not yet read) offers only the always-safe floor, never a
-    # wrong option set asserted ahead of the data.
-    assert "if (availableDays == null) return [STANDARD_WINDOWS[0]];" in fn
+    # Unknown (or non-positive/unusable) span offers only the always-safe
+    # floor, never a wrong option set asserted ahead of the data.
+    assert "if (availableDays == null || availableDays <= 0) return [STANDARD_WINDOWS[0]];" in fn
 
     # Known span: only windows at-or-under the available span, plus one final
     # option at the real span itself.
@@ -138,6 +138,44 @@ def test_window_selectors_derive_from_data_span(html):
     opt_view = html[opt_start:opt_end]
     assert "st.opt.data_span.available_days" in opt_view
     assert 'value="7d">Last 7d</option>\n        <option value="30d">Last 30d' not in opt_view
+
+
+def test_window_ladder_adds_exactly_one_intermediate_rung(html):
+    # standardWindowOptions offers base rungs (24h/7d/30d) clamped to the
+    # span, ONE intermediate rung (the largest INTERMEDIATE_RUNG_DAYS
+    # candidate strictly below the span), then the exact span itself. Pinned
+    # against the operator's own three worked examples, run by hand through
+    # the actual algorithm (this file has no JS runner in CI, so the pin is
+    # the exact source text rather than an executed assertion):
+    #   67  days -> 24h, 7d, 30d, 60d, 67d   (not 90d -- 90 is not < 67)
+    #   112 days -> 24h, 7d, 30d, 90d, 112d  (not ALSO 60d -- only the
+    #               LARGEST qualifying candidate is added, never every one)
+    #   42  days -> 24h, 7d, 30d, 42d        (no intermediate rung clears
+    #               42 at all, so none is added)
+    # A naive "every standard rung under the span" reading would wrongly add
+    # both 60d and 90d for the 112-day case -- that's the one case that rules
+    # it out, so it is the one pinned literally below.
+    assert "const INTERMEDIATE_RUNG_DAYS = [60, 90, 120, 180, 365];" in html
+    start = html.index("function standardWindowOptions")
+    end = html.index("\n}\n", start) + 3
+    fn = html[start:end]
+    assert "const intermediateDays = INTERMEDIATE_RUNG_DAYS.filter(d => d < availableDays).pop();" in fn
+    assert "if (intermediateDays != null) {" in fn
+
+    # Sub-30-day spans drop base rungs the corpus can't support rather than
+    # ever offering a window with nothing behind it (the original defect) --
+    # STANDARD_WINDOWS itself is filtered by `w.days <= availableDays` first,
+    # so a 12-day corpus naturally yields 24h/7d (30d filtered out) then the
+    # exact-span push adds 12d, with no separate sub-30 branch required.
+    const_start = html.index("const STANDARD_WINDOWS")
+    consts = html[const_start:html.index("function standardWindowOptions")]
+    assert "{ value: '30d', label: 'Last 30d', days: 30 }" in consts
+    assert "{ value: '90d'" not in consts  # 90d moved to INTERMEDIATE_RUNG_DAYS
+
+    # Non-positive/unusable spans degrade to the always-safe floor, same as
+    # the not-yet-known (null) case -- never a confusing single "Last 0d" or
+    # empty option list.
+    assert "if (availableDays == null || availableDays <= 0) return [STANDARD_WINDOWS[0]];" in fn
 
 
 def test_detail_views_show_a_layout_shaped_skeleton_not_bare_loading_text(html):
