@@ -2381,7 +2381,8 @@ function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axis
 // an overlaid line. `data` = [xs, savingsPerBucket]. Bars via the vendored
 // uPlot. The y-axis is sized generously (size 70 + gap) so labels never clip
 // (the old "000.0M" leading-digit clip). Plan-tier framing: the caller passes
-// token-volume + token formatters for subscription/local (no raw $).
+// token-volume + token formatters for LOCAL only (no marginal cost to price
+// at all -- api/subscription both pass the dollar figure).
 function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -2545,10 +2546,11 @@ const WASTE_LEGEND_OVERRIDE = {
 };
 
 // Build the cost-by-component + recoverable overlay from a /cost/components
-// response. `useTokens` (subscription/local) swaps measured cost $ → token
-// volume and recoverable $ → recoverable tokens, so the whole surface respects
-// plan-tier framing. `isApi` gates `WASTE_LEGEND_OVERRIDE` entries marked
-// `apiOnly`. Returns null when there's nothing to show.
+// response. `useTokens` (true only for LOCAL -- no marginal cost to price at
+// all) swaps measured cost $ → token volume and recoverable $ → recoverable
+// tokens, so the whole surface respects plan-tier framing. `isApi` gates
+// `WASTE_LEGEND_OVERRIDE` entries marked `apiOnly`. Returns null when
+// there's nothing to show.
 function buildComponentWaste(resp, useTokens, isApi) {
   if (!resp || !resp.components) return null;
   const costSegs = resp.components.map(c => ({
@@ -2861,7 +2863,7 @@ function StatusView({ params }) {
           </div>
           ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
           ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
-          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
+          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
           ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
@@ -4715,7 +4717,6 @@ function SessionDetailView({ sessionId }) {
   const contextSeries = data.context_series || [];
   const subagents = data.subagents || { rows: [], total: 0, cost_usd: 0, tokens: 0, flagged: 0 };
   const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
-  const isSub = s.pricing_mode === 'subscription';
   const isLocal = s.pricing_mode === 'local';
   const framing = data.framing || null;
   const title = s.label || s.agent_id;
@@ -4751,7 +4752,7 @@ function SessionDetailView({ sessionId }) {
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
           ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
-          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
+          : html`<div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
         ${s.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(s.cache_tokens)}</span></div>` : null}
@@ -4783,7 +4784,7 @@ function SessionDetailView({ sessionId }) {
       <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How this session split across models${data.turn_count ? ' · ' + data.turn_count + ' LLM call' + (data.turn_count === 1 ? '' : 's') : ''}</div>
       ${modelMix.length > 0 ? html`
         <div class="table-wrap"><table>
-          <thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th></tr></thead>
+          <thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th></tr></thead>
           <tbody>
             ${modelMix.map(m => html`
               <tr>
@@ -4833,10 +4834,10 @@ function SessionDetailView({ sessionId }) {
 
     ${tab === 'subagents' ? html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Subagents</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">${subagents.total} subagent${subagents.total === 1 ? '' : 's'}${s.total_cost_usd > 0 ? ' · ' + Math.round(subagents.cost_usd / s.total_cost_usd * 100) + '% of session ' + (isSub ? 'implied value' : 'cost') : ''}${subagents.flagged ? ' · ' + subagents.flagged + ' flagged for right-sizing' : ''}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">${subagents.total} subagent${subagents.total === 1 ? '' : 's'}${s.total_cost_usd > 0 ? ' · ' + Math.round(subagents.cost_usd / s.total_cost_usd * 100) + '% of session cost' : ''}${subagents.flagged ? ' · ' + subagents.flagged + ' flagged for right-sizing' : ''}</div>
     ${subagents.rows.length > 0 ? html`
       <div class="table-wrap"><table>
-        <thead><tr><th>Subagent</th><th>Model</th><th>Calls</th><th>Tools</th><th>Input</th><th>Cache</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Right-sizing</th></tr></thead>
+        <thead><tr><th>Subagent</th><th>Model</th><th>Calls</th><th>Tools</th><th>Input</th><th>Cache</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th><th>Right-sizing</th></tr></thead>
         <tbody>
           ${subagents.rows.map(r => html`
             <tr style=${r.flags.length ? 'background:rgba(245,166,35,0.06)' : ''}>
@@ -4895,7 +4896,7 @@ function SessionDetailView({ sessionId }) {
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
     ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>` : html`
       <div class="table-wrap"><table>
-        <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result</th><th>Spans</th><th></th></tr></thead>
+        <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th><th>Result</th><th>Spans</th><th></th></tr></thead>
         <tbody>
           ${traces.map(t => html`
             <tr class="clickable" onClick=${() => location.hash = '#/traces/' + t.trace_id} title=${'Trace ' + t.trace_id}>
@@ -5099,11 +5100,12 @@ function RunDetailView({ runId }) {
   const sessions = data.sessions || [];
   const tree = data.tree || [];
   // Honest cost framing: a run aggregates member sessions; pricing_mode is
-  // 'subscription' / 'local' / 'api' / 'unknown' / 'mixed'. Treat 'mixed' like
-  // subscription for safety (show implied value, never a hard spend claim).
+  // 'subscription' / 'local' / 'api' / 'unknown' / 'mixed'. Dollars price all
+  // traffic at API list rates regardless of plan (product decision: tj does
+  // not differentiate subscription-billed from API-billed users), including
+  // a 'mixed' aggregate -- only LOCAL has no marginal cost to price at all.
   const isLocal = r.pricing_mode === 'local';
-  const isSub = r.pricing_mode === 'subscription' || r.pricing_mode === 'mixed';
-  const costTip = "Aggregated from member sessions' token usage. If any session is on a subscription plan (e.g. Claude Max), actual spend may differ.";
+  const costTip = "Aggregated from member sessions' token usage, at API list rates.";
 
   // Map session_id -> summary for tree rendering.
   const byId = {};
@@ -5154,7 +5156,7 @@ function RunDetailView({ runId }) {
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
           ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
-          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
+          : html`<div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(r.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(r.output_tokens)}</span></div>
         ${r.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(r.cache_tokens)}</span></div>` : null}
@@ -5369,11 +5371,12 @@ function TraceDetailView({ traceId }) {
   const nameW = 220;
 
   // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
-  // (subscription/local), the magnitude bar + summary read on TOKEN volume, never
+  // (local -- no marginal cost to price; subscription no longer suppresses,
+  // product decision), the magnitude bar + summary read on TOKEN volume, never
   // raw spend — the suppression decision comes from the server framing block, not
   // re-derived here. Tokens are never suppressed, so they always annotate.
   const spanTokens = s => (s.input_tokens || 0) + (s.output_tokens || 0) + (s.cache_tokens || 0) + (s.cache_write_tokens || 0);
-  const wfUseTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const wfUseTokens = !!framing && framing.pricing_mode === 'local';
   const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
   const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
 
@@ -5390,8 +5393,9 @@ function TraceDetailView({ traceId }) {
   const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
   const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
   // A single trace's total is per-item, not a window aggregate (#249) — render
-  // it as in+out TOKENS for subscription/local, dollars for api/unknown. ("% of
-  // cycle" for one trace is the same category error as the per-row cells.)
+  // it as in+out TOKENS for local (no marginal cost to price at all), dollars
+  // for api/subscription/unknown. ("% of cycle" for one trace is the same
+  // category error as the per-row cells.)
   const wfTotalInOut = spans.reduce((a, s) => a + _costVal(s, true), 0);
   const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing);
 
@@ -5467,12 +5471,13 @@ function TraceDetailView({ traceId }) {
         width = Math.max(1.5, Math.min(width, 100 - left));
         const barEnd = left + width;
         const valFlip = barEnd > 72;
-        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local
-        // \u2192 "\u2014" (suppressed), api/unknown \u2192 "$X".
+        // Plan-tier framed cost (#187): local \u2192 "\u2014" (suppressed, no
+        // marginal cost to price at all); api/subscription \u2192 "$X" (product
+        // decision: tj does not differentiate subscription-billed from
+        // API-billed users).
         const costFramed = fmtFramedDollar(s.cost_usd, framing);
-        // Per-SPAN cost is per-item (#249): "% of cycle" is nonsensical at this
-        // granularity, and the token column already conveys per-span magnitude,
-        // so only show the $ value for api/unknown.
+        // Per-SPAN cost is per-item (#249): the token column already conveys
+        // per-span magnitude, so only show the $ value when it's not suppressed.
         const costShown = !wfUseTokens && s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
         const sTok = spanTokens(s);
         const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
@@ -5563,30 +5568,35 @@ function TraceDetailView({ traceId }) {
 // that passes fmtDashUsd, so its figures stay at most 2dp without touching
 // this formatter's precision anywhere else it is used (Sessions, Cost,
 // Optimize, ...).
+//
+// Product decision: tj does not differentiate subscription-billed from
+// API-billed users -- both want the same token/cost savings, and dollars
+// price all traffic at API list rates regardless of plan, so subscription no
+// longer gets its own "% of cycle" rendering here. LOCAL is a structurally
+// different case, not a differentiation choice: local inference incurs no
+// marginal dollar cost at all (no vendor bills it), so it still renders as
+// unknown/absent rather than a fabricated $0.
 function fmtFramedDollar(v, framing, dollarFmt = fmtCost) {
   if (!framing) return dollarFmt(v);
-  const m = framing.pricing_mode;
-  if (m === 'local') return '—';
-  if (m === 'subscription') {
-    return framing.plan_monthly_usd ? (100 * v / framing.plan_monthly_usd).toFixed(1) + '% of cycle' : '—';
-  }
-  return dollarFmt(v); // api / unknown
+  if (framing.pricing_mode === 'local') return '—';
+  return dollarFmt(v); // api / subscription / unknown
 }
 
-// Per-ITEM (per-row) cost rendering (#249). "% of cycle" is a WINDOW-LEVEL
-// aggregate concept — applying it to a single trace / agent / span produces
-// nonsense like "466.7% of cycle". So at per-item granularity, subscription /
-// local users see the row's TOKEN total (the same in+out basis as the Cost
-// table's "Cost (tokens)" column via _costVal), while api / unknown users keep
-// dollars unchanged. WINDOW-LEVEL totals + headlines still use fmtFramedDollar.
-// `tokenTotal` must be a server-provided per-row figure (single compute path) —
-// the /traces and /status payloads carry input_tokens/output_tokens per row.
+// Per-ITEM (per-row) cost rendering (#249). Dollars, uniformly, for every
+// pricing mode except local (no marginal cost to price at all). The Traces
+// list is the one deliberate exception -- it shows token totals for EVERY
+// account there, as the market-convention display for how traces are
+// presented rather than a plan consequence -- so it bypasses this formatter
+// entirely rather than reading perItemUsesTokens (see TracesListView).
+// `tokenTotal` must be a server-provided per-row figure (single compute
+// path) -- the /traces and /status payloads carry input_tokens/output_tokens
+// per row.
 function perItemUsesTokens(framing) {
-  return !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  return !!framing && framing.pricing_mode === 'local';
 }
 function fmtPerItemCost(costUsd, tokenTotal, framing) {
   if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';
-  return fmtFramedDollar(costUsd, framing); // api / unknown → dollars
+  return fmtFramedDollar(costUsd, framing); // api / subscription / unknown → dollars
 }
 
 // Integer count with thousand separators (#262): "23954" → "23,954". For the
@@ -5615,31 +5625,24 @@ const UNKNOWN_FIGURE = '?';
 // tile showing 0 for a read that failed.
 const kpiFigure = (v, fmt) => (v == null ? UNKNOWN_FIGURE : fmt(v));
 
-// The Spend KPI tile under plan-tier framing (#262). For SUBSCRIPTION, the
-// confusing "% of cycle" is replaced by an honest implied-value MULTIPLIER —
-// "43.5× plan value" (implied API value ÷ the plan's monthly fee, which is just
-// the "% of cycle" number ÷ 100). It is plan VALUE, never "spent $X". api /
-// unknown keep dollars. LOCAL (no plan fee) and a subscription with no declared
-// monthly fee have no denominator, so the tile is dropped — the Tokens tile
-// already conveys volume. Returns {label, value} or null (drop the tile).
+// The Spend KPI tile under plan-tier framing (#262). Used to swap in an
+// implied-value MULTIPLIER ("43.5× plan value") for SUBSCRIPTION instead of
+// a dollar figure; that differentiation is gone by product decision (tj does
+// not differentiate subscription-billed from API-billed users, and dollars
+// price all traffic at API list rates regardless of plan). api / subscription
+// / unknown all render the same plain "Spend" dollar figure now. LOCAL has no
+// marginal dollar cost at all (not a differentiation choice — no vendor
+// bills it), so the tile is still dropped there — the Tokens tile already
+// conveys volume. Returns {label, value} or null (drop the tile).
 function spendTileDisplay(spendUsd, framing) {
   const mode = framing && framing.pricing_mode;
-  // An unreported spend field is unknown, not zero. Both branches below would
-  // otherwise manufacture one: `(null || 0) / fee` renders "0.0× plan value" and
-  // fmtDashUsd(null) renders "$0.00", and on a spend tile a zero reads as "this
-  // window cost you nothing". Checked before the mode branches so neither can.
-  const unknown = spendUsd == null;
-  if (mode === 'subscription') {
-    if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
-    if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };
-    const mult = spendUsd / framing.plan_monthly_usd;    // == (% of cycle) / 100
-    return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
-  }
-  if (mode === 'local') return null;                     // no plan fee to multiply against
-  // api / unknown → dollars, at most 2dp (Dashboard's own precision rule --
-  // this tile has exactly one caller, AnalyticsView, which only ever renders
-  // embedded on the Dashboard).
-  return { label: 'Spend', value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };
+  if (mode === 'local') return null;                     // no marginal cost to price
+  // An unreported spend field is unknown, not zero: fmtDashUsd(null) would
+  // render "$0.00", and on a spend tile a zero reads as "this window cost
+  // you nothing". At most 2dp (Dashboard's own precision rule -- this tile
+  // has exactly one caller, AnalyticsView, which only ever renders embedded
+  // on the Dashboard).
+  return { label: 'Spend', value: spendUsd == null ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };
 }
 
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
@@ -5761,9 +5764,9 @@ function kpiSparkValues(resp, metric) {
 }
 
 // Build a uPlot [xs, ys...] series from day-grouped cost rows. `mode` is
-// total | model | agent; `useTokens` swaps cost for token volume (subscription
-// / local framing where dollars are suppressed). Splits keep the top-5 keys
-// plus an "other" bucket.
+// total | model | agent; `useTokens` swaps cost for token volume (true only
+// for LOCAL framing, where dollars are suppressed — no marginal cost to
+// price at all). Splits keep the top-5 keys plus an "other" bucket.
 function _costVal(r, useTokens) {
   return useTokens ? ((r.input_tokens || 0) + (r.output_tokens || 0)) : (r.cost_usd || 0);
 }
@@ -5865,7 +5868,7 @@ function _windowGrid(resp) {
 // bars are the one chart (not a cumulative ramp), the overall hit-rate is a
 // headline stat (+ a tiny sparkline for trend, NOT an overlaid axis line), and
 // the "recoverable (est.)" overlay is gone (noise here; it lives on Optimize).
-// `useTokens` (subscription/local) swaps captured $ for cached-token volume.
+// `useTokens` (true only for LOCAL) swaps captured $ for cached-token volume.
 function buildCacheSeries(resp, useTokens) {
   const grid = _windowGrid(resp); if (!grid) return null;
   const { xs, idx, step, bucket } = grid;
@@ -5978,7 +5981,10 @@ function CostView({ params }) {
   }, [refreshAll]);
 
   const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
-  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  // LOCAL only -- no marginal cost to price at all. Subscription no longer
+  // suppresses (product decision: tj does not differentiate subscription-
+  // billed from API-billed users), so it renders dollars like api/unknown.
+  const useTokens = !!framing && framing.pricing_mode === 'local';
   const series = buildCostSeries(costResp, isAttributionDim ? 'total' : groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
   const cacheSeries = buildCacheSeries(cacheResp, useTokens);
@@ -6061,7 +6067,8 @@ function CostView({ params }) {
       <div class="chart-card">
         <div class="chart-title">Caching</div>
         <!-- Lead with the answer (#246): hit-rate + savings this window, framed.
-             Subscription/local show cached-token volume (never raw $). -->
+             LOCAL shows cached-token volume (never raw $, no marginal cost to
+             price at all); api and subscription both show the dollar figure. -->
         <div class="cache-headline">
           <span class="cache-stat"><b>${cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate</span>
           <${Sparkline} values=${cacheSeries.hitSpark} color="var(--chart-2)" width=${72} height=${22} />
@@ -6099,7 +6106,7 @@ function CostView({ params }) {
           <th>${COST_GROUP_BY_LABELS[tableMode] || 'Group'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
-          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
+          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
@@ -6720,12 +6727,11 @@ function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost) {
     return tokens == null ? '—' : (fmtTokens(tokens) + ' tokens');
   }
   if (dollarsSuppressed(framing)) {
-    if (tokens == null) return '—';
-    const mode = framing ? framing.pricing_mode : 'api';
-    if (mode === 'subscription' && framing.window_total_tokens > 0) {
-      return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
-    }
-    return fmtTokens(tokens) + ' tokens';
+    // The window-total "% of cycle tokens" branch this used to have for
+    // subscription is dead: dollarsSuppressed() can no longer be true for
+    // subscription (see its own comment below), so the only pricing_mode
+    // that ever reaches here is 'local'.
+    return tokens == null ? '—' : (fmtTokens(tokens) + ' tokens');
   }
   return usd == null ? '—' : dollarFmt(usd);
 }
@@ -6734,16 +6740,19 @@ function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost) {
 // server-side decision (`display_rule`, core/framing.py) rather than
 // re-deriving it, with a pricing_mode fallback for older payloads. True for
 // local inference (no marginal cost to price) and an all-unknown plan mix.
-// Subscription is deliberately NOT in this set — dollars price all traffic at
-// API list rates and are shown with a list-price-equivalent qualifier.
-// Callers make TOKENS the headline only in the suppressed case.
-const DOLLARS_SUPPRESSED_RULES = new Set([
-  'suppress_dollars_for_subscription_share', 'tokens_only', 'suppress_dollars_unknown',
-]);
+// The subscription-share suppression rule is deliberately gone from this set
+// — product decision: tj does not differentiate subscription-billed from
+// API-billed users, so dollars price all traffic at API list rates
+// regardless of plan. That display_rule value is dead on the server side too
+// (core/framing.py's compute_framing no longer produces it; the constant
+// stays defined there for any other caller that wants to detect a
+// subscription-dominant window from pricing_mode). Callers make TOKENS the
+// headline only in the suppressed case.
+const DOLLARS_SUPPRESSED_RULES = new Set(['tokens_only', 'suppress_dollars_unknown']);
 function dollarsSuppressed(framing) {
   if (!framing) return false;
   if (framing.display_rule) return DOLLARS_SUPPRESSED_RULES.has(framing.display_rule);
-  return framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local';
+  return framing.pricing_mode === 'local';
 }
 
 // Count agents whose latest session breaches the 2σ drift threshold on any
@@ -7314,7 +7323,9 @@ function OptimizeView({ params }) {
   const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']
     .filter(n => !personaGated.has(n));
   const compFraming = st.comp ? st.comp.framing : framing;
-  const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
+  // LOCAL only -- subscription no longer suppresses (product decision: tj
+  // does not differentiate subscription-billed from API-billed users).
+  const useTokens = !!compFraming && compFraming.pricing_mode === 'local';
   const compIsApi = !!compFraming && compFraming.pricing_mode === 'api';
   const waste = buildComponentWaste(st.comp, useTokens, compIsApi);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
@@ -8213,7 +8224,7 @@ function downloadCsv(filename, text) {
 // nothing invokes it bare anymore.
 // Four placeholders for the four KPI tiles the row settles into (Spend, Tokens,
 // Sessions, Events), so the row occupies its final height from first paint. A
-// subscription/local corpus with no declared plan fee drops the Spend tile, in
+// LOCAL corpus (no marginal cost to price at all) drops the Spend tile, in
 // which case the row narrows by one when the answer lands; holding four is still
 // the closer guess than holding none.
 const KPI_SKELETON_TILES = [0, 1, 2, 3];
@@ -8264,10 +8275,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 
   const { loading, error, resp } = st;
   const framing = resp ? resp.framing : null;
-  // Plan-tier framing: the spend metric switches to token volume for
-  // subscription/local (dollars suppressed) — single source, never re-derived.
+  // Plan-tier framing: the spend metric switches to token volume for LOCAL
+  // (dollars suppressed -- no marginal cost to price at all) — single
+  // source, never re-derived. Subscription no longer suppresses (product
+  // decision: tj does not differentiate subscription-billed from
+  // API-billed users).
   const isSpend = metric === 'spend';
-  const useTokens = isSpend && !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const useTokens = isSpend && !!framing && framing.pricing_mode === 'local';
   const valueIsDollars = isSpend && !useTokens;
   // fmtDashUsd (at most 2dp), not fmtCost: this view only ever renders
   // embedded on the Dashboard (see the router's dashboard/analytics alias
@@ -8363,13 +8377,12 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 
     ${!error && kpis ? (() => {
       // The Spend tile follows the server framing block (single source, never
-      // re-derived). Under SUBSCRIPTION it shows an implied-value MULTIPLIER
-      // ("43.5× plan value", #262) — NOT "% of cycle" and NOT raw tokens (which
-      // duplicated the Tokens tile, #247). Its sparkline/delta still track SPEND
-      // (cost_usd), since the multiplier is just spend rescaled by the plan fee
-      // — so the trend/shape are identical to spend, never raw $. LOCAL / a
-      // subscription with no declared fee have no denominator → the tile is
-      // dropped rather than duplicate Tokens.
+      // re-derived), via spendTileDisplay (#262). Renders the same plain
+      // dollar figure for api/subscription/unknown (product decision: tj
+      // does not differentiate subscription-billed from API-billed users —
+      // the old subscription-only "43.5× plan value" multiplier is gone).
+      // LOCAL has no marginal cost to price at all, so the tile is dropped
+      // there rather than duplicate Tokens (#247).
       const deltas = resp.kpi_deltas || {};
       const spend = spendTileDisplay(kpis.spend, framing);
       // A prior window with almost no activity makes period-over-period % a
@@ -10448,11 +10461,11 @@ function ReviewInboxView({ params }) {
   // Founder-approved carve-out, scoped to THIS page only: the Review inbox's
   // dollar figures are a savings/waste comparison ("what would this cost me
   // to keep paying for"), not a billed-amount claim, so it shows them
-  // unconditionally rather than falling back to tokens for a
-  // subscription-dominant account the way every OTHER dollar figure in the
-  // app does (requirement #9, core/framing.py's dollarsSuppressed() — left
-  // completely untouched and still governs Overview/Optimize/etc). Genuinely
-  // unpriced items (no computable rate at all, or the resend/TRIM
+  // unconditionally rather than falling back to tokens the way every OTHER
+  // dollar figure in the app does for a LOCAL account (no marginal cost to
+  // price at all -- requirement #9, core/framing.py's dollarsSuppressed() —
+  // left completely untouched and still governs Overview/Optimize/etc).
+  // Genuinely unpriced items (no computable rate at all, or the resend/TRIM
   // not-a-savings-claim exclusion above) still fall back to tokens on their
   // own terms; this constant only removes the EXTRA plan-tier gate on top of
   // that, it never invents a dollar figure where none exists.
@@ -10928,7 +10941,9 @@ function DashboardView({ params }) {
   const costData = costRead.data;
   const cost = costData || {};
   const framing = costData ? (cost.framing || null) : null;
-  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  // LOCAL only -- subscription no longer suppresses (product decision: tj
+  // does not differentiate subscription-billed from API-billed users).
+  const useTokens = !!framing && framing.pricing_mode === 'local';
   // Series only used to gate the run-rate projection (the chart itself is the
   // explorer's now — spend de-dup); window total drives the run-rate caption.
   const series = costData ? buildCostSeries(cost, 'total', useTokens) : null;
@@ -10983,9 +10998,10 @@ function DashboardView({ params }) {
 
   // Run-rate projection folded into a one-line caption under the explorer's KPI
   // row — the dashboard's single spend headline lives there, not as a separate
-  // chart (de-dup). Framed (tokens for subscription/local), never raw $.
-  // Requires `projection`, which requires `costData`, so this caption cannot be
-  // built from an unanswered read.
+  // chart (de-dup). Framed: tokens for LOCAL (no marginal cost to price at
+  // all), the dollar figure (via fmtFramedDollar, fmtDashUsd's 2dp) for
+  // api/subscription/unknown. Requires `projection`, which requires
+  // `costData`, so this caption cannot be built from an unanswered read.
   const kpiCaption = (projection && projection !== '—')
     ? ('At this pace, ~' + projection + ' by ' + cyc.label + ' — linear run-rate, not a forecast')
     : null;

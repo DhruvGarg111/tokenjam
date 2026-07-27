@@ -283,17 +283,17 @@ def test_an_unreported_kpi_field_is_unknown_not_zero(html):
 
 
 def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
-    # `(null || 0) / fee` rendered "0.0× plan value" and fmtDashUsd(null) would
-    # render "$0.00"; on a spend tile a zero reads as "this window cost you
-    # nothing". fmtDashUsd (at most 2dp, the Dashboard's own precision rule)
-    # replaced fmtCost here since this tile has exactly one caller and it only
-    # ever renders on the Dashboard -- the unknown-guard behaviour is unchanged.
+    """fmtDashUsd(null) would render "$0.00"; on a spend tile a zero reads as
+    "this window cost you nothing". The subscription-specific "0.0× plan
+    value" manufactured-zero this test used to guard against is gone along
+    with the multiplier branch itself (product decision: no more subscription
+    differentiation) -- the remaining guard is the plain null check on the
+    one dollar path every mode but local now shares."""
     spend = html[html.index("function spendTileDisplay"):]
     spend = spend[:spend.index("function PlanBadge")]
-    assert "const unknown = spendUsd == null;" in spend
-    assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
-    assert "value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
-    assert "(spendUsd || 0) / framing.plan_monthly_usd" not in spend
+    assert "value: spendUsd == null ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
+    assert "plan_monthly_usd" not in spend
+    assert "× plan value" not in spend
 
 
 def test_one_page_shows_one_kind_of_unknown(html):
@@ -507,3 +507,117 @@ def test_fmt_dash_usd_never_prints_a_real_cost_as_free():
     assert _dash_usd(0.0031) == "< $0.01"
     assert _dash_usd(0.009) == "< $0.01"
     assert _dash_usd(0.01) == "$0.01"
+
+
+# --------------------------------------------------------------------------- #
+# De-differentiation: subscription and api must render identically, run under
+# node. Product decision -- tj does not differentiate subscription-billed
+# from API-billed users; both want the same token/cost savings, and dollars
+# price all traffic at API list rates regardless of plan. LOCAL is a
+# structurally different case (no marginal cost to price at all -- no vendor
+# bills it), not a differentiation choice, so it is exempt throughout.
+# --------------------------------------------------------------------------- #
+def _dedup_source() -> str:
+    """Every formatter this suite exercises, lifted straight out of the
+    served page and concatenated once. `fmtFramedDollar`/`fmtFramedSavings`
+    depend on `fmtCost`; `perItemUsesTokens`/`fmtPerItemCost` depend on
+    `fmtFramedDollar` and `fmtTokens`; `spendTileDisplay` depends on
+    `UNKNOWN_FIGURE` and `fmtDashUsd`; `fmtFramedSavings` depends on
+    `dollarsSuppressed`/`DOLLARS_SUPPRESSED_RULES`/`fmtTokens`."""
+    src = _UI.read_text(encoding="utf-8")
+
+    def block(anchor: str) -> str:
+        start = src.index(anchor)
+        end = src.index("\n}\n", start) + 2
+        return src[start:end]
+
+    def const_line(anchor: str) -> str:
+        start = src.index(anchor)
+        return src[start: src.index("\n", start) + 1]
+
+    return "\n".join([
+        block("function fmtCost(usd)"),
+        block("function fmtDashUsd(v)"),
+        block("function fmtTokens(n)"),
+        block("function fmtFramedDollar(v, framing, dollarFmt = fmtCost)"),
+        block("function perItemUsesTokens(framing)"),
+        block("function fmtPerItemCost(costUsd, tokenTotal, framing)"),
+        const_line("const UNKNOWN_FIGURE"),
+        block("function spendTileDisplay(spendUsd, framing)"),
+        const_line("const DOLLARS_SUPPRESSED_RULES"),
+        block("function dollarsSuppressed(framing)"),
+        block("function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost)"),
+    ])
+
+
+def _run_dedup_js(expr: str):
+    script = _dedup_source() + "\nconsole.log(JSON.stringify(" + expr + "));"
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+_API_FRAMING = json.dumps({"pricing_mode": "api", "display_rule": "show_dollars"})
+_SUB_FRAMING = json.dumps({
+    "pricing_mode": "subscription", "display_rule": "show_dollars_with_qualifier",
+    "plan_monthly_usd": 200, "window_total_tokens": 1_000_000,
+})
+_LOCAL_FRAMING = json.dumps({"pricing_mode": "local", "display_rule": "tokens_only"})
+
+
+@_node
+def test_fmt_framed_dollar_renders_identically_for_subscription_and_api():
+    api = _run_dedup_js("fmtFramedDollar(123.456, %s)" % _API_FRAMING)
+    sub = _run_dedup_js("fmtFramedDollar(123.456, %s)" % _SUB_FRAMING)
+    assert api == sub == "$123.4560"
+    # LOCAL is exempt -- no marginal cost to price at all.
+    assert _run_dedup_js("fmtFramedDollar(123.456, %s)" % _LOCAL_FRAMING) == "—"
+
+
+@_node
+def test_fmt_per_item_cost_renders_identically_for_subscription_and_api():
+    api = _run_dedup_js("fmtPerItemCost(9.5, 12345, %s)" % _API_FRAMING)
+    sub = _run_dedup_js("fmtPerItemCost(9.5, 12345, %s)" % _SUB_FRAMING)
+    assert api == sub == "$9.5000"
+    # LOCAL is exempt -- still renders the token total.
+    assert _run_dedup_js("fmtPerItemCost(9.5, 12345, %s)" % _LOCAL_FRAMING) == "12.3k tok"
+
+
+@_node
+def test_spend_tile_display_renders_identically_for_subscription_and_api():
+    api = _run_dedup_js("spendTileDisplay(500, %s)" % _API_FRAMING)
+    sub = _run_dedup_js("spendTileDisplay(500, %s)" % _SUB_FRAMING)
+    # $500.00, not fmtCost's 4dp: spendTileDisplay uses fmtDashUsd (this tile
+    # only ever renders on the Dashboard, at most 2dp).
+    assert api == sub == {"label": "Spend", "value": "$500.00"}
+    # LOCAL is exempt -- the tile is dropped (no marginal cost to price).
+    assert _run_dedup_js("spendTileDisplay(500, %s)" % _LOCAL_FRAMING) is None
+
+
+@_node
+def test_fmt_framed_savings_renders_identically_for_subscription_and_api():
+    api = _run_dedup_js("fmtFramedSavings(42.5, 98765, %s)" % _API_FRAMING)
+    sub = _run_dedup_js("fmtFramedSavings(42.5, 98765, %s)" % _SUB_FRAMING)
+    assert api == sub == "$42.5000"
+    # LOCAL is exempt -- still renders the token total.
+    assert _run_dedup_js("fmtFramedSavings(42.5, 98765, %s)" % _LOCAL_FRAMING) == "98.8k tokens"
+
+
+@_node
+def test_no_dollar_surface_renders_a_suppressed_figure_with_no_explanation():
+    """A figure is either shown (fmtCost's precise string) or explicitly
+    replaced with a token total / a placeholder ("—", "?") -- never a value
+    that quietly vanishes with nothing in its place. Exercises every
+    formatter in this suite across all three pricing modes plus an unknown
+    framing (the read hasn't landed yet)."""
+    framings = [_API_FRAMING, _SUB_FRAMING, _LOCAL_FRAMING, "null"]
+    for fr in framings:
+        for expr in (
+            "fmtFramedDollar(10, %s)" % fr,
+            "fmtPerItemCost(10, 5000, %s)" % fr,
+            "fmtFramedSavings(10, 5000, %s)" % fr,
+        ):
+            result = _run_dedup_js(expr)
+            assert result not in (None, ""), "%s produced no explanation: %r" % (expr, result)

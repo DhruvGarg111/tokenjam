@@ -564,14 +564,16 @@ def test_trace_detail_costs_route_through_framing(html):
 # --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
 def test_status_card_cost_today_routes_through_framing(html):
     # Status agent cards' "Cost today" must consume the /status framing block,
-    # not render raw fmtCost(a.cost_today). Per #249 it's per-item → tokens for
-    # subscription/local via fmtPerItemCost (not fmtFramedDollar "% of cycle").
+    # not render raw fmtCost(a.cost_today). Per #249 it's per-item, so it
+    # routes through fmtPerItemCost (tokens for LOCAL only now -- subscription
+    # no longer suppresses, product decision), not fmtFramedDollar "% of cycle".
     assert "${fmtCost(a.cost_today)}" not in html
     assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html
 
 
 def test_optimize_window_comparison_routes_through_framing(html):
-    # The window-comparison cost delta must reframe for subscription/local.
+    # The window-comparison cost delta must reframe (LOCAL suppresses; api and
+    # subscription both render the dollar figure -- product decision).
     assert "${fmtCost(Math.abs(st.cmp.cost_delta_usd))}" not in html
     assert "${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)}" in html
 
@@ -587,9 +589,10 @@ def test_optimize_budget_projection_routes_through_framing(html):
 
 
 def test_optimize_cluster_avg_cost_routes_through_framing(html):
-    # The script cluster table "Avg cost" cell is per-item, so per #260 it routes
-    # through fmtPerItemCost (tokens for subscription/local), not the raw $ nor
-    # the window-aggregate fmtFramedDollar "% of cycle".
+    # The script cluster table "Avg cost" cell is per-item, so per #260 it
+    # routes through fmtPerItemCost (tokens for LOCAL only now -- subscription
+    # no longer suppresses, product decision), not the raw $ nor the
+    # window-aggregate fmtFramedDollar "% of cycle".
     assert "${fmtCost(c.avg_cost_usd)}" not in html
     assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" not in html
     assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
@@ -607,9 +610,13 @@ def test_stacked_bar_chart_present(html):
 
 
 def test_stacked_bar_chart_uses_framing_tokens(html):
-    # Stacked chart respects plan-tier framing: subscription/local -> tokens.
+    """Stacked chart respects plan-tier framing: LOCAL -> tokens (no marginal
+    cost to price at all). Subscription used to switch to tokens here too;
+    that differentiation is gone by product decision (tj does not
+    differentiate subscription-billed from API-billed users), so subscription
+    now renders dollars like api/unknown."""
     assert "fmtY=${fmtY}" in html  # fmtY = useTokens ? fmtTokens : fmtCost
-    assert "const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
+    assert "const useTokens = !!framing && framing.pricing_mode === 'local'" in html
 
 
 def test_cache_savings_chart_present(html):
@@ -623,8 +630,10 @@ def test_cache_savings_chart_present(html):
 
 def test_cache_savings_honesty_framing(html):
     # #246 dropped the "estimated recoverable" overlay from this chart (noise;
-    # it lives on Optimize). The cache card now reports MEASURED savings, framed:
-    # api → "$X saved", subscription/local → cached-token VOLUME (never raw $).
+    # it lives on Optimize). The cache card now reports MEASURED savings,
+    # framed: api and subscription → "$X saved" (product decision: no
+    # subscription differentiation), LOCAL → cached-token VOLUME (never raw
+    # $, no marginal cost to price at all).
     assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
     assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
     # the recoverable overlay is no longer wired into the cache chart
@@ -681,13 +690,17 @@ def test_component_waste_honesty_estimated_not_saved(html):
 
 
 def test_component_waste_recoverable_routes_through_framing(html):
-    # Per-analyzer recoverable must reframe (subscription/local → token-share),
-    # mirroring the existing recoverable band — not raw fmtCost.
+    """Per-analyzer recoverable must reframe (LOCAL -> token-share; local has
+    no marginal cost to price at all), mirroring the existing recoverable
+    band — not raw fmtCost. Subscription used to switch to token-share here
+    too; that differentiation is gone by product decision (tj does not
+    differentiate subscription-billed from API-billed users)."""
     assert "fmtFramedSavings(r.usd, r.tokens, compFraming)" in html
     # the measured-cost total uses the dollar framing helper, not raw fmtCost
     assert "fmtFramedDollar(st.comp.total_cost_usd" in html
     # plan-tier toggle drives tokens-vs-dollars for the whole surface
-    assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html
+    assert "compFraming.pricing_mode === 'local'" in html
+    assert "compFraming.pricing_mode === 'subscription'" not in html
 
 
 # --- trim card: provenance + flagged text on the web card, not just the CLI - #
@@ -806,11 +819,14 @@ def test_analytics_consumes_endpoint_not_reimplements(html):
 
 
 def test_analytics_respects_plan_tier_framing(html):
-    # spend metric switches to token volume for subscription/local (dollars
-    # suppressed); never re-derives the suppression rule — reads framing.
-    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
-    # The Spend KPI tile reframes via spendTileDisplay (implied-value multiplier
-    # for subscription, #262) rather than fmtFramedDollar's "% of cycle".
+    """spend metric switches to token volume for LOCAL (dollars suppressed --
+    no marginal cost to price at all); never re-derives the suppression rule
+    — reads framing. Subscription used to suppress here too (an implied-value
+    multiplier instead of "% of cycle", #262); that differentiation is gone
+    by product decision (tj does not differentiate subscription-billed from
+    API-billed users), so the Spend KPI tile now renders the same plain
+    dollar figure for subscription as api/unknown via spendTileDisplay."""
+    assert "isSpend && !!framing && framing.pricing_mode === 'local'" in html
     assert "spendTileDisplay(kpis.spend, framing)" in html
 
 
@@ -897,10 +913,17 @@ def test_trace_waterfall_per_span_cost_token_annotation(html):
 
 
 def test_trace_waterfall_magnitude_respects_framing(html):
-    # The magnitude bar (and summary) read on TOKEN volume when dollars are
-    # suppressed (subscription/local) — the suppression decision comes from the
-    # server framing block, never re-derived in JS.
-    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
+    """The magnitude bar (and summary) read on TOKEN volume when dollars are
+    suppressed — the suppression decision comes from the server framing
+    block, never re-derived in JS. LOCAL still suppresses (no marginal cost
+    to price at all). Subscription used to suppress here too; that
+    differentiation is gone by product decision (tj does not differentiate
+    subscription-billed from API-billed users) -- this site was not in the
+    founder's named list of four `useTokens` duplicates to convert, but it is
+    the exact same pattern on the trace detail/waterfall view (part of the
+    same Traces feature the list's Cost column belongs to), so it is
+    converted the same way for consistency; flagged in the session report."""
+    assert "const wfUseTokens = !!framing && framing.pricing_mode === 'local';" in html
     assert "const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0)" in html
 
 
@@ -928,11 +951,12 @@ def test_kpi_series_is_server_computed_not_client_aggregated(html):
 
 
 def test_kpi_spend_tile_respects_framing(html):
-    # The Spend tile reads the framed value from the server block (api → $,
-    # subscription → implied-value multiplier "43.5× plan value", #262), never
-    # raw $ for subscription. Its sparkline and delta track SPEND (cost_usd) —
-    # the multiplier is just spend rescaled, so the trend/shape match while the
-    # displayed number is never raw dollars.
+    # The Spend tile reads the framed value from the server block via
+    # spendTileDisplay (#262) — api and subscription both render the same
+    # plain dollar figure now (product decision: tj does not differentiate
+    # subscription-billed from API-billed users; the old "43.5× plan value"
+    # multiplier for subscription is gone). Its sparkline and delta still
+    # track SPEND (cost_usd) regardless.
     assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
     assert "series: kpiSparkValues(resp, 'spend'), delta: deltas.spend" in html
 
@@ -1096,9 +1120,10 @@ def test_kpi_tiles_clickable_select_metric(html):
 
 def test_spend_tile_distinct_under_subscription(html):
     # #247/#262: the Spend tile no longer falls back to raw tokens (which
-    # duplicated the Tokens tile). It uses spendTileDisplay (implied-value
-    # multiplier for subscription) and is dropped when no distinct value exists
-    # (local / a subscription with no declared fee → null).
+    # duplicated the Tokens tile). It uses spendTileDisplay, which renders a
+    # plain dollar figure for api/subscription/unknown alike (product
+    # decision: no subscription differentiation) and is dropped only for
+    # LOCAL (no marginal cost to price at all → null).
     assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
     assert "if (spend) {" in html
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
@@ -1174,15 +1199,21 @@ def test_status_archive_cost_column_respects_framing(html):
 
 # --- #249: "% of cycle" is window-level; per-item cost must render as tokens -- #
 def test_per_item_cost_helper_renders_tokens_for_subscription_local(html):
-    # The per-item formatter: subscription/local → token total (the in+out basis
-    # via _costVal), api/unknown → dollars. "% of cycle" (a window aggregate) is
-    # never produced at per-item granularity.
+    """The per-item formatter: LOCAL only -> token total (the in+out basis via
+    _costVal); api / subscription / unknown -> dollars uniformly. Subscription
+    used to also render tokens here; that branch is gone by product decision
+    (tj does not differentiate subscription-billed from API-billed users).
+    Local is a structurally different case, not a differentiation choice --
+    local inference incurs no marginal dollar cost at all -- so it still
+    renders tokens. "% of cycle" (a window aggregate) is never produced at
+    per-item granularity, regardless."""
     assert "function perItemUsesTokens(framing)" in html
     assert "function fmtPerItemCost(costUsd, tokenTotal, framing)" in html
+    assert "return !!framing && framing.pricing_mode === 'local';" in html
     assert "if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';" in html
     # the only "% of cycle" string in the codebase lives in fmtFramedDollar, which
     # per-item surfaces no longer call directly for the row value.
-    assert "return fmtFramedDollar(costUsd, framing); // api / unknown → dollars" in html
+    assert "return fmtFramedDollar(costUsd, framing); // api / subscription / unknown → dollars" in html
 
 
 def test_per_item_cost_surfaces_use_the_helper_not_framed_dollar(html):
@@ -1273,8 +1304,8 @@ def test_cache_chart_leads_with_answer_headline(html):
     # series). The card title is "Caching".
     assert '<div class="cache-headline">' in html
     assert "cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate" in html
-    assert "saved this window" in html          # api framing
-    assert "cached reads this window" in html    # subscription framing (no raw $)
+    assert "saved this window" in html          # api / subscription framing
+    assert "cached reads this window" in html    # local framing (no raw $)
 
 
 def test_cache_chart_is_single_axis_per_period_bars(html):
@@ -1343,20 +1374,20 @@ def test_script_cluster_payload_token_total_is_server_side(html):
 
 
 # --- #262: Analytics spend tile = implied-value multiplier, separators, soft delta -- #
-def test_analytics_spend_tile_uses_value_multiplier_for_subscription(html):
-    # The Spend tile shows an implied-value multiplier ("43.5× plan value") for
-    # subscription, never "% of cycle" and never raw $ — plan VALUE, not spend.
-    assert "function spendTileDisplay(spendUsd, framing)" in html
-    assert "+ '× plan value'" in html
-    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd. The `|| 0`
-    # that used to sit on the numerator is gone deliberately: it turned an
-    # unreported spend field into "0.0x plan value", so the null case is now
-    # caught before the division and renders as unknown instead (see
-    # test_lens_dashboard_states.py).
-    assert "const mult = spendUsd / framing.plan_monthly_usd;" in html
-    assert "const unknown = spendUsd == null;" in html
-    # the tile no longer renders fmtFramedDollar (the "% of cycle") for spend
-    assert "const spendVal = fmtFramedDollar(kpis.spend, framing);" not in html
+def test_analytics_spend_tile_renders_a_plain_dollar_figure_for_subscription(html):
+    """The Spend tile used to show an implied-value multiplier ("43.5× plan
+    value") for subscription instead of a dollar figure. That differentiation
+    is gone by product decision: tj does not differentiate subscription-billed
+    from API-billed users, so subscription now renders the same plain "Spend"
+    dollar figure as api/unknown. LOCAL is untouched (still dropped -- no
+    marginal cost to price at all, a structurally different case, not a
+    differentiation choice)."""
+    start = html.index("function spendTileDisplay(spendUsd, framing)")
+    fn = html[start: html.index("function PlanBadge", start)]
+    assert "× plan value" not in fn
+    assert "plan_monthly_usd" not in fn
+    assert "if (mode === 'local') return null;" in fn
+    assert "return { label: 'Spend', value: spendUsd == null ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };" in fn
     assert "const spend = spendTileDisplay(kpis.spend, framing);" in html
 
 
@@ -1731,11 +1762,14 @@ def test_index_html_has_no_nul_bytes():
 
 # --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
 # Route the two dollar-bearing cells left on bare fmtCost through
-# fmtFramedDollar(value, framing) so subscription users see "% of cycle" and
-# only api-plan users see raw $ — matching Traces/Cost/Optimize.
+# fmtFramedDollar(value, framing) — matching Traces/Cost/Optimize. (fmtFramedDollar
+# used to render "% of cycle" for subscription; that differentiation is gone by
+# product decision, so api and subscription now render the same dollar figure —
+# see test_fmt_framed_dollar_renders_identically_for_subscription_and_api in
+# test_lens_dashboard_states.py. Only LOCAL still renders "—".)
 def test_session_detail_cost_cell_routes_through_framing(html):
-    # The "Cost & Tokens" / "Implied API value" panel must consume the
-    # /sessions/{id} framing block, not render raw fmtCost(s.total_cost_usd).
+    # The "Cost & Tokens" panel must consume the /sessions/{id} framing block,
+    # not render raw fmtCost(s.total_cost_usd).
     assert "<span class=\"value\">${fmtCost(s.total_cost_usd)}</span>" not in html
     assert "<span class=\"value\">${fmtFramedDollar(s.total_cost_usd, framing)}</span>" in html
     # The view actually pulls the framing block off the /sessions/{id} response.
@@ -2672,6 +2706,11 @@ def test_fmt_framed_savings_never_renders_a_bare_dollar_when_framing_is_unknown(
     fmtCost, so every existing caller's behaviour is unchanged; only the
     Dashboard passes fmtDashUsd. This test still pins the null-guard logic
     against the default formatter.
+
+    The suppressed path's own "% of cycle tokens" branch for subscription is
+    gone: dollarsSuppressed() can no longer be true for subscription (that
+    differentiation was removed), so the only pricing_mode that ever reaches
+    the suppressed path now is local, which just wants the plain token total.
     """
     fn = _fmt_framed_savings_src(html)
     # The null/undefined guard must run BEFORE dollarsSuppressed() is even
@@ -2685,11 +2724,12 @@ def test_fmt_framed_savings_never_renders_a_bare_dollar_when_framing_is_unknown(
     assert "dollarFmt(" not in guard_body
     assert "fmtTokens(tokens) + ' tokens'" in guard_body
 
-    # Behaviour for a KNOWN framing (either branch) must be untouched: the
-    # suppressed path's tokens-only/percent-of-cycle fallback, and the
-    # show-with-qualifier path's dollar figure (via dollarFmt, fmtCost by
-    # default), both still follow the null guard unchanged.
-    assert "return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';" in fn
+    # Behaviour for a KNOWN framing must be untouched: the suppressed path's
+    # tokens-only fallback, and the show-with-qualifier path's dollar figure
+    # (via dollarFmt, fmtCost by default), both still follow the null guard.
+    # (The code's own comment explaining the removal legitimately mentions
+    # the retired string, so check the CODE only, not the comment.)
+    assert "% of cycle tokens" not in _no_comments(fn)
     assert "return usd == null ? '—' : dollarFmt(usd);" in fn
 
 
@@ -2779,15 +2819,18 @@ def test_applied_item_row_respects_dollar_suppression(html):
 
 
 def test_dollars_suppressed_reads_the_server_display_rule(html):
-    # The suppress/show decision is server-side (core/framing.py); the UI reads
-    # display_rule rather than re-deriving the rule in JS.
+    """The suppress/show decision is server-side (core/framing.py); the UI
+    reads display_rule rather than re-deriving the rule in JS.
+    'suppress_dollars_for_subscription_share' was removed from the suppressed
+    set by product decision: tj does not differentiate subscription-billed
+    from API-billed users, so a subscription window is never suppressed to
+    tokens-only any more. core/framing.py's compute_framing already stopped
+    producing that display_rule value; this pins the JS side dropping it too,
+    so the two do not silently drift back out of agreement."""
     assert "function dollarsSuppressed" in html
-    for rule in (
-        "'suppress_dollars_for_subscription_share'",
-        "'tokens_only'",
-        "'suppress_dollars_unknown'",
-    ):
+    for rule in ("'tokens_only'", "'suppress_dollars_unknown'"):
         assert rule in html, f"missing suppressing display_rule {rule}"
+    assert "'suppress_dollars_for_subscription_share'" not in html
 
 
 # --- the headline is the server's past-overspend band, not a JS sum -------- #
@@ -4110,8 +4153,21 @@ def test_dashboard_qualifier_banner_is_removed(html):
     # Every other framing consumer in DashboardView is untouched — the removal
     # was scoped to the banner only, never to `framing` itself. (The trailing
     # `, fmtDashUsd` on the two dollar formatters is the Dashboard's separate
-    # at-most-2dp precision override, not a framing change.)
-    assert "const useTokens = !!framing && (framing.pricing_mode" in dash
+    # at-most-2dp precision override, not a framing change. `useTokens` itself
+    # is now LOCAL-only, a separate product decision removing subscription
+    # differentiation -- see test_dashboard_use_tokens_is_local_only.)
+    assert "const useTokens = !!framing && framing.pricing_mode === 'local'" in dash
     assert "fmtFramedDollar(projected, framing, fmtDashUsd)" in dash
     assert "<${PlanBadge} framing=${framing} />" in dash
     assert "fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)" in dash
+
+
+def test_dashboard_use_tokens_is_local_only(html):
+    """DashboardView's `useTokens` used to switch to token display for BOTH
+    subscription and local. Subscription no longer suppresses (product
+    decision: tj does not differentiate subscription-billed from API-billed
+    users, and dollars price all traffic at API list rates regardless of
+    plan); local still does (no marginal cost to price at all -- a
+    structurally different case, not a differentiation choice)."""
+    dash = _dashboard_src(html)
+    assert "framing.pricing_mode === 'subscription'" not in dash
