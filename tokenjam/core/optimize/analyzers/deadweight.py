@@ -138,9 +138,14 @@ def _mcp_server_names(path: Path) -> set[str]:
     return {str(name) for name in servers if str(name).strip()}
 
 
-def _global_config_path() -> Path:
+def _global_config_path(claude_home: Path | None = None) -> Path:
     # Resolved LAZILY (never at import time) so a test patching HOME sees the
-    # fake home, never the developer's real ~/.claude.json.
+    # fake home, never the developer's real ~/.claude.json. `claude_home`
+    # scopes it further: under an explicit `--projects-root` the global MCP
+    # config read must stay inside the root the caller drew, or a scoped run
+    # still reports servers from the operator's real machine.
+    if claude_home is not None:
+        return claude_home / ".claude.json"
     return Path.home() / ".claude.json"
 
 
@@ -153,7 +158,9 @@ class ConfiguredServer:
     cwds:   set[str] = field(default_factory=set)  # project scope: reachable cwds
 
 
-def enumerate_configured_servers(repo_cwds: set[str]) -> dict[str, ConfiguredServer]:
+def enumerate_configured_servers(
+    repo_cwds: set[str], *, claude_home: Path | None = None,
+) -> dict[str, ConfiguredServer]:
     """Read-only enumeration of MCP servers across the three config
     locations: project ``.mcp.json`` / ``.claude/settings*.json`` under each
     given session cwd, plus the global ``~/.claude.json``. Never edits a
@@ -165,7 +172,7 @@ def enumerate_configured_servers(repo_cwds: set[str]) -> dict[str, ConfiguredSer
     """
     servers: dict[str, ConfiguredServer] = {}
 
-    global_path = _global_config_path()
+    global_path = _global_config_path(claude_home)
     if global_path.is_file():
         for name in _mcp_server_names(global_path):
             servers[name] = ConfiguredServer(name=name, scope="user", source=str(global_path))
@@ -711,6 +718,7 @@ def compute_deadweight_finding(
     until: datetime,
     *,
     projects_root: Path | str | None = None,
+    claude_home: Path | None = None,
     min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
     cache_dir: Path | None = None,
 ) -> DeadweightFinding:
@@ -778,7 +786,7 @@ def compute_deadweight_finding(
         per_session[session_id] = _analyze_session(records)
 
     repo_cwds = {c for c in session_cwds.values() if c}
-    configured = enumerate_configured_servers(repo_cwds)
+    configured = enumerate_configured_servers(repo_cwds, claude_home=claude_home)
     finding.configured_servers = len(configured)
     if not configured:
         return finding
@@ -1013,7 +1021,17 @@ def run(ctx: AnalyzerContext) -> None:
     repeat HTTP request against a live ``tj serve`` — skips re-parsing every
     session it already has a fresh cache entry for.
     """
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.transcript_cache import default_cache_dir
+
+    scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
+    if not scope.enabled:
+        # Scanned nothing, and says so on the report rather than leaving an
+        # empty finding that reads like "no dead MCP servers here" (root
+        # anti-pattern 22).
+        ctx.report.filesystem_scan_skipped_reason = scope.reason
+        ctx.report.findings["deadweight"] = DeadweightFinding()
+        return
 
     optimize_cfg = getattr(ctx.config, "optimize", None)
     min_sessions = getattr(
@@ -1021,6 +1039,8 @@ def run(ctx: AnalyzerContext) -> None:
     )
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
         ctx.since, ctx.until,
+        projects_root=scope.projects_root,
+        claude_home=scope.claude_home,
         min_sessions=min_sessions,
         cache_dir=default_cache_dir(ctx.config),
     )

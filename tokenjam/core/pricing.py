@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -386,10 +387,10 @@ def _config_pricing_section() -> dict | None:
     None; config problems surface through the normal config-load path
     elsewhere.
     """
-    from tokenjam.core.config import find_config_file
+    from tokenjam.core.config import resolve_config_path
 
     try:
-        path = find_config_file(os.environ.get("TJ_CONFIG"))
+        path = resolve_config_path()
     except (FileNotFoundError, OSError):
         return None
     if path is None:
@@ -595,12 +596,45 @@ def clear_pricing_cache() -> None:
     _UNKNOWN_VARIANT_WARNED.clear()
 
 
-def _strip_date_suffix(model: str) -> str | None:
-    """Return `model` minus a trailing `-YYYYMMDD` suffix, or None if absent."""
-    import re as _re
+#: The two shapes a provider stamps a release date onto a model id in:
+#: Anthropic's compact `-YYYYMMDD` (`claude-opus-4-20250514`) and OpenAI's
+#: dashed `-YYYY-MM-DD` (`gpt-4o-2024-08-06`). Only the compact form was
+#: handled originally, so every dated OpenAI id fell through to the flat
+#: default rate even when its bare row was sitting in the table.
+_DATE_SUFFIX_RE = re.compile(r"^(.*?)-(?:\d{8}|\d{4}-\d{2}-\d{2})$")
 
-    m = _re.match(r"^(.*)-(\d{8})$", model)
+#: A routing prefix from a gateway or aggregator — LiteLLM emits
+#: `anthropic/claude-opus-4.1`, OpenRouter `openrouter/anthropic/claude-opus-4.1`.
+#: One segment is stripped per application; `_lookup_candidates` re-applies the
+#: transform, so a multi-segment prefix unwinds one hop at a time.
+_PROVIDER_PREFIX_RE = re.compile(r"^[A-Za-z0-9_.-]+/(.+)$")
+
+#: A dotted version segment (`claude-opus-4.1`, `gemini-2.0-flash`) against the
+#: table's dashed key form (`claude-opus-4-1`, `gemini-2-0-flash`). Only digits
+#: on both sides of the dot are rewritten, so a dotted table key that is itself
+#: exact (`gpt-5.5`) is unaffected — the exact match is tried first regardless.
+_VERSION_DOT_RE = re.compile(r"(?<=\d)\.(?=\d)")
+
+
+def _strip_date_suffix(model: str) -> str | None:
+    """Return `model` minus a trailing release-date suffix, or None if absent.
+
+    Handles both published shapes — see `_DATE_SUFFIX_RE`.
+    """
+    m = _DATE_SUFFIX_RE.match(model)
+    return m.group(1) if (m and m.group(1)) else None
+
+
+def _strip_provider_prefix(model: str) -> str | None:
+    """Return `model` minus one leading `<provider>/` routing segment, or None."""
+    m = _PROVIDER_PREFIX_RE.match(model)
     return m.group(1) if m else None
+
+
+def _dashed_version(model: str) -> str | None:
+    """Return `model` with dotted version segments dashed, or None if unchanged."""
+    dashed = _VERSION_DOT_RE.sub("-", model)
+    return dashed if dashed != model else None
 
 
 def _strip_context_tag(model: str) -> str | None:
@@ -624,30 +658,69 @@ def _strip_context_tag(model: str) -> str | None:
     return m.group(1) if (m and m.group(1)) else None
 
 
+#: The name transforms tried, in priority order, when the exact model name has
+#: no row. Each is `(kind, fn)`; `fn` returns the rewritten name or None when it
+#: does not apply. `kind` is provenance only (see `classify_pricing_source`).
+#: Order is load-bearing: the date strip must precede the version dash-ing so
+#: `gpt-4.1-2025-04-14` is offered as `gpt-4.1` (a real key) before the
+#: less-likely `gpt-4-1-2025-04-14`.
+_NAME_TRANSFORMS: tuple[tuple[str, Any], ...] = (
+    ("provider_prefix", _strip_provider_prefix),
+    ("date_stripped", _strip_date_suffix),
+    ("context_tag", _strip_context_tag),
+    ("version_dots", _dashed_version),
+)
+
+#: How many times the transform set is re-applied to names it produced. A
+#: routing prefix over a dotted, dated name needs three hops
+#: (`openrouter/anthropic/claude-opus-4.1` → … → `claude-opus-4-1`); the cap
+#: exists only so a pathological name cannot loop, not as a tuning knob.
+_MAX_TRANSFORM_ROUNDS = 4
+
+
 def _lookup_candidates(model: str) -> list[tuple[str, str]]:
     """Ordered fallback (name, kind) pairs to try for `model` (most specific first).
 
-    Beyond the exact name we try, in order: the date-stripped name
-    (``-YYYYMMDD``, kind ``"date_stripped"``), the context-tag-stripped name
-    (``[1m]``, kind ``"context_tag"``), and the context-tag-then-date-stripped
-    name (also ``"context_tag"`` — a context tag is present either way). The
-    caller de-dups against the exact name, so a plain model like
-    ``claude-opus-4-8`` yields no extra work. `kind` is provenance-only (see
-    `classify_pricing_source`) — `get_rates` ignores it and uses only `name`.
+    The exact name is the caller's job; this returns only the rewrites. Each
+    transform in `_NAME_TRANSFORMS` is applied to the original name and then,
+    for `_MAX_TRANSFORM_ROUNDS` rounds, to every name produced so far — so
+    combinations compose without enumerating them by hand. The forms this
+    covers, and why each exists:
+
+      * ``provider_prefix`` — a gateway's routing segment
+        (``anthropic/claude-opus-4.1`` from LiteLLM,
+        ``openrouter/anthropic/…`` from OpenRouter). One segment per hop.
+      * ``date_stripped`` — a release-date suffix in either published shape,
+        ``-YYYYMMDD`` (Anthropic) or ``-YYYY-MM-DD`` (OpenAI).
+      * ``context_tag`` — a bracketed context-window tag (``claude-opus-4-8[1m]``);
+        the 1M window bills at standard rates, see `_strip_context_tag`.
+      * ``version_dots`` — a dotted version segment against the table's dashed
+        key form (``claude-opus-4.1`` → ``claude-opus-4-1``).
+
+    A name's `kind` is inherited from the name it was derived from, so the
+    provenance names the OUTERMOST thing that had to be removed rather than the
+    last transform that ran. A plain model like ``claude-opus-4-8`` yields no
+    candidates at all, so the common path stays free.
     """
     candidates: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    seen: set[str] = {model}
+    frontier: list[tuple[str, str | None]] = [(model, None)]
 
-    def _add(name: str | None, kind: str) -> None:
-        if name and name not in seen and name != model:
-            seen.add(name)
-            candidates.append((name, kind))
+    for _round in range(_MAX_TRANSFORM_ROUNDS):
+        next_frontier: list[tuple[str, str | None]] = []
+        for name, inherited in frontier:
+            for kind, transform in _NAME_TRANSFORMS:
+                derived = transform(name)
+                if not derived or derived in seen:
+                    continue
+                seen.add(derived)
+                derived_kind = inherited or kind
+                candidates.append((derived, derived_kind))
+                next_frontier.append((derived, derived_kind))
+        if not next_frontier:
+            break
+        frontier = next_frontier
 
-    _add(_strip_date_suffix(model), "date_stripped")
-    no_tag = _strip_context_tag(model)
-    _add(no_tag, "context_tag")
-    if no_tag is not None:
-        _add(_strip_date_suffix(no_tag), "context_tag")
     return candidates
 
 
@@ -733,11 +806,13 @@ def get_rates(
          over the packaged models.toml).
 
     Each step tries an exact match first, then falls back through
-    `_lookup_candidates`: the YYYYMMDD-date-stripped name (Anthropic/OpenAI both
-    ship dated variants like `claude-haiku-4-5-20251001`) and the context-tag-
-    stripped name (`claude-opus-4-8[1m]` → `claude-opus-4-8`; the 1M window bills
-    at standard rates, see `_strip_context_tag`). This keeps the tables short
-    while still pricing the dated / context-tagged names that flow through Lens.
+    `_lookup_candidates`, which strips a gateway routing prefix
+    (`anthropic/claude-opus-4.1`), a release-date suffix in either published
+    shape (`-YYYYMMDD` and `-YYYY-MM-DD`), a bracketed context tag
+    (`claude-opus-4-8[1m]` → `claude-opus-4-8`; the 1M window bills at standard
+    rates, see `_strip_context_tag`), and dotted version segments
+    (`claude-opus-4.1` → `claude-opus-4-1`) — in any combination. This keeps the
+    tables short while still pricing every name form that flows through Lens.
 
     Bedrock spans are normalized for the table lookup only (#373): the
     provider aliases in _BEDROCK_PROVIDER_ALIASES map onto the table's
@@ -840,11 +915,17 @@ def classify_pricing_source(provider: str, model: str) -> str:
                              provider-keyed user override, or the
                              Bedrock-normalized modelId form — all
                              indistinguishable here, see above).
-      "date_stripped"      - resolved only after stripping a trailing
-                             `-YYYYMMDD` suffix.
+      "provider_prefix"    - resolved only after stripping a leading gateway
+                             routing segment (`anthropic/…`, `openrouter/…`),
+                             possibly alongside further rewrites.
+      "date_stripped"      - resolved only after stripping a trailing release
+                             date, `-YYYYMMDD` or `-YYYY-MM-DD`.
       "context_tag"        - resolved only after stripping a trailing `[...]`
                              context tag (with or without an additional
                              date-suffix strip).
+      "version_dots"       - resolved only after rewriting dotted version
+                             segments to the table's dashed form
+                             (`claude-opus-4.1` → `claude-opus-4-1`).
       "default_fallback"   - nothing matched; calculate_cost falls back to the
                              flat default rates (DEFAULT_INPUT_PER_MTOK /
                              DEFAULT_OUTPUT_PER_MTOK / DEFAULT_CACHE_*).
