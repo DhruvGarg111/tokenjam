@@ -586,10 +586,23 @@ def test_trim_card_no_longer_a_flat_three_column_table(html):
 # --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
 def test_analytics_screen_registered(html):
     assert "function AnalyticsView" in html
-    # Keep-alive router: the view is wired via the PRIMARY_VIEWS registry (which
-    # replaced the switch-and-unmount router) rather than a `case` arm.
-    assert "['analytics', AnalyticsView]" in html
-    assert 'href="#/analytics"' in html  # sidebar nav link
+
+
+def test_analytics_route_retired(html):
+    # The standalone Analytics screen + nav item are gone: it was a duplicate
+    # of the Dashboard's own embedded "Explore" section (same AnalyticsView
+    # component), so the separate nav entry was a second door to one room.
+    # Lingering #/analytics links fall through to the Dashboard, same pattern
+    # as the earlier #/overview retirement.
+    assert 'href="#/analytics"' not in html
+    assert "['analytics', AnalyticsView]" not in html
+    assert "analytics: 'observe'" not in html  # VIEW_LENS entry retired too
+    # Keep-alive router: #/analytics folds into the Dashboard key via primaryKeyFor.
+    assert "if (v === 'overview' || v === 'analytics') return 'dashboard';" in html
+    # The component itself and the API route it calls both stay -- the
+    # Dashboard's embedded explorer hard-depends on both.
+    assert "function AnalyticsView" in html
+    assert "await api('/analytics'" in html
 
 
 def test_analytics_metric_dimension_chart_controls(html):
@@ -630,8 +643,9 @@ def test_analytics_presets_and_csv_export(html):
 
 def test_analytics_url_is_source_of_truth(html):
     # state read from URL params with validators, written back via navigate().
-    # navigate() targets `route` (default 'analytics' preserves the standalone
-    # screen; the dashboard preview passes route="dashboard").
+    # navigate() targets `route` (the 'analytics' default is a vestige of the
+    # now-retired standalone screen -- unused today since every live caller,
+    # the Dashboard, passes route="dashboard" explicitly).
     assert "route = 'analytics'" in html
     assert "navigate(route, { ...cur" in html
     assert "readParam(params, 'metric'" in html
@@ -887,17 +901,34 @@ def test_overview_retired(html):
     assert 'href="#/overview"' not in html
     # Keep-alive router: #/overview folds into the Dashboard key via primaryKeyFor
     # (replaced the switch's `case 'overview': case 'dashboard'` fallthrough).
-    assert "if (v === 'overview') return 'dashboard';" in html
+    # #/analytics was folded into the same alias branch later — see
+    # test_analytics_route_retired.
+    assert "if (v === 'overview' || v === 'analytics') return 'dashboard';" in html
 
 
 def test_dashboard_embeds_analytics_explorer(html):
     # The hero composes the existing AnalyticsView (route rewired to dashboard,
-    # embedded, with the run-rate caption) — not a reimplemented pivot. Standalone
-    # #/analytics keeps working: the props are default-preserving.
+    # embedded, with the run-rate caption) — not a reimplemented pivot. The
+    # component's default args stay call-compatible even though nothing
+    # invokes it bare any more (the standalone #/analytics route is retired;
+    # see test_analytics_route_retired).
     assert 'route="dashboard" embedded=${true} kpiCaption=${kpiCaption}' in html
     assert "function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null })" in html
-    # The full-screen explorer nav item stays.
-    assert 'href="#/analytics"' in html
+
+
+def test_analytics_alias_preserves_query_params_and_deep_links_to_explore(html):
+    # An old #/analytics?metric=...&group_by=... bookmark must land on the same
+    # explorer slice, not a bare Dashboard. primaryKeyFor only remaps the VIEW
+    # KEY used to pick a component out of PRIMARY_VIEWS; route.params (built
+    # from the raw query string in getRoute(), independent of that mapping)
+    # flow straight through to DashboardView and then to the embedded
+    # AnalyticsView unchanged, so metric/group_by/stack/chart/since survive.
+    dash_start = html.index("function DashboardView")
+    dash_end = html.index("function ", dash_start + 1)
+    dash_view = html[dash_start:dash_end]
+    assert 'id="dash-explore"' in dash_view
+    assert "isAnalyticsAlias" in dash_view
+    assert "scrollIntoView" in dash_view
 
 
 def test_dashboard_spend_deduped(html):
@@ -2403,7 +2434,7 @@ def test_no_duplicate_status_nav_entry(html):
 # AppliedItemRow (the same `est.`-labeled snapshot per row).
 def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
     # NOTE: ReviewInboxView always calls InboxStatTiles with suppressed=false
-    # on this page now (the founder-approved always-dollars carve-out — see
+    # on this page now (the always-dollars carve-out — see
     # test_review_inbox_ignores_dollar_suppression below). This only pins that
     # the component itself still HONORS a truthy `suppressed` if ever passed
     # one, i.e. the parameter isn't dead weight removed from the function.
@@ -2419,17 +2450,16 @@ def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
     assert "fmtUsd(appliedUsdSum)" in tile
 
 
-# --- Founder-approved carve-out: Review inbox ignores dollar suppression --- #
+# --- Approved carve-out: Review inbox ignores dollar suppression ---------- #
 def test_review_inbox_ignores_dollar_suppression(html):
-    # Founder decision: on the Review inbox ONLY, dollar figures render
-    # unconditionally — the subscription-share suppression rule
-    # (dollarsSuppressed(), core/framing.py's suppress_dollars_for_
-    # subscription_share) does not apply here, even though it still gates
-    # every other dollar figure in the app unchanged. Verified against the
-    # founder's real account (87% subscription-billed, Max 20x plan): the API
-    # payload correctly carries estimated_monthly_usd for every priced item,
-    # so once this page stops gating on dollarsSuppressed() those figures
-    # render regardless of plan tier.
+    # On the Review inbox ONLY, dollar figures render unconditionally — the
+    # subscription-share suppression rule (dollarsSuppressed(),
+    # core/framing.py's suppress_dollars_for_subscription_share) does not
+    # apply here, even though it still gates every other dollar figure in the
+    # app unchanged. Verified against a real account (87% subscription-billed,
+    # Max 20x plan): the API payload correctly carries estimated_monthly_usd
+    # for every priced item, so once this page stops gating on
+    # dollarsSuppressed() those figures render regardless of plan tier.
     view = html[html.index("function ReviewInboxView"):]
     start = view.index("const suppressed = ")
     end = view.index(";", start)
@@ -2450,27 +2480,39 @@ def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html
     # The resend/TRIM card is the one documented exception to "always
     # dollars": its own evidence text discloses the figure is a structural
     # token-share measurement, not a savings claim (RESEND_HONESTY_CAVEAT,
-    # analyzers/context_resend.py) — it stays tokens-only even though its
-    # estimated_monthly_usd is a real, non-null number in the real payload.
+    # analyzers/context_resend.py). A resend CostProposal renders through
+    # `pastOverspendFigure` like every other cost card — the exclusion set
+    # only has one live consumer left, `appliedEstimate` (the Applied tab,
+    # which merges relearn + cost records and needs to know which analyzer's
+    # figure to treat as unpriced there too).
     assert "const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);" in html
-    assert "function monthlyUsdForDisplay(item)" in html
-    fn_start = html.index("function monthlyUsdForDisplay(item)")
-    fn_end = html.index("\n}", fn_start) + 2
-    fn = html[fn_start:fn_end]
-    assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer)" in fn
-    # Every dollar-first decision point on the page routes through it (or the
-    # equivalent inline check in appliedEstimate) rather than reading
-    # estimated_monthly_usd directly, so the exclusion can't be bypassed at
-    # one of the several call sites.
-    est_line_start = html.index("function estMonthlyLine(item, suppressed)")
-    est_line_end = html.index("\n}", est_line_start)
-    assert "monthlyUsdForDisplay(item)" in html[est_line_start:est_line_end]
-    combined_start = html.index("function combinedEstMonthly(items, suppressed)")
-    combined_end = html.index("\n}", combined_start)
-    assert "monthlyUsdForDisplay(i)" in html[combined_start:combined_end]
     applied_est_start = html.index("function appliedEstimate(rec)")
     applied_est_end = html.index("\n}", applied_est_start)
     assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer)" in html[applied_est_start:applied_est_end]
+    # The relearn-cluster-only forward-figure machinery this exclusion used to
+    # gate is retired entirely — a relearn cluster shows its past figure only,
+    # rendered via `relearnObservedFigure`/`pastOverspendFigure`, so there is
+    # no separate monthly-basis display path left to exclude an analyzer from.
+    assert "function monthlyUsdForDisplay(item)" not in html
+    assert "function estMonthlyLine(item, suppressed)" not in html
+    assert "function combinedEstMonthly(items, suppressed)" not in html
+
+
+def test_applied_estimate_falls_back_to_legacy_fields_for_pre_upgrade_records(html):
+    # A ledger entry applied BEFORE the past_overspend_* collapse snapshotted
+    # its estimate under the retired forward-savings names
+    # (estimated_monthly_usd/_tokens). appliedEstimate() must still surface a
+    # figure for that record -- read-only, never re-persisting the legacy
+    # name -- rather than the Applied tab silently losing it.
+    fn_start = html.index("function appliedEstimate(rec)")
+    fn_end = html.index("\n}", fn_start)
+    fn = html[fn_start:fn_end]
+    assert "estimated_monthly_usd" in fn
+    assert "estimated_monthly_tokens" in fn
+    # `!= null` (not a truthy check) so a genuine 0 is never mistaken for
+    # "missing" and papered over with the legacy fallback.
+    assert "past_overspend_usd != null" in fn
+    assert "past_overspend_tokens != null" in fn
 
 
 def test_fixes_applied_tile_never_claims_verification(html):
@@ -2532,16 +2574,16 @@ def test_dollars_suppressed_reads_the_server_display_rule(html):
 
 
 # --- the headline is the server's past-overspend band, not a JS sum -------- #
-# SUPERSEDES the old "ESTIMATED RECOVERABLE / mo" tile tests. The founder
-# decision this replaces them under: the product leads with what the flagged
-# behaviours ALREADY cost (past tense, window-observed), not with what a fix
-# might return. A past figure is checkable against a bill the user already
-# paid; a forward one asks them to trust a projection of a month that has not
-# happened, and trust is the scarce resource.
+# SUPERSEDES the old "ESTIMATED RECOVERABLE / mo" tile tests. What replaces
+# them: the product leads with what the flagged behaviours ALREADY cost (past
+# tense, window-observed), not with what a fix might return. A past figure is
+# checkable against a bill the user already paid; a forward one asks them to
+# trust a projection of a month that has not happened, and trust is the
+# scarce resource.
 def test_inbox_headline_is_the_past_overspend_tile(html):
-    # 2026-07-26 founder call: the full-width band was removed and this figure
-    # now occupies the compact tile slot beside "Fixes applied". The TENSE
-    # decision above is unchanged -- only the shape moved.
+    # The full-width band was removed and this figure now occupies the
+    # compact tile slot beside "Fixes applied". The TENSE decision above is
+    # unchanged -- only the shape moved.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
@@ -2626,10 +2668,10 @@ def test_estimated_tile_still_renders_with_only_excluded_waste_and_no_open_items
 
 
 # --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
-def test_review_inbox_intro_matches_the_founder_approved_mockup(html):
-    # Inbox redesign: the page title and subtitle are the founder-approved
-    # mockup's own copy verbatim (colon in place of the mockup transcription's
-    # em dash — house style forbids em dashes in tokenjam copy).
+def test_review_inbox_intro_matches_the_approved_mockup(html):
+    # Inbox redesign: the page title and subtitle are the approved mockup's
+    # own copy verbatim (colon in place of the mockup transcription's em dash
+    # — house style forbids em dashes in tokenjam copy).
     assert "<div class=\"page-title\"" in html
     assert ">Inbox<" in html
     intro = (
@@ -3330,9 +3372,15 @@ def test_the_ordering_key_cannot_reach_a_projection(html):
     # And the view splits before it sorts.
     view = html[html.index("function ReviewInboxView"):]
     assert "const { ranked, unobserved } = partitionByObservedOverspend(shownItems)" in view
-    assert "const sortedOpen = sortByObservedOverspend(ranked)" in view
-    # The retired key must not come back under its old name.
+    assert "const sortedOpen = sortByPastOverspend(ranked)" in view
+    # The retired key must not come back under either retired name. Upstream
+    # renamed it to `sortByPastOverspend` when relearn's forward claim was
+    # retired; this branch had independently grown a `sortByObservedOverspend`
+    # computing the identical thing, and that duplicate is deleted in favour of
+    # upstream's name rather than kept in parallel.
     assert "sortByEstMonthly" not in html
+    assert "sortByObservedOverspend" not in html
+    assert "function sortByPastOverspend" in html
 
 
 def test_ordering_key_rejects_a_projection_only_row(html):
@@ -3362,19 +3410,25 @@ def test_ordering_key_rejects_a_projection_only_row(html):
     assert ranked[0] is not projection_only
 
 
-def test_collapsed_tail_combined_figure_uses_the_priceable_majority_rule(html):
+def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
     # combinedEstMonthly used to lead with dollars the moment ANY tail item had
     # one (summing the rest as $0), understating a mostly-tokens-only tail as
-    # a tiny dollar figure. It now matches InboxStatTiles's own majority rule.
-    start = html.index("function combinedEstMonthly")
+    # a tiny dollar figure. It's retired along with the forward claim it
+    # summarised: both tabs now state their combined tail figure via
+    # `combinedObservedCost`, on the same `past_overspend_*` basis their
+    # expanded rows use, so there is no separate priceable-majority rule left
+    # to pin.
+    assert "function combinedEstMonthly" not in html
+    start = html.index("function combinedObservedCost")
     end = html.index("function CollapsedTailRow", start)
     fn = html[start:end]
-    assert "priceable.length * 2 >= items.length" in fn
+    assert "past_overspend_usd" in fn
+    assert "already spent, combined" in fn
 
 
 def test_fmt_tokens_renders_billion_scale_human_readable(html):
-    # "~11268.0M tok" (the founder's actual rendered figure) must become
-    # "~11.3B tok" — fmtTokens needs a billion-scale branch above the
+    # "~11268.0M tok" (an actual rendered figure from a real corpus) must
+    # become "~11.3B tok" — fmtTokens needs a billion-scale branch above the
     # existing million/thousand ones.
     start = html.index("function fmtTokens(n)")
     end = html.index("\n}", start) + 2
@@ -3387,11 +3441,11 @@ def test_fmt_tokens_renders_billion_scale_human_readable(html):
     assert fn.index("1e9") < fn.index("1e6")
 
 
-def test_fmt_tokens_billion_scale_matches_the_founders_real_figure():
+def test_fmt_tokens_billion_scale_matches_a_real_reported_figure():
     # A Python-side reimplementation of the exact fmtTokens algorithm pinned
-    # above, run against the founder's own reported number, so this test
-    # fails loudly if the JS and this contract ever diverge in behavior, not
-    # just in the presence of the string "1e9".
+    # above, run against a real reported number, so this test fails loudly if
+    # the JS and this contract ever diverge in behavior, not just in the
+    # presence of the string "1e9".
     def fmt_tokens(n):
         if n is None:
             return "-"
@@ -3413,10 +3467,10 @@ def test_fmt_tokens_billion_scale_matches_the_founders_real_figure():
 def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
     # A Python-side contract test pinning the SAME "rank by
     # estimated_monthly_tokens descending" algorithm the JS now implements
-    # (sortByEstMonthly, pinned above), run against the founder's own real
-    # numbers from the bug report — the exact dataset that exposed the
-    # original "adapter insertion order" bug. Proves the fixed algorithm
-    # produces a genuinely monotonic order for real, not synthetic, data.
+    # (sortByPastOverspend, pinned above), run against real numbers from the bug
+    # report — the exact dataset that exposed the original "adapter insertion
+    # order" bug. Proves the fixed algorithm produces a genuinely monotonic
+    # order for real, not synthetic, data.
     items = [
         {"analyzer": "deadweight", "estimated_monthly_tokens": 80_800_000},
         {"analyzer": "trim",       "estimated_monthly_tokens": 11_062_000_000},
@@ -3430,7 +3484,7 @@ def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
     ranked = sorted(items, key=lambda i: i["estimated_monthly_tokens"], reverse=True)
     values = [i["estimated_monthly_tokens"] for i in ranked]
     assert values == sorted(values, reverse=True)   # monotonically non-increasing
-    # Pins the founder's own explicit ordering constraints from the bug report.
+    # Pins the explicit ordering constraints from the bug report.
     assert ranked[0]["analyzer"] == "trim"
     reuse_values = [i["estimated_monthly_tokens"] for i in ranked if i["analyzer"] == "reuse"]
     assert reuse_values == sorted(reuse_values, reverse=True)
@@ -3443,7 +3497,7 @@ def test_split_top_and_tail_slices_an_already_sorted_list(html):
     # slices whatever the ranking already produced, never re-sorts or re-orders
     # on its own.
     start = html.index("function splitTopAndTail")
-    end = html.index("function estMonthlyLine", start)
+    end = html.index("function relearnObservedFigure", start)
     fn = html[start:end]
     assert "sorted.slice(0, max)" in fn
     assert "sorted.slice(max)" in fn
@@ -3456,15 +3510,15 @@ def test_split_top_and_tail_slices_an_already_sorted_list(html):
 
 
 def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
-    # End-to-end contract test for the founder's real scenario: an account
-    # whose framing says suppress_dollars_for_subscription_share (87%
-    # subscription-billed, verified against the founder's own live store)
-    # still gets dollar headlines on the Review inbox for every priced item,
-    # tokens for the one documented exception (resend/TRIM), and tokens for
-    # a genuinely unpriced item (no computable rate at all). A Python
-    # reimplementation of estMonthlyLine's decision, pinned so a future
-    # divergence between this contract and the shipped JS fails loudly.
-    founder_framing = {
+    # End-to-end contract test for a real scenario: an account whose framing
+    # says suppress_dollars_for_subscription_share (87% subscription-billed,
+    # verified against a real live store) still gets dollar headlines on the
+    # Review inbox for every priced item, tokens for the one documented
+    # exception (resend/TRIM), and tokens for a genuinely unpriced item (no
+    # computable rate at all). A Python reimplementation of estMonthlyLine's
+    # decision, pinned so a future divergence between this contract and the
+    # shipped JS fails loudly.
+    real_framing = {
         "pricing_mode": "subscription", "plan_tier": "max_20x",
         "subscription_share_pct": 87.0,
         "display_rule": "suppress_dollars_for_subscription_share",
@@ -3485,10 +3539,10 @@ def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
     resend_structural = {"analyzer": "resend", "estimated_monthly_usd": 186.357458, "estimated_monthly_tokens": 11_061_129_491}
     unpriced_placement = {"analyzer": "placement", "estimated_monthly_usd": None, "estimated_monthly_tokens": 78_812_584}
 
-    assert headline_unit(priced_downsize, founder_framing) == "dollars"
-    assert headline_unit(priced_deadweight, founder_framing) == "dollars"
-    assert headline_unit(resend_structural, founder_framing) == "tokens"
-    assert headline_unit(unpriced_placement, founder_framing) == "tokens"
+    assert headline_unit(priced_downsize, real_framing) == "dollars"
+    assert headline_unit(priced_deadweight, real_framing) == "dollars"
+    assert headline_unit(resend_structural, real_framing) == "tokens"
+    assert headline_unit(unpriced_placement, real_framing) == "tokens"
 
 
 # --- Recoverable-waste band drops no-lever analyzers for claude-code -------- #
@@ -3521,6 +3575,23 @@ def test_optimize_view_and_recoverable_tiles_read_same_payload_field(html):
     # disagree about which analyzers a persona can act on.
     assert html.count("persona_disabled_analyzers") >= 2
     assert "const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);" in html
+
+
+# --- Cost view: top-tenants panel must share Refresh/poll cadence ---------- #
+# `loadTenants` used to have its own mount-only effect, independent of
+# `load`'s 30s poll and the Refresh button -- so Cost totals updated on every
+# refresh/poll while the top-tenants-by-spend panel kept showing whatever it
+# fetched on the last mount or since/agentId change.
+def test_cost_view_tenants_panel_shares_refresh_and_poll_cadence(html):
+    fn_start = html.index("function CostView(")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+
+    assert "const loadTenants = useCallback(" in fn
+    # The Refresh button (and the poll it shares an effect with) must drive a
+    # callback that reaches BOTH load and loadTenants -- never `load` alone.
+    assert "onClick=${load}>Refresh" not in fn
+    assert "load(opts);" in fn and "loadTenants(opts);" in fn
 
 
 def test_a_model_swap_row_asks_for_the_path_instead_of_offering_mark_applied(html):

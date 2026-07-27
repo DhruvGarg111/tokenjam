@@ -255,6 +255,26 @@ def test_render_resend_sdk_persona_leads_with_cache_control_snippet(db, capsys):
     assert '"cache_control"' in out
 
 
+def test_render_resend_sdk_persona_without_snippet_never_shows_compact(db, capsys):
+    """`/compact` is a Claude Code interactive command an SDK caller cannot
+    run. When no priced cache_control example exists, the SDK fix must fall
+    back to a persona-neutral instruction rather than the claude-code
+    branch's compaction text."""
+    from tokenjam.core.optimize.analyzers.context_resend import RESEND_SDK_TRIM_FIX
+    from tokenjam.cli.cmd_optimize import _render_resend
+
+    _seed_heavy_resend(db)
+    _, finding = _run(db)
+    assert finding.repeat_share is not None
+    finding.fix_cache_control = ""  # no priced example in this window
+
+    _render_resend(finding, pricing_mode="api", marker="①", persona="sdk")
+    out = _flat(capsys.readouterr().out)
+
+    assert "/compact" not in out
+    assert RESEND_SDK_TRIM_FIX in out
+
+
 def test_render_resend_mixed_persona_shows_both_labeled(db, capsys):
     from tokenjam.cli.cmd_optimize import _render_resend
 

@@ -190,7 +190,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
             "Sonnet-shaped work",
             style="bold",
         )
-        # The number is a single labelled ESTIMATE (founder D1/D3): the "estimate"
+        # The number is a single labelled ESTIMATE (D1/D3): the "estimate"
         # tag + a wide bootstrap CI (resampled segments) so it never reads as a
         # settled figure. Below 2 segments there's no spread to bracket.
         est = Text("\n", style="dim")

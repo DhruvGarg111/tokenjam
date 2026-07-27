@@ -185,9 +185,32 @@ class ResourceAttributes:
     # project tile (e.g. all `Aquanodeio/*` repos -> namespace "aquanode").
     SERVICE_NAMESPACE = "service.namespace"
     # Per-instance identifier (one process / terminal). tj uses it as the
-    # human label for a session's terminal (e.g. "founder-os") when set at
+    # human label for a session's terminal (e.g. "dev-box") when set at
     # launch via OTEL_RESOURCE_ATTRIBUTES.
     SERVICE_INSTANCE_ID = "service.instance.id"
+
+    # -- SDK cost-attribution dimensions (multi-tenant cost breakdown) --
+    # Standard OTel semantic-convention names, preferred over inventing tj.*
+    # equivalents so any OTLP producer (a gateway, a collector processor, an
+    # already-instrumented service) populates them for free via the standard
+    # `OTEL_RESOURCE_ATTRIBUTES` env var — no tj-specific code required.
+
+    # Deployment tier ("staging" | "production" | ...). Current stable name;
+    # supersedes the deprecated bare `deployment.environment`.
+    DEPLOYMENT_ENVIRONMENT_NAME = "deployment.environment.name"
+    # The exact build identifier for the CALLING service (semver, git hash, or
+    # an arbitrary version string). NOTE: tj's own TracerProvider stamps this
+    # with tokenjam's *own* package version as a default (see
+    # otel/provider.py::build_tracer_provider) — that default only applies
+    # when the caller hasn't already declared their own via
+    # OTEL_RESOURCE_ATTRIBUTES, so a caller's real service.version always wins.
+    SERVICE_VERSION = "service.version"
+    # VCS commit/revision the running build was cut from. `VCS_REF_HEAD_REVISION`
+    # is the current stable name; `VCS_REPOSITORY_REF_REVISION` is the OLDER,
+    # now-deprecated name some existing OTLP producers still emit — read as a
+    # fallback so this repo doesn't miss data from an un-upgraded exporter.
+    VCS_REF_HEAD_REVISION = "vcs.ref.head.revision"
+    VCS_REPOSITORY_REF_REVISION = "vcs.repository.ref.revision"  # deprecated
 
 
 class TjAttributes:
@@ -258,6 +281,24 @@ class TjAttributes:
     # detection tell an identical repeated call from normal repeated tool use
     # without retaining the (potentially sensitive) raw input.
     TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
+
+    # -- SDK cost-attribution dimensions, continued --
+    # No established OTel semantic convention exists for multi-tenant
+    # customer/tenant identity or an application "feature"/workflow label (the
+    # OTel `user.*` namespace covers an END USER, not a billing tenant), so
+    # these are tj-specific extensions. Span-level (not resource-level):
+    # tenant/feature/prompt identity vary per call, not per process.
+    TENANT_ID        = "tokenjam.tenant_id"
+    FEATURE          = "tokenjam.feature"
+    # Prompt/template identity pair. No stable gen_ai.* prompt-template
+    # convention exists yet (gen_ai.prompt / gen_ai.completion were removed as
+    # deprecated rather than replaced with a template identity attribute), so
+    # this is a tj-specific extension. template_id names the prompt/template
+    # itself (e.g. "support-triage"); template_version is its version/hash —
+    # together they let the Cost view show which prompt revision is driving
+    # spend, e.g. after a prompt change regresses token usage.
+    PROMPT_TEMPLATE_ID      = "tokenjam.prompt.template_id"
+    PROMPT_TEMPLATE_VERSION = "tokenjam.prompt.template_version"
 
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"

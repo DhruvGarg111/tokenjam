@@ -31,12 +31,34 @@ from tokenjam.core.models import (
     SessionRecord,
     SpanKind,
     SpanStatus,
+    TraceCostStats,
     TraceFilters,
     TraceRecord,
 )
 from tokenjam.utils.time_parse import utcnow
 
 logger = logging.getLogger("tokenjam.db")
+
+
+def _is_cost_outlier(
+    cost_usd: float | None,
+    q1: float | None,
+    q3: float | None,
+    priced_count: int,
+    min_sample: int,
+) -> bool:
+    """Tukey's-fence outlier check shared by get_traces / get_trace_cost_stats.
+
+    False whenever there isn't enough priced-trace history to trust the
+    quartiles (`priced_count < min_sample`), or this trace itself has no
+    positive cost — a $0 trace is never an "outlier," it's just unpriced.
+    """
+    if cost_usd is None or cost_usd <= 0:
+        return False
+    if q1 is None or q3 is None or priced_count < min_sample:
+        return False
+    fence = q3 + 1.5 * (q3 - q1)
+    return cost_usd > fence
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +89,7 @@ class StorageBackend(Protocol):
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
+    def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats: ...
     def get_session_id_for_trace(self, trace_id: str) -> str | None: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
     def get_alerts(self, filters: AlertFilters) -> list[Alert]: ...
@@ -174,6 +197,8 @@ _SPAN_BULK_COLUMNS: tuple[str, ...] = (
     "input_tokens", "output_tokens", "cache_tokens", "cost_usd",
     "request_type", "conversation_id", "events", "billing_account",
     "cache_write_tokens", "request_params", "request_tools", "sub_agent_id",
+    "tenant_id", "feature", "environment", "service_version", "commit_sha",
+    "prompt_template_id", "prompt_template_version",
 )
 
 # read_json column -> type. Timestamps are read as VARCHAR and cast to TIMESTAMPTZ
@@ -191,6 +216,9 @@ _SPAN_BULK_READ_TYPES: dict[str, str] = {
     "conversation_id": "VARCHAR", "events": "JSON", "billing_account": "VARCHAR",
     "cache_write_tokens": "BIGINT", "request_params": "JSON",
     "request_tools": "JSON", "sub_agent_id": "VARCHAR",
+    "tenant_id": "VARCHAR", "feature": "VARCHAR", "environment": "VARCHAR",
+    "service_version": "VARCHAR", "commit_sha": "VARCHAR",
+    "prompt_template_id": "VARCHAR", "prompt_template_version": "VARCHAR",
 }
 
 # Columns that need a cast in the SELECT (read as VARCHAR, stored as TIMESTAMPTZ).
@@ -263,6 +291,13 @@ def _span_to_json_obj(span: NormalizedSpan) -> dict:
         "request_params": span.request_params,
         "request_tools": span.request_tools,
         "sub_agent_id": span.sub_agent_id,
+        "tenant_id": span.tenant_id,
+        "feature": span.feature,
+        "environment": span.environment,
+        "service_version": span.service_version,
+        "commit_sha": span.commit_sha,
+        "prompt_template_id": span.prompt_template_id,
+        "prompt_template_version": span.prompt_template_version,
     }
 
 
@@ -568,6 +603,24 @@ MIGRATIONS: list[tuple[int, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_expectation_runs_exp "
         "ON expectation_runs(expectation_id)"
     )),
+    # Migration 17: SDK cost-attribution dimensions on spans — the multi-tenant
+    # cost breakdown (which CUSTOMER/TENANT, FEATURE, ENVIRONMENT, and PROMPT
+    # VERSION is spending the money). All nullable; existing spans and every
+    # producer that doesn't set them are unaffected. tenant_id/feature are
+    # tj-specific extensions (no OTel convention exists for a billing tenant or
+    # an app "feature" label); environment/service_version/commit_sha carry
+    # standard OTel semantic-convention values (deployment.environment.name /
+    # service.version / vcs.ref.head.revision — see otel/semconv.py). See
+    # core/models.py::NormalizedSpan for the full field-by-field rationale.
+    (17, (
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS tenant_id                TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS feature                  TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS environment              TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS service_version          TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS commit_sha               TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_id       TEXT;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_version  TEXT"
+    )),
 ]
 
 
@@ -592,6 +645,13 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "cache_write_tokens", "BIGINT DEFAULT 0"),        # migration 12
     ("sessions", "run_id",             "TEXT"),                    # migration 13
     ("sessions", "parent_session_id",  "TEXT"),                    # migration 13
+    ("spans",    "tenant_id",               "TEXT"),               # migration 17
+    ("spans",    "feature",                 "TEXT"),               # migration 17
+    ("spans",    "environment",              "TEXT"),              # migration 17
+    ("spans",    "service_version",         "TEXT"),               # migration 17
+    ("spans",    "commit_sha",              "TEXT"),               # migration 17
+    ("spans",    "prompt_template_id",      "TEXT"),               # migration 17
+    ("spans",    "prompt_template_version", "TEXT"),               # migration 17
 ]
 
 
@@ -904,6 +964,13 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         billing_account=d.get("billing_account"),
         request_params=request_params,
         request_tools=request_tools,
+        tenant_id=d.get("tenant_id"),
+        feature=d.get("feature"),
+        environment=d.get("environment"),
+        service_version=d.get("service_version"),
+        commit_sha=d.get("commit_sha"),
+        prompt_template_id=d.get("prompt_template_id"),
+        prompt_template_version=d.get("prompt_template_version"),
     )
 
 
@@ -1321,9 +1388,12 @@ class DuckDBBackend:
                 "duration_ms, attributes, provider, model, tool_name, "
                 "input_tokens, output_tokens, cache_tokens, cost_usd, "
                 "request_type, conversation_id, events, billing_account, "
-                "cache_write_tokens, request_params, request_tools, sub_agent_id"
+                "cache_write_tokens, request_params, request_tools, sub_agent_id, "
+                "tenant_id, feature, environment, service_version, commit_sha, "
+                "prompt_template_id, prompt_template_version"
                 ") VALUES "
-                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
+                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
+                "$29,$30,$31,$32,$33,$34,$35)",
                 [
                     span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                     span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -1335,6 +1405,8 @@ class DuckDBBackend:
                     json.dumps(span.request_params) if span.request_params is not None else None,
                     json.dumps(span.request_tools) if span.request_tools is not None else None,
                     span.sub_agent_id,
+                    span.tenant_id, span.feature, span.environment, span.service_version,
+                    span.commit_sha, span.prompt_template_id, span.prompt_template_version,
                 ],
             )
 
@@ -1803,43 +1875,134 @@ class DuckDBBackend:
         where = " AND ".join(clauses) if clauses else "1=1"
         return where, params, idx
 
+    # Trace-cost-ranking sort options. "recent" (default) preserves the
+    # historical reverse-chronological order; "cost" ranks the highest-spend
+    # trace first within the same filtered/paginated window — additive, not a
+    # replacement (see TracesListView in ui/index.html for the toggle).
+    _TRACE_SORT_EXPR = {
+        "recent": "tc.start_time DESC",
+        "cost": "tc.cost_usd DESC NULLS LAST, tc.start_time DESC",
+    }
+
+    # Statistical cost-outlier rule (Tukey's fence): a trace is flagged when its
+    # cost sits above Q3 + 1.5 * IQR of the *priced* (cost_usd > 0) traces in the
+    # same filtered window. Below this many priced traces the quartiles are too
+    # noisy to mean anything, so nothing is flagged at all. This is the classic
+    # box-plot outlier rule — conservative, well-known, and cheap to compute
+    # alongside the existing per-trace aggregation (no second table scan).
+    MIN_OUTLIER_SAMPLE = 8
+
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         where, params, idx = self._trace_filter_where(filters)
+        sort_expr = self._TRACE_SORT_EXPR.get(filters.sort, self._TRACE_SORT_EXPR["recent"])
+        having = ""
+        if filters.min_cost_usd is not None:
+            having = f"WHERE tc.cost_usd >= ${idx}"
+            params.append(filters.min_cost_usd)
+            idx += 1
         # Use FIRST(name ORDER BY start_time) to pick the root span name —
         # the previous correlated-subquery variant returned NULL for most
         # rows in DuckDB, leaving the TYPE column blank in `tj traces` (U2).
+        #
+        # trace_costs aggregates spans -> traces over the SAME filtered window
+        # as before (bounded by since/until/agent_id/etc, same complexity class
+        # as the prior query — no new scan). cost_stats computes the window's
+        # cost quartiles ONCE, over the unfiltered-by-threshold trace set, so a
+        # `min_cost_usd` filter never skews the outlier fence. Both are derived
+        # from one pass over trace_costs; the min-cost filter and pagination are
+        # applied only in the outer SELECT.
         sql = (
-            f"SELECT trace_id, MAX(agent_id) AS agent_id, "
-            f"FIRST(name ORDER BY start_time) AS name, "
-            f"MIN(start_time) AS start_time, "
-            f"SUM(duration_ms) AS duration_ms, "
-            f"SUM(cost_usd) AS cost_usd, "
-            f"CASE WHEN SUM(CASE WHEN status_code='error' THEN 1 ELSE 0 END) > 0 THEN 'error' "
-            f"     WHEN SUM(CASE WHEN status_code='ok' THEN 1 ELSE 0 END) > 0 THEN 'ok' "
-            f"     ELSE 'unset' END AS status_code, "
-            f"COUNT(*) AS span_count, "
-            f"SUM(input_tokens) AS input_tokens, "
-            f"SUM(output_tokens) AS output_tokens "
-            f"FROM spans WHERE {where} "
-            f"GROUP BY trace_id "
-            f"ORDER BY start_time DESC "
+            f"WITH trace_costs AS ("
+            f"  SELECT trace_id, MAX(agent_id) AS agent_id, "
+            f"  FIRST(name ORDER BY start_time) AS name, "
+            f"  MIN(start_time) AS start_time, "
+            f"  SUM(duration_ms) AS duration_ms, "
+            f"  SUM(cost_usd) AS cost_usd, "
+            f"  CASE WHEN SUM(CASE WHEN status_code='error' THEN 1 ELSE 0 END) > 0 THEN 'error' "
+            f"       WHEN SUM(CASE WHEN status_code='ok' THEN 1 ELSE 0 END) > 0 THEN 'ok' "
+            f"       ELSE 'unset' END AS status_code, "
+            f"  COUNT(*) AS span_count, "
+            f"  SUM(input_tokens) AS input_tokens, "
+            f"  SUM(output_tokens) AS output_tokens "
+            f"  FROM spans WHERE {where} "
+            f"  GROUP BY trace_id"
+            f"), cost_stats AS ("
+            f"  SELECT "
+            f"  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cost_usd) AS q1, "
+            f"  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY cost_usd) AS q3, "
+            f"  COUNT(*) AS priced_count "
+            f"  FROM trace_costs WHERE cost_usd > 0"
+            f") "
+            f"SELECT tc.trace_id, tc.agent_id, tc.name, tc.start_time, tc.duration_ms, "
+            f"tc.cost_usd, tc.status_code, tc.span_count, tc.input_tokens, tc.output_tokens, "
+            f"cs.q1, cs.q3, cs.priced_count "
+            f"FROM trace_costs tc CROSS JOIN cost_stats cs "
+            f"{having} "
+            f"ORDER BY {sort_expr} "
             f"LIMIT ${idx} OFFSET ${idx + 1}"
         )
         params.extend([filters.limit, filters.offset])
         rows = self.conn.execute(sql, params).fetchall()
-        return [
-            TraceRecord(
+        result = []
+        for r in rows:
+            cost_usd = r[5]
+            q1, q3, priced_count = r[10], r[11], int(r[12] or 0)
+            is_outlier = _is_cost_outlier(cost_usd, q1, q3, priced_count, self.MIN_OUTLIER_SAMPLE)
+            result.append(TraceRecord(
                 trace_id=r[0], agent_id=r[1], name=r[2], start_time=r[3],
-                duration_ms=r[4], cost_usd=r[5], status_code=r[6],
+                duration_ms=r[4], cost_usd=cost_usd, status_code=r[6],
                 span_count=r[7],
                 input_tokens=int(r[8] or 0), output_tokens=int(r[9] or 0),
-            )
-            for r in rows
-        ]
+                is_outlier=is_outlier,
+            ))
+        return result
+
+    def get_trace_cost_stats(self, filters: TraceFilters) -> TraceCostStats:
+        """Window-level cost distribution behind `TraceRecord.is_outlier`.
+
+        Mirrors the `cost_stats` CTE in `get_traces` (same `where`, no
+        pagination/threshold) so the numbers the UI shows for "why is this
+        flagged" always match the flags actually returned.
+        """
+        where, params, _ = self._trace_filter_where(filters)
+        sql = (
+            f"WITH trace_costs AS ("
+            f"  SELECT trace_id, SUM(cost_usd) AS cost_usd "
+            f"  FROM spans WHERE {where} GROUP BY trace_id"
+            f") "
+            f"SELECT "
+            f"PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY cost_usd) AS q1, "
+            f"PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY cost_usd) AS q3, "
+            f"COUNT(*) AS priced_count "
+            f"FROM trace_costs WHERE cost_usd > 0"
+        )
+        row = self.conn.execute(sql, params).fetchone()
+        q1, q3, priced_count = (row[0], row[1], int(row[2] or 0)) if row else (None, None, 0)
+        threshold = None
+        if q1 is not None and q3 is not None and priced_count >= self.MIN_OUTLIER_SAMPLE:
+            threshold = q3 + 1.5 * (q3 - q1)
+        return TraceCostStats(
+            method="iqr_1.5x",
+            sample_size=priced_count,
+            min_sample=self.MIN_OUTLIER_SAMPLE,
+            q1_usd=q1,
+            q3_usd=q3,
+            threshold_usd=threshold,
+        )
 
     def count_traces(self, filters: TraceFilters) -> int:
-        where, params, _ = self._trace_filter_where(filters)
-        row = self.conn.execute(f"SELECT COUNT(DISTINCT trace_id) FROM spans WHERE {where}", params).fetchone()
+        where, params, idx = self._trace_filter_where(filters)
+        if filters.min_cost_usd is not None:
+            sql = (
+                f"SELECT COUNT(*) FROM ("
+                f"  SELECT trace_id FROM spans WHERE {where} "
+                f"  GROUP BY trace_id HAVING SUM(cost_usd) >= ${idx}"
+                f")"
+            )
+            params.append(filters.min_cost_usd)
+        else:
+            sql = f"SELECT COUNT(DISTINCT trace_id) FROM spans WHERE {where}"
+        row = self.conn.execute(sql, params).fetchone()
         return int(row[0] or 0) if row else 0
 
     def get_session_id_for_trace(self, trace_id: str) -> str | None:
@@ -1858,11 +2021,19 @@ class DuckDBBackend:
         return [_row_to_span(r, cols) for r in rows]
 
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]:
+        # SDK cost-attribution dimensions (tenant/feature/environment/prompt
+        # version) — added alongside agent/model/day/tool. All four are plain
+        # columns on `spans` (see migration 17).
+        attribution_dims = ("tenant", "feature", "environment", "prompt_version")
         group_col_map = {
             "day": "CAST(start_time AS DATE)",
             "agent": "agent_id",
             "model": "model",
             "tool": "tool_name",
+            "tenant": "tenant_id",
+            "feature": "feature",
+            "environment": "environment",
+            "prompt_version": "prompt_template_version",
         }
         group_expr = group_col_map.get(filters.group_by, "CAST(start_time AS DATE)")
 
@@ -1877,6 +2048,14 @@ class DuckDBBackend:
             "tool_name IS NOT NULL" if filters.group_by == "tool" else "model IS NOT NULL"
         )
         clauses: list[str] = [presence_clause]
+        # Attribution dims additionally require the dimension itself to be set
+        # (rather than folding NULL/unset spend into a misleading "(none)"
+        # bucket) — a caller wanting to see unattributed spend can compare this
+        # grouping's total against the ungrouped window total. This is the
+        # "degrade honestly" contract: an empty `rows` list here means the
+        # dimension was never set at the call site, not that spend was zero.
+        if filters.group_by in attribution_dims:
+            clauses.append(f"{group_expr} IS NOT NULL")
         params: list[object] = []
         idx = 1
         if filters.agent_id:
@@ -1890,6 +2069,25 @@ class DuckDBBackend:
         if filters.until:
             clauses.append(f"start_time <= ${idx}")
             params.append(filters.until)
+            idx += 1
+        # Equality filters for the attribution dimensions themselves — independent
+        # of group_by, so e.g. group_by="model" + tenant_id="acme" scopes a
+        # per-model breakdown to one tenant.
+        if filters.tenant_id:
+            clauses.append(f"tenant_id = ${idx}")
+            params.append(filters.tenant_id)
+            idx += 1
+        if filters.feature:
+            clauses.append(f"feature = ${idx}")
+            params.append(filters.feature)
+            idx += 1
+        if filters.environment:
+            clauses.append(f"environment = ${idx}")
+            params.append(filters.environment)
+            idx += 1
+        if filters.prompt_version:
+            clauses.append(f"prompt_template_version = ${idx}")
+            params.append(filters.prompt_version)
             idx += 1
         where = " AND ".join(clauses)
 
@@ -1923,6 +2121,16 @@ class DuckDBBackend:
                 + f"FROM spans WHERE {where} "
                 f"GROUP BY grp "
                 f"ORDER BY COUNT(*) DESC"
+            )
+        elif filters.group_by in attribution_dims:
+            # Biggest spender first — the whole point of this grouping is
+            # concentration (which tenant/feature/environment/prompt version is
+            # driving spend), so cost order is the useful default.
+            sql = (
+                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
+                + f"FROM spans WHERE {where} "
+                f"GROUP BY grp "
+                f"ORDER BY COALESCE(SUM(cost_usd), 0.0) DESC"
             )
         else:
             # day: group only by the primary expression to avoid cross-product

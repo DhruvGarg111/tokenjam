@@ -29,7 +29,10 @@ from pydantic import BaseModel, ConfigDict
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
 from tokenjam.core.framing import (
     WindowSummary,
+    agent_persona_mix,
     compute_framing,
+    config_declared_plan,
+    dominant_persona,
     plan_determination_mix,
 )
 from tokenjam.core.optimize import (
@@ -105,6 +108,26 @@ def _conn(request: Request) -> Any | None:
     return getattr(db, "conn", None) if db is not None else None
 
 
+def _persona(request: Request) -> str:
+    """Dominant user persona, full-corpus (relearn is the unbounded-history
+    detector — see its module docstring — so its own empty-state copy needs
+    the same unbounded classification, not a windowed one that could
+    disagree with what the daemon actually gated relearn's write levers on
+    in ``relearn_store.recompute_now``). Mirrors that same computation;
+    degrades to ``"unknown"`` on any error so a persona-classification
+    failure never breaks the inbox itself.
+    """
+    try:
+        conn = _conn(request)
+        if conn is None:
+            return "unknown"
+        return dominant_persona(
+            agent_persona_mix(conn), declared_plan=config_declared_plan(_config(request)),
+        )
+    except Exception:
+        return "unknown"
+
+
 def _resolvable_session_ids(conn: Any | None, session_ids: list[str]) -> set[str]:
     """Subset of `session_ids` that exist as rows in the sessions table."""
     if conn is None or not session_ids:
@@ -175,10 +198,16 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
 
     ``framing`` is the same plan-tier dollar-suppression block the cost-
     proposals endpoint carries (``core.framing.compute_framing``) — relearn
-    clusters now carry their own blended-rate ``estimated_monthly_usd``
-    (behavioral requirement #2), so this surface needs the same suppression
-    rule the cost-advisory dollars already respect rather than a second,
-    un-gated dollar figure on the page.
+    clusters carry their own blended-rate ``past_overspend_usd``, the one
+    canonical dollar field (no relearn-specific forward claim any more), so
+    this surface needs the same suppression rule the cost-advisory dollars
+    already respect rather than a second, un-gated dollar figure on the page.
+
+    ``persona`` is the full-corpus dominant persona (see ``_persona``) — the
+    inbox's empty state for this tab needs it to disclose that ``relearn``
+    reads only on-disk Claude Code transcripts and therefore never surfaces
+    anything for an SDK-dominant window, rather than reading as "you're doing
+    great."
     """
     cached = relearn_store.read_cache(config=_config(request))
     computing = relearn_store.is_computing()
@@ -188,6 +217,7 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "computed_at": None,
             "finding": None,
             "framing": _framing(request),
+            "persona": _persona(request),
         }
     finding = cached.get("finding")
     if isinstance(finding, dict):
@@ -200,6 +230,7 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
         "computed_at": cached.get("computed_at"),
         "finding": _with_example_resolvability(finding, _conn(request)),
         "framing": _framing(request),
+        "persona": _persona(request),
     }
 
 
@@ -335,8 +366,8 @@ def _open_cost_verify_window(
             "agent_name": str(cluster.get("agent_name") or ""),
         },
         "baseline": {"proposed_model": str(cluster.get("proposed_model") or "")},
-        "estimated_recoverable_usd": None,
-        "estimated_recoverable_tokens": None,
+        "past_overspend_usd": None,
+        "past_overspend_tokens": None,
         "estimate_basis": "",
     }
     try:

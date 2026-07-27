@@ -28,6 +28,55 @@ from __future__ import annotations
 from tokenjam.core.context_diagnostic import TurnComposition
 from tokenjam.core.model_tiers import is_premium_tier
 
+#: THE `relearn` / `resend` BOUNDARY, stated once so neither side can restate
+#: it differently. Both analyzers are imported from here, and both quote this
+#: constant in their basis strings rather than paraphrasing it.
+#:
+#: The two look overlapping because on a coding corpus almost every token in
+#: almost every call is re-sent context — measured on the local corpus, the
+#: MEDIAN turn in a failure-bearing session is 96,064 prompt tokens of which
+#: 95,919 (99.8%) are cache reads and 2 are fresh input. So "the cost of a
+#: retry turn" and "re-sent context" name nearly the same physical tokens, and
+#: an unstated boundary would let both cards price them.
+#:
+#: The line is the COUNTERFACTUAL, not the token class:
+#:
+#:   * `relearn` owns whether a call EXISTS. Its fix removes the failure, so
+#:     the retry turn never happens and its ENTIRE cost goes with it —
+#:     including the context that turn re-read. You do not pay a call's cache
+#:     reads for a call you never make. That is why relearn prices the whole
+#:     turn and not just the ~2 fresh tokens it introduced; pricing only the
+#:     new tokens would value eliminating a 96k-token call at a fraction of a
+#:     cent, which is false.
+#:   * `resend` owns how BIG a call is. Its levers (offload to a subagent,
+#:     compaction) shrink calls that still have to happen. It never claims a
+#:     call's existence, only its size.
+#:
+#: Two consequences that keep the claims disjoint in practice:
+#:
+#:   1. relearn does NOT claim the error text's own downstream tail — the
+#:      ~1,500 tokens of error text re-read by every LATER call. Those later
+#:      calls did have to happen, so their size is resend's population.
+#:      relearn reports that share as an observation (`past_reread_*`) and
+#:      excludes it from its claim.
+#:   2. The residual overlap runs the other way: a retry turn is itself one of
+#:      the later calls resend counts in its tails, so resend's claim includes
+#:      re-reads performed by calls relearn says should not exist. Measured
+#:      2026-07-26 this is 5,735 retry turns against 275,537 LLM calls
+#:      (2.08%), and after resend's own in-scope and offloadable-share gates
+#:      it is under 0.1% of resend's claim — bounded, disclosed, and pinned by
+#:      `tests/unit/test_relearn_resend_boundary.py` rather than left to be
+#:      rediscovered.
+RELEARN_RESEND_BOUNDARY = (
+    "relearn prices calls that should not have happened; resend prices the "
+    "size of calls that had to. A failure's fix removes the retry turn "
+    "entirely, so relearn claims that turn whole — including the context it "
+    "re-read, which is not billed at all once the call is gone. The error "
+    "text's own re-read tail on LATER calls is excluded from relearn's claim "
+    "and reported as an observation, because those calls happen regardless "
+    "and their size is resend's to claim."
+)
+
 #: A prompt whose size falls to at most this share of the previous turn's has
 #: had its context reset (a ``/compact``, a resume, a fresh window). Material
 #: introduced before that point is not re-read after it, so a tail stops there

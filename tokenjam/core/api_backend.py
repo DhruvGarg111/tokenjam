@@ -120,6 +120,14 @@ class ApiBackend:
             params["until"] = filters.until.isoformat()
         if filters.group_by:
             params["group_by"] = filters.group_by
+        if filters.tenant_id:
+            params["tenant_id"] = filters.tenant_id
+        if filters.feature:
+            params["feature"] = filters.feature
+        if filters.environment:
+            params["environment"] = filters.environment
+        if filters.prompt_version:
+            params["prompt_version"] = filters.prompt_version
         data = self._get("/api/v1/cost", params)
         return [
             CostRow(

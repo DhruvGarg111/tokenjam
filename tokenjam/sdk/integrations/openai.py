@@ -16,6 +16,7 @@ from typing import Any
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_openai_completion,
     record_completion_content,
@@ -66,6 +67,10 @@ class OpenAIIntegration:
             # unless [capture] prompts is on. Set before the call so it's present
             # even on the streaming path (completion text isn't aggregated there).
             record_prompt_content(span, kwargs.get("messages"))
+            # Cost-attribution dimensions from the ambient sdk.attribution
+            # context (#SDK dashboard shape) — this patched client call has no
+            # per-call kwarg for tenant_id/feature.
+            stamp_span_attribution(span)
             is_stream = kwargs.get("stream", False)
             try:
                 response = integration._original_create(self_comp, *args, **kwargs)

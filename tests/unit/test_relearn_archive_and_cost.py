@@ -64,14 +64,24 @@ def _episode(
     )
 
 
-def _priced_session(db, session_id: str, *, agent_id: str = CODING_AGENT, at=BASE):
-    """A session row plus one priced LLM span, so a rate profile can be blended."""
+def _priced_session(
+    db, session_id: str, *, agent_id: str = CODING_AGENT, at=BASE,
+    input_tokens: int = 2_000,
+):
+    """A session row plus one priced LLM span, so a rate profile can be blended.
+
+    ``input_tokens`` is a knob because a test asserting on the WRITE OFFER (as
+    opposed to the clustering) has to fund it: `write_budget.MIN_NET_WRITE_USD`
+    declines to spend a permanent block on a rule returning under $5, so a
+    cent-scale fixture is correctly refused a write and cannot exercise the
+    offered path.
+    """
     db.upsert_session(make_session(
         agent_id=agent_id, session_id=session_id, started_at=at, ended_at=at,
     ))
     db.insert_span(make_llm_span(
         agent_id=agent_id, session_id=session_id, model="claude-sonnet-4-5",
-        input_tokens=2_000, output_tokens=200, start_time=at,
+        input_tokens=input_tokens, output_tokens=200, start_time=at,
     ))
 
 
@@ -175,17 +185,16 @@ def test_no_fix_template_cluster_still_carries_its_observed_cost(db):
     p = proposals[0]
     assert "no known fix template" in p.proposed_fix.lower() or "review examples" in p.proposed_fix.lower()
 
-    # The CLAIM is correctly zero: nothing is recoverable without a fix.
-    assert p.estimated_recoverable_tokens == 0
-    assert p.estimated_monthly_tokens == 0
+    # No forward claim exists at all any more — the one canonical dollar
+    # field is `past_overspend_*`, no carve-out.
+    assert not hasattr(p, "estimated_recoverable_tokens")
+    assert not hasattr(p, "estimated_monthly_tokens")
+    assert not p.write_offered
 
-    # The OBSERVATION is not.
+    # The OBSERVATION is not zero.
     assert p.past_overspend_tokens >= MIN_RECURRING_SESSIONS * GROUNDED_TOKENS_PER_OCCURRENCE
     assert p.past_overspend_usd is not None and p.past_overspend_usd > 0
     assert p.past_overspend_basis
-    # The past figure can never be smaller than any claim made off the same
-    # cluster, or a card would read "cost you $X, of which $Y>X was avoidable".
-    assert p.past_overspend_tokens >= p.estimated_recoverable_tokens
 
 
 def test_net_negative_write_budget_does_not_zero_the_past_cost(db):
@@ -215,7 +224,7 @@ def test_net_negative_write_budget_does_not_zero_the_past_cost(db):
     assert len(proposals) == 1
     p = proposals[0]
     assert p.net_negative, "expected the write budget to suppress this rule"
-    assert p.estimated_recoverable_tokens == 0        # nothing worth doing
+    assert not p.write_offered        # nothing worth doing, no forward field exists
     # It still cost real money, at the FULL observed rate.
     assert p.past_overspend_tokens >= MIN_RECURRING_SESSIONS * GROUNDED_TOKENS_PER_OCCURRENCE
     assert p.past_overspend_usd is not None and p.past_overspend_usd > 0
@@ -447,8 +456,8 @@ def test_cli_relearn_row_leads_with_what_it_cost_not_the_gated_claim(db):
     )
     p = proposals[0]
     assert p.net_negative
-    # The claim is zero...
-    assert p.estimated_recoverable_tokens == 0
+    # No write is offered — no forward field exists to be zero...
+    assert not p.write_offered
     # ...and yet the row still shows a non-empty observed cost.
     cost = _relearn_past_overspend(p, pricing_mode="api")
     assert cost, "a suppressed cluster must still render what it cost"
@@ -694,15 +703,20 @@ def test_relearn_claims_the_retry_turn_and_never_the_reread_tail(db):
     """
     from tokenjam.core.optimize.analyzers.relearn import cluster_failures
 
+    # Sized to clear `write_budget.MIN_NET_WRITE_USD`, since this test asserts
+    # on the OFFERED path: 5 sessions of ~100k-token turns hitting the same
+    # pothole 4 times each, which is an ordinary shape on a real coding corpus.
     failures = []
     for i in range(MIN_RECURRING_SESSIONS + 2):
         session_id = f"d{i}"
-        _priced_session(db, session_id)
-        failures.append(_episode(
-            session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
-        ))
+        _priced_session(db, session_id, input_tokens=100_000)
+        for occurrence in range(4):
+            failures.append(_episode(
+                session_id,
+                "File has not been read yet. Read it first before writing to it.",
+                ts=(BASE + timedelta(days=i, minutes=occurrence)).isoformat(),
+                tool="Edit",
+            ))
     clusters = list(cluster_failures(failures).values())
     proposals, _ = build_proposals(
         clusters, conn=db.conn, window_days=30.0, persona="claude-code",
@@ -711,27 +725,15 @@ def test_relearn_claims_the_retry_turn_and_never_the_reread_tail(db):
     p = proposals[0]
     assert p.write_offered, "this family has a real fix; expected a claim"
 
-    # The observation is the whole cost: retry turns + the text's re-read tail.
-    # The claim is the retry turns alone, so it is strictly the smaller of the
-    # two whenever a tail exists at all.
-    assert p.past_overspend_tokens >= p.estimated_recoverable_tokens
-    if p.past_reread_tokens:
-        assert p.estimated_recoverable_tokens < p.past_overspend_tokens, (
-            "a cluster with a re-read tail must not claim that tail"
-        )
-        # The claim plus the tail reconstructs the observation: nothing is
-        # invented and nothing goes missing between the two figures.
-        assert (
-            p.estimated_recoverable_tokens + p.past_reread_tokens
-            == p.past_overspend_tokens
-        )
-    # And both basis strings say which figure is which, in the user's words:
-    # the observed one discloses the overlap, the claim one says it is excluded.
-    from tokenjam.core.optimize.analyzers.relearn import (
-        ESTIMATE_BASIS,
-        PAST_OVERSPEND_BASIS,
-    )
+    # No forward claim field exists any more — a relearn cluster shows its
+    # PAST figure only. The disjointness rule this test used to assert on
+    # `estimated_recoverable_tokens` now lives entirely inside the observed
+    # figure: the re-read tail is a COMPONENT of `past_overspend_tokens` (not
+    # an addend), broken out separately as `past_reread_tokens`, and never
+    # exceeds the total it is a component of.
+    assert not hasattr(p, "estimated_recoverable_tokens")
+    assert p.past_reread_tokens <= p.past_overspend_tokens
+    # The one basis string says the overlap is disclosed, never claimed twice.
+    from tokenjam.core.optimize.analyzers.relearn import PAST_OVERSPEND_BASIS
 
     assert "must never be added together" in PAST_OVERSPEND_BASIS
-    assert "NOT claimed here" in ESTIMATE_BASIS
-    assert "should not have happened" in ESTIMATE_BASIS

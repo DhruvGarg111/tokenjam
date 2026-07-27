@@ -397,10 +397,12 @@ def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
     assert p.write_offered is False
     assert p.suggested_target == ""
     assert p.advise_only is True
-    assert p.estimated_recoverable_tokens == 0
+    assert not hasattr(p, "estimated_recoverable_tokens")
+    assert not hasattr(p, "gross_recoverable_tokens")
     assert p.write_blocked_reason == wb.REASON_PLACEHOLDER
-    # The pre-net observation is still inspectable; only the CLAIM is zero.
-    assert p.gross_recoverable_tokens > 0
+    # The observation is still inspectable and unaffected — only the
+    # (now-retired) forward claim was ever zero.
+    assert p.past_overspend_tokens > 0
 
 
 def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
@@ -421,14 +423,18 @@ def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
     hook = by_family["cwd_confusion"]
     note = by_family["edit_before_read"]
 
+    # The netting arithmetic itself (not a rendered forward field any more —
+    # see `write_budget.py`) still distinguishes a zero-standing-cost hook
+    # from a rung-1 note that costs something to keep.
     assert hook.rung == 3
     assert hook.standing_cost_tokens == 0
-    assert hook.estimated_recoverable_tokens == hook.gross_recoverable_tokens
+    assert hook.payback_ratio is None or hook.payback_ratio >= 1.0
+    assert not hasattr(hook, "estimated_recoverable_tokens")
 
     assert note.rung == 1
     assert note.standing_cost_tokens > 0
-    assert note.estimated_recoverable_tokens < note.gross_recoverable_tokens
     assert note.standing_cost_basis
+    assert not hasattr(note, "estimated_recoverable_tokens")
 
 
 def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
@@ -446,17 +452,25 @@ def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
     offered = [p for p in proposals if p.write_offered]
     assert len(proposals) == 12
     assert len(offered) <= wb.RELEARN_MAX_OFFERED_WRITES
-    # Ranked: nothing suppressed outranks anything offered.
+    # Ranked: nothing suppressed outranks anything offered, on the pre-net
+    # observation the budget itself ranks by (no forward field is rendered
+    # any more to check this against).
     suppressed = [p for p in proposals if not p.write_offered and not p.net_negative]
     if offered and suppressed:
-        assert min(p.estimated_recoverable_tokens for p in offered) >= max(
-            p.estimated_recoverable_tokens for p in suppressed
+        assert min(p.past_overspend_tokens for p in offered) >= max(
+            p.past_overspend_tokens for p in suppressed
         )
 
 
-def test_relearn_totals_are_the_netted_ones():
-    """The finding's headline sums the NET per-cluster figures, so no rollup
-    can reach a gross number by adding the parts back up."""
+def test_relearn_carries_no_monthly_forward_field():
+    """The 30-day-basis forward claim (`estimated_monthly_*` /
+    `gross_monthly_*`) is retired entirely — a relearn cluster's headline is
+    `past_overspend_*`, the same past-tense figure every other analyzer's
+    card shows. `gross_recoverable_tokens` is also gone: it held the SAME
+    value as `past_overspend_tokens`, so the one observation now doubles as
+    the netting input `write_budget.WriteCandidate.gross_tokens` needs to
+    decide whether a permanent write is worth OFFERING
+    (`standing_cost_*`, `payback_ratio` survive on that decision)."""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
@@ -466,9 +480,14 @@ def test_relearn_totals_are_the_netted_ones():
         projection=_basis(sessions=80, active_days=10),
     )
     p = proposals[0]
-    assert p.estimated_monthly_tokens <= p.gross_monthly_tokens
-    if p.gross_monthly_usd is not None:
-        assert p.estimated_monthly_usd <= p.gross_monthly_usd
+    for retired in (
+        "estimated_monthly_tokens", "estimated_monthly_usd",
+        "gross_monthly_tokens", "gross_monthly_usd",
+        "estimated_recoverable_tokens", "estimated_recoverable_usd",
+        "gross_recoverable_tokens",
+    ):
+        assert not hasattr(p, retired)
+    assert p.past_overspend_tokens > 0
 
 
 # --- Lane integration: cost proposals -------------------------------------------
@@ -584,3 +603,105 @@ def test_a_non_write_cost_card_is_left_completely_untouched():
     assert p.past_overspend_tokens == 90_000
     assert p.standing_cost_tokens == 0
     assert p.gross_recoverable_tokens is None       # never entered the pass
+
+
+# --- The value floor (MIN_NET_WRITE_USD) --------------------------------------
+# Netting alone only asks "does this break even". These pin the stronger
+# question the floor asks: "is this worth one of five permanent blocks in a
+# file the user re-sends forever".
+
+def test_a_rule_returning_less_than_the_floor_is_not_offered():
+    # Arrange: comfortably net-POSITIVE in tokens, but worth only $2.
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=2.0)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+
+    assert decision.net_negative is False          # it DID clear its own cost
+    assert decision.offered is False               # ...and still isn't worth a block
+    assert decision.reason == wb.REASON_BELOW_VALUE_FLOOR
+
+
+def test_the_floor_defers_the_write_but_never_suppresses_the_claim():
+    """The floor is a decision about OUR remedy, not about the user's money.
+
+    Repo CLAUDE.md rule 32: a gate on action-availability may never make an
+    incurred cost read as zero. So a below-floor family keeps its net claim and
+    its copyable snippet, exactly like a budget-deferred one — the only thing
+    it loses is the permanent write.
+    """
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=2.0)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+
+    assert decision.claim_suppressed is False
+    assert decision.claimed_tokens > 0
+    assert decision.claimed_usd is not None and decision.claimed_usd > 0
+
+
+def test_a_rule_at_or_above_the_floor_is_offered():
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=wb.MIN_NET_WRITE_USD * 3)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+    assert decision.offered is True
+    assert decision.reason == ""
+
+
+def test_an_unpriced_family_is_never_held_to_a_dollar_floor():
+    """No dollar figure means no comparison, and inventing a rate to make one
+    would kill real fixes for the sin of being unquantified — the same reason
+    `BASIS_NOT_PRICEABLE` exists."""
+    decision = wb.allocate_writes(
+        [_candidate("a", tokens=1_000_000, usd=None)],
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )["a"]
+    assert decision.offered is True
+    assert decision.reason == ""
+
+
+def test_a_below_floor_family_does_not_consume_a_write_slot():
+    """The floor exists to protect the scarce slots, so it has to be applied
+    BEFORE the budget — otherwise a $2 family could crowd out a $50 one."""
+    candidates = [
+        _candidate("small", family="f1", tokens=1_000_000, usd=1.0),
+        _candidate("big", family="f2", tokens=1_000_000, usd=50.0),
+    ]
+    decisions = wb.allocate_writes(
+        candidates,
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=1),
+        _basis(sessions=100),
+    )
+    assert decisions["small"].offered is False
+    assert decisions["small"].reason == wb.REASON_BELOW_VALUE_FLOOR
+    assert decisions["big"].offered is True        # the slot went to the big one
+
+
+def test_the_floor_has_a_short_label_so_it_never_renders_generic():
+    assert wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR) != "no permanent fix offered"
+    assert "5" in wb.short_reason(wb.REASON_BELOW_VALUE_FLOOR)
+
+
+def test_the_floor_applies_to_the_combined_family_value_not_one_members_share():
+    """Regression guard: several clusters sharing one write family collapse
+    onto ONE block (`_decide_family`), so the floor must compare against the
+    family's COMBINED net, not just the representative member's own share.
+    Two members at $3 each are individually below MIN_NET_WRITE_USD, but
+    their combined $6 clears it -- the shared rule must still be offered."""
+    candidates = [
+        _candidate("a", family="combofam", tokens=1_000_000, usd=3.0),
+        _candidate("b", family="combofam", tokens=1_000_000, usd=3.0),
+    ]
+    decisions = wb.allocate_writes(
+        candidates,
+        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        _basis(sessions=100),
+    )
+    rep_decision = next(d for d in decisions.values() if d.reason != wb.REASON_FAMILY_MERGED)
+    assert rep_decision.offered is True
+    assert rep_decision.net_usd is not None and rep_decision.net_usd > wb.MIN_NET_WRITE_USD

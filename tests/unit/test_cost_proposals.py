@@ -1157,16 +1157,43 @@ def test_resend_carries_one_dollar_figure_and_the_headline_reads_it():
     assert rollup["past_overspend_tokens"] == 6_830
 
 
-def test_resend_sdk_persona_gets_no_write_and_leads_with_compact():
-    # The SDK branch is unchanged: no coding-agent harness reads a CLAUDE.md
-    # note there, so no write is offered and /compact remains the lead fix.
+def test_resend_unknown_persona_gets_no_write_and_leads_with_compact():
+    # "unknown" is untouched by the SDK /compact fix below: no coding-agent
+    # harness reads a CLAUDE.md note there, so no write is offered and
+    # /compact remains the lead fix.
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
-    for persona in ("sdk", "unknown"):
-        prop = _resend_to_proposals(_resend_finding(), persona=persona)[0]
-        assert prop.advise_only is True
-        assert prop.apply_capable is False
-        assert prop.advise_text == "Run /compact."
+    prop = _resend_to_proposals(_resend_finding(), persona="unknown")[0]
+    assert prop.advise_only is True
+    assert prop.apply_capable is False
+    assert prop.advise_text == "Run /compact."
+
+
+def test_resend_sdk_persona_never_sees_compact():
+    # `/compact` is a Claude Code interactive command an SDK caller has no
+    # access to. When a priced cache_control example exists, the advise text
+    # must lead with adopting it instead, never with /compact.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="sdk")[0]
+    assert prop.advise_only is True
+    assert prop.apply_capable is False
+    assert "/compact" not in prop.advise_text
+    assert "cache_control" in prop.advise_text
+
+
+def test_resend_sdk_persona_without_a_snippet_gets_a_neutral_fallback():
+    # No priced example -> fix_cache_control is empty. The fallback must be
+    # persona-neutral and actionable, and must still never mention /compact.
+    from tokenjam.core.optimize.analyzers.context_resend import RESEND_SDK_TRIM_FIX
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    finding = _resend_finding()
+    finding.fix_cache_control = ""
+    prop = _resend_to_proposals(finding, persona="sdk")[0]
+    assert "/compact" not in prop.advise_text
+    assert prop.advise_text == RESEND_SDK_TRIM_FIX
+    assert prop.one_paste_fix == RESEND_SDK_TRIM_FIX
 
 
 def test_resend_mixed_persona_offers_write_and_keeps_snippet():
@@ -1217,8 +1244,18 @@ def test_resend_persona_flows_through_the_report_dispatch():
     # resend adapter (it was the one adapter that didn't take persona).
     from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 
+    from dataclasses import replace
+
     rep = _report()
-    rep.findings["resend"] = _resend_finding()
+    # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): the
+    # report dispatch runs the write budget, which declines a permanent block
+    # for a 50-cent return, and this test is about persona threading rather
+    # than about whether a rule is worth writing. Tokens move with the dollars
+    # so the implied rate stays inside a real price band (CLAUDE.md rule 28).
+    rep.findings["resend"] = replace(
+        _resend_finding(),
+        past_overspend_usd=60.0, past_overspend_tokens=20_000_000,
+    )
     rep.persona = "claude-code"
     prop = {p.analyzer: p for p in cost_proposals_from_report(rep)}["resend"]
     assert prop.suggestion == "", "report persona must reach the resend adapter"
@@ -1320,7 +1357,7 @@ def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
 # --- Real-data validation follow-ups: dollar-first headline, sort, formatting -
 
 def test_downsize_agent_row_carries_the_window_delta_never_the_row_projection():
-    # Reproduces the founder's real "Model over-sizing in claude-code
+    # Reproduces a real "Model over-sizing in claude-code
     # (claude-opus-4-7 to claude-haiku-4-5)" card: a per-agent price row is
     # the path that produced it (_downsize_agent_proposals, not the window-
     # wide aggregate _report() fixture above exercises). The card's one dollar

@@ -1044,7 +1044,7 @@ def audit_opus_quota(
     audit.actual_cost_usd = round(actual_cost, 6)
     audit.alternative_cost_usd = round(alt_cost, 6)
 
-    # Confidence interval on the HEADLINE PERCENT (design §6, founder D3). Each
+    # Confidence interval on the HEADLINE PERCENT (design §6, D3). Each
     # flagged segment contributes its premium-quota value; scaling the resampled
     # SUM by 100/premium_quota turns the bootstrap into an interval on the share.
     # Resampling segments (not sessions) widens the band honestly when the

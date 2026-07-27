@@ -226,7 +226,7 @@ class TestSetupCompleteHome:
         assert "last 30 days" in out
         # No second command list here: the onboard flows print their own
         # curated next-steps block just above this close — a duplicate
-        # next-best-actions list was founder-flagged (2026-07). Just the
+        # next-best-actions list was flagged as redundant (2026-07). Just the
         # help pointer.
         assert "tj optimize" not in out
         assert "tj --help" in out

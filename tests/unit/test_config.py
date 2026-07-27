@@ -7,6 +7,7 @@ from tokenjam.core.config import (
     find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
     BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
     OptimizeConfig, StorageConfig, resolve_effective_budget, validate_budget_value,
+    validate_cycle_start_day,
 )
 
 
@@ -389,3 +390,18 @@ class TestValidateBudgetValue:
     def test_negative_raises(self):
         with pytest.raises(ValueError, match="must be non-negative"):
             validate_budget_value(-1.0, "daily_usd")
+
+
+class TestValidateCycleStartDay:
+    def test_in_range_returns_value(self):
+        assert validate_cycle_start_day(15) == 15
+        assert validate_cycle_start_day(1) == 1
+        assert validate_cycle_start_day(28) == 28
+
+    def test_zero_raises(self):
+        with pytest.raises(ValueError, match="between 1 and 28"):
+            validate_cycle_start_day(0)
+
+    def test_above_28_raises(self):
+        with pytest.raises(ValueError, match="between 1 and 28"):
+            validate_cycle_start_day(29)

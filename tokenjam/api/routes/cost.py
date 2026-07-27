@@ -474,6 +474,57 @@ async def get_cost_cache(
     }
 
 
+# Attribution dimensions the Cost view can group/filter by, beyond the
+# original agent/model/day/tool — the "which CUSTOMER/TENANT, FEATURE,
+# ENVIRONMENT, PROMPT VERSION is spending the money" breakdown. Each maps its
+# group_by key to (spans column, the wire attribute a caller sets to populate
+# it, human label) so the UI's empty state can tell a user exactly what to
+# instrument instead of just showing a blank chart.
+ATTRIBUTION_DIMENSIONS: dict[str, tuple[str, str, str]] = {
+    "tenant": ("tenant_id", "tokenjam.tenant_id", "Tenant"),
+    "feature": ("feature", "tokenjam.feature", "Feature"),
+    "environment": ("environment", "deployment.environment.name", "Environment"),
+    "prompt_version": (
+        "prompt_template_version", "tokenjam.prompt.template_version", "Prompt version",
+    ),
+}
+
+
+def _dimension_coverage(conn, agent_id, since_dt, until_dt) -> dict:
+    """Whether each attribution dimension carries ANY data in this window
+    (#SDK dashboard shape). Powers the honest empty state: a dimension with
+    zero coverage renders "set <attribute> at the call site" instead of a
+    misleadingly blank chart indistinguishable from "no spend at all".
+    """
+    out = {
+        key: {"has_data": False, "attribute": attr, "label": label}
+        for key, (_, attr, label) in ATTRIBUTION_DIMENSIONS.items()
+    }
+    if conn is None:
+        return out
+    clauses = ["model IS NOT NULL"]
+    params: list = []
+    if agent_id:
+        params.append(agent_id)
+        clauses.append("agent_id = $" + str(len(params)))
+    if since_dt is not None:
+        params.append(since_dt)
+        clauses.append("start_time >= $" + str(len(params)))
+    if until_dt is not None:
+        params.append(until_dt)
+        clauses.append("start_time <= $" + str(len(params)))
+    where = " AND ".join(clauses)
+    cols = ", ".join(
+        f"COUNT(*) FILTER (WHERE {col} IS NOT NULL)"
+        for key, (col, _, _) in ATTRIBUTION_DIMENSIONS.items()
+    )
+    row = conn.execute(f"SELECT {cols} FROM spans WHERE {where}", params).fetchone()
+    if row is not None:
+        for i, key in enumerate(ATTRIBUTION_DIMENSIONS):
+            out[key]["has_data"] = bool(row[i] and row[i] > 0)
+    return out
+
+
 @router.get("/cost")
 async def get_cost(
     request: Request,
@@ -481,6 +532,10 @@ async def get_cost(
     since: str | None = None,
     until: str | None = None,
     group_by: str = "day",
+    tenant_id: str | None = None,
+    feature: str | None = None,
+    environment: str | None = None,
+    prompt_version: str | None = None,
 ) -> dict:
     db = request.app.state.db
     config = request.app.state.config
@@ -491,6 +546,10 @@ async def get_cost(
         since=since_dt,
         until=until_dt,
         group_by=group_by,
+        tenant_id=tenant_id,
+        feature=feature,
+        environment=environment,
+        prompt_version=prompt_version,
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)
@@ -526,4 +585,138 @@ async def get_cost(
         **_window_series(conn, agent_id, since_dt, until_dt),
         "cycle": _cycle_block(config),
         "framing": framing,
+        # Per-dimension "is there any data to show" flags (#SDK dashboard
+        # shape) so the UI can render an honest empty state — independent of
+        # group_by, so switching the dropdown to an uninstrumented dimension
+        # doesn't require a second round-trip to know it'll be empty.
+        "attribution_coverage": _dimension_coverage(conn, agent_id, since_dt, until_dt),
+    }
+
+
+@router.get("/cost/tenants")
+async def get_cost_tenants(
+    request: Request,
+    agent_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    top_n: int = 10,
+) -> dict:
+    """Top-N tenants by spend: concentration view (#SDK dashboard shape).
+
+    Audits of multi-tenant B2B SaaS commonly find a small share of tenants
+    driving most of the token spend — this is the view that answers "which
+    ones, and how much". Shares are computed against TOTAL window spend
+    (including spend with no tenant_id set), never just the attributed subset,
+    so concentration can never be silently inflated by excluded unattributed
+    spend (Critical Rule 14 — never mislead with an unstated denominator).
+    Trend is each top tenant's cost delta vs. the prior equal-length window.
+    """
+    db = request.app.state.db
+    config = request.app.state.config
+    since_dt = parse_since(since) if since else None
+    until_dt = parse_since(until) if until else None
+    conn = getattr(db, "conn", None)
+    end_dt = until_dt or utcnow()
+
+    empty = {
+        "rows": [],
+        "total_cost_usd": 0.0,
+        "attributed_cost_usd": 0.0,
+        "unattributed_cost_usd": 0.0,
+        "has_data": False,
+        "attribute": "tokenjam.tenant_id",
+        "window_start": int(since_dt.timestamp()) if since_dt is not None else None,
+        "window_end": int(end_dt.timestamp()),
+        "framing": _framing_block(db, config, agent_id, 0.0, 0),
+    }
+    if conn is None:
+        return empty
+
+    clauses = ["model IS NOT NULL", "start_time < $1"]
+    params: list = [end_dt]
+    if since_dt is not None:
+        params.append(since_dt)
+        clauses.append("start_time >= $" + str(len(params)))
+    if agent_id:
+        params.append(agent_id)
+        clauses.append("agent_id = $" + str(len(params)))
+    where = " AND ".join(clauses)
+
+    # Total window spend (denominator) and the attributed/unattributed split,
+    # in one scan.
+    totals_row = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0.0), "
+        "COALESCE(SUM(cost_usd) FILTER (WHERE tenant_id IS NOT NULL), 0.0) "
+        f"FROM spans WHERE {where}",
+        params,
+    ).fetchone()
+    total_cost = float(totals_row[0] or 0.0) if totals_row else 0.0
+    attributed_cost = float(totals_row[1] or 0.0) if totals_row else 0.0
+    unattributed_cost = max(0.0, total_cost - attributed_cost)
+
+    if attributed_cost <= 0.0:
+        return {**empty, "total_cost_usd": round(total_cost, 8),
+                "unattributed_cost_usd": round(total_cost, 8)}
+
+    top_rows = conn.execute(
+        "SELECT tenant_id, "
+        "COALESCE(SUM(cost_usd), 0.0), COUNT(*), "
+        "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+        "COALESCE(SUM(cache_tokens), 0), COALESCE(SUM(cache_write_tokens), 0) "
+        f"FROM spans WHERE {where} AND tenant_id IS NOT NULL "
+        "GROUP BY tenant_id ORDER BY 2 DESC LIMIT $" + str(len(params) + 1),
+        [*params, max(1, top_n)],
+    ).fetchall()
+
+    # Trend: each top tenant's spend in the prior equal-length window.
+    prev_by_tenant: dict[str, float] = {}
+    if since_dt is not None:
+        prev_since = since_dt - (end_dt - since_dt)
+        prev_clauses = ["model IS NOT NULL", "tenant_id IS NOT NULL",
+                         "start_time >= $1", "start_time < $2"]
+        prev_params: list = [prev_since, since_dt]
+        if agent_id:
+            prev_params.append(agent_id)
+            prev_clauses.append("agent_id = $" + str(len(prev_params)))
+        prev_where = " AND ".join(prev_clauses)
+        for tenant, cost in conn.execute(
+            f"SELECT tenant_id, COALESCE(SUM(cost_usd), 0.0) FROM spans WHERE {prev_where} "
+            "GROUP BY tenant_id",
+            prev_params,
+        ).fetchall():
+            prev_by_tenant[tenant] = float(cost or 0.0)
+
+    rows = []
+    for tenant_id, cost, call_count, in_t, out_t, cr_t, cw_t in top_rows:
+        cost = float(cost or 0.0)
+        prev_cost = prev_by_tenant.get(tenant_id)
+        delta_pct = (
+            round((cost - prev_cost) / prev_cost * 100.0, 1)
+            if prev_cost else None
+        )
+        rows.append({
+            "tenant_id": tenant_id,
+            "cost_usd": round(cost, 8),
+            # Share of TOTAL window spend (the honest denominator — see
+            # docstring), not just the attributed subset.
+            "share_of_total": round(cost / total_cost, 6) if total_cost > 0 else None,
+            "call_count": int(call_count or 0),
+            "input_tokens": int(in_t or 0),
+            "output_tokens": int(out_t or 0),
+            "cache_tokens": int(cr_t or 0),
+            "cache_write_tokens": int(cw_t or 0),
+            "previous_cost_usd": round(prev_cost, 8) if prev_cost is not None else None,
+            "delta_pct": delta_pct,
+        })
+
+    return {
+        "rows": rows,
+        "total_cost_usd": round(total_cost, 8),
+        "attributed_cost_usd": round(attributed_cost, 8),
+        "unattributed_cost_usd": round(unattributed_cost, 8),
+        "has_data": True,
+        "attribute": "tokenjam.tenant_id",
+        "window_start": int(since_dt.timestamp()) if since_dt is not None else None,
+        "window_end": int(end_dt.timestamp()),
+        "framing": _framing_block(db, config, agent_id, total_cost, 0),
     }
