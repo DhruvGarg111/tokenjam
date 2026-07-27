@@ -1478,10 +1478,21 @@ code.md-code {
 /* A snippet is the row's payload and stays visible, but it must not decide the
    row's height: a six-line downsize fix made that row 2.5x a relearn row. Capped
    with its own scroll rather than collapsed, so the fix is still readable in place
-   and `CopySnippetButton` still copies the full text either way. Three lines
-   (12px x 1.5 plus the box's own 14px padding): four still left the one row whose
-   only fix is a long snippet as the tallest on the list. */
-.inbox-row .sz-copybox { max-height: 82px; }
+   and `CopySnippetButton` still copies the full text either way.
+   TWO lines (12px x 1.5 plus the box's own 14px padding). Four, then three, each
+   still left the one row whose only fix is a long snippet among the tallest on
+   the list; the box scrolls and the Copy button takes the whole snippet either
+   way, so the cap costs the reader nothing that a scroll does not return. */
+.inbox-row .sz-copybox { max-height: 64px; }
+/* An apply control nested inside a row is a card inside a card. `.opt-section`
+   is the page's standalone-panel rule (16px/18px padding, its own border), and
+   the row already IS one; the nested copy therefore spent 34px of a row's height
+   on chrome that only restated a boundary the row had already drawn. Padding
+   trimmed and the border softened rather than removed: the box still has to read
+   as a distinct affordance, since it is the one part of the row that writes to
+   disk. Scoped to `.inbox-row` so every standalone Optimize panel keeps its own
+   measure. */
+.inbox-row .opt-section { padding: 8px 10px; background: transparent; }
 /* Uniform collapsed height for a row's prose, so the LIST can be scanned rather
    than read. Row descriptions come straight from the analyzers and their lengths
    are wildly uneven: `resend` concatenates evidence + advise_text + caveat into
@@ -9656,21 +9667,23 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         </div>
       ` : html`
         <div class="opt-section" style="margin:10px 0 0">
-          <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
-          ${/* The sizing rubric is project-scoped, so it needs a specific
-                project CLAUDE.md. When tokenjam couldn't resolve one
-                (prop.target_path empty), the project was never registered
-                per-project, so say so and give the two real exits instead of
-                an empty box that only errors on Apply. */ ''}
-          ${!prop.target_path ? html`
-            ${/* One sentence, not a numbered list. It carried the same two exits
-                  over four stacked lines and was the single largest non-snippet
-                  contributor to row height; nothing was dropped, only unstacked. */ ''}
-            <div class="sz-note" style="margin-top:6px;font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-              <span>tokenjam doesn't know this project's path, so paste its <code>CLAUDE.md</code> below, or register it once with</span>
-              <code>tj onboard --add-project</code><${CopySnippetButton} text="tj onboard --add-project" />
-            </div>
-          ` : null}
+          ${/* ONE line for the label, the reversibility fact and the
+                unregistered-project guidance together.
+                They were three: a label line, then a two-line wrapped sentence
+                naming the same two exits the input and the button already offer.
+                That was 60px of prose above a 35px control, and it made the two
+                `Apply the sizing note` rows the tallest on the list while
+                offering no more than their neighbours. Nothing is dropped: the
+                input still takes a pasted path, and the register-once command is
+                still named and still copyable, just inline.
+                The reversibility claim stays in the label rather than being
+                trimmed with the rest — it is the fact that makes a one-click
+                write acceptable, so it is not chrome. */ ''}
+          <div class="opt-title" style="font-size:12.5px;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap">
+            <span>Apply the sizing note</span>
+            <span class="dim" style="font-weight:400">· writes a reversible rung-1 note to the project ${prop.target_path ? 'below' : html`<code>CLAUDE.md</code> you paste below, or register it once with <code>tj onboard --add-project</code>`}</span>
+            ${!prop.target_path ? html`<${CopySnippetButton} text="tj onboard --add-project" />` : null}
+          </div>
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
             <input class="rename-input" style="flex:1;min-width:280px" value=${target}
               placeholder="/absolute/path/to/project/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
