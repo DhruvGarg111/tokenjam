@@ -1027,9 +1027,12 @@ def post_register_source_path(
                 "target_path": check["target_path"],
                 "source_path": resolved,
             }
-        model_apply.register_agent_source_path(config, agent_id, resolved)
-        # The cluster is projected from the STORE plus the now-REGISTERED path,
-        # never from the request body — the same rule `cluster_for_apply` states.
+        # The cluster is projected from the STORE plus the resolved path, never
+        # from the request body — the same rule `cluster_for_apply` states. It
+        # is built from `resolved` directly (not a config re-read) so nothing
+        # here depends on the config having been written yet: registration is
+        # deferred until AFTER the apply succeeds, so a refused apply leaves the
+        # on-disk config completely untouched.
         cluster = {
             "signature": str(stored.get("signature") or ""),
             "title": str(stored.get("title") or ""),
@@ -1037,9 +1040,7 @@ def post_register_source_path(
             "apply_kind": model_apply.APPLY_KIND_MODEL_SWAP,
             "current_model": current_model,
             "proposed_model": proposed_model,
-            "source_path": str(
-                getattr(config.agents.get(agent_id), "source_path", "") or ""
-            ),
+            "source_path": resolved,
             "rung": int(stored.get("rung") or 1),
             "sessions": 0,
             "repos": [],
@@ -1049,6 +1050,11 @@ def post_register_source_path(
             config, cluster, target_path=check["target_path"], scope=body.scope,
             go=True, conn=_conn(request), force=body.force,
         )
+        # Only persist the registration once the swap itself has actually
+        # succeeded — a refused apply (e.g. the active-session gate below)
+        # must never leave a path pointing at a repo the swap turned out not
+        # to be possible in.
+        model_apply.register_agent_source_path(config, agent_id, resolved)
     except relearn_apply.RelearnApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

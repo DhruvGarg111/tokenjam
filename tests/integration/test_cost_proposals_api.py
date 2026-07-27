@@ -583,3 +583,84 @@ async def test_register_source_path_refuses_a_path_it_cannot_swap_in(
     assert refused.status_code == 409
     assert "not inside a git repository" in refused.json()["detail"]
     assert "svc-a" not in config.config_path.read_text(encoding="utf-8")
+
+
+async def test_register_source_path_refused_by_apply_leaves_no_registration(
+    client, app, config, db, tmp_path, monkeypatch,
+):
+    """A refusal that surfaces only INSIDE ``apply_relearn_fix`` — the
+    active-session gate, which ``model_swap_precheck`` doesn't check — must
+    leave the config exactly as untouched as a precheck-time refusal does.
+
+    Registering the path before the apply runs would persist a path the swap
+    then refused to write through, silently contradicting the endpoint's own
+    docstring promise that a refused apply never leaves a path behind.
+    """
+    import pathlib as pa
+    import subprocess
+
+    from tokenjam.core.config import write_config
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+    from tokenjam.core.optimize.types import DowngradeFinding
+    from tokenjam.core.optimize import relearn_store
+    from tests.factories import make_session
+
+    home = tmp_path / "home"
+    repo = home / "svc-a"
+    repo.mkdir(parents=True)
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: home))
+    source = repo / "agent.py"
+    source.write_text('MODEL = "claude-opus-4-8"\n', encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    config.config_path = tmp_path / "tj.toml"
+    write_config(config, config.config_path)
+
+    # A live session in the same repo (label "svc-a"), seen moments ago — the
+    # active-session gate that lives INSIDE apply_relearn_fix, not in
+    # model_swap_precheck.
+    db.upsert_session(make_session(agent_id="svc-a", status="active"))
+
+    rows = build_agent_price_rows([{
+        "session_id": "s1", "agent_id": "svc-a", "provider": "anthropic",
+        "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 100_000, "output_tokens": 20_000,
+        "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+    }], 30.0)
+    finding = DowngradeFinding(
+        candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,
+        alternative_cost_usd=1.0, monthly_savings_usd=8.0, percent_of_sessions=100.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-haiku-4-5"},
+    )
+    finding.per_agent = rows
+    relearn_store.write_cost_proposals(
+        _downsize_agent_proposals(finding, config, persona="sdk"), config=config,
+    )
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = [p for p in proposals if p["analyzer"] == "downsize"][0]
+
+    before_source = source.read_text(encoding="utf-8")
+    before_config = config.config_path.read_text(encoding="utf-8")
+
+    refused = await client.post(
+        "/api/v1/relearn/cost-proposals/register-source-path",
+        json={"proposal_id": prop["proposal_id"], "source_path": str(repo), "go": True},
+        headers=hdr,
+    )
+    assert refused.status_code == 409
+    assert "active session" in refused.json()["detail"]
+
+    # No rollback needed because nothing was ever written: neither the swap
+    # target nor the config changed.
+    assert source.read_text(encoding="utf-8") == before_source
+    assert config.config_path.read_text(encoding="utf-8") == before_config
+    assert "svc-a" not in config.agents
+    assert "svc-a" not in config.config_path.read_text(encoding="utf-8")
