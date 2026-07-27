@@ -1581,15 +1581,32 @@ code.md-code {
    an action on the proposal, and the row's real actions are the buttons below. */
 .inbox-more { font-size: 11.5px; margin-top: 4px; }
 
+/* Summarize back link — deliberately NOT the brand-blue .sz-link: this one
+   isn't an in-flow action, it's page chrome. Founder instruction: white text,
+   not blue. It's already full-brightness at rest, so brighten-on-hover isn't
+   available as a hover signal here — the affordance is the leading arrow
+   glyph plus an underline on hover. */
+.sz-back-link { color: var(--text); text-decoration: none; }
+.sz-back-link:hover { text-decoration: underline; }
 /* Engine gate */
-.sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; }
-.sz-engine { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; cursor: pointer; transition: border-color .15s; color: var(--text); font-family: inherit; }
+.sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; align-items: stretch; }
+.sz-engine { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; cursor: pointer; transition: border-color .15s, background-color .15s; color: var(--text); font-family: inherit; }
 .sz-engine:hover:not(:disabled) { border-color: var(--accent); }
-.sz-engine:disabled { opacity: .5; cursor: not-allowed; }
+/* Disabled = "unavailable until you set a key", not "broken". A dashed border
+   and a slightly recessed fill signal a deliberate, labeled state; title and
+   description stay at full legibility (uniform opacity dimming previously
+   made the disabled card read as lower-quality rather than gated). */
+.sz-engine:disabled { cursor: not-allowed; background: var(--surface2); border-style: dashed; }
 .sz-eng-name { font-family: 'Geist', sans-serif; font-weight: 700; font-size: 16px; }
-.sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); margin-top: 4px; }
-.sz-eng-desc { font-size: 13px; color: var(--text-dim); margin-top: 10px; line-height: 1.55; }
-.sz-eng-off { font-size: 12px; color: var(--warn); margin-top: 10px; }
+.sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+.sz-eng-desc { font-size: 13px; color: var(--text-dim); margin-top: 10px; line-height: 1.55; flex: 1; }
+.sz-eng-off { margin-top: 10px; }
+/* Founder instruction, repeated: the disabled-reason text ("set
+   TJ_ANTHROPIC_API_KEY to enable") must render white, not amber and not the
+   dim grey .badge-closed normally carries. Keep the badge's recessed pill
+   background (it still reads as a deliberate label against it in both
+   themes) but override just the text color back up to full strength. */
+.sz-eng-off.badge-closed { color: var(--text); }
 
 /* Curator / review filterable box */
 .cur-filters { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:0 0 14px; }
@@ -7772,27 +7789,27 @@ function SummarizeView({ params }) {
         <div class="sz-eng-name">${name}</div>
         <div class="sz-eng-tag">${tag}</div>
         <div class="sz-eng-desc">${desc}</div>
-        ${!avail && cap && cap.reason ? html`<div class="sz-eng-off">${cap.reason}</div>` : null}
+        ${!avail && cap && cap.reason ? html`<div class="sz-eng-off badge badge-closed">${cap.reason}</div>` : null}
       </button>`;
     };
     return html`
-      <div style="margin:0 0 4px"><a class="sz-link" href="#/optimize">← Optimize</a></div>
+      <div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>
       <div class="page-title">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
-      <div class="sz-note">Rewrites prose only — code, tables and ${'<tj-keep>'} blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
+      <div class="sz-note">Rewrites prose only: code, tables, and <code>&lt;tj-keep&gt;</code> blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
       ${staged.length ? html`<div class="cur-tally" style="cursor:pointer;margin-top:14px" onClick=${() => setPhase('review')}>
         <div class="cur-tally-head">
-          <div class="cur-tally-count">${staged.length} <small>staged rewrite(s) ready to review — no engine needed</small></div>
+          <div class="cur-tally-count">${staged.length} <small>staged rewrite(s) ready to review; no engine needed</small></div>
           <div class="cur-tally-hint">Review & apply →</div>
         </div>
       </div>` : null}
-      ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:8px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone — <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
+      ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:8px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone: <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
       <div class="sz-sub" style="font-weight:600;margin:18px 0 2px">Summarize new files</div>
       <div class="sz-note" style="margin-bottom:6px">How to produce the summaries:</div>
       ${capErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">Couldn't load engine availability: ${capErr}</div></div>` : null}
       ${!caps && !capErr ? html`<div class="shimmer" style="height:140px"></div>` : null}
       ${caps ? html`<div class="sz-engines">
         ${eng('api', 'API', '$ at cost · your key', 'Calls Anthropic with your key. Billed per rewrite; the review shows cost and break-even.')}
-        ${eng('claude_p', 'Claude CLI', 'against your Claude limits', 'Runs the local `claude` CLI. No dollar cost — uses your Claude limits. Local host only.')}
+        ${eng('claude_p', 'Claude CLI', 'against your Claude limits', html`Runs the local <code>claude</code> CLI against your Claude limits, with no dollar cost. Local host only.`)}
         ${eng('manual', 'Manual', 'no outbound calls', 'Copy a ready-made prompt into any Claude session, paste the reply back. Nothing leaves this machine.')}
       </div>` : null}
     `;
