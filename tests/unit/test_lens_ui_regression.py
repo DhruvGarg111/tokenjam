@@ -65,6 +65,45 @@ def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
     assert 'label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"' not in html
 
 
+def test_dashboard_window_options_derive_from_data_span(html):
+    # The Dashboard window selector used to be a fixed 24h/7d/30d/90d list with
+    # no relation to how much telemetry the store actually holds -- offering
+    # 90d over a two-month corpus, and unable to reach past 90d on a longer
+    # one. It must now derive from core/data_span.py's `available_days`
+    # (served on /drift and /relearn/proposals), not a hardcoded list.
+    const_start = html.index("const DASHBOARD_STANDARD_WINDOWS")
+    start = html.index("function dashboardWindowOptions")
+    end = html.index("function DashboardView", start)
+    consts = html[const_start:start]
+    fn = html[start:end]
+
+    # The always-safe floor entry exists and is what an unknown span falls
+    # back to.
+    assert "{ value: '24h', label: 'Last 24h', days: 1 }" in consts
+
+    # Unknown span (not yet read) offers only the always-safe floor, never a
+    # wrong option set asserted ahead of the data.
+    assert "if (availableDays == null) return [DASHBOARD_STANDARD_WINDOWS[0]];" in fn
+
+    # Known span: only windows at-or-under the available span, plus one final
+    # option at the real span itself.
+    assert "w.days <= availableDays" in fn
+    assert "value: `${availableDays}d`" in fn
+
+    dash_start = html.index("function DashboardView")
+    dash_end = html.index("function ", dash_start + 1)
+    dash_view = html[dash_start:dash_end]
+
+    # Wired to the server-provided data_span, not re-derived client-side.
+    assert "driftRead.data.data_span" in dash_view
+    assert "relearnRead.data.data_span" in dash_view
+    assert "dashboardWindowOptions(availableDays)" in dash_view
+
+    # The old unconditional four-option list is gone from the picker itself.
+    assert '<option value="24h">Last 24h</option>\n      <option value="7d">Last 7d</option>' not in dash_view
+    assert "winOptionsWithCurrent.map(w => html`<option value=${w.value}>${w.label}</option>`)" in dash_view
+
+
 # --- #126: Downsize typed slot always rendered ----------------------------- #
 def test_downsize_section_always_renders(html):
     # The no-candidates branch renders a literal Downsize section id instead of
