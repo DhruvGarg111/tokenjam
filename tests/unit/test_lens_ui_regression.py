@@ -4709,3 +4709,107 @@ def test_optimize_view_renders_a_cold_state_instead_of_empty_cards(html):
     assert "${!st.loading && scan.known && st.opt ? html`" in fn
     assert "No analyzer scan has completed yet." in fn
     assert "this is not a report of zero waste" in fn
+
+
+# --- Optimize ▸ Analyzer guide --------------------------------------------- #
+# The guide exists because `downsize` and `subagent` were repeatedly read as the
+# same check. Its two structural risks are (a) becoming a second, JS-side copy
+# of the persona gate, and (b) shipping as a route nothing links to. One test
+# each, plus one pinning the contrast itself, since that paragraph IS the page's
+# reason to exist and a later edit could quietly drop it.
+
+
+def test_analyzer_guide_is_reachable_from_the_optimize_screen(html):
+    """Critical Rule 24: a route that resolves is not a surface. Two links must
+    point AT the guide -- the sidebar child, and an unconditional link on the
+    Optimize page itself (the nav-child only appears once you are already on
+    Optimize, and Optimize's data branches can all be empty)."""
+    assert (
+        'href="#/optimize/guide" class="nav-link nav-child" '
+        'data-view="optimize" data-param="guide"'
+    ) in html
+    fn_start = html.index("function OptimizeView({ params })")
+    fn_end = html.index("// Optimize ▸ Guide", fn_start)
+    fn = html[fn_start:fn_end]
+    assert 'href="#/optimize/guide"' in fn
+    # ...and it hangs off the page title, which renders before any `st.opt` /
+    # `scan.known` guard, so a cold or failed store still offers the way in.
+    title_at = fn.index('Optimize <${PlanBadge}')
+    link_at = fn.index('href="#/optimize/guide"')
+    assert link_at - title_at < 400, "guide link drifted out of the always-rendered title block"
+    # And the router actually resolves it, else the links are decoration.
+    assert "if (v === 'optimize' && route.param === 'guide') return 'guide';" in html
+    assert "['guide',     AnalyzerGuideView]," in html
+
+
+def test_analyzer_guide_reads_the_gate_from_the_server_not_a_js_copy(html):
+    """Which checks apply is Python's answer (`PERSONA_DISABLED_ANALYZERS` ->
+    `/optimize/analyzers`). The guide may own PROSE keyed by analyzer name, but
+    never a membership decision -- a JS copy of the map desyncs the first time
+    the Python side changes."""
+    fn_start = html.index("function GuideBody({ persona, sets })")
+    fn_end = html.index("function AnalyzerGuideView()", fn_start)
+    fn = html[fn_start:fn_end]
+    # Membership comes from the payload on both sides: what runs, what is gated.
+    assert "sets.runs" in fn
+    assert "sets.disabled" in fn
+    view_start = html.index("function AnalyzerGuideView()")
+    view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
+    view = html[view_start:view_end]
+    assert "api('/optimize/analyzers')" in view
+    # No persona-keyed analyzer-name list anywhere in the guide's own source:
+    # the prose maps are keyed by name, but nothing decides membership from
+    # a persona conditional in JS.
+    guide_start = html.index("const GUIDE_PERSONA_LABELS = {")
+    guide = _no_comments(html[guide_start:view_end])
+    assert "PERSONA_DISABLED_ANALYZERS" not in guide
+    assert "disabled_analyzers_for_persona" not in guide
+
+
+def test_analyzer_guide_states_the_downsize_vs_subagent_distinction(html):
+    """The founder could not tell these two apart; that is the page's whole
+    reason to exist. The contrast must be stated as WHERE vs WHO, and must say
+    that a session can only trip one of them."""
+    start = html.index("const GUIDE_KEY_CONTRAST = {")
+    end = html.index("const GUIDE_ENTRIES = {", start)
+    block = html[start:end]
+    assert "Downsize is about WHERE the work happened." in block
+    assert "Subagent is about WHO did it" in block
+    assert "only considers sessions that never delegated at all" in block
+    # Rendered ABOVE the per-check cards, not buried in one of them.
+    body_start = html.index("function GuideBody({ persona, sets })")
+    body_end = html.index("function AnalyzerGuideView()", body_start)
+    body = html[body_start:body_end]
+    assert body.index("GUIDE_KEY_CONTRAST.title") < body.index("GuideCheck")
+
+
+def test_analyzer_guide_ships_no_unwritten_persona_as_placeholder_prose(html):
+    """Only Claude Code content was validated. An unwritten persona gets a
+    banner naming the gap -- never invented copy, and never a silent fallback
+    that reads as if it were written for the reader's setup."""
+    start = html.index("const GUIDE_ENTRIES = {")
+    end = html.index("function guideMissingEntry(name)", start)
+    entries = html[start:end]
+    # Exactly one persona is populated.
+    assert entries.count("    order: [") == 1
+    assert "'claude-code': {" in entries
+    for absent in ("'sdk': {", "'mixed': {", "'unknown': {"):
+        assert absent not in entries, f"{absent} must not carry unvalidated prose"
+    view_start = html.index("function AnalyzerGuideView()")
+    view = html[view_start:html.index("// Optimize ▸ Summarize (Track B)", view_start)]
+    assert "has not been written yet" in view
+    assert "Nothing has classified this install yet" in view
+
+
+def test_analyzer_guide_makes_no_guaranteed_saving_claim(html):
+    """Honesty discipline (Critical Rule 14) governs every user-visible string:
+    estimates are candidates to review, never a promised saving, and the page
+    never discusses how a figure was derived."""
+    start = html.index("const GUIDE_PERSONA_LABELS = {")
+    end = html.index("// Optimize ▸ Summarize (Track B)", start)
+    guide = html[start:end]
+    for banned in ("saves you", "you will save", "guaranteed", "realization rate",
+                   "best-case", "ceiling of", "over-claim", "past_overspend"):
+        assert banned not in guide, f"guide copy must not contain {banned!r}"
+    assert "estimates from your own history" in guide
+    assert "review before you act on them" in guide
