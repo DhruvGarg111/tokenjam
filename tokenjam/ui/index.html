@@ -10629,7 +10629,18 @@ function ReviewInboxView({ params }) {
             below: above a skeleton it points at nothing, and above an empty state
             it qualifies a claim nobody made. Same rule as the empty state it sits
             over, applied to a disclosure rather than to an absence. */ ''}
-      ${appliedCountKnown && combinedApplied.length > 0 ? html`
+      ${/* Gated on a FIGURE being present, not on a row being present. Rows and
+            figures are not the same population: a reverted row renders the word
+            instead of a number, and a record can carry no estimate at all (on a
+            real corpus, four applied hooks and a trim record all arrive with
+            usd and tokens null). With rows but no figures this line qualified
+            nothing, which is the same dangling-claim shape as the absences
+            above, one level over. */ ''}
+      ${appliedCountKnown && combinedApplied.some(r => {
+        if (r.state === 'reverted') return false;
+        const e = appliedEstimate(r);
+        return e.usd != null || e.tokens != null;
+      }) ? html`
         <div class="sz-note" style="margin:12px 0 10px">Each figure below is that row's own estimate from the moment it was applied. Nothing here is re-measured afterwards.</div>` : null}
       <div class="cur-listbox">
         ${/* THREE distinguishable states, and the middle one was missing.

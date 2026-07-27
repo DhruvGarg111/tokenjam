@@ -3868,8 +3868,20 @@ def test_the_applied_panel_gates_on_its_own_read_not_a_page_wide_flag(html):
     assert "if (openItems.length === 0 && appliedKnown && appliedCount === 0" in tile
 
     # The section disclosure says "each figure below", so it may not sit above a
-    # skeleton or above an empty state.
-    assert "${appliedCountKnown && combinedApplied.length > 0 ? html`" in view
+    # skeleton, above an empty state, or above rows that carry no figure at all.
+    # Re-anchored to the stronger property: gating on the row COUNT was not enough,
+    # because rows and figures are different populations. A reverted row renders the
+    # word "reverted" instead of a number, and an applied record can arrive with no
+    # estimate whatsoever (measured on a real corpus: four applied hooks plus a trim
+    # record, all with usd and tokens null), so a row-count gate still let the line
+    # qualify nothing.
+    assert "appliedCountKnown && combinedApplied.some(" in view
+    disclosure_gate = view[view.index("appliedCountKnown && combinedApplied.some("):]
+    disclosure_gate = disclosure_gate[: disclosure_gate.index("Each figure below")]
+    assert "state === 'reverted'" in disclosure_gate, \
+        "a reverted row shows the word, not a figure, so it may not satisfy the gate"
+    assert "appliedEstimate(r)" in disclosure_gate, \
+        "the gate must consult the row's actual estimate, not merely its presence"
 
     # The skeleton mirrors the real row's geometry, so content fills in rather than
     # replacing a differently-shaped block.
