@@ -2247,6 +2247,14 @@ def _resend_to_proposals(
             "offloadable_share_median": getattr(finding, "offloadable_share_median", None),
             "offload_recoverable_usd": getattr(finding, "offload_recoverable_usd", None),
             "rightsize_recoverable_usd": getattr(finding, "rightsize_recoverable_usd", None),
+            # The token counts those two dollar terms were priced over, carried
+            # so the per-term implied rate is auditable off the card itself
+            # (Critical Rule 28), and the compaction lever's separate, wider
+            # token estimate — which is deliberately NOT part of
+            # `past_overspend_tokens` and must never be summed into a rollup.
+            "offload_recoverable_tokens": getattr(finding, "offload_recoverable_tokens", None),
+            "rightsize_recoverable_tokens": getattr(finding, "rightsize_recoverable_tokens", None),
+            "compaction_avoidable_tokens": getattr(finding, "compaction_avoidable_tokens", None),
             "rightsize_agent_name": rightsize.get("agent_name", ""),
             "rightsize_target_path": rightsize.get("target_path", ""),
             # The two figures' differing populations, carried machine-readable
