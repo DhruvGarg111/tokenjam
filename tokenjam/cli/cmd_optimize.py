@@ -1874,10 +1874,15 @@ def _render_prompt_bloat(
         sample = p.sample_chars.replace("\n", " ")[:80]
         if len(p.sample_chars) > 80:
             sample = sample[:77] + "..."
+        trim_cost = (
+            f" (~{format_cost(p.estimated_cost_reduction_usd)})"
+            if pricing_mode == "api" and p.estimated_cost_reduction_usd is not None
+            else ""
+        )
         console.print(
             f"       [dim]{p.agent_id}[/dim]  "
             f"[bold]{p.bloat_chars}[/bold] bloat / {p.prompt_chars} chars  "
-            f"[dim]~{p.estimated_token_reduction} tokens trimmable[/dim]"
+            f"[dim]~{p.estimated_token_reduction} tokens trimmable{trim_cost}[/dim]"
         )
         console.print(f"           [dim italic]{_rich_escape(sample)}[/dim italic]")
         # Provenance (read-only, see prompt_bloat.py's module docstring): most

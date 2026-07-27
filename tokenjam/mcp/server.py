@@ -1305,6 +1305,7 @@ def _tool_get_optimize_report(
     db, config, agent_id: str | None, since: str | None, findings: list[str] | None,
     budget_provider: str | None, budget_usd: float | None,
 ) -> dict:
+    from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
     from tokenjam.core.optimize import build_report, report_to_dict
     from tokenjam.utils.time_parse import parse_since, utcnow
     if config is None:
@@ -1317,17 +1318,37 @@ def _tool_get_optimize_report(
             )
         }
     since_dt = parse_since(since) if since else parse_since("30d")
+    until_dt = utcnow()
     report = build_report(
         db=db,
         config=config,
         since=since_dt,
-        until=utcnow(),
+        until=until_dt,
         agent_id=agent_id,
         findings=findings,
         budget_provider_filter=budget_provider,
         budget_usd_override=budget_usd,
     )
-    return report_to_dict(report)
+    payload = report_to_dict(report)
+
+    # Plan-tier mix + framing block (#110), mirroring /api/v1/optimize
+    # (api/routes/optimize.py) — this direct-DB fallback path used to skip
+    # both, so it emitted neither `pricing_mode` nor `framing`, contradicting
+    # this tool's own docstring and leaving a caller with no way to tell an
+    # api-billed window from a subscription/local/unknown one.
+    mix = plan_tier_mix(db.conn, since_dt, until_dt, agent_id)
+    payload["plan_tier_mix"] = mix
+    w = report.window
+    payload["framing"] = compute_framing(
+        config,
+        WindowSummary(
+            total_cost_usd=float(getattr(w, "total_cost_usd", 0.0) or 0.0),
+            total_tokens=int(getattr(w, "total_tokens", 0) or 0),
+            sessions=int(getattr(w, "sessions", 0) or 0),
+            plan_tier_mix=mix,
+        ),
+    ).to_dict()
+    return payload
 
 
 @mcp.tool()

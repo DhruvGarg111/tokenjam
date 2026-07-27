@@ -260,6 +260,11 @@ class BloatPrompt:
     bloat_chars:     int         # chars in flagged regions
     regions:         list[BloatRegion] = field(default_factory=list)
     estimated_token_reduction: int = 0
+    # Dollar counterpart of estimated_token_reduction, priced at the same
+    # window-average input rate the finding-level aggregate uses (see
+    # _window_avg_input_rate). None when no priced model was observed in the
+    # window — never a $0.00 standing in for "no rate observed".
+    estimated_cost_reduction_usd: float | None = None
     # Provenance (read-only, see module docstring): the catalog file this
     # prompt's text verbatim-contains, or None when no catalog file cleared
     # the bar — the expected outcome for most prompts, not a failure.
@@ -549,6 +554,10 @@ def run(ctx: AnalyzerContext) -> None:
     prompts_with_provenance = 0
     total_bloat = 0
     total_chars = 0
+    # Lazily computed once and reused for both the per-prompt dollar figure
+    # and the finding-level aggregate below, so the two never disagree and a
+    # window with no bloat at all never pays for the rate query.
+    avg_rate: float | None = None
 
     for agent_id, attrs in rows:
         if prompts_scored >= MAX_PROMPTS_PER_RUN:
@@ -595,6 +604,15 @@ def run(ctx: AnalyzerContext) -> None:
         if source_path is not None:
             prompts_with_provenance += 1
 
+        if est_tokens > 0 and avg_rate is None:
+            avg_rate = _window_avg_input_rate(
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+            )
+        cost_reduction = (
+            estimate_trim_recoverable(est_tokens, avg_rate)
+            if est_tokens > 0 and avg_rate else None
+        )
+
         per_prompt.append(BloatPrompt(
             agent_id=str(agent_id),
             sample_chars=text[:120],
@@ -603,6 +621,7 @@ def run(ctx: AnalyzerContext) -> None:
             bloat_chars=bloat_chars,
             regions=regions,
             estimated_token_reduction=est_tokens,
+            estimated_cost_reduction_usd=cost_reduction,
             source_path=source_path,
             source_basis=source_basis,
         ))
@@ -613,14 +632,17 @@ def run(ctx: AnalyzerContext) -> None:
 
     # Recoverable-savings estimate (#111): low-significance tokens across all
     # scored prompts (not just the top-10 retained for display), priced at the
-    # window-average input rate. None when nothing was flagged.
+    # SAME window-average input rate the per-prompt figures above use (so the
+    # aggregate can never disagree with its own rows). None when nothing was
+    # flagged.
     low_sig_tokens = int(total_bloat / CHARS_PER_TOKEN) if total_bloat > 0 else 0
     rec_usd: float | None = None
     rec_tokens: int | None = None
     if low_sig_tokens > 0:
-        avg_rate = _window_avg_input_rate(
-            ctx.conn, ctx.since, ctx.until, ctx.agent_id
-        )
+        if avg_rate is None:
+            avg_rate = _window_avg_input_rate(
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+            )
         rec_usd = estimate_trim_recoverable(low_sig_tokens, avg_rate)
         rec_tokens = low_sig_tokens
 

@@ -6006,7 +6006,13 @@ function CostView({ params }) {
   // % arithmetic noise. Use its session count as the "did anything happen" proxy
   // so TrendChip shows "new" instead of e.g. ▲140980% on a first-run compare.
   const trendPrevThin = !!(compare && compare.previous) && (compare.previous.sessions || 0) < 2;
-  const totalDisplay = useTokens ? (fmtTokens(totalTokens) + ' tokens') : fmtFramedDollar(total, framing);
+  // Local has no marginal cost to price at all (a genuine no-rate case, never
+  // an invented one), so it shows tokens only; every other mode shows the
+  // dollar figure PLUS the token total so neither unit is ever the only one
+  // on screen.
+  const totalDisplay = useTokens
+    ? (fmtTokens(totalTokens) + ' tokens')
+    : `${fmtFramedDollar(total, framing)} (${fmtTokens(totalTokens)} tokens)`;
   const tableMode = groupBy === 'total' ? 'day' : groupBy;
   const totalIn = rows.reduce((s, r) => s + (r.input_tokens || 0), 0);
   const totalOut = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
@@ -6075,7 +6081,8 @@ function CostView({ params }) {
           <span class="cache-sep">·</span>
           <span class="cache-stat">${useTokens
             ? html`<b>${fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window`
-            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window`}</span>
+            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window
+              <span class="dim">(${fmtTokens(cacheResp.total_captured_tokens || 0)} cached reads)</span>`}</span>
         </div>
         ${loading ? html`<div class="shimmer" style="height:180px"></div>` : html`
           <${CacheSavingsChart} data=${cacheSeries.data} height=${180}
@@ -7166,7 +7173,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
           <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
           ${fd.per_prompt.slice(0, 5).map((p, i) => html`
             <div key=${i} style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-              <div class="opt-line"><span class="mono">${p.agent_id}</span> <span class="dim">${p.bloat_chars}/${p.prompt_chars} chars flagged, ~${p.estimated_token_reduction} tokens trimmable</span></div>
+              <div class="opt-line"><span class="mono">${p.agent_id}</span> <span class="dim">${p.bloat_chars}/${p.prompt_chars} chars flagged, ~${p.estimated_token_reduction} tokens trimmable${!dollarsSuppressed(framing) && p.estimated_cost_reduction_usd != null ? ` (~${fmtCost(p.estimated_cost_reduction_usd)})` : ''}</span></div>
               ${p.source_path ? html`
                 <div class="opt-line dim">Attributed to <span class="mono">${p.source_path}</span> (${p.source_basis}) <a class="sz-link" href="#/optimize/summarize">Review in Summarize →</a></div>` : null}
               ${(p.regions || []).length ? html`
