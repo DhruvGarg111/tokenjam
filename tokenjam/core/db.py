@@ -641,10 +641,10 @@ MIGRATIONS: list[tuple[int, str]] = [
     # Migration 19: sub_agent_type on spans — the STABLE identity of a Claude
     # Code subagent dispatch, alongside the per-dispatch `sub_agent_id` from
     # migration 14. `sub_agent_id` is Claude Code's `agentId`, which is minted
-    # fresh per Task dispatch: measured over a real 6,588-session corpus, all
-    # 3,689 distinct values appeared in exactly ONE session each, so no
-    # per-subagent cohort could ever be formed from it and 28.5% of spans were
-    # unclusterable. This column carries the dispatched agent TYPE instead (the
+    # fresh per Task dispatch, so each value belongs to exactly ONE session by
+    # construction and no per-subagent cohort can ever be formed from it —
+    # leaving a substantial share of spans (all subagent work) unclusterable.
+    # This column carries the dispatched agent TYPE instead (the
     # spawning Task/Agent call's `subagent_type` argument), which recurs across
     # sessions and is the name that resolves to a `.claude/agents/<name>.md`
     # definition file. Nullable; NULL for main-thread spans, non-Claude-Code

@@ -189,38 +189,56 @@ def _agent_id_from_cwd(cwd: str | None) -> str:
 
 
 #: ``taskKind`` values whose ``agentType`` is a caller-chosen, per-dispatch
-#: INSTANCE LABEL rather than a reusable agent-definition name. An
+#: INSTANCE LABEL rather than a reusable agent-definition name.
+#:
+#: THE EMPTY RESULT HERE IS DELIBERATE — do not "fix" it. An
 #: ``in_process_teammate`` is spawned with an ad-hoc ``name`` ("worker-428",
-#: "pr543", "fix-499") and Claude Code writes that name into ``agentType``;
-#: measured on a real corpus those were 413 distinct values across 416
-#: dispatches, i.e. as unclusterable as the dispatch id itself and resolving to
-#: no definition file. Recording one as a stable type would silently
-#: mis-attribute, so those spans keep ``sub_agent_type = None``.
+#: "fix-499") and Claude Code writes that name into ``agentType``, so the field
+#: is populated and looks perfectly usable. It is not: the label is minted per
+#: dispatch, so adopting it would reintroduce exactly the unclusterable
+#: one-session-per-identity property that ``sub_agent_type`` exists to remove,
+#: and it addresses no definition file. Leaving these spans at
+#: ``sub_agent_type = None`` reads like a gap in the extraction; recording them
+#: would instead be a silent mis-attribution, which is worse than a known gap.
 _PER_DISPATCH_TASK_KINDS = frozenset({"in_process_teammate"})
 
 
 def _subagent_type_for(path: Path) -> str | None:
     """The dispatched agent TYPE for a Claude Code subagent transcript, or None.
 
-    Claude Code writes an ``agent-<agentId>.meta.json`` sidecar next to every
-    ``subagents/agent-<agentId>.jsonl`` transcript, carrying ``agentType`` — the
-    ``subagent_type`` argument of the spawning Task/Agent call, resolved (so a
-    dispatch that omitted the argument reads as its ``general-purpose``
-    default). Verified against a real corpus: the sidecar was present for
-    3,077/3,077 subagent transcripts, and where the spawning Task call was still
-    on disk its ``subagent_type`` matched ``agentType`` on 1,008 of 1,019
-    dispatches — the other 11 omitted the argument entirely, so the sidecar is
-    strictly more complete than re-deriving the linkage by scanning parent
-    transcripts for the dispatching tool_use.
+    SOURCE, AND WHY NOT THE OBVIOUS ONE. Claude Code writes an
+    ``agent-<agentId>.meta.json`` sidecar next to every subagent transcript,
+    carrying ``agentType`` — the ``subagent_type`` argument of the spawning
+    Task/Agent call, already resolved (a dispatch that omitted the argument
+    reads as the default it actually ran under, rather than as absent).
+
+    The natural-looking alternative is to join a sidechain to its dispatching
+    ``Task`` call and read ``subagent_type`` off the tool args — a real field,
+    which the next reader will find and assume is the source. Rejected because
+    that join is only as available as the PARENT transcript, and Claude Code
+    prunes transcripts on its own retention setting: wherever the parent has
+    aged out, the dispatch is unlinkable, and subagent transcripts outlive their
+    parents often enough that this is the common case rather than the edge. The
+    sidecar sits beside the child and shares its lifetime, so it is present
+    whenever the child is. The two were cross-checked against each other on real
+    transcripts and they agree; where they differ it is because the Task call
+    omitted the argument and the sidecar records the resolved default, so the
+    sidecar is the more correct of the pair, not merely the more available.
 
     Sidechain records live ONLY under a ``subagents/`` directory, in
-    ``agent-<id>.jsonl`` files, one agentId per file (verified: zero main-thread
-    files carry an ``isSidechain`` record, and zero subagent files carry more
-    than one distinct ``agentId``), so one per-file lookup covers every span this
-    file produces. The directory is not always the immediate parent — a workflow
-    dispatch nests one level further as
-    ``subagents/workflows/<workflow-id>/agent-<id>.jsonl`` — so membership is
-    tested against the whole path, not just ``path.parent``.
+    ``agent-<id>.jsonl`` files, one agentId per file (checked both ways on real
+    transcripts: no main-thread file carries an ``isSidechain`` record, and no
+    subagent file carries more than one distinct ``agentId``), so one per-file
+    lookup covers every span this file produces.
+
+    The directory is NOT always the immediate parent: a workflow dispatch nests
+    one level further, as ``subagents/workflows/<workflow-id>/agent-<id>.jsonl``.
+    Membership is therefore tested against the whole path. A predicate matching
+    only ``path.parent`` silently drops every workflow dispatch — silently
+    because a missing type is indistinguishable from a dispatch that legitimately
+    has none, so nothing raises and no count looks wrong locally. It surfaced
+    only as a disagreement between the number of typed spans in the DB and the
+    number of typed transcripts on disk.
 
     Returns None for a main-thread transcript, a missing/garbled sidecar, and a
     per-dispatch instance label (see ``_PER_DISPATCH_TASK_KINDS``).

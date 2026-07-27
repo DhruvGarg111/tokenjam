@@ -75,10 +75,11 @@ class NormalizedSpan:
     # The subagent's STABLE identity: the agent TYPE that was dispatched (the
     # `subagent_type` argument of the spawning Task/Agent call, e.g.
     # `general-purpose` / `Explore` / a user-defined `.claude/agents/<name>.md`
-    # slug). Distinct from `sub_agent_id` above, which is per-DISPATCH and never
-    # recurs across sessions — measured on a real corpus, every one of 3,689
-    # dispatch ids appeared in exactly one session, so `sub_agent_id` alone
-    # cannot form a per-subagent cohort. Read at backfill time off Claude Code's
+    # slug). Distinct from `sub_agent_id` above, which Claude Code mints per
+    # DISPATCH: it is unique to one dispatch and so appears in exactly one
+    # session, which means it can neither form a per-subagent cohort across
+    # sessions nor name anything on disk. This field is the identity that
+    # recurs. Read at backfill time off Claude Code's
     # `agent-<id>.meta.json` sidecar (`agentType`); None for main-thread spans,
     # non-Claude-Code telemetry, and dispatches whose "type" is a caller-chosen
     # per-dispatch instance label rather than a reusable definition name (see
