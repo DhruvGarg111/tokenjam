@@ -86,6 +86,21 @@ def write_cache(
     if "cost_proposals" in existing:
         payload["cost_proposals"] = existing["cost_proposals"]
         payload["cost_computed_at"] = existing.get("cost_computed_at")
+        # `cost_window_days`/`cost_excluded` are written alongside
+        # `cost_proposals` by `write_cost_proposals` and read back through
+        # `read_cost_proposals`/`_headline_window_days` (see
+        # `api/routes/relearn.py`) to label the Review inbox headline with the
+        # window its figures were actually observed over. This relearn-detector
+        # write shares the same cache file (see this module's docstring) and
+        # used to preserve only the two keys above, silently forgetting a
+        # non-default cost window on every relearn recompute. Harmless while
+        # every route falls back to the same default, but round-tripping both
+        # keys here means a variable window survives regardless of which
+        # producer wrote the cache last.
+        if "cost_window_days" in existing:
+            payload["cost_window_days"] = existing["cost_window_days"]
+        if "cost_excluded" in existing:
+            payload["cost_excluded"] = existing["cost_excluded"]
     _atomic_write(p, payload)
     return payload
 

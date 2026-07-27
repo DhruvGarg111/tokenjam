@@ -77,6 +77,46 @@ include_captured_content = false
   protocol = "http"            # http | grpc
 ```
 
+## Analyzer scans
+
+The optimize analyzers are **never run on an HTTP request**. Several of them scan
+your full corpus and take tens of seconds to minutes, so a page that computed
+them inline would hang for exactly that long. Instead, the `tj serve` daemon
+computes the report in the background and every surface — the Dashboard's
+recoverable-waste panel, Budgets at risk, the Optimize view, `tj optimize` under
+a running daemon — reads the stored result plus the time it was computed.
+
+A scan runs on three triggers: once when the daemon starts, on the interval
+below, and whenever you press **Rescan** in the web UI.
+
+```toml
+[optimize]
+scan_enabled            = true   # false: the daemon never scans on its own.
+                                 #   Rescan still works; nothing ever computes
+                                 #   inline on a request either way.
+scan_interval_hours     = 6.0    # cadence of the background scan
+scan_window_days        = 30     # lookback the scan observes. Stored with the
+                                 #   result, so a surface labels its figures
+                                 #   with the window they came from.
+scan_min_rescan_seconds = 60     # floor between rescans that actually re-run
+                                 #   the analyzers; 0 disables the limit
+scan_ui_poll_seconds    = 300    # how often an open page asks for a rescan;
+                                 #   0 turns the browser's auto-rescan off
+```
+
+Overlapping scans never stack: a rescan pressed while one is already running is
+a no-op, and the panel keeps showing the last completed result with a scanning
+indicator rather than blanking.
+
+**Before the first scan completes, surfaces say "not computed yet" — not `0` and
+not "nothing found."** Those are different claims, and only the first one is true
+on a fresh install.
+
+`[optimize]` also holds each analyzer's sensitivity threshold (`min_cluster_instances`,
+`cache_efficacy_threshold`, and friends). Every default matches the module constant
+it replaces, so an omitted key changes nothing; see `OptimizeConfig` in
+`tokenjam/core/config.py` for the current list and each field's analyzer.
+
 ## Budget limits
 
 Budget limits merge per-field: each agent inherits default limits unless it explicitly overrides them.

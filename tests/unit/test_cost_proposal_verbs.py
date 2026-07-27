@@ -190,6 +190,54 @@ def test_list_shows_past_overspend_rollup(cfg):
     assert "already overspent" in result.output
 
 
+def test_headline_covers_relearn_rows_the_same_way_the_web_route_does(cfg):
+    """The CLI headline used to sum cost proposals only, while the web Review
+    inbox headline (``GET /relearn/cost-proposals``) also folds in every open
+    relearn cluster as an ordinary row on the canonical field (see
+    ``core/optimize/inbox_contribution.py``). Both surfaces read the SAME
+    shared-module calls now, so a relearn cluster's windowed contribution
+    lands in the terminal total too -- not just the cost proposal's $12.5.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnExample
+    from tokenjam.core.optimize.cost_proposals import DEFAULT_COST_WINDOW_DAYS
+    from tokenjam.core.optimize.relearn_window import RelearnWindowedObservation
+
+    bucket = RelearnWindowedObservation(
+        label=f"{DEFAULT_COST_WINDOW_DAYS}d", window_days=float(DEFAULT_COST_WINDOW_DAYS),
+        window_start="2026-06-27T12:00:00+00:00", window_end="2026-07-27T12:00:00+00:00",
+        occurrences=6, sessions=3, detour_turns=4.0, undated_occurrences=0,
+        tail_calls_median=3, tail_multiplier=1.4,
+        past_overspend_tokens=200_000, past_overspend_usd=20.0,
+        past_reread_tokens=20_000, past_reread_usd=2.0, capped_at_unbounded=False,
+        basis="windowed",
+    )
+    cluster = RelearnCluster(
+        signature="cwd_confusion", family_key="cwd_confusion",
+        title="cwd / relative-path confusion", sessions=12, occurrences=324,
+        repos=["demo"], rung=1, scope="project",
+        proposed_fix="Verify an absolute cwd before a relative Read.",
+        examples=[RelearnExample(session_id="s1", repo="demo", ts=None, snippet="no such file")],
+        past_overspend_tokens=486_000, past_overspend_usd=40.0,
+        past_overspend_windows={f"{DEFAULT_COST_WINDOW_DAYS}d": bucket},
+    )
+    from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
+    relearn_store.write_cache(
+        RelearnFinding(clusters=[cluster],
+                       past_overspend_windows={f"{DEFAULT_COST_WINDOW_DAYS}d": None}),
+        config=cfg,
+    )
+    _store(cfg, _advise_only())  # $12.5 cost proposal.
+
+    result = _run(cfg, ["cost-proposals"])
+    assert result.exit_code == 0, result.output
+    assert "already overspent" in result.output
+    # $12.5 cost proposal + (20.0 - 2.0) relearn contribution = $30.5, across
+    # 2 of 2 open proposals -- the cost feed alone would report only $12.5
+    # across 1 of 1.
+    assert "$30.50" in result.output
+    assert "across 2 of 2 open proposal(s)" in result.output
+
+
 def test_list_omits_the_advise_only_footer_when_every_proposal_is_apply_capable(cfg, tmp_path):
     _store(cfg, _apply_capable(target_path=str(tmp_path / "CLAUDE.md")))
     result = _run(cfg, ["cost-proposals"])
@@ -198,15 +246,20 @@ def test_list_omits_the_advise_only_footer_when_every_proposal_is_apply_capable(
 
 # --- pricing-mode honesty -------------------------------------------------------
 
-def test_subscription_plan_suppresses_the_raw_dollar_figure(tmp_path):
+def test_subscription_plan_shows_the_same_dollar_figure_as_api(tmp_path):
+    """Subscription users now see the same `$12.50` recoverable figure an API
+    user would (core/framing.render_savings, made unconditional by product
+    decision: dollars are always legitimate, so tj no longer differentiates
+    its rendering between subscription and API users). Previously this
+    figure was suppressed in favour of a bare token count for subscription
+    plans."""
     cfg = TjConfig(
         version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")),
         budgets={"anthropic": ProviderBudget(plan="max_5x")},
     )
     _store(cfg, _advise_only())
     result = _run(cfg, ["cost-proposals"])
-    assert "$12.50" not in result.output
-    assert "12.5" not in result.output.replace("12,500", "")  # no bare dollar amount leaks
+    assert "$12.50" in result.output
 
 
 # --- cost-apply: the workspace-write verb ---------------------------------------

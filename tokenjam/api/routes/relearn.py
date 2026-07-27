@@ -23,10 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     agent_persona_mix,
@@ -38,10 +39,12 @@ from tokenjam.core.framing import (
 from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
+    inbox_contribution,
     relearn_apply,
     relearn_proposals,
     relearn_store,
 )
+from tokenjam.core.optimize.relearn_window import resolve_window_label, window_report
 
 router = APIRouter()
 
@@ -184,8 +187,97 @@ def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
     }
 
 
+#: The window the Review inbox headline is LABELLED with. Both inbox
+#: endpoints (this one and ``/relearn/proposals``) resolve it through the
+#: SAME function so a row can never publish a contribution a headline built
+#: elsewhere never counted -- and so does the CLI's ``tj relearn
+#: cost-proposals`` (``cli/cost_proposal_verbs.py``), which is why the
+#: helper lives on the shared ``core/optimize/inbox_contribution.py`` module
+#: rather than staying private to this route.
+_headline_window_days = inbox_contribution.headline_window_days
+
+
+_NO_WINDOWED_FIGURES = (
+    "this cached result was produced before bounded window figures existed, so "
+    "no window could be applied. The rows below are the full unbounded "
+    "observation. Refresh the proposals to get windowed figures"
+)
+
+
+def _apply_window(
+    finding: Any, since: str | None,
+) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
+    """Bound a cached finding to a trailing window.
+
+    Returns ``(finding, window_block, windowed_total)``. The bounded figures were
+    computed by the DETECTOR and cached (see ``core/optimize/relearn_window.py``
+    for why they cannot be derived here: the cached cluster keeps a scalar
+    occurrence count, and the only surviving dates are on a three-item
+    newest-first example list). This function therefore SELECTS a precomputed
+    window; it never computes one.
+
+    Two populations exist in the result and both are named rather than blended.
+    The rows are the clusters with at least one occurrence inside the window; the
+    finding's own ``past_overspend_*`` totals still cover every cluster,
+    including the omitted ones, and ``past_overspend_windowed`` is the figure
+    that covers exactly the rows. ``window_block`` says how many were omitted, so
+    a shorter list is never mistaken for a quieter corpus.
+
+    A cache with no windowed figures at all cannot honor the window. Returning an
+    empty list would claim the window observed nothing and returning the
+    unbounded rows under the requested label would publish a corpus-wide total as
+    a 24-hour one, so the rows pass through unfiltered and the block states that
+    no window was applied and why.
+    """
+    available = list((finding or {}).get("past_overspend_windows") or {}) \
+        if isinstance(finding, dict) else []
+    if since is None:
+        return finding, window_report(
+            since=None, applied=None, available=available,
+        ), None
+    if not isinstance(finding, dict) or not available:
+        return finding, window_report(
+            since=since, applied=None, available=available,
+            unavailable_reason=_NO_WINDOWED_FIGURES,
+        ), None
+
+    label = resolve_window_label(since, available)
+    total = dict(finding["past_overspend_windows"][label])
+    clusters = finding.get("clusters") or []
+    kept: list[Any] = []
+    omitted = 0
+    for cluster in clusters:
+        windows = cluster.get("past_overspend_windows") if isinstance(cluster, dict) else None
+        bucket = (windows or {}).get(label) if isinstance(windows, dict) else None
+        if bucket is None:
+            # No windowed figure for this cluster: its occurrences carry no
+            # parseable timestamps, so whether it recurred in the window is
+            # UNKNOWN. Kept (dropping it would assert it did not) and stamped so
+            # a reader is not shown an absent figure as a zero one.
+            kept.append({**cluster, "window": None, "window_unknown": True})
+            continue
+        if not bucket.get("occurrences"):
+            omitted += 1
+            continue
+        kept.append({**cluster, "window": bucket, "window_unknown": False})
+
+    bounded = {**finding, "clusters": kept}
+    return bounded, window_report(
+        since=since, applied=total, available=available,
+        clusters_in_window=len(kept), clusters_omitted=omitted,
+    ), total
+
+
 @router.get("/relearn/proposals", dependencies=[Depends(require_api_key)])
-def get_relearn_proposals(request: Request) -> dict[str, Any]:
+def get_relearn_proposals(
+    request: Request,
+    since: str | None = Query(
+        None,
+        description="Lookback window (e.g. 30d, 7d, 24h). Bounds the clusters "
+                    "and the dollar figures to occurrences inside the window. "
+                    "Omit for the full unbounded observation.",
+    ),
+) -> dict[str, Any]:
     """Cached relearn-detector proposals for the Review inbox.
 
     Returns ``{"status": "ready"|"computing"|"never_run", "computed_at":
@@ -208,9 +300,48 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
     reads only on-disk Claude Code transcripts and therefore never surfaces
     anything for an SDK-dominant window, rather than reading as "you're doing
     great."
+
+    ``since`` bounds the result to a trailing window, using the same helper and
+    the same 400-on-malformed contract ``/cost``, ``/alerts``, ``/traces`` and
+    ``/optimize`` use. This endpoint previously took no window at all, so the
+    Dashboard's window selector governed three of its five Health tiles and
+    silently did nothing to "Pending fixes": the identical cluster list came back
+    for ``24h`` and ``90d``. The bounded figures come off the cache (the detector
+    computes them; see ``_apply_window``), so a ``since`` with no precomputed
+    bucket resolves to the NEAREST one and ``window.applied`` names which. Never
+    the label that was asked for, when that is not the label the figures were
+    computed under.
+
+    ``window``, ``past_overspend_windowed`` and ``data_span`` are always present.
+    ``past_overspend_windowed`` is ``None`` when no window was applied: an absent
+    figure, not a zero one.
+
+    Every cluster carries ``inbox_contribution_usd``/``_tokens``/``_window``/
+    ``_basis``: what that row contributed to the Review inbox's ONE headline
+    total, which ``/relearn/cost-proposals`` publishes and which now covers
+    relearn's rows too (see ``core/optimize/inbox_contribution.py``). It is the
+    bounded figure for the HEADLINE's window, net of the re-read share the
+    ``resend`` proposal prices in full, and it is deliberately NOT re-based by a
+    caller's own ``since``: the inbox's noise floor, its collapsed-tail combined
+    figure and its headline have to read one quantity whatever the reader is
+    filtering, and the selected window's own figure already travels on each row's
+    ``window`` bucket. ``None`` means UNPRICED on that basis, never zero.
     """
+    since_error: str | None = None
+    if since is not None:
+        from tokenjam.utils.time_parse import parse_since
+
+        try:
+            parse_since(since)
+        except ValueError as exc:
+            since_error = str(exc)
+    if since_error is not None:
+        raise HTTPException(status_code=400, detail=f"Invalid since: {since_error}")
+
     cached = relearn_store.read_cache(config=_config(request))
     computing = relearn_store.is_computing()
+    conn = _conn(request)
+    data_span = available_data_span(conn).to_dict()
     if cached is None:
         return {
             "status": "computing" if computing else "never_run",
@@ -218,6 +349,15 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "finding": None,
             "framing": _framing(request),
             "persona": _persona(request),
+            "window": window_report(
+                since=since, applied=None, available=[],
+                unavailable_reason=(
+                    "no detector result has been cached yet, so there is nothing "
+                    "to bound to a window"
+                ) if since is not None else None,
+            ),
+            "past_overspend_windowed": None,
+            "data_span": data_span,
         }
     finding = cached.get("finding")
     if isinstance(finding, dict):
@@ -225,12 +365,30 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
         # proposal id or the advise-only reason existed still resolves without
         # waiting for a recompute. Idempotent.
         finding = relearn_proposals.stamp_proposal_ids(finding)
+        # What each cluster contributed to the inbox's ONE headline total, on
+        # the headline's own window and net of the re-read share the context
+        # re-send proposal already prices. This is the field the noise floor is
+        # tested against and the collapsed tail sums, so the rows, the hidden-set
+        # note and the headline are one quantity over one population by
+        # construction. See `core/optimize/inbox_contribution.py`; stamped
+        # BEFORE `_apply_window` so a reader's own `since` cannot change which
+        # window the headline's figure was taken from.
+        finding = inbox_contribution.stamp_relearn_contributions(
+            finding,
+            label=inbox_contribution.contribution_window_label(
+                finding, _headline_window_days(cached),
+            ),
+        )
+    finding, window, windowed_total = _apply_window(finding, since)
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": _with_example_resolvability(finding, _conn(request)),
+        "finding": _with_example_resolvability(finding, conn),
         "framing": _framing(request),
         "persona": _persona(request),
+        "window": window,
+        "past_overspend_windowed": windowed_total,
+        "data_span": data_span,
     }
 
 
@@ -481,14 +639,27 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
 
     ``past_overspend`` is THE aggregate — the ONLY one this endpoint returns
     (``cost_proposals.past_overspend_rollup``): the sum of
-    ``past_overspend_usd``/``_tokens`` across the OPEN proposals only — every
-    proposal whose signature isn't already in the (non-reverted) cost-applied
-    ledger. It is the AVOIDABLE portion of what the flagged behaviours already
-    cost over the analyzed window, observed rather than projected. Computed
-    here, not client-side, so the Dashboard hero and the Review inbox headline
-    read one server-computed figure and cannot disagree (a browser's local
-    "dismiss" never affects it — dismissing hides a card from one person's
-    view, it doesn't change what's actually still outstanding).
+    ``past_overspend_usd``/``_tokens`` across the OPEN rows of the Review inbox —
+    every row whose signature isn't already in a (non-reverted) applied ledger.
+    It is the AVOIDABLE portion of what the flagged behaviours already cost over
+    the analyzed window, observed rather than projected. Computed here, not
+    client-side, so the Dashboard hero and the Review inbox headline read one
+    server-computed figure and cannot disagree (a browser's local "dismiss" never
+    affects it — dismissing hides a card from one person's view, it doesn't
+    change what's actually still outstanding).
+
+    **IT COVERS EVERY ROW OF THE INBOX, INCLUDING RELEARN'S.** The inbox is one
+    list fed by this endpoint and by ``/relearn/proposals``, so a headline summed
+    over one feed left the other's rows outside it: the collapsed tail's combined
+    figure summed rows of BOTH kinds, and the below-floor note said the hidden
+    items were "still counted in the total above" when most of that money had
+    never entered the total. Each open relearn cluster therefore contributes an
+    ordinary row on the canonical field (``core/optimize/inbox_contribution.py``),
+    carrying the detector's own bounded figure for the window this rollup is
+    labelled with, net of the re-read share the ``resend`` proposal already prices
+    in full. One window over every row, and every dollar once. A cluster whose
+    money cannot be put on that window is disclosed through ``excluded`` rather
+    than counted as nothing.
 
     There is deliberately no second aggregate and no forward/paced one. A
     ``rollup`` key carrying ``estimated_recoverable_*`` plus a
@@ -497,19 +668,33 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     ratio, so a surface could render any of three near-identical dollar
     figures. Both are gone.
 
-    The block also carries ``observed_cost_usd`` — the full observed COST of
-    the same behaviours, including the part never shown to be avoidable — as
-    its own key, never summed into the headline and never labelled waste; and
-    ``excluded`` (e.g. ``{"summarize": {...}}`` when that analyzer found
-    something), waste this headline deliberately does NOT sum in because it has
-    its own review surface, stated instead of silently dropped.
+    An ``observed_cost_usd`` key used to sit here too — a second total, summed
+    over whichever proposals carried a full-cost figure — under a disclosure
+    saying the headline was a subset of it. It was not: on live data the headline
+    summed 13 proposals and that total covered 2, so most of the headline sat
+    outside the figure it was described as part of. Key and disclosure are both
+    deleted. **Every figure this block publishes now covers the same set of
+    proposals**, which is the invariant that failure exposed.
+
+    The block still carries ``excluded`` (e.g. ``{"summarize": {...}}`` when that
+    analyzer found something), waste this headline deliberately does NOT sum in
+    because it has its own review surface, stated instead of silently dropped.
 
     Each proposal carries the same figures per-card
-    (``past_overspend_usd``/``_tokens``/``_basis``, plus ``observed_cost_*``
-    and ``coverage_note`` where the total cost is a genuinely different
-    quantity) so a card never re-derives its own headline. relearn's clusters
-    are NOT folded in here: relearn reaches this aggregate through its own
-    ``cost:relearn`` proposal like any other analyzer, counted once."""
+    (``past_overspend_usd``/``_tokens``/``_basis``, plus ``coverage_note`` where
+    the avoidable figure was computed over a subset) so a card never re-derives
+    its own headline.
+
+    Every proposal ALSO carries ``inbox_contribution_usd``/``_tokens``/
+    ``_window``/``_basis``: exactly what that row contributed to the headline
+    above. ``/relearn/proposals`` stamps the same four fields on every relearn
+    cluster, so ONE field spans both feeds and the inbox's noise floor, its
+    collapsed-tail combined figure and this headline are the same quantity over
+    the same population by construction. ``None`` there means UNPRICED, never
+    zero: the floor may not hide such a row and no combined figure may include
+    it. For a cost proposal the contribution IS ``past_overspend_usd`` unchanged;
+    relearn's differs from its row's unbounded figure, which is why the field
+    exists rather than each surface picking a number per row kind."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
@@ -530,14 +715,55 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # NOT accompanied by `active_days`/`n_sessions`: the rollup is a window
     # observation, so there is no pace to project it at and nothing to project
     # from (see `past_overspend_rollup`).
-    rollup_kwargs: dict[str, Any] = {}
-    if block:
-        if block.get("cost_window_days"):
-            rollup_kwargs["window_days"] = block["cost_window_days"]
-        rollup_kwargs["excluded"] = block.get("cost_excluded")
-    past_overspend = cost_proposals_mod.past_overspend_rollup(
-        open_proposals, **rollup_kwargs,
+    window_days = _headline_window_days(block)
+    # RELEARN'S ROWS ARE INBOX ROWS, SO THEIR MONEY IS IN THIS TOTAL. The inbox
+    # is one list fed by two endpoints; a headline summed over one of them left
+    # the other's rows outside it, which made the collapsed tail's combined
+    # figure and the below-floor "still counted in the total above" note false
+    # for the money they described. Each open cluster arrives here as an
+    # ORDINARY row on the one canonical field — no parameter on the rollup, no
+    # second aggregate, no second key — carrying the detector's own bounded
+    # figure for THIS window, net of the re-read share the resend proposal
+    # already prices in full. `core/optimize/inbox_contribution.py` owns that
+    # design and why it is neither of the two mechanisms this repo retired.
+    relearn_cache = relearn_store.read_cache(config=config)
+    relearn_finding = (relearn_cache or {}).get("finding")
+    relearn_label = inbox_contribution.contribution_window_label(
+        relearn_finding, window_days,
     )
+    relearn_applied_sigs = {
+        str(rec.get("signature") or "")
+        for rec in relearn_apply.list_applied(config)
+        if rec.get("state") != "reverted"
+    }
+    relearn_rows = inbox_contribution.relearn_contribution_rows(
+        relearn_finding, label=relearn_label,
+        applied_signatures=relearn_applied_sigs,
+    )
+    # Clusters whose money could NOT be put on this window's basis (a cache
+    # written before bounded figures, or occurrences with no parseable
+    # timestamp). Absent is never zero: stated through the rollup's `excluded`
+    # channel, summed into nothing.
+    unrepresented = inbox_contribution.unrepresented_relearn(
+        relearn_finding, label=relearn_label,
+        applied_signatures=relearn_applied_sigs,
+    )
+    excluded = {
+        **((block.get("cost_excluded") or {}) if block else {}),
+        **inbox_contribution.relearn_excluded_entry(
+            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
+        ),
+    }
+    past_overspend = cost_proposals_mod.past_overspend_rollup(
+        open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
+    )
+    # Every row a reader sees carries what it contributed, cost and relearn
+    # alike, so the noise floor and the tail's combined figure read the SAME
+    # quantity the headline sums instead of each re-deriving one.
+    proposals = [
+        inbox_contribution.stamp_cost_contribution(p, window=f"{window_days}d")
+        for p in proposals
+    ]
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)
@@ -715,6 +941,136 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
         except cost_apply.CostApplyRefused:
             cost_record = None
     return {"applied": applied, "cost_record": cost_record}
+
+
+class RegisterSourcePathRequest(BaseModel):
+    """A named STORED cost proposal plus the ONE fact only the user can supply:
+    where the flagged agent's source lives.
+
+    Same split as its siblings — everything about WHAT is written comes off the
+    store; the caller supplies only where the agent's checkout is, plus the
+    go/force confirmations.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id:  str
+    source_path:  str = ""
+    scope:        str = "project"
+    go:           bool = False
+    force:        bool = False
+
+
+@router.post("/relearn/cost-proposals/register-source-path", dependencies=_WRITE_AUTH)
+def post_register_source_path(
+    request: Request, body: RegisterSourcePathRequest,
+) -> dict[str, Any]:
+    """Register an agent's source path, then apply its model swap.
+
+    The gap this closes: eleven live ``downsize`` model-swap proposals carried a
+    real fix snippet and ``apply_capable: false``, for one reason — nobody had
+    ever told tokenjam where those agents' source lives, and tokenjam refuses to
+    scan a filesystem looking for it (``config.AgentConfig.source_path``: opt-in,
+    never inferred). So the fix was deterministic, the target was one grep away
+    from a path the user knows, and the row still offered nothing but a copy box.
+
+    ``go=false`` previews: it resolves the path, re-runs every
+    ``model_swap_precheck`` gate against it, and returns the diff it WOULD write,
+    changing nothing on disk or in the config. ``go=true`` registers the path in
+    the user's own config and then performs the swap through the existing
+    ``relearn_apply`` machinery — backup, git commit, ledger, revert — with no
+    second discipline invented here.
+
+    **The write still reads its target out of the config, not out of this body.**
+    That is the safety property that made ``source_path`` config-only in the first
+    place (see ``relearn_proposals.APPLY_CLUSTER_FIELDS``), and registration does
+    not weaken it: a caller cannot aim an edit at an arbitrary repo, it can only
+    ask the user's config to be changed — deliberately, from their own machine,
+    durably, and inspectably afterwards.
+
+    Registration is per AGENT, so one answer unlocks every other proposal for the
+    same agent at the next recompute. Several of the eleven share an ``agent_id``.
+
+    403 outside home; 409 on any refusal (a path that is not a directory, not in
+    a git repo, a model id in several files, a dirty target, a live session in
+    the repo unless ``force``); 404 on an unknown ``proposal_id``.
+    """
+    from tokenjam.core.optimize import model_apply
+
+    _reject_target_outside_home(body.source_path)
+    config = _config(request)
+    stored = _stored_cost_proposal(request, body.proposal_id)
+    if not stored.get("needs_source_path"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"stored proposal {body.proposal_id} is not waiting on a "
+                   f"source path. Refresh the cost proposals and use the apply "
+                   f"path its own card offers.",
+        )
+    agent_id = str(stored.get("agent_id") or "")
+    current_model = str(stored.get("current_model") or "")
+    proposed_model = str(stored.get("proposed_model") or "")
+
+    # Resolve and gate BEFORE touching the config, so a preview never leaves a
+    # registration behind and a refused apply never leaves a path pointing at a
+    # repo the swap turned out not to be possible in.
+    try:
+        resolved = model_apply.resolve_source_path(body.source_path)
+        check = model_apply.model_swap_precheck(resolved, current_model)
+        if not check["ok"]:
+            raise relearn_apply.RelearnApplyRefused(check["reason"])
+        if not body.go:
+            return {
+                "applied": model_apply.preview_model_swap(
+                    check["target_path"], current_model, proposed_model,
+                ),
+                "cost_record": None,
+                "target_path": check["target_path"],
+                "source_path": resolved,
+            }
+        # The cluster is projected from the STORE plus the resolved path, never
+        # from the request body — the same rule `cluster_for_apply` states. It
+        # is built from `resolved` directly (not a config re-read) so nothing
+        # here depends on the config having been written yet: registration is
+        # deferred until AFTER the apply succeeds, so a refused apply leaves the
+        # on-disk config completely untouched.
+        cluster = {
+            "signature": str(stored.get("signature") or ""),
+            "title": str(stored.get("title") or ""),
+            "proposed_fix": str(stored.get("proposed_fix") or ""),
+            "apply_kind": model_apply.APPLY_KIND_MODEL_SWAP,
+            "current_model": current_model,
+            "proposed_model": proposed_model,
+            "source_path": resolved,
+            "rung": int(stored.get("rung") or 1),
+            "sessions": 0,
+            "repos": [],
+            "examples": [],
+        }
+        applied = relearn_apply.apply_relearn_fix(
+            config, cluster, target_path=check["target_path"], scope=body.scope,
+            go=True, conn=_conn(request), force=body.force,
+        )
+        # Only persist the registration once the swap itself has actually
+        # succeeded — a refused apply (e.g. the active-session gate below)
+        # must never leave a path pointing at a repo the swap turned out not
+        # to be possible in.
+        model_apply.register_agent_source_path(config, agent_id, resolved)
+    except relearn_apply.RelearnApplyRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    db = getattr(request.app.state, "db", None)
+    cost_record = None
+    if db is not None:
+        try:
+            cost_record = cost_apply.mark_applied(db, config, stored)
+        except cost_apply.CostApplyRefused:
+            cost_record = None
+    return {
+        "applied": applied,
+        "cost_record": cost_record,
+        "target_path": check["target_path"],
+        "source_path": resolved,
+    }
 
 
 @router.get("/relearn/cost-applied", dependencies=[Depends(require_api_key)])

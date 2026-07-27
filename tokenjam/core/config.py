@@ -334,6 +334,32 @@ class OptimizeConfig:
     # placement is worth suggesting.
     min_group_cost_usd: float = 1.0
 
+    # --- Scheduled analyzer scan (core/optimize/report_store.py) -------------
+    # No HTTP request path runs analyzers any more: the full report is computed
+    # by the `tj serve` daemon (once at boot, then on an interval, plus on a
+    # user-pressed rescan) and every route serves the STORED result. These are
+    # the always-on rails for that scan — a kill switch, a cadence, the window
+    # the scan observes, and a floor on how often a rescan request may actually
+    # re-run the analyzers.
+    #
+    # scan_enabled=False keeps the daemon from ever scanning on its own; the
+    # stored report then only ever changes when a human presses rescan. It does
+    # NOT re-enable inline computation on a request — nothing does.
+    scan_enabled: bool = True
+    # Cadence of the daemon's background scan.
+    scan_interval_hours: float = 6.0
+    # Lookback the scan observes. Stored alongside the result so every surface
+    # labels the figures with the window they were actually computed over
+    # rather than whatever picker the reader's screen is set to.
+    scan_window_days: int = 30
+    # Floor between two rescans that actually re-run the analyzers. A rescan
+    # request inside this window is answered with the stored result and
+    # `throttled: true` rather than stacking another full-corpus pass.
+    scan_min_rescan_seconds: int = 60
+    # How often a UI surface re-reads the stored result (NOT how often the scan
+    # runs). Zero disables the UI's auto-refresh entirely.
+    scan_ui_poll_seconds: int = 300
+
 
 @dataclass
 class LoopConfig:
@@ -704,6 +730,16 @@ def _parse(raw: dict) -> TjConfig:
             "min_sessions_for_cadence", OptimizeConfig.min_sessions_for_cadence),
         min_group_cost_usd=optimize_raw.get(
             "min_group_cost_usd", OptimizeConfig.min_group_cost_usd),
+        scan_enabled=bool(optimize_raw.get(
+            "scan_enabled", OptimizeConfig.scan_enabled)),
+        scan_interval_hours=float(optimize_raw.get(
+            "scan_interval_hours", OptimizeConfig.scan_interval_hours)),
+        scan_window_days=int(optimize_raw.get(
+            "scan_window_days", OptimizeConfig.scan_window_days)),
+        scan_min_rescan_seconds=int(optimize_raw.get(
+            "scan_min_rescan_seconds", OptimizeConfig.scan_min_rescan_seconds)),
+        scan_ui_poll_seconds=int(optimize_raw.get(
+            "scan_ui_poll_seconds", OptimizeConfig.scan_ui_poll_seconds)),
     )
 
     defaults_raw = raw.get("defaults", {})

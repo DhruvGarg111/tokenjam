@@ -229,6 +229,14 @@ class TjAttributes:
     BILLING_ACCOUNT  = "tokenjam.billing_account"
     PLAN_TIER        = "tokenjam.plan_tier"
 
+    # How the request was BOUGHT, when that differs from the model's standard
+    # rate — currently Anthropic's fast mode (`speed="fast"`), which bills the
+    # same model id at a premium. Billing metadata, not content, so unlike the
+    # gen_ai.request.* sampling params it is NOT gated by a [capture] toggle:
+    # dropping it would silently price fast traffic at half its real rate. Read
+    # by core/cost.rate_variant_for_span to pick the pricing variant.
+    REQUEST_SPEED    = "tokenjam.request.speed"
+
     # Full tools / tool_choice payload for the request (issue #209). OTel GenAI
     # has no single attribute for the tool-definition list, so this is a
     # tj-specific extension carrying a JSON object: {"tools": [...],

@@ -81,6 +81,16 @@ def auth_client(app_with_auth):
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
+def _warm_scan(db, config):
+    """Run the daemon's background analyzer scan so the routes have a STORED
+    report to serve. No route runs an analyzer any more (see
+    core/optimize/report_store.py), so a test that wants findings on the wire
+    must warm the store first, exactly as `tj serve` does at boot."""
+    from tokenjam.core.optimize import report_store
+
+    return report_store.recompute_now(db, config)
+
+
 def _otlp_body(spans: list[dict] | None = None) -> dict:
     """Build a minimal OTLP JSON body."""
     if spans is None:
@@ -347,6 +357,21 @@ async def test_get_traces_returns_list(client):
     assert len(data["traces"]) >= 1
 
 
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_get_traces_malformed_since_returns_400_not_500(client, bad_since):
+    """A malformed --since must degrade to a helpful 400, matching /optimize's
+    existing try/except pattern — not a bare 500 from an unhandled ValueError."""
+    resp = await client.get("/api/v1/traces", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
+async def test_get_traces_malformed_until_returns_400_not_500(client):
+    resp = await client.get("/api/v1/traces", params={"until": "abc"})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
 async def test_get_traces_returns_total_count_for_pagination(db, client):
     for idx in range(3):
         db.insert_span(make_llm_span(agent_id="a", trace_id=f"trace-{idx}"))
@@ -467,6 +492,19 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
+@pytest.mark.parametrize("path", [
+    "cost", "cost/components", "cost/cache", "cost/tenants",
+])
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_cost_endpoints_malformed_since_returns_400_not_500(client, path, bad_since):
+    """Every /cost* endpoint parses --since the same way; all four must
+    degrade to a helpful 400, matching /optimize's existing try/except
+    pattern, not a bare 500 from an unhandled ValueError."""
+    resp = await client.get(f"/api/v1/{path}", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
+
+
 async def test_trace_detail_includes_cache_write_tokens(db, client):
     """The traces API exposes cache_write_tokens so per-span cost reconciles
     from the displayed columns (#17 — it was the ~91% cost driver, hidden)."""
@@ -491,6 +529,22 @@ async def test_cost_rows_carry_cache_tokens(db, client):
     assert data["rows"][0]["cache_tokens"] == 243597
     assert data["rows"][0]["cache_write_tokens"] == 209000
     assert data["total_cache_write_tokens"] == 209000
+
+
+async def test_cost_total_tokens_includes_both_cache_types(db, client):
+    """`total_tokens` must sum all four token types, not just input+output.
+
+    Before the fix, `total_tokens` was `input_tokens + output_tokens` only,
+    which on a cache-heavy corpus undercounted by roughly two orders of
+    magnitude (a ~99.6% undercount was observed live: 9,964,627 vs the
+    matching /optimize window's 2,280,025,819 over the same 24h window).
+    """
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    data = (await client.get("/api/v1/cost?group_by=model")).json()
+    assert data["total_tokens"] == 2 + 465 + 243597 + 209000
 
 
 async def test_cost_includes_window_series_for_chart(client):
@@ -725,6 +779,7 @@ async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
     _seed_reuse_cluster(db, count=3, completions=True)
     pipeline = IngestPipeline(db=db, config=cfg)
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    _warm_scan(db, cfg)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.get("/api/v1/reuse/clusters", params={"since": "30d"})
@@ -738,8 +793,9 @@ async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
     assert data["pricing_mode"] in ("api", "subscription", "local", "unknown")
 
 
-async def test_optimize_response_includes_framing_block(client):
+async def test_optimize_response_includes_framing_block(client, db, config):
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d")
     assert resp.status_code == 200
     data = resp.json()
@@ -748,10 +804,11 @@ async def test_optimize_response_includes_framing_block(client):
     assert _FRAMING_KEYS <= set(data["framing"])
 
 
-async def test_optimize_response_always_carries_downgrade_key(client):
+async def test_optimize_response_always_carries_downgrade_key(client, db, config):
     """The downsize typed slot must always be present (null when no candidates)
     so the UI can always render a Downsize section (#126)."""
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d")
     data = resp.json()
     if data.get("error") == "no_data":
@@ -766,10 +823,11 @@ async def test_root_serves_lens_title(client):
     assert "<title>TokenJam Lens</title>" in resp.text
 
 
-async def test_optimize_chain_framing_and_recoverable_fields(client):
+async def test_optimize_chain_framing_and_recoverable_fields(client, db, config):
     """The framing block (#110) + per-finding recoverable fields (#111) are
     both present on /api/v1/optimize — validates the chain Overview relies on."""
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d")
     data = resp.json()
     if data.get("error") == "no_data":
@@ -784,19 +842,31 @@ async def test_optimize_chain_framing_and_recoverable_fields(client):
             assert "estimate_basis" in findings[name]
 
 
-async def test_optimize_fast_skips_trim(client):
-    """fast=true skips the expensive Trim analyzer and reports it (#114)."""
+async def test_optimize_fast_no_longer_means_anything(client, db, config):
+    """`fast=true` used to drop the expensive Trim analyzer from a LIVE
+    dispatch on the request thread. There is no live dispatch any more — the
+    route serves the stored report — so nothing is "skipped for speed" and
+    `skipped_analyzers` is always empty.
+
+    The assertion is inverted rather than deleted (Critical Rule 23): the old
+    one now defends the wrong state, and asserting the empty list is what
+    catches a reintroduced inline dispatch.
+    """
     await _ingest_sample_span(client)
+    _warm_scan(db, config)
     resp = await client.get("/api/v1/optimize?since=30d&fast=true")
     assert resp.status_code == 200
     data = resp.json()
     if data.get("error") == "no_data":
         pytest.skip("no spans landed for optimize in this fixture")
-    assert "trim" in data.get("skipped_analyzers", [])
-    assert "trim" not in (data.get("findings") or {})
+    assert data.get("skipped_analyzers") == []
+    # The stored report is the same one `fast=false` gets — there is one
+    # report, not a fast variant and a slow variant that could disagree.
+    slow = (await client.get("/api/v1/optimize?since=30d")).json()
+    assert set(data.get("findings") or {}) == set(slow.get("findings") or {})
 
 
-async def test_optimize_payload_reports_persona_disabled_analyzers(db, client):
+async def test_optimize_payload_reports_persona_disabled_analyzers(db, client, config):
     """A claude-code window reports which analyzers the persona gate dropped,
     and never lists one as merely `skipped` — the UI renders a placeholder for
     a skipped name, and a gated analyzer must vanish instead."""
@@ -816,6 +886,7 @@ async def test_optimize_payload_reports_persona_disabled_analyzers(db, client):
             session_id=f"cc-{i}", start_time=started,
         ))
 
+    _warm_scan(db, config)
     data = (await client.get("/api/v1/optimize?since=30d&fast=true")).json()
     assert data["persona"] == "claude-code"
     gated = set(data["persona_disabled_analyzers"])
@@ -858,6 +929,15 @@ async def test_get_alerts_returns_list(client):
     data = resp.json()
     assert "alerts" in data
     assert isinstance(data["alerts"], list)
+
+
+@pytest.mark.parametrize("bad_since", ["abc", "0", "1", "-1", "9999"])
+async def test_get_alerts_malformed_since_returns_400_not_500(client, bad_since):
+    """A malformed --since must degrade to a helpful 400, matching /optimize's
+    existing try/except pattern — not a bare 500 from an unhandled ValueError."""
+    resp = await client.get("/api/v1/alerts", params={"since": bad_since})
+    assert resp.status_code == 400
+    assert "Invalid --since" in resp.json()["detail"]
 
 
 async def test_get_tools_returns_list(client):

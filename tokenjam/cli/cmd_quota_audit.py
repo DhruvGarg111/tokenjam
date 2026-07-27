@@ -271,9 +271,8 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
         padding=(1, 2),
     ))
 
-    # Qualifier banner (plan-tier framing) + the mandatory honesty caveat.
-    if framing.qualifier_text:
-        console.print(f"  [dim]{framing.qualifier_text}[/dim]")
+    # The mandatory honesty caveat. No billing-mode qualifier banner: product
+    # decision, no differentiated messaging between subscription and API users.
     console.print(f"  [yellow]![/yellow] [italic]{audit.caveat}[/italic]")
     if audit.candidate_sessions > 0:
         console.print(

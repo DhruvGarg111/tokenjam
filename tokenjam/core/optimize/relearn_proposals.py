@@ -112,6 +112,37 @@ def advise_only_reason(proposal: dict[str, Any]) -> str | None:
     return ADVISE_ONLY_REASON if proposal.get("advise_only") else None
 
 
+def advise_snippet_offered(proposal: dict[str, Any]) -> bool:
+    """Is this cluster's ``proposed_fix`` a real recommendation the user can act
+    on themselves, rather than the "no fix template matched" placeholder?
+
+    The Review inbox routes every row onto a three-valued mechanism axis: tj can
+    apply it, tj hands over the exact change, or there is genuinely nothing to
+    hand over. ``write_offered`` answers the first. This answers the second, and
+    it has to be answered HERE rather than in the browser: the distinction is
+    ``build_proposals``' own ``has_real_fix``, and the only trace of it on the
+    payload is that a placeholder write is blocked with ``REASON_PLACEHOLDER``.
+    Re-deriving that in JS would mean the UI keying on a sentence this package
+    owns the wording of, which is the drift the ``short_reason`` map exists to
+    prevent.
+
+    False when the write WAS offered, and that is the load-bearing half. Unlike a
+    cost proposal, where ``suggestion`` and the apply path are separate fields
+    describing separate things (``deadweight``'s mcp_remove legitimately carries
+    both), a relearn cluster's ``proposed_fix`` is the SAME content the write
+    would write. Handing it over is only a distinct offer when tokenjam will not
+    write it, so a cluster tokenjam is about to write must not also advertise
+    "copy this" and duplicate its own fix on the row. Hence "advise" in the name.
+    """
+    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER
+
+    if not str(proposal.get("proposed_fix") or "").strip():
+        return False
+    if proposal.get("write_offered"):
+        return False
+    return str(proposal.get("write_blocked_reason") or "").strip() != REASON_PLACEHOLDER
+
+
 def proposal_id_for(signature: str) -> str:
     """The stable ID for a cluster signature. Deterministic across processes
     and recomputes: the same signature always yields the same ID."""
@@ -152,6 +183,12 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
                 c.get("write_blocked_short")
                 or short_reason(c.get("write_blocked_reason") or "")
             ),
+            # Derived on read for the same reason as the three above, and
+            # deliberately NOT stored on the dataclass: it is a pure function of
+            # fields already on the cluster, so a stored copy could only ever
+            # disagree with them. A cache written before this existed resolves
+            # correctly on the first read, with no recompute.
+            "advise_snippet_offered": advise_snippet_offered(c),
         }
         if isinstance(c, dict) else c
         for c in clusters

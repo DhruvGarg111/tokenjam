@@ -181,6 +181,36 @@ def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
     assert relearn_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
 
 
+def test_relearn_recompute_preserves_cost_window_and_excluded(tmp_path):
+    """A relearn detector recompute must not silently forget a non-default
+    cost window or the excluded block a prior cost-proposals recompute wrote.
+
+    Both routes fall back to the same `DEFAULT_COST_WINDOW_DAYS` today, so a
+    dropped `cost_window_days` was invisible on live data -- but the moment a
+    caller stores a non-default window, `write_cache` (the relearn job's own
+    write into the shared cache file) must round-trip it rather than reset
+    the headline's label back to the default on the next relearn pass.
+    """
+    path = tmp_path / "relearn_cache.json"
+    relearn_store.write_cost_proposals(
+        [{"kind": "cost", "analyzer": "trim", "signature": "cost:trim:x"}],
+        path=path,
+        window_days=14,
+        excluded={"summarize": {"past_overspend_usd": 3.5}},
+    )
+    cost_block = relearn_store.read_cost_proposals(path=path)
+    assert cost_block["cost_window_days"] == 14
+    assert cost_block["cost_excluded"] == {"summarize": {"past_overspend_usd": 3.5}}
+
+    # A relearn recompute lands on the SAME cache file, on its own cadence.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=11), path=path)
+
+    cost_block_after = relearn_store.read_cost_proposals(path=path)
+    assert cost_block_after["cost_proposals"][0]["signature"] == "cost:trim:x"
+    assert cost_block_after["cost_window_days"] == 14
+    assert cost_block_after["cost_excluded"] == {"summarize": {"past_overspend_usd": 3.5}}
+
+
 # --- Subagent right-sizing: the apply-capable 4th analyzer --------------------
 
 def _sub_finding(models=("claude-opus-4-8",)):
@@ -950,15 +980,42 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     assert "floor, not a total" not in rollup["basis"]
 
 
-# --- relearn reaches the rollup as an ordinary card; excluded is carried --- #
+# --- the rollup has one entry point; excluded is carried -------------------- #
 
-def test_relearn_reaches_the_rollup_through_its_own_card_not_a_side_channel():
+def test_the_rollup_has_no_per_analyzer_side_channel():
     """relearn used to be folded into the aggregate by a dedicated
     ``relearn_clusters=`` parameter, on its OWN 30-day basis, landing in a
     ``projected_usd_30d`` key that no other analyzer's window figure shared.
-    Two time bases in one aggregate is exactly the ambiguity the field
-    collapse removed: relearn now contributes through the ``cost:relearn``
-    proposal like every other analyzer, on the one canonical field.
+    Two time bases in one aggregate is exactly the ambiguity the field collapse
+    removed: every contribution arrives as an ordinary row on the one canonical
+    field, or not at all. THAT is what this test guards, and it is unchanged.
+
+    WHAT CHANGED, AND WHY IT IS NOT THE SHAPE ABOVE COMING BACK. relearn used to
+    be the "or not at all" case, and its money therefore sat outside the Review
+    inbox's headline while its rows sat inside the inbox's list. That made the
+    tail's combined figure and the below-floor "still counted in the total above"
+    note false for most of the money they described, so relearn is now the "as an
+    ordinary row" case: ``core/optimize/inbox_contribution.py`` turns each open
+    cluster into a plain row carrying ``past_overspend_usd``/``_tokens``, and the
+    route hands those rows to this function alongside the cost proposals.
+
+    Four properties are what make that the sanctioned path rather than the
+    retired one, and the assertions below pin all four:
+
+      1. **No parameter.** The relearn-shaped kwarg still raises ``TypeError``.
+         Nothing about relearn is known to this function; it sees rows.
+      2. **One time basis.** The row's figure is the detector's own bounded
+         bucket for the window this rollup is LABELLED with (a date filter over
+         the same occurrences at the same price, never a rescale), so the label
+         over the total stays true for every row under it.
+      3. **No second key.** The result grows no relearn-specific key, no paced
+         key and no second total. It is the same dict shape as before.
+      4. **Attributable, not smuggled.** The contribution shows up as an ordinary
+         ``by_analyzer`` entry, so a reader can see whose money it is instead of
+         finding an unexplained delta.
+
+    A row with no canonical figure still contributes nothing and earns no
+    ``by_analyzer`` entry, whichever producer it came from.
     """
     with pytest.raises(TypeError):
         past_overspend_rollup([], relearn_clusters=[{"signature": "relearn:a"}])  # type: ignore[call-arg]
@@ -966,13 +1023,24 @@ def test_relearn_reaches_the_rollup_through_its_own_card_not_a_side_channel():
     rollup = past_overspend_rollup([
         {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
          "past_overspend_usd": 3.0},
-        {"signature": "cost:relearn", "analyzer": "relearn", "title": "t2",
-         "past_overspend_usd": None, "observed_cost_usd": 46.30},
+        {"signature": "cost:nothing", "analyzer": "hypothetical", "title": "t2",
+         "past_overspend_usd": None, "past_overspend_tokens": None},
+        # An ordinary row that happens to come from relearn: the canonical field,
+        # nothing relearn-shaped about how it is passed or read.
+        {"signature": "relearn-window:cwd", "analyzer": "relearn", "title": "t3",
+         "past_overspend_usd": 2.0},
     ])
-    assert rollup["past_overspend_usd"] == 3.0
-    assert rollup["observed_cost_usd"] == 46.30
-    # No paced key survives anywhere on the block.
+    assert rollup["past_overspend_usd"] == 5.0
+    assert rollup["proposal_count"] == 2
+    assert [e["analyzer"] for e in rollup["by_analyzer"]] == ["downsize", "relearn"]
+    # No paced key survives anywhere on the block, and no second total either.
     assert not [k for k in rollup if "monthly" in k or "projected" in k]
+    assert not [k for k in rollup if "observed_cost" in k or k == "cost_disclosure"]
+    # And nothing relearn-specific on the result: the retired mechanism's tell was
+    # a key of its own beside the canonical total.
+    assert not [k for k in rollup if "relearn" in k]
+    # One label over every row that fed the total.
+    assert rollup["window_days"] == 30
 
 
 def test_rollup_excluded_is_carried_through_never_summed():
@@ -1124,22 +1192,26 @@ def test_resend_claude_code_offers_apply_capable_compound_write():
     assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
 
 
-def test_resend_cost_of_waste_is_carried_but_never_the_recoverable_figure():
-    # The gross observation rides its own fields and must never be confused
-    # with — or summed into — what the fix returns.
+def test_resend_carries_one_dollar_figure_and_the_headline_reads_it():
+    # resend was the one analyzer that shipped a SECOND, larger dollar figure
+    # (the full observed cost of the re-sent volume). It is deleted from the
+    # contract, so the card carries exactly one, and the field it rode on cannot
+    # be set at all — an adapter that tried would now raise rather than quietly
+    # attach an untracked number.
+    import dataclasses
+
     from tokenjam.core.optimize.cost_proposals import (
         _resend_to_proposals,
         past_overspend_rollup,
     )
 
     finding = _resend_finding()
-    finding.cost_of_waste_usd = 4_200.0
-    finding.cost_of_waste_tokens = 9_800_000_000
     prop = _resend_to_proposals(finding, persona="claude-code")[0]
 
-    assert prop.cost_of_waste_usd == 4_200.0
+    fields = {f.name for f in dataclasses.fields(prop)}
+    assert not [f for f in fields if "cost_of_waste" in f or "observed_cost" in f]
     assert prop.past_overspend_usd == 0.5
-    # The Review inbox headline reads only the recoverable fields.
+    # The Review inbox headline reads that one field.
     rollup = past_overspend_rollup([prop])
     assert rollup["past_overspend_usd"] == 0.5
     assert rollup["past_overspend_tokens"] == 6_830

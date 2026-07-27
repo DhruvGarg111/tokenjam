@@ -1,16 +1,28 @@
 """
-GET /api/v1/optimize — server-side `tj optimize` execution.
+GET /api/v1/optimize — the STORED analyzer report. Never a live analyzer run.
 
-Exists because `cmd_optimize` runs analyzers via direct `db.conn.execute(SQL)`
-queries that DuckDB blocks when another process (tj serve) holds the write
-lock. Routing optimize through the API lets the CLI work in the recommended
-operating mode (daemon auto-started by tj onboard) — see issue #68 §12.
+This route used to call `build_report(...)` on the request thread, which
+dispatched every registered analyzer over the corpus — including `relearn`,
+whose own store exists precisely because it is "far too slow to compute per
+HTTP request". `fast=true` did not save it: it dropped only `trim`, applied no
+timeout, and still ran the full-corpus scans. Measured on a real corpus the
+Review inbox (which reads a stored block) painted instantly while the
+Dashboard's recoverable-waste panel and Budget-at-risk card took tens of
+seconds to minutes.
 
-The endpoint runs `build_report` server-side using `app.state.db` (the same
-connection that handles ingest) and returns the JSON-serialized report. The
-CLI's `cmd_optimize` deserializes the response back into an `OptimizeReport`
-via `report_from_dict` and feeds the rendering path as if it had built the
-report locally — no second code path for rendering.
+So no request path runs an analyzer any more. `core.optimize.report_store`
+holds the report; the `tj serve` daemon computes it at boot, on the configured
+interval, and when a user presses Rescan (`POST /optimize/rescan`, which starts
+a BACKGROUND pass and returns immediately). This route reads that store and
+returns the stored body plus the freshness envelope (`status`, `computed_at`,
+the window it was observed over).
+
+Ingestion is untouched: traces, spans, sessions, maps, approach and timeline
+still update continuously. Only the analyzer layer moved off the request path.
+
+**A cold store is not an empty result.** `status: "never_run"` comes back with
+NO report body — never a zeroed one. A zero here would read as "no waste
+found", which is a reassurance the data does not support.
 """
 from __future__ import annotations
 
@@ -18,52 +30,56 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from tokenjam.api.deps import require_api_key
+from tokenjam.api.deps import require_api_key, require_relearn_write_auth
 from tokenjam.cli.cmd_optimize import _rank_findings
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     agent_persona_mix,
     compute_framing,
     plan_tier_mix,
 )
-from tokenjam.core.optimize import (
-    ANALYZER_REGISTRY,
-    build_report,
-    disabled_analyzers_for_persona,
-    report_to_dict,
-)
+from tokenjam.core.optimize import disabled_analyzers_for_persona, report_store
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
 
-# Analyzers too slow to run on a polling surface (Overview). Trim runs
-# LLMLingua-2 (a BERT classifier) and is multi-second. `fast=true` skips these.
-_EXPENSIVE_ANALYZERS = {"trim"}
+# Rescan is a write-shaped action (it starts a full-corpus pass), so it takes
+# the same local write-token gate the relearn write endpoints use — an
+# unauthenticated caller must not be able to make the daemon scan on demand.
+_WRITE_AUTH = [Depends(require_api_key), Depends(require_relearn_write_auth)]
 
 
 @router.get("/optimize", dependencies=[Depends(require_api_key)])
 def get_optimize(
     request: Request,
-    since: str = Query("30d", description="Lookback window (e.g. 30d, 7d, 24h)."),
+    since: str = Query(
+        "30d",
+        description="Accepted for backwards compatibility and echoed back as "
+                    "requested_since. The response is the STORED report, which "
+                    "was computed over [optimize] scan_window_days — see "
+                    "window_days / scan_since / scan_until.",
+    ),
     agent_id: str | None = Query(None, alias="agent_id"),
     finding: list[str] | None = Query(
-        None,
-        description="Optional list of analyzer names to run. Omit to run all.",
+        None, description="Accepted and echoed back; the stored report always "
+                          "contains every analyzer the persona gate allowed.",
     ),
     budget_provider: str | None = Query(None),
     budget_usd: float | None = Query(None),
     fast: bool = Query(
         False,
-        description="Skip expensive analyzers (Trim) for snappy polling surfaces "
-                    "like Overview. Skipped names are returned in skipped_analyzers.",
+        description="Accepted for backwards compatibility and ignored: no "
+                    "analyzer runs on this request at any speed.",
     ),
 ) -> dict[str, Any]:
-    """
-    Run the optimize analyzers server-side and return the serialized report.
+    """Serve the stored analyzer report plus its freshness envelope.
 
-    Mirrors the CLI `tj optimize` flags: --since, --agent, positional NAME args,
-    --budget, --budget-usd. Returns the same dict shape `report_to_dict` produces
-    locally, so the CLI can reconstruct an `OptimizeReport` and render it.
+    When a report exists, the stored body is returned at the TOP LEVEL (so
+    `report_from_dict(payload)` keeps working for the CLI) with the envelope
+    keys merged alongside it. When the store is cold or has only ever failed,
+    the envelope comes back on its own with `report_available: false` — the
+    caller renders "not yet computed", never a zero.
     """
     db = request.app.state.db
     config = request.app.state.config
@@ -73,92 +89,73 @@ def get_optimize(
             detail="Server not fully initialised (db or config missing).",
         )
 
+    # `since` is still validated so a malformed window is a 400 rather than
+    # being silently ignored, even though it no longer selects the data.
     try:
-        since_dt = parse_since(since)
+        parse_since(since)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
 
-    until_dt = utcnow()
+    envelope = report_store.stored_report_block(config)
+    envelope["requested_since"] = since
+    envelope["requested_findings"] = list(finding) if finding else None
+    envelope["scan_interval_hours"] = getattr(config.optimize, "scan_interval_hours", None)
+    envelope["scan_enabled"] = getattr(config.optimize, "scan_enabled", True)
+    envelope["ui_poll_seconds"] = getattr(config.optimize, "scan_ui_poll_seconds", 0)
 
-    # Resolve which analyzers to run. fast=true drops the expensive ones from
-    # whatever set would otherwise run, recording what was skipped.
-    run_findings = list(finding) if finding else None
-    skipped: list[str] = []
-    if fast:
-        base = run_findings if run_findings is not None else list(ANALYZER_REGISTRY.keys())
-        run_findings = [f for f in base if f not in _EXPENSIVE_ANALYZERS]
-        skipped = [f for f in base if f in _EXPENSIVE_ANALYZERS]
+    body = report_store.stored_report_dict(config)
+    if body is None:
+        # COLD (or error-only). No report body, no finding list, no rollups —
+        # emphatically no zeros. Everything downstream must render this as
+        # "not computed yet", which is a different claim from "found nothing".
+        envelope["report_available"] = False
+        return envelope
 
-    try:
-        report = build_report(
-            db=db,
-            config=config,
-            since=since_dt,
-            until=until_dt,
-            agent_id=agent_id,
-            findings=run_findings,
-            budget_provider_filter=budget_provider,
-            budget_usd_override=budget_usd,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    # The STORED DICT verbatim. Deliberately NOT `report_to_dict(rehydrated)`:
+    # the store already holds exactly what the serializer produced, so passing
+    # it through a rehydration step could only ever lose something. The typed
+    # report below is used for the two derivations that need real objects, and
+    # never re-serialized onto the wire.
+    payload: dict[str, Any] = dict(body)
+    payload.update(envelope)
+    payload["report_available"] = True
 
-    payload = report_to_dict(report)
-    # `skipped_analyzers` means "not run HERE for speed, open the Optimize tab"
-    # — the UI renders a placeholder tile for each one. An analyzer the persona
-    # gate dropped is a different thing entirely: it has no fix this user can
-    # apply, the Optimize tab won't show it either, and it must vanish rather
-    # than leave a row pointing at nothing. So it never enters this list.
+    report = report_store.stored_report(config)
+    if report is None:
+        # The stored dict is present but un-rehydratable (a corrupt or
+        # far-future payload). Serve the body — it is what the analyzers
+        # wrote — and omit only the derivations that need typed objects.
+        payload["finding_rank"] = []
+        payload["persona_disabled_analyzers"] = []
+        payload["skipped_analyzers"] = []
+        return payload
+
+    # `fast` no longer skips anything (nothing runs here), so nothing is
+    # "skipped for speed". The key stays for wire compatibility.
     persona_disabled = disabled_analyzers_for_persona(report.persona)
-    payload["skipped_analyzers"] = [n for n in skipped if n not in persona_disabled]
+    payload["skipped_analyzers"] = []
     # The names the persona gate dropped, so the UI can tell "ran, found
     # nothing" (render the empty state) from "not run for this persona"
-    # (render nothing at all). Without this the analyzers that attach no
-    # finding when they find nothing — `placement` — would still draw an
-    # empty-state card for a user who has no way to act on it.
+    # (render nothing at all).
     payload["persona_disabled_analyzers"] = sorted(persona_disabled)
 
-    # Biggest-waste-first ranking (#97) — the same
-    # `_rank_findings` the CLI's text view already ranks by, so the web
-    # doesn't fall back to Object.keys() insertion order for its recoverable
-    # tiles. `share` is the estimated-recoverable-tokens fraction of the
-    # window; None means "no quantified estimate" (unranked), which is NOT
-    # the same as zero — the UI must not sort those away as de-minimis.
+    # Biggest-waste-first ranking — the same `_rank_findings` the CLI's text
+    # view ranks by, so the web doesn't fall back to Object.keys() insertion
+    # order. `share` of None means "no quantified estimate" (unranked), which
+    # is NOT zero — the UI must not sort those away as de-minimis.
     payload["finding_rank"] = [
-        {"name": name, "share": share}
-        for name, share in _rank_findings(report, run_findings)
+        {"name": name, "share": share} for name, share in _rank_findings(report, None)
     ]
 
-    # Plan-tier mix lets the CLI render subscription / local / unknown
-    # framings correctly under daemon mode. Without this the CLI defaults
-    # to "api" pricing_mode regardless of the user's actual plan (#68 §12
-    # follow-up). Best-effort: depends on db.conn (DuckDBBackend); skip
-    # silently if the daemon's storage layer doesn't expose a connection.
+    # Plan-tier / persona mix are cheap direct queries (no analyzer), so they
+    # stay live: they describe the corpus as it is right now, and a stale mix
+    # would frame a fresh figure under the wrong pricing mode.
     conn = getattr(db, "conn", None)
-    if conn is not None:
-        try:
-            payload["plan_tier_mix"] = plan_tier_mix(conn, since_dt, until_dt, agent_id)
-        except Exception:
-            payload["plan_tier_mix"] = {}
-    else:
-        payload["plan_tier_mix"] = {}
+    since_dt = report.window.since
+    until_dt = report.window.until or utcnow()
+    payload["plan_tier_mix"] = _mix(plan_tier_mix, conn, since_dt, until_dt, agent_id)
+    payload["agent_persona_mix"] = _mix(agent_persona_mix, conn, since_dt, until_dt, agent_id)
 
-    # Agent-persona mix (#97) — same best-effort daemon-mode plumbing as
-    # plan_tier_mix above, so the CLI's downsize CTA can tell a Claude Code
-    # subscriber from an SDK/API developer whether or not the daemon is up.
-    if conn is not None:
-        try:
-            payload["agent_persona_mix"] = agent_persona_mix(conn, since_dt, until_dt, agent_id)
-        except Exception:
-            payload["agent_persona_mix"] = {}
-    else:
-        payload["agent_persona_mix"] = {}
-
-    # Plan-tier framing block (#110) — built from the report window + the
-    # plan-tier mix above, so the local web UI frames recoverable-savings and
-    # spend figures identically to the CLI.
     w = report.window
     payload["framing"] = compute_framing(
         config,
@@ -170,4 +167,57 @@ def get_optimize(
         ),
     ).to_dict()
 
+    # `available_days` (core/data_span.py) so the Optimize window selector can
+    # derive its options from what the store actually holds, the same way the
+    # Dashboard's does — instead of a fixed 7d/30d/90d list.
+    payload["data_span"] = available_data_span(conn).to_dict()
+
     return payload
+
+
+def _mix(fn: Any, conn: Any, since_dt: Any, until_dt: Any, agent_id: str | None) -> dict:
+    """Best-effort mix query; `{}` when the storage layer exposes no connection
+    (e.g. a proxy backend) rather than failing the whole read."""
+    if conn is None:
+        return {}
+    try:
+        return dict(fn(conn, since_dt, until_dt, agent_id))
+    except Exception:
+        return {}
+
+
+@router.post("/optimize/rescan", dependencies=_WRITE_AUTH)
+def rescan_optimize(request: Request) -> dict[str, Any]:
+    """Start a background analyzer scan and return immediately.
+
+    Three rails, all always-on rather than staged:
+
+    * **Overlap guard** — `report_store.trigger_background_recompute` no-ops
+      when a scan is already in flight, so pressing Rescan twice (or pressing
+      it while the scheduled job runs) costs one pass, not two.
+    * **Rate limit** — a request inside `[optimize] scan_min_rescan_seconds`
+      is answered `throttled` with the stored result untouched, so a user
+      cannot hammer full-corpus passes.
+    * **Own connection** — the scan runs on a daemon thread against a FRESH
+      `DuckDBBackend`, never this request's connection, so it never contends
+      with the live writer and never blocks this response.
+    """
+    config = request.app.state.config
+    db = getattr(request.app.state, "db", None)
+    if config is None or db is None or getattr(db, "conn", None) is None:
+        return {"status": "unavailable", "reason": "no direct database connection"}
+
+    if report_store.is_computing():
+        return {**report_store.stored_report_block(config), "started": False,
+                "reason": "a scan is already running"}
+    if report_store.rescan_throttled(config):
+        return {**report_store.stored_report_block(config), "started": False,
+                "throttled": True,
+                "reason": "rescanned too recently; showing the stored result"}
+
+    from tokenjam.core.db import DuckDBBackend
+
+    started = report_store.trigger_background_recompute(
+        lambda: DuckDBBackend(config.storage), config,
+    )
+    return {**report_store.stored_report_block(config), "started": started}

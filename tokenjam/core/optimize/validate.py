@@ -407,8 +407,19 @@ def run_validation(
         if ok:
             preserved += 1
 
-        base_tok = base.input_tokens + base.output_tokens
-        cand_tok = cand.input_tokens + cand.output_tokens
+        # All four token types, always (Cache token types in aggregates, root
+        # CLAUDE.md) — a validation replay call can carry real cache reads/
+        # writes just like a live one, and dropping them here would
+        # understate the measured token delta the same way the cost
+        # calculation above already correctly avoids.
+        base_tok = (
+            base.input_tokens + base.output_tokens
+            + base.cache_read_tokens + base.cache_write_tokens
+        )
+        cand_tok = (
+            cand.input_tokens + cand.output_tokens
+            + cand.cache_read_tokens + cand.cache_write_tokens
+        )
         baseline_tokens += base_tok
         candidate_tokens += cand_tok
         baseline_cost += base_cost

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
@@ -56,10 +57,15 @@ async def list_traces(
     min_cost_usd: float | None = None,
 ) -> dict:
     db = request.app.state.db
+    try:
+        since_dt = parse_since(since) if since else None
+        until_dt = parse_since(until) if until else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     filters = TraceFilters(
         agent_id=agent_id,
-        since=parse_since(since) if since else None,
-        until=parse_since(until) if until else None,
+        since=since_dt,
+        until=until_dt,
         limit=limit,
         offset=offset,
         status=status,
@@ -70,6 +76,7 @@ async def list_traces(
     traces = db.get_traces(filters)
     total_count = db.count_traces(filters) if hasattr(db, "count_traces") else len(traces)
     stats = db.get_trace_cost_stats(filters) if hasattr(db, "get_trace_cost_stats") else None
+    conn = getattr(db, "conn", None)
     return {
         "traces": [
             {
@@ -96,6 +103,10 @@ async def list_traces(
         "total_count": total_count,
         "framing": _traces_framing(request, agent_id),
         "outlier_rule": _outlier_rule_dict(stats),
+        # `available_days` (core/data_span.py) so the Traces window selector
+        # can derive its options from what the store actually holds, the same
+        # way the Dashboard's does — instead of a fixed 24h/7d/30d/90d list.
+        "data_span": available_data_span(conn).to_dict(),
     }
 
 

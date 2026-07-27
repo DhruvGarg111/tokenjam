@@ -187,10 +187,19 @@ def test_status_distinct_alert_types_are_not_collapsed(runner, db, config):
     assert "×2" not in result.output
 
 
-def test_status_subscription_plan_shows_no_raw_dollar_line(runner, db):
-    """Subscription-tier users must not see a raw '$0.00' Cost today line
-    (#96) — the workspace rule is subscription users see plan-share framing,
-    never raw spend they don't pay. Mirrors `tj cost`'s honesty note."""
+def test_status_subscription_plan_shows_raw_dollar_line_like_api(runner, db):
+    """Subscription-tier users now see the same raw dollar Cost today line an
+    API user would (`_cost_line` made unconditional by product decision:
+    dollars are always legitimate, so tj no longer differentiates its
+    rendering between subscription and API users). Previously this was
+    reframed as a "% of cycle" share of the monthly plan, with a
+    subscription-billed qualifier note ("list-price equivalent, not an
+    amount billed") printed underneath; both are gone.
+
+    The seeded session carries no spans, so a literal $0.00 here is an
+    honest "no spend recorded today" reading (mirrors
+    `test_status_api_plan_keeps_raw_dollar_line`'s identical fixture and
+    assertion for the API case), not a masked unknown figure."""
     from tokenjam.core.config import ProviderBudget
 
     session = make_session(agent_id="test-agent", plan_tier="max_5x")
@@ -199,13 +208,10 @@ def test_status_subscription_plan_shows_no_raw_dollar_line(runner, db):
 
     result = _invoke(runner, db, sub_config, ["status"])
     assert result.exit_code == 0
-    assert "$0.00" not in result.output
-    assert "$0.000000" not in result.output
-    assert "Cost today:     0.0% of cycle" in result.output
-    # The generic "Subscription plan — flat-fee billing" note was superseded
-    # by compute_framing's list-price-equivalent qualifier, which now fires
-    # unconditionally for subscription mode (see cmd_status._framing_note).
-    assert "list-price equivalent, not an amount billed" in result.output
+    assert "Cost today:     $0.00" in result.output
+    assert "% of cycle" not in result.output
+    assert "list-price equivalent, not an amount billed" not in result.output
+    assert "subscription-billed" not in result.output
 
 
 def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
@@ -218,11 +224,15 @@ def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
 
 
 def test_status_subscription_plan_with_daily_limit_shows_literal_dollar_cap(runner, db):
-    """A subscription-framed agent with a per-agent `daily_usd` limit must show
-    that limit as its literal dollar amount with a `/day` qualifier, not as a
-    percentage of the monthly subscription cycle — a user-configured DAILY
-    dollar cap has no relationship to the MONTHLY cycle `render_dollar` uses
-    for framed spend. Only the spend-so-far figure stays plan-tier-framed."""
+    """A subscription-framed agent with a per-agent `daily_usd` limit shows
+    both the spend-so-far and the limit as literal dollar amounts, with a
+    `/day` suffix on the limit. Previously the spend-so-far figure was
+    reframed as a "% of cycle" share of the monthly subscription plan;
+    removed by product decision (dollars are always legitimate, no
+    differentiated rendering between subscription and API users) — only the
+    `/day` suffix on the limit itself remains distinctive, since a
+    user-configured DAILY dollar cap has no relationship to the MONTHLY
+    cycle."""
     from tokenjam.core.config import ProviderBudget
 
     session = make_session(agent_id="test-agent", plan_tier="max_5x")
@@ -235,8 +245,8 @@ def test_status_subscription_plan_with_daily_limit_shows_literal_dollar_cap(runn
 
     result = _invoke(runner, db, sub_config, ["status"])
     assert result.exit_code == 0
-    assert "Cost today:     0.0% of cycle / $5.00/day limit" in result.output
-    assert "% of cycle limit" not in result.output
+    assert "Cost today:     $0.00 / $5.00/day limit" in result.output
+    assert "% of cycle" not in result.output
 
 
 # -- traces tests --
@@ -1770,7 +1780,12 @@ def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatc
     cfg = _reuse_config(completions=True)
     _seed_reuse_cluster(db, count=3, completions=True)
 
-    # Capture the real endpoint payload (exercises the route handler).
+    # Capture the real endpoint payload (exercises the route handler). The
+    # route serves the STORED analyzer report, so warm the store first —
+    # `tj serve` does this at boot and on its schedule.
+    from tokenjam.core.optimize import report_store
+    report_store.recompute_now(db, cfg)
+
     app = create_app(config=cfg, db=db, ingest_pipeline=IngestPipeline(db=db, config=cfg))
 
     async def _fetch():

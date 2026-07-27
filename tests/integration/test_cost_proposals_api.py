@@ -409,9 +409,13 @@ async def test_cost_proposals_payload_carries_the_past_overspend_block(app, clie
     assert block["basis"]
     assert block["disclosure"]
 
-    # The observed COST total ships as its own key and is never the headline:
-    # the avoidable figure is a subset of it, so they may not be summed.
-    assert "observed_cost_usd" in block
+    # ONE dollar total on the block. A second key, `observed_cost_usd`, used to
+    # ship here under a disclosure calling the headline a subset of it; on live
+    # data it covered 2 of the headline's 13 proposals, so the claim was false as
+    # published. Key and disclosure are deleted — every figure this block
+    # publishes now covers the same set of proposals.
+    assert {k for k in block if k.endswith("_usd")} == {"past_overspend_usd"}
+    assert "cost_disclosure" not in block
     # No retired per-analyzer dollar field, and no pace to project at.
     assert "projection_ratio" not in block
     assert not [k for k in block if "monthly" in k or "projected" in k]
@@ -423,3 +427,240 @@ async def test_cost_proposals_payload_carries_the_past_overspend_block(app, clie
         assert "past_overspend_basis" in proposal
         assert "estimated_recoverable_usd" not in proposal
         assert "estimated_monthly_usd" not in proposal
+
+
+async def test_register_source_path_previews_then_applies_a_model_swap(
+    client, app, config, tmp_path, monkeypatch,
+):
+    """The eleven-row gap, closed end to end.
+
+    Every live ``downsize`` model-swap proposal carried a real fix snippet and
+    ``apply_capable: false``, for exactly one reason: nobody had told tokenjam
+    where those agents' source lives, and it refuses to scan a filesystem looking
+    (``config.AgentConfig.source_path`` is opt-in, never inferred). So the row's
+    only offer was a copy box and a "Mark applied" that recorded the user doing it
+    by hand. This proves the row can now ask once and then write.
+
+    Also proves the two properties the ask must not cost us: the preview writes
+    NOTHING (not the file, not the config), and the write reads its target out of
+    the config it just registered rather than out of the request body.
+    """
+    import pathlib as pa
+    import subprocess
+
+    from tokenjam.core.config import AgentConfig, write_config
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+    from tokenjam.core.optimize.types import DowngradeFinding
+    from tokenjam.core.optimize import relearn_store
+
+    home = tmp_path / "home"
+    repo = home / "svc-a"
+    repo.mkdir(parents=True)
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: home))
+    source = repo / "agent.py"
+    source.write_text('MODEL = "claude-opus-4-8"\n', encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    # The config must have a real path on disk, because registration WRITES to it.
+    config.config_path = tmp_path / "tj.toml"
+    write_config(config, config.config_path)
+
+    rows = build_agent_price_rows([{
+        "session_id": "s1", "agent_id": "svc-a", "provider": "anthropic",
+        "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 100_000, "output_tokens": 20_000,
+        "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+    }], 30.0)
+    finding = DowngradeFinding(
+        candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,
+        alternative_cost_usd=1.0, monthly_savings_usd=8.0, percent_of_sessions=100.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-haiku-4-5"},
+    )
+    finding.per_agent = rows
+    # Built with the agent UNREGISTERED, which is the state the eleven rows were in.
+    relearn_store.write_cost_proposals(
+        _downsize_agent_proposals(finding, config, persona="sdk"), config=config,
+    )
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = [p for p in proposals if p["analyzer"] == "downsize"][0]
+    assert prop["needs_source_path"] is True
+    assert prop["apply_capable"] is True
+    # No apply_kind yet: with no registered path there is no deterministic edit,
+    # so the row must not reach the endpoint that assumes one.
+    assert prop["apply_kind"] == ""
+    assert prop["target_path"] == ""
+    # The caveat rides its own field so the card can keep it visible beside the
+    # button rather than inside the collapsed description.
+    assert "NOT measured here" in prop["apply_caveat"]
+
+    body = {"proposal_id": prop["proposal_id"], "source_path": str(repo)}
+
+    # PREVIEW writes nothing: not the source file, not the config.
+    before_source = source.read_text(encoding="utf-8")
+    before_config = config.config_path.read_text(encoding="utf-8")
+    dry = await client.post(
+        "/api/v1/relearn/cost-proposals/register-source-path",
+        json={**body, "go": False}, headers=hdr,
+    )
+    assert dry.status_code == 200, dry.text
+    assert dry.json()["applied"]["dry_run"] is True
+    assert "claude-haiku-4-5" in dry.json()["applied"]["diff"]
+    assert dry.json()["target_path"] == str(source)
+    assert source.read_text(encoding="utf-8") == before_source
+    assert config.config_path.read_text(encoding="utf-8") == before_config
+
+    # APPLY registers the path and writes the swap.
+    wrote = await client.post(
+        "/api/v1/relearn/cost-proposals/register-source-path",
+        json={**body, "go": True}, headers=hdr,
+    )
+    assert wrote.status_code == 200, wrote.text
+    assert 'MODEL = "claude-haiku-4-5"' in source.read_text(encoding="utf-8")
+    # Registered PER AGENT, which is what unlocks the same agent's other rows at
+    # the next recompute rather than asking again per proposal.
+    assert config.agents["svc-a"].source_path == str(repo.resolve())
+    assert "svc-a" in config.config_path.read_text(encoding="utf-8")
+
+
+async def test_register_source_path_refuses_a_path_it_cannot_swap_in(
+    client, app, config, tmp_path, monkeypatch,
+):
+    """A precheck failure after the path is given says WHY on the row, and leaves
+    no registration behind. Silently failing would be worse than the copy box it
+    replaced, and a registration pointing at a repo the swap is impossible in
+    would make every later recompute produce the same dead button.
+    """
+    import pathlib as pa
+
+    from tokenjam.core.config import write_config
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+    from tokenjam.core.optimize.types import DowngradeFinding
+    from tokenjam.core.optimize import relearn_store
+
+    home = tmp_path / "home"
+    plain = home / "not-a-repo"
+    plain.mkdir(parents=True)
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: home))
+    (plain / "agent.py").write_text('MODEL = "claude-opus-4-8"\n', encoding="utf-8")
+
+    config.config_path = tmp_path / "tj.toml"
+    write_config(config, config.config_path)
+
+    rows = build_agent_price_rows([{
+        "session_id": "s1", "agent_id": "svc-a", "provider": "anthropic",
+        "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 100_000, "output_tokens": 20_000,
+        "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+    }], 30.0)
+    finding = DowngradeFinding(
+        candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,
+        alternative_cost_usd=1.0, monthly_savings_usd=8.0, percent_of_sessions=100.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-haiku-4-5"},
+    )
+    finding.per_agent = rows
+    relearn_store.write_cost_proposals(
+        _downsize_agent_proposals(finding, config, persona="sdk"), config=config,
+    )
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = [p for p in proposals if p["analyzer"] == "downsize"][0]
+
+    refused = await client.post(
+        "/api/v1/relearn/cost-proposals/register-source-path",
+        json={"proposal_id": prop["proposal_id"], "source_path": str(plain), "go": True},
+        headers=hdr,
+    )
+    assert refused.status_code == 409
+    assert "not inside a git repository" in refused.json()["detail"]
+    assert "svc-a" not in config.config_path.read_text(encoding="utf-8")
+
+
+async def test_register_source_path_refused_by_apply_leaves_no_registration(
+    client, app, config, db, tmp_path, monkeypatch,
+):
+    """A refusal that surfaces only INSIDE ``apply_relearn_fix`` — the
+    active-session gate, which ``model_swap_precheck`` doesn't check — must
+    leave the config exactly as untouched as a precheck-time refusal does.
+
+    Registering the path before the apply runs would persist a path the swap
+    then refused to write through, silently contradicting the endpoint's own
+    docstring promise that a refused apply never leaves a path behind.
+    """
+    import pathlib as pa
+    import subprocess
+
+    from tokenjam.core.config import write_config
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+    from tokenjam.core.optimize.types import DowngradeFinding
+    from tokenjam.core.optimize import relearn_store
+    from tests.factories import make_session
+
+    home = tmp_path / "home"
+    repo = home / "svc-a"
+    repo.mkdir(parents=True)
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: home))
+    source = repo / "agent.py"
+    source.write_text('MODEL = "claude-opus-4-8"\n', encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    config.config_path = tmp_path / "tj.toml"
+    write_config(config, config.config_path)
+
+    # A live session in the same repo (label "svc-a"), seen moments ago — the
+    # active-session gate that lives INSIDE apply_relearn_fix, not in
+    # model_swap_precheck.
+    db.upsert_session(make_session(agent_id="svc-a", status="active"))
+
+    rows = build_agent_price_rows([{
+        "session_id": "s1", "agent_id": "svc-a", "provider": "anthropic",
+        "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 100_000, "output_tokens": 20_000,
+        "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+    }], 30.0)
+    finding = DowngradeFinding(
+        candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,
+        alternative_cost_usd=1.0, monthly_savings_usd=8.0, percent_of_sessions=100.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-haiku-4-5"},
+    )
+    finding.per_agent = rows
+    relearn_store.write_cost_proposals(
+        _downsize_agent_proposals(finding, config, persona="sdk"), config=config,
+    )
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = [p for p in proposals if p["analyzer"] == "downsize"][0]
+
+    before_source = source.read_text(encoding="utf-8")
+    before_config = config.config_path.read_text(encoding="utf-8")
+
+    refused = await client.post(
+        "/api/v1/relearn/cost-proposals/register-source-path",
+        json={"proposal_id": prop["proposal_id"], "source_path": str(repo), "go": True},
+        headers=hdr,
+    )
+    assert refused.status_code == 409
+    assert "active session" in refused.json()["detail"]
+
+    # No rollback needed because nothing was ever written: neither the swap
+    # target nor the config changed.
+    assert source.read_text(encoding="utf-8") == before_source
+    assert config.config_path.read_text(encoding="utf-8") == before_config
+    assert "svc-a" not in config.agents
+    assert "svc-a" not in config.config_path.read_text(encoding="utf-8")
