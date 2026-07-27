@@ -338,6 +338,30 @@ def _tokens_saved_over_window(
     return round(tokens_saved * _reads_per_session(calls_per_session) * sessions)
 
 
+def _project_scan_root(scope) -> "Path | None":
+    """Where the candidate scan's PROJECT half may start looking.
+
+    `None` means "the process's cwd", the behavior every run had before the
+    scan was scoped at all — and the behavior an unscoped run must keep
+    byte-for-byte, since the default projects root (`~/.claude/projects`)
+    contains no source project and rooting there would empty the scan.
+
+    Once a root has been drawn explicitly (`--projects-root`, or the env var),
+    the cwd is only an acceptable starting point while it is INSIDE that
+    scope; from anywhere else it reaches straight past the boundary the caller
+    asked for, so the scan starts at the scope's home instead.
+    """
+    if scope.source not in ("flag", "env"):
+        return None
+    home = scope.home.expanduser()
+    cwd = Path.cwd()
+    try:
+        cwd.relative_to(home)
+    except ValueError:
+        return home
+    return cwd
+
+
 @register("summarize")
 def run(ctx: AnalyzerContext) -> None:
     """Attach a SummarizeFinding: catalog-default candidates + per-call token saving.
@@ -369,8 +393,16 @@ def run(ctx: AnalyzerContext) -> None:
         return
 
     try:
-        # read-only, never writes; `home` scopes the catalog's `~` paths
-        scan = list_candidates(config=ctx.config, home=scope.home)
+        # read-only, never writes; `home` scopes the catalog's `~` paths and
+        # `project_root` scopes the OTHER half of the scan. Passing only `home`
+        # left project discovery rooted at the process's cwd, so a run with
+        # `--projects-root` given and a cwd outside it still surfaced unrelated
+        # CLAUDE.md-type files as candidates — the isolation the flag exists to
+        # provide, defeated through the door the catalog scoping left open.
+        scan = list_candidates(
+            config=ctx.config, home=scope.home,
+            project_root=_project_scan_root(scope),
+        )
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the
         # optimize report — but log it: a silent broad-swallow would hide a real

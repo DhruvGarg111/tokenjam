@@ -286,8 +286,18 @@ def list_candidates(
     ratio: float = DEFAULT_TARGET_RATIO,
     extra_exts: Iterable[str] = (),
     home: "Path | None" = None,
+    project_root: "Path | None" = None,
 ) -> ScanResult:
-    """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes."""
+    """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes.
+
+    `project_root` relocates the implicit "where am I" that project and repo
+    discovery start from, without any of the widening a positional `path`
+    carries: `path` marks the scan explicit, which opens `ext_set` to all-md
+    and relabels the scope from "project" to "path". A caller that only needs
+    the scan confined — an analyzer honoring `--projects-root` — wants the
+    relocation and none of the widening. `None` means the process's cwd, which
+    is what every caller got before this parameter existed.
+    """
     mode = _pricing_mode(config)
     extra = {e for e in (_norm_ext(x) for x in extra_exts) if e}
     # The net opens to all-md (+ extras) the moment ANY widening input is given.
@@ -319,7 +329,11 @@ def list_candidates(
 
     # 2) Project scope.
     explicit = path is not None
-    target = Path(path).expanduser() if path is not None else Path.cwd()
+    # Everywhere below that would have consulted the process's cwd consults
+    # this instead, so a confined scan cannot reach a project outside its root
+    # through the one door the catalog scoping left open.
+    here = Path(project_root).expanduser() if project_root is not None else Path.cwd()
+    target = Path(path).expanduser() if path is not None else here
 
     if explicit and not target.exists():
         # A typo'd / missing PATH shouldn't silently show only globals. This MUST be
@@ -336,7 +350,7 @@ def list_candidates(
         root_used = target
         _add(target, "path")
     elif recursive:
-        walk_root = target if explicit else find_repo_root(Path.cwd())
+        walk_root = target if explicit else find_repo_root(here)
         if walk_root is None:
             tail = "showing globals only" if cands else "nothing to show"
             note = ("--recursive needs a git repo or an explicit PATH; no safe root "
@@ -348,9 +362,9 @@ def list_candidates(
                 _add(p, "path" if explicit else "repo")
     else:
         if repo and not explicit:
-            found = find_repo_root(Path.cwd())
+            found = find_repo_root(here)
             if found is None:                       # --repo but no repo: don't fake a "repo" root
-                scope_root, scope = Path.cwd(), "project"
+                scope_root, scope = here, "project"
                 note = "--repo: no git repo found — scanning the current directory instead."
             else:
                 scope_root, scope = found, "repo"

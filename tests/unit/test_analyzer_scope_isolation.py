@@ -251,3 +251,90 @@ def test_a_scoped_root_authorizes_its_own_suggested_target(tmp_path):
     )
     assert suggested == demo_home / ".claude" / "CLAUDE.md"
     assert write_scope.allowed_root in suggested.parents
+
+
+# ── The scan must STAY inside the root, not merely start there ─────────────
+#
+# The tests above assert that a scoped run recorded no skip reason, which says
+# it looked — never that it looked only where it was allowed to. `summarize`
+# scans two halves: a catalog of `~`-rooted global prompt files, and a project
+# scan. Only the first was scoped, so with a root given and a cwd outside it
+# the second walked the cwd anyway and surfaced unrelated files as candidates.
+
+def _summarize_candidate_paths(ctx) -> list[str]:
+    finding = ctx.report.findings["summarize"]
+    return [c.path for c in finding.candidates]
+
+
+def test_a_scoped_summarize_does_not_scan_a_cwd_outside_its_root(
+    tmp_path, monkeypatch,
+):
+    """A CLAUDE.md sitting in an unrelated cwd must not become a candidate."""
+    scoped_root = tmp_path / "scoped"
+    (scoped_root / "projects").mkdir(parents=True)
+    outsider = tmp_path / "someone-elses-repo"
+    outsider.mkdir()
+    # Long enough prose to clear the candidate thresholds if it is ever read.
+    (outsider / "CLAUDE.md").write_text(
+        "# Project notes\n\n" + ("This is a long prose paragraph. " * 300)
+    )
+    monkeypatch.chdir(outsider)
+
+    ctx = _ctx(_Config(db_explicit=True, projects_root=str(scoped_root / "projects")))
+    summarize_analyzer.run(ctx)
+
+    paths = _summarize_candidate_paths(ctx)
+    assert all(str(outsider) not in p for p in paths), (
+        f"scan escaped its root into the cwd: {paths}"
+    )
+
+
+def test_an_unscoped_summarize_still_scans_the_cwd(tmp_path, monkeypatch):
+    """The default path is the one that must not change.
+
+    With no `--projects-root` and no `--db`, project discovery is rooted at
+    the cwd exactly as it always was — the fix confines the scan only once a
+    boundary has actually been drawn.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    project = tmp_path / "home" / "work" / "repo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text(
+        "# Project notes\n\n" + ("This is a long prose paragraph. " * 300)
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(project)
+
+    ctx = _ctx(_Config())
+    summarize_analyzer.run(ctx)
+
+    paths = _summarize_candidate_paths(ctx)
+    assert any(str(project) in p for p in paths), (
+        f"default run stopped scanning the cwd: {paths}"
+    )
+
+
+def test_a_scoped_summarize_keeps_scanning_a_cwd_inside_its_root(
+    tmp_path, monkeypatch,
+):
+    """Confinement, not blanket suppression: a cwd within scope is still scanned."""
+    scoped_home = tmp_path / "scoped"
+    (scoped_home / ".claude" / "projects").mkdir(parents=True)
+    project = scoped_home / "work" / "repo"
+    project.mkdir(parents=True)
+    (project / "CLAUDE.md").write_text(
+        "# Project notes\n\n" + ("This is a long prose paragraph. " * 300)
+    )
+    monkeypatch.chdir(project)
+
+    ctx = _ctx(_Config(
+        db_explicit=True,
+        projects_root=str(scoped_home / ".claude" / "projects"),
+    ))
+    summarize_analyzer.run(ctx)
+
+    paths = _summarize_candidate_paths(ctx)
+    assert any(str(project) in p for p in paths), (
+        f"in-scope cwd was not scanned: {paths}"
+    )
