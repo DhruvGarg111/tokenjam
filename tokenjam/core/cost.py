@@ -4,7 +4,15 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from tokenjam.core.models import NormalizedSpan
-from tokenjam.core.pricing import get_rates, ModelRates, DEFAULT_INPUT_PER_MTOK, DEFAULT_OUTPUT_PER_MTOK
+from tokenjam.core.pricing import (
+    get_rates,
+    ModelRates,
+    DEFAULT_INPUT_PER_MTOK,
+    DEFAULT_OUTPUT_PER_MTOK,
+    DEFAULT_CACHE_READ_PER_MTOK,
+    DEFAULT_CACHE_WRITE_PER_MTOK,
+    classify_pricing_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +54,25 @@ def calculate_cost(
         if key not in _UNKNOWN_MODEL_WARNED:
             _UNKNOWN_MODEL_WARNED.add(key)
             logger.warning(
-                "No pricing data for %s/%s — using default rates (cost figures "
-                "may be inaccurate). Upgrade tokenjam for current pricing, or "
-                "add an override to ~/.config/tj/pricing.toml — see `tj pricing list`.",
+                "No pricing data for %s/%s — using default rates, including "
+                "guessed cache rates (cost figures may be inaccurate, "
+                "especially for cache-heavy traffic). Upgrade tokenjam for "
+                "current pricing, or add an override to "
+                "~/.config/tj/pricing.toml — see `tj pricing list`.",
                 provider, model,
             )
+        # cache_read/write_per_mtok are non-zero guesses, not 0.0: a model with
+        # NO pricing entry that is mostly cache traffic would otherwise have
+        # ~all of its real cost priced at zero, silently, rather than merely
+        # estimated (see DEFAULT_CACHE_READ_PER_MTOK). specified=False marks
+        # both as guesses, not a quoted rate for this model.
         rates = ModelRates(
             input_per_mtok=DEFAULT_INPUT_PER_MTOK,
             output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
+            cache_read_per_mtok=DEFAULT_CACHE_READ_PER_MTOK,
+            cache_write_per_mtok=DEFAULT_CACHE_WRITE_PER_MTOK,
+            cache_read_specified=False,
+            cache_write_specified=False,
         )
 
     cost = (
@@ -109,6 +128,14 @@ class CostEngine:
         )
 
         span.cost_usd = cost
+        # Provenance: HOW that cost resolved (real rate vs. a guessed
+        # fallback), stamped on the span so it survives past ingest — see
+        # classify_pricing_source and the `pricing_source` column (spans
+        # migration adding it). Without this a fallback-priced span and a
+        # correctly-priced one are indistinguishable once only the dollar
+        # figure remains, which is exactly how the unpriced-cache-at-zero bug
+        # went unnoticed.
+        span.pricing_source = classify_pricing_source(span.provider, span.model)
 
         # Persist through the StorageBackend protocol (issue #309 — this used to
         # reach into self.db.conn directly). Backends that can't persist (e.g.
@@ -117,7 +144,7 @@ class CostEngine:
         update = getattr(self.db, "update_span_cost", None)
         if update is None:
             return
-        update(span.span_id, cost)
+        update(span.span_id, cost, span.pricing_source)
 
         # Only accumulate into the session total when we computed the cost here.
         # Skip the session update for pre-priced spans to avoid double-counting

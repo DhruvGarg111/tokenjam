@@ -31,6 +31,21 @@ USER_PRICING_ENV = "TJ_PRICING_FILE"
 DEFAULT_INPUT_PER_MTOK = 0.50
 DEFAULT_OUTPUT_PER_MTOK = 2.00
 
+# Cache rates for that same unpriced-model fallback. Every priced Anthropic row
+# in models.toml holds cache_read_per_mtok at ~10% of input and
+# cache_write_per_mtok at ~1.25x input (e.g. claude-opus-4-8: 5.00 input / 0.50
+# cache_read / 6.25 cache_write; claude-sonnet-5: 2.00 / 0.20 / 2.50;
+# claude-haiku-4-5: 1.00 / 0.10 / 1.25 — the ratio holds across every priced
+# tier). Leaving these at 0.0 (the old behavior) silently priced an unpriced
+# model's cache tokens at zero — for a model whose traffic is mostly cache
+# (reads/writes), that understated true cost by close to 100%, not by the
+# modest amount a flat input/output guess implies. These are a guess
+# extrapolated from the observed ratio, not a quoted rate: add the model's
+# real row to models.toml as soon as it's known, at which point calculate_cost
+# stops using this fallback for it entirely.
+DEFAULT_CACHE_READ_PER_MTOK = round(DEFAULT_INPUT_PER_MTOK * 0.1, 4)
+DEFAULT_CACHE_WRITE_PER_MTOK = round(DEFAULT_INPUT_PER_MTOK * 1.25, 4)
+
 # Reserved section name for *model-keyed* (provider-agnostic) overrides.
 # Lives at `[models]` in the standalone pricing file and `[pricing.models]`
 # in the main config. Everything else at that level is a provider section
@@ -46,6 +61,17 @@ class ModelRates:
     output_per_mtok: float
     cache_read_per_mtok: float = 0.0
     cache_write_per_mtok: float = 0.0
+    # True when the source (a models.toml row, a user override, or a real
+    # priced entry) actually specified this cache class. False means the
+    # numeric value above is a stand-in for "not specified" — either a
+    # deliberate, documented omission in models.toml (e.g. OpenAI publishes no
+    # cache-write rate) or an unpriced-model fallback guess (see
+    # DEFAULT_CACHE_READ_PER_MTOK / DEFAULT_CACHE_WRITE_PER_MTOK below). This
+    # is what makes "priced at exactly 0.0" distinguishable from "never priced
+    # at all" — the two used to be indistinguishable, which is how an unpriced
+    # model's cache tokens silently priced at zero (see calculate_cost).
+    cache_read_specified: bool = True
+    cache_write_specified: bool = True
 
 
 def _rates_from(raw: dict) -> ModelRates:
@@ -55,6 +81,8 @@ def _rates_from(raw: dict) -> ModelRates:
         output_per_mtok=raw.get("output_per_mtok", DEFAULT_OUTPUT_PER_MTOK),
         cache_read_per_mtok=raw.get("cache_read_per_mtok", 0.0),
         cache_write_per_mtok=raw.get("cache_write_per_mtok", 0.0),
+        cache_read_specified="cache_read_per_mtok" in raw,
+        cache_write_specified="cache_write_per_mtok" in raw,
     )
 
 
@@ -293,25 +321,30 @@ def _strip_context_tag(model: str) -> str | None:
     return m.group(1) if (m and m.group(1)) else None
 
 
-def _lookup_candidates(model: str) -> list[str]:
-    """Ordered fallback names to try for `model` (most specific first).
+def _lookup_candidates(model: str) -> list[tuple[str, str]]:
+    """Ordered fallback (name, kind) pairs to try for `model` (most specific first).
 
     Beyond the exact name we try, in order: the date-stripped name
-    (``-YYYYMMDD``), the context-tag-stripped name (``[1m]``), and the
-    context-tag-then-date-stripped name. The caller de-dups against the exact
-    name, so a plain model like ``claude-opus-4-8`` yields no extra work.
+    (``-YYYYMMDD``, kind ``"date_stripped"``), the context-tag-stripped name
+    (``[1m]``, kind ``"context_tag"``), and the context-tag-then-date-stripped
+    name (also ``"context_tag"`` — a context tag is present either way). The
+    caller de-dups against the exact name, so a plain model like
+    ``claude-opus-4-8`` yields no extra work. `kind` is provenance-only (see
+    `classify_pricing_source`) — `get_rates` ignores it and uses only `name`.
     """
-    candidates: list[str] = []
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
 
-    def _add(name: str | None) -> None:
-        if name and name not in candidates and name != model:
-            candidates.append(name)
+    def _add(name: str | None, kind: str) -> None:
+        if name and name not in seen and name != model:
+            seen.add(name)
+            candidates.append((name, kind))
 
-    _add(_strip_date_suffix(model))
+    _add(_strip_date_suffix(model), "date_stripped")
     no_tag = _strip_context_tag(model)
-    _add(no_tag)
+    _add(no_tag, "context_tag")
     if no_tag is not None:
-        _add(_strip_date_suffix(no_tag))
+        _add(_strip_date_suffix(no_tag), "context_tag")
     return candidates
 
 
@@ -374,7 +407,7 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
     rates = model_keyed.get(model)
     if rates is not None:
         return rates
-    for name in candidates:
+    for name, _kind in candidates:
         rates = model_keyed.get(name)
         if rates is not None:
             return rates
@@ -386,7 +419,7 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
     rates = provider_models.get(model)
     if rates is not None:
         return rates
-    for name in candidates:
+    for name, _kind in candidates:
         rates = provider_models.get(name)
         if rates is not None:
             return rates
@@ -402,6 +435,77 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
                 return rates
 
     return None
+
+
+def classify_pricing_source(provider: str, model: str) -> str:
+    """Classify HOW `get_rates(provider, model)` would resolve, for provenance.
+
+    Mirrors get_rates' own lookup order (model-keyed override, then the
+    provider table, each tried exact-then-fallback-candidates) and reports
+    WHICH step would resolve, rather than re-deriving the rate itself — so the
+    two functions can't silently drift apart on what counts as a match.
+
+    Deliberately reads only the two `@lru_cache`-memoized tables
+    (`load_model_pricing_overrides`, `load_pricing_table`) — the same ones
+    `get_rates` itself reads. This runs on the ingest hot path (once per span,
+    see CostEngine.process_span), so it must NOT touch `load_pricing_sources`
+    or `_override_raw_sources`: those re-read the user pricing file and the
+    main config from disk on every call (they're designed for the occasional
+    `tj pricing list`, not a per-span hot path) — an earlier version of this
+    function called them here and silently turned every cost computation into
+    a disk read, defeating the whole point of `load_pricing_table`'s cache.
+    One consequence: a provider-keyed override (`[provider.model]` in
+    ~/.config/tj/pricing.toml) reads as "exact", not "override" — it's merged
+    into the same cached table as the packaged row and the two are no longer
+    distinguishable without the uncached lookup. Model-keyed overrides don't
+    have this problem (`load_model_pricing_overrides` is its own cached
+    table), so those still classify as "override".
+
+    Returns one of:
+      "override"          - resolved via a user **model-keyed** override
+                             (the reserved `[models]` / `[pricing.models]`
+                             section — see MODEL_SECTION_KEY).
+      "exact"              - resolved via an exact row in the merged
+                             provider table (packaged models.toml, a
+                             provider-keyed user override, or the
+                             Bedrock-normalized modelId form — all
+                             indistinguishable here, see above).
+      "date_stripped"      - resolved only after stripping a trailing
+                             `-YYYYMMDD` suffix.
+      "context_tag"        - resolved only after stripping a trailing `[...]`
+                             context tag (with or without an additional
+                             date-suffix strip).
+      "default_fallback"   - nothing matched; calculate_cost falls back to the
+                             flat default rates (DEFAULT_INPUT_PER_MTOK /
+                             DEFAULT_OUTPUT_PER_MTOK / DEFAULT_CACHE_*).
+
+    Used to stamp `pricing_source` on a span at ingest (see CostEngine in
+    core/cost.py) so a cost figure's provenance survives past ingest instead of
+    being unrecoverable once the fallback and a real rate look equally
+    plausible in the stored dollar amount.
+    """
+    candidates = _lookup_candidates(model)
+
+    model_keyed = load_model_pricing_overrides()
+    if model in model_keyed or any(name in model_keyed for name, _kind in candidates):
+        return "override"
+
+    table = load_pricing_table()
+    lookup_provider = _BEDROCK_PROVIDER_ALIASES.get(provider, provider)
+    provider_models = table.get(lookup_provider, {})
+
+    if model in provider_models:
+        return "exact"
+    for name, kind in candidates:
+        if name in provider_models:
+            return kind
+
+    if lookup_provider == "aws":
+        normalized = _normalize_bedrock_model(model)
+        if normalized is not None and normalized in provider_models:
+            return "exact"
+
+    return "default_fallback"
 
 
 def provider_for_model(model: str | None) -> str | None:

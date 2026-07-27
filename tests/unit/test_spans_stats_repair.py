@@ -38,7 +38,7 @@ def _insert_minimal_span(conn, *, trace_id: str, span_id: str) -> None:
     conn.execute(
         "INSERT INTO spans VALUES "
         "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
-        "$29,$30,$31,$32,$33,$34,$35)",
+        "$29,$30,$31,$32,$33,$34,$35,$36)",
         [
             span_id, trace_id, None, "session-1",
             "test-agent", "test-span", "internal", "ok",
@@ -58,6 +58,7 @@ def _insert_minimal_span(conn, *, trace_id: str, span_id: str) -> None:
             None,  # commit_sha (migration 17)
             None,  # prompt_template_id (migration 17)
             None,  # prompt_template_version (migration 17)
+            None,  # pricing_source (migration 18)
         ],
     )
 
