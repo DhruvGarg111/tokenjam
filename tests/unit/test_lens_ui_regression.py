@@ -3969,3 +3969,111 @@ def test_dashboard_window_scoped_framing_consumers_are_not_repointed(html):
     assert "fmtFramedDollar(projected, earlyFraming)" not in dash
     assert "framing=${earlyFraming}" not in dash
     assert "fmtFramedSavings(t.usd, t.tokens, earlyFraming)" not in dash
+
+
+# --- Summarize engine-picker polish: back link, disabled state, dashes, backticks --- #
+def _summarize_engine_view(html: str) -> str:
+    """The `phase === 'engine'` render — the back link, heading, intro
+    paragraph, and the three API/Claude CLI/Manual mode cards."""
+    start = html.index("if (phase === 'engine') {")
+    end = html.index("if (phase === 'run' && engine !== 'manual') {", start)
+    return html[start:end]
+
+
+def test_summarize_back_link_is_not_the_brand_blue_sz_link(html):
+    # The back link is page chrome, not an in-flow action, so per founder
+    # instruction it must NOT ride the shared brand-blue .sz-link class used
+    # for every other clickable string on this screen (and across the app).
+    # It gets its own class so this stays a one-hunk, page-local change.
+    view = _summarize_engine_view(html)
+    assert '<a class="sz-back-link" href="#/optimize">← Optimize</a>' in view
+    assert '<a class="sz-link" href="#/optimize">← Optimize</a>' not in view
+    # The new class must actually be monochrome (no var(--brand) anywhere in
+    # its definition), with a non-color hover affordance so it doesn't read
+    # as inert text.
+    assert ".sz-back-link { color: var(--text-dim); text-decoration: none; }" in html
+    assert ".sz-back-link:hover { color: var(--text); text-decoration: underline; }" in html
+
+
+def test_summarize_back_link_has_breathing_room_before_heading(html):
+    # The back link and the "Summarize" heading were cramped together at
+    # margin:0 0 4px; this must be widened so the two are visually separated.
+    view = _summarize_engine_view(html)
+    assert '<div style="margin:0 0 4px"><a class="sz-back-link"' not in view
+    assert '<div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>' in view
+
+
+def test_summarize_disabled_reason_is_not_amber(html):
+    # "set TJ_ANTHROPIC_API_KEY to enable" used to render in var(--warn)
+    # (amber/yellow) via a bespoke .sz-eng-off color rule. It now reuses the
+    # existing (previously unused) monochrome .badge-closed treatment instead
+    # of introducing a new color.
+    assert ".sz-eng-off { font-size: 12px; color: var(--warn); margin-top: 10px; }" not in html
+    view = _summarize_engine_view(html)
+    assert '<div class="sz-eng-off badge badge-closed">${cap.reason}</div>' in view
+
+
+def test_summarize_disabled_card_is_a_deliberate_state_not_uniform_dimming(html):
+    # Blanket opacity:.5 on the whole disabled <button> dimmed the title
+    # equally with everything else, so "unavailable" read as "broken" and
+    # conflated disabled with less-important. The disabled state is now a
+    # dashed border + recessed fill, leaving title/description at full
+    # legibility.
+    assert ".sz-engine:disabled { opacity: .5; cursor: not-allowed; }" not in html
+    assert "border-style: dashed" in html
+    assert ".sz-engine:disabled { cursor: not-allowed; background: var(--surface2); border-style: dashed; }" in html
+
+
+def test_summarize_engine_cards_share_height(html):
+    # The three cards (API/Claude CLI/Manual) have different description
+    # lengths and only the API card carries the extra disabled-reason badge,
+    # so without an explicit stretch the row read as uneven card heights.
+    assert ".sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; align-items: stretch; }" in html
+    assert "display: flex; flex-direction: column; height: 100%;" in html
+
+
+def test_summarize_engine_tags_are_monochrome_not_accent(html):
+    # "$ at cost · your key" / "against your Claude limits" / "no outbound
+    # calls" are card SUBTITLES, not interactive controls, but were rendered
+    # in the brand-blue accent color — the same color this app's terminal
+    # taste reserves for "typeable or clickable." Moved onto the monochrome
+    # (--text-dim) scale so accent keeps one meaning app-wide.
+    assert ".sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 4px; }" in html
+    assert ".sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); margin-top: 4px; }" not in html
+
+
+def test_summarize_engine_view_has_no_em_dashes(html):
+    # Standing project rule: no em dashes in user-facing copy. This view had
+    # three: the intro paragraph, the Claude CLI card description, and the
+    # staged-rewrite tally / undo hints.
+    view = _summarize_engine_view(html)
+    assert "—" not in view
+
+
+def test_summarize_engine_view_has_no_unrendered_backticks(html):
+    # The Claude CLI card read "Runs the local `claude` CLI." with literal
+    # backtick characters because the string was never passed through <code>.
+    # It must now render as a real <code> element with no stray backticks
+    # left in the source strings for this view.
+    view = _summarize_engine_view(html)
+    assert "`claude`" not in view
+    assert "<code>claude</code>" in view
+    assert "Runs the local <code>claude</code> CLI against your Claude limits, with no dollar cost. Local host only." in view
+
+
+def test_summarize_tj_keep_token_is_escaped_and_code_styled(html):
+    # `<tj-keep>` used to be interpolated as a bare JS string (`${'<tj-keep>'}`)
+    # which rendered as plain, unstyled angle-bracket text sitting oddly in
+    # the sentence. It's still inserted as escaped text (never a real
+    # unknown-tag risk to htm's parser), but now explicitly HTML-escaped and
+    # wrapped in <code> so it reads as a token, not stray prose.
+    view = _summarize_engine_view(html)
+    assert "<code>&lt;tj-keep&gt;</code>" in view
+    assert "${'<tj-keep>'}" not in view
+    assert "Rewrites prose only: code, tables, and <code>&lt;tj-keep&gt;</code> blocks stay verbatim." in view
+
+
+def test_summarize_engine_intro_uses_colon_not_em_dash(html):
+    view = _summarize_engine_view(html)
+    assert "Rewrites prose only —" not in view
+    assert "Rewrites prose only: code, tables, and" in view
