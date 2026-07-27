@@ -393,3 +393,97 @@ def test_the_finding_round_trips_through_the_daemon_path(db, cfg):
     assert came_back.call_sites[0].remediation_snippet == (
         original.call_sites[0].remediation_snippet
     )
+
+
+# ---------------------------------------------------------------------------
+# Token-less observations must not become a baseline of zeros
+# ---------------------------------------------------------------------------
+
+def _seed_tokenless_observation(db, *, agent_id, provider, model,
+                                session_suffix, days_ago=1):
+    """A completed stream whose observer never learned its token counts.
+
+    The proxy's SSE tap watches the wire: it can see a stream run to
+    completion and stamp the streaming signature while the provider's usage
+    accounting stays entirely out of view. Those spans store NULL token
+    columns — not zero — and this seeds exactly that shape.
+    """
+    _seed_stream(
+        db, agent_id=agent_id, provider=provider, model=model,
+        usage_reported=True, input_tokens=0, output_tokens=0,
+        session_suffix=session_suffix, days_ago=days_ago,
+    )
+    db.conn.execute(
+        "UPDATE spans SET input_tokens = NULL, output_tokens = NULL, "
+        "cache_tokens = NULL, cache_write_tokens = NULL "
+        "WHERE session_id = $1",
+        [f"{agent_id}-{session_suffix}"],
+    )
+
+
+def test_tokenless_observations_never_enter_the_peer_median(db, cfg):
+    """A NULL token count is unknown, not zero.
+
+    Coercing it to zero lets a wire-level observation vote in the median, and
+    enough of them drive the per-call baseline — and the whole under-count
+    estimate — far below the truth while still rendering as a confident
+    figure.
+    """
+    # Arrange: two real peers at 1000/300, swamped by six token-less ones.
+    for i in range(2):
+        _seed_stream(
+            db, agent_id="chat-service", provider="openai", model="gpt-4o-mini",
+            usage_reported=True, input_tokens=1000, output_tokens=300,
+            session_suffix=f"c{i}", days_ago=i + 1,
+        )
+    for i in range(6):
+        _seed_tokenless_observation(
+            db, agent_id="chat-service", provider="openai",
+            model="gpt-4o-mini", session_suffix=f"p{i}", days_ago=i + 1,
+        )
+    _seed_stream(
+        db, agent_id="chat-service", provider="openai", model="gpt-4o-mini",
+        usage_reported=False, session_suffix="t0", days_ago=1,
+    )
+
+    # Act
+    finding = _finding(db, cfg)
+
+    # Assert: the median is taken over the two real peers only.
+    site = finding.call_sites[0]
+    assert site.peer_output_tokens == 300
+    assert site.peer_input_tokens == 1000
+    assert site.complete_calls == 2
+    assert finding.undercounted_usd is not None and finding.undercounted_usd > 0
+
+
+def test_only_tokenless_peers_estimates_nothing_and_says_why(db, cfg):
+    """With no real peer left, both estimate fields degrade together.
+
+    Zero is the worst possible placeholder here: a `$0.00` under-count reads
+    as "no blind spot", which is the one claim this analyzer exists to stop
+    the product from making.
+    """
+    for i in range(4):
+        _seed_tokenless_observation(
+            db, agent_id="chat-service", provider="openai",
+            model="gpt-4o-mini", session_suffix=f"p{i}", days_ago=i + 1,
+        )
+    _seed_stream(
+        db, agent_id="chat-service", provider="openai", model="gpt-4o-mini",
+        usage_reported=False, session_suffix="t0", days_ago=1,
+    )
+
+    finding = _finding(db, cfg)
+
+    site = finding.call_sites[0]
+    assert site.undercounted_usd is None
+    assert site.undercounted_tokens is None
+    assert site.peer_output_tokens is None
+    assert finding.undercounted_usd is None
+    assert finding.undercounted_tokens is None
+    # The basis must distinguish "watched, learned nothing" from "watched
+    # nothing" — they point at different remedies.
+    assert "none carried token counts" in site.derivation
+    assert "4 completed streams" in site.derivation
+    assert finding.estimate_basis

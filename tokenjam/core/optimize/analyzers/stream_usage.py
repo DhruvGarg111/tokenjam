@@ -173,9 +173,14 @@ class _Bucket:
     peer_output: list = field(default_factory=list)
     peer_cache: list = field(default_factory=list)
     peer_cache_write: list = field(default_factory=list)
+    # Completed streams whose observer never saw token counts. Counted, not
+    # discarded: "we watched N of these and learned nothing from them" is what
+    # makes an unestimated gap legible instead of looking like no data at all.
+    observed_without_tokens: int = 0
 
     @property
     def complete(self) -> int:
+        """Completed streams the median can actually be taken over."""
         return len(self.peer_output)
 
 
@@ -195,10 +200,15 @@ def _select_streaming_spans(ctx: AnalyzerContext) -> list[tuple]:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
     where = " AND ".join(clauses)
+    # The token columns are read RAW, never COALESCEd to 0. NULL here means the
+    # observer could not see token counts at all — the proxy's SSE tap watches
+    # the wire and stamps the streaming signature without ever learning the
+    # numbers — and that is a different fact from a call that reported zero.
+    # Flattening the two lets token-less observations into the peer baseline
+    # and drags the median toward zero; see `_bucket_rows`.
     return ctx.conn.execute(
         f"SELECT provider, model, agent_id, session_id, attributes, "
-        f"COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), "
-        f"COALESCE(cache_tokens, 0), COALESCE(cache_write_tokens, 0) "
+        f"input_tokens, output_tokens, cache_tokens, cache_write_tokens "
         f"FROM spans WHERE {where}",
         params,
     ).fetchall()
@@ -219,11 +229,21 @@ def _bucket_rows(rows: list[tuple]) -> tuple[dict, int, int]:
         bucket = buckets.setdefault(key, _Bucket())
         if attrs.get(TjAttributes.STREAM_USAGE_REPORTED):
             # A completed stream is the peer baseline the missing ones are
-            # estimated against, so it is recorded rather than skipped.
-            bucket.peer_input.append(int(input_tokens))
-            bucket.peer_output.append(int(output_tokens))
-            bucket.peer_cache.append(int(cache_tokens))
-            bucket.peer_cache_write.append(int(cache_write_tokens))
+            # estimated against, so it is recorded rather than skipped — but
+            # only if it actually carries token counts. An observer can watch a
+            # stream run to completion and still never learn its numbers (the
+            # proxy tap reads the wire, not the provider's accounting), and
+            # those spans store NULL. Admitting them as zeros would let the
+            # median collapse toward zero and render a confident "$0.00" for a
+            # gap nobody measured — the exact false all-clear this module
+            # exists to prevent.
+            if output_tokens is None and input_tokens is None:
+                bucket.observed_without_tokens += 1
+                continue
+            bucket.peer_input.append(int(input_tokens or 0))
+            bucket.peer_output.append(int(output_tokens or 0))
+            bucket.peer_cache.append(int(cache_tokens or 0))
+            bucket.peer_cache_write.append(int(cache_write_tokens or 0))
             continue
         # No usage payload. Only count it when content was actually produced:
         # a stream that opened and delivered nothing cost nothing to
@@ -259,14 +279,33 @@ def _build_call_site(key: tuple, bucket: _Bucket, at) -> StreamUsageCallSite:
         # price it against. Both estimate fields stay None — an unmeasured
         # gap renders an em dash, never "$0.00", which would read as "no
         # blind spot" and is the exact lie this analyzer exists to prevent.
-        site.derivation = (
-            "No completed stream was observed for this call site in this "
-            "window, so there is no per-call baseline to size the missing "
-            "calls against and no under-count figure is claimed."
-            if med_out is None else
-            "The affected calls carry no model name, so there is no rate to "
-            "price them at and no under-count figure is claimed."
-        )
+        if med_out is not None:
+            site.derivation = (
+                "The affected calls carry no model name, so there is no rate "
+                "to price them at and no under-count figure is claimed."
+            )
+        elif bucket.observed_without_tokens:
+            # Distinct from "nothing was observed": streams DID complete here,
+            # the observer just never learned their token counts. Saying so
+            # points at the actual remedy (instrument the SDK client, which
+            # sees the usage payload) instead of implying an idle window.
+            site.derivation = (
+                f"{bucket.observed_without_tokens} completed stream"
+                f"{'s' if bucket.observed_without_tokens != 1 else ''} "
+                f"{'were' if bucket.observed_without_tokens != 1 else 'was'} "
+                f"observed for this call site, but none carried token counts "
+                f"— they were watched on the wire, where the provider's usage "
+                f"payload is not accounted. There is no per-call baseline to "
+                f"size the missing calls against, so no under-count figure is "
+                f"claimed. Instrument the client itself (`patch_openai()` / "
+                f"`patch_anthropic()`) to establish one."
+            )
+        else:
+            site.derivation = (
+                "No completed stream was observed for this call site in this "
+                "window, so there is no per-call baseline to size the missing "
+                "calls against and no under-count figure is claimed."
+            )
         return site
     site.peer_input_tokens = med_in
     site.peer_output_tokens = med_out
@@ -294,6 +333,13 @@ def _build_call_site(key: tuple, bucket: _Bucket, at) -> StreamUsageCallSite:
         f"cache-read + {med_cache_write or 0} cache-write tokens per call), "
         f"priced at that model's rates. Estimated, not observed: the real "
         f"counts for these calls were never reported by the provider."
+        + (
+            f" A further {bucket.observed_without_tokens} completed stream"
+            f"{'s' if bucket.observed_without_tokens != 1 else ''} carried no "
+            f"token counts and {'were' if bucket.observed_without_tokens != 1 else 'was'} "
+            f"left out of that median rather than counted as zero."
+            if bucket.observed_without_tokens else ""
+        )
     )
     return site
 
@@ -352,11 +398,20 @@ def run(ctx: AnalyzerContext) -> None:
             )
         )
     elif sites:
+        tokenless = sum(b.observed_without_tokens for b in buckets.values())
         finding.estimate_basis = (
             f"{missing} of {seen} observed streams closed without a usage "
-            f"payload, and no completed stream was observed for any affected "
-            f"model in this window — so the size of the gap is not estimated "
-            f"here, only its existence."
+            f"payload, and no completed stream carrying token counts was "
+            f"observed for any affected model in this window — so the size of "
+            f"the gap is not estimated here, only its existence."
+            + (
+                f" {tokenless} stream{'s' if tokenless != 1 else ''} did "
+                f"complete, but {'were' if tokenless != 1 else 'was'} watched "
+                f"on the wire where the provider's usage payload is not "
+                f"accounted, so {'they carry' if tokenless != 1 else 'it carries'} "
+                f"no token counts to build a baseline from."
+                if tokenless else ""
+            )
         )
 
     ctx.report.findings["stream-usage"] = finding
