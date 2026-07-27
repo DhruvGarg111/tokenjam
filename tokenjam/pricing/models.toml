@@ -192,6 +192,15 @@ output_per_mtok = 75.00
 cache_read_per_mtok = 1.50
 cache_write_per_mtok = 18.75
 
+# Claude 3.7 Sonnet (deprecated). Still the dominant model in archived agent
+# traces, which arrive as `claude-3-7-sonnet-20250219` (date-stripped to this
+# row) or `anthropic/claude-3.7-sonnet` from a gateway.
+[anthropic.claude-3-7-sonnet]
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
+
 # Claude Haiku 3.5 (retired except on Bedrock and Vertex)
 [anthropic.claude-haiku-3-5]
 input_per_mtok = 0.80
@@ -238,6 +247,11 @@ output_per_mtok = 180.00
 # ─── OpenAI (superseded, kept for historical spans) ─────────────────────────
 # gpt-4o / gpt-4o-mini / o3 / o4-mini are no longer on OpenAI's current pricing
 # page but still appear in older telemetry; rates retained as last-published.
+[openai."gpt-4.1"]
+input_per_mtok = 2.00
+output_per_mtok = 8.00
+cache_read_per_mtok = 0.50
+
 [openai.gpt-4o]
 input_per_mtok = 2.50
 output_per_mtok = 10.00
@@ -253,6 +267,13 @@ output_per_mtok = 40.00
 [openai.o4-mini]
 input_per_mtok = 1.10
 output_per_mtok = 4.40
+
+# Gemini 2.0 Flash (retired 2026-06-01, kept for historical spans). Arrives as
+# the dotted `gemini-2.0-flash`, resolved to this key by the version-dash
+# fallback in `get_rates`.
+[google.gemini-2-0-flash]
+input_per_mtok = 0.10
+output_per_mtok = 0.40
 
 [google.gemini-2-5-pro]
 input_per_mtok = 1.25

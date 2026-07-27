@@ -148,6 +148,28 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                       f"[bold]{sum(r.call_count for r in rows)}[/bold]")
 
     console.print(table)
+    _print_pricing_coverage(db, agent, since_dt)
+
+
+def _print_pricing_coverage(db, agent: str | None, since_dt) -> None:
+    """Name any model in this window priced at the flat default rate.
+
+    Without this the table's COST column reads identically whether a rate was
+    published for the model or guessed, which is how a model missing from
+    `models.toml` stays invisible while its dollar figure is badly wrong. Prints
+    nothing when everything resolved, and nothing on the API-shim path (no
+    direct connection) rather than implying a clean bill it never checked.
+    """
+    from tokenjam.core.pricing_coverage import (
+        coverage_note,
+        summarize_pricing_coverage,
+    )
+
+    conn = getattr(db, "conn", None)
+    note = coverage_note(summarize_pricing_coverage(conn, agent, since_dt, None))
+    if note:
+        console.print()
+        console.print(f"[dim]{note}[/dim]")
 
 
 def _cost_framing(ctx, db, since, since_dt, until_dt, agent, total_cost, total_tokens):
