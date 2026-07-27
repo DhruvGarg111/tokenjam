@@ -23,6 +23,7 @@ from tokenjam.core.config import (
     CodingGroupConfig,
     DefaultsConfig,
     GroupBudgetConfig,
+    load_config,
     TjConfig,
     active_config_path,
 )
@@ -160,6 +161,76 @@ def test_post_sdk_agent_scope_unchanged_daily_and_session(tmp_path, db):
     sdk = resp.json()["sdk"]["agents"]["sdk-workflow-x"]
     assert sdk["configured"]["daily_usd"] == 12.0
     assert sdk["configured"]["session_usd"] == 3.0
+
+
+def test_get_response_is_a_superset_carrying_the_legacy_top_level_shape(tmp_path, db):
+    """The still-committed old BudgetView reads `data.defaults.daily_usd` /
+    `data.defaults.session_usd` (unguarded) and `Object.entries(data.agents)`
+    directly off the GET response -- not the new `coding`/`sdk` zones. Until
+    that view is rewritten (a separate, in-flight change on this same
+    branch), the response MUST still carry those two top-level keys with the
+    exact old per-agent-flat-row values, or the page throws on render."""
+    db.upsert_session(make_session(agent_id="claude-code-proj-a", session_id="s1"))
+    db.upsert_session(make_session(agent_id="sdk-workflow-a", session_id="s2"))
+    config = _config(
+        tmp_path,
+        defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=9.0, session_usd=2.0)),
+        agents={"sdk-workflow-a": AgentConfig(budget=BudgetConfig(daily_usd=4.0, session_usd=1.0))},
+    )
+    with _client(config, db) as client:
+        resp = client.get("/api/v1/budget")
+    body = resp.json()
+
+    # Legacy top-level "defaults" — exactly the old {daily_usd, session_usd} shape.
+    assert body["defaults"] == {"daily_usd": 9.0, "session_usd": 2.0}
+
+    # Legacy top-level "agents" — ONE FLAT ROW PER agent_id, coding and SDK
+    # alike, un-grouped (the pre-redesign behavior), each with
+    # configured/effective sub-objects.
+    assert set(body["agents"].keys()) == {"claude-code-proj-a", "sdk-workflow-a"}
+    assert body["agents"]["sdk-workflow-a"]["configured"] == {"daily_usd": 4.0, "session_usd": 1.0}
+    assert body["agents"]["sdk-workflow-a"]["effective"] == {"daily_usd": 4.0, "session_usd": 1.0}
+    # A coding agent with no per-agent override still gets a flat legacy row,
+    # falling back to the legacy defaults (not the new coding-group default).
+    assert body["agents"]["claude-code-proj-a"]["configured"] == {"daily_usd": None, "session_usd": None}
+    assert body["agents"]["claude-code-proj-a"]["effective"] == {"daily_usd": 9.0, "session_usd": 2.0}
+
+
+def test_legacy_shaped_post_roundtrips_through_the_new_schema(tmp_path, db):
+    """Exactly the payload the still-committed old BudgetView.handleSave
+    sends: {scope, daily_usd, session_usd}, with scope either "defaults" or
+    a literal agent_id -- including a claude-code-<project> id, since the
+    old UI has no concept of coding-tool grouping and writes one row per
+    agent_id it saw. Must persist through the NEW config schema (BudgetConfig
+    on config.agents[<id>].budget, unchanged) and the response must still
+    reflect it under the legacy top-level "agents" key."""
+    config = _config(tmp_path)
+    with _client(config, db) as client:
+        # Legacy defaults-scope save.
+        resp = client.post(
+            "/api/v1/budget", json={"scope": "defaults", "daily_usd": 15.0, "session_usd": 3.0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["defaults"] == {"daily_usd": 15.0, "session_usd": 3.0}
+
+        # Legacy per-agent save on a literal coding-project agent_id, exactly
+        # as the un-rewritten UI still does (one row per project it observed).
+        resp2 = client.post(
+            "/api/v1/budget",
+            json={"scope": "claude-code-my-project", "daily_usd": 6.0, "session_usd": 1.25},
+        )
+        assert resp2.status_code == 200
+        body2 = resp2.json()
+        assert body2["agents"]["claude-code-my-project"]["configured"] == {
+            "daily_usd": 6.0, "session_usd": 1.25,
+        }
+
+    # And it actually persisted to config, not just the in-memory response.
+    reloaded = load_config(str(config.config_path))
+    assert reloaded.defaults.budget.daily_usd == 15.0
+    assert reloaded.defaults.budget.session_usd == 3.0
+    assert reloaded.agents["claude-code-my-project"].budget.daily_usd == 6.0
+    assert reloaded.agents["claude-code-my-project"].budget.session_usd == 1.25
 
 
 def test_post_daily_only_preserves_an_existing_session_usd(tmp_path, db):

@@ -158,6 +158,21 @@ def _budget_payload(config, agent_ids: list[str]) -> dict:
     # from config when the window mix is empty).
     framing = compute_framing(config, WindowSummary())
 
+    # LEGACY top-level `defaults` / `agents` keys — the pre-redesign shape,
+    # computed exactly as `_budget_payload` used to (one flat row per
+    # agent_id, coding and SDK alike, no grouping). Kept as a STRICT SUPERSET
+    # alongside `coding`/`sdk` so the still-committed old BudgetView (reads
+    # `data.defaults.daily_usd` unguarded, and `data.agents`) keeps rendering
+    # and saving correctly while the UI rewrite is in flight on a branch that
+    # cannot yet touch this file's own PR. Remove only once that rewrite
+    # lands and nothing reads these two keys anymore.
+    legacy_agents = {}
+    for aid in agent_ids:
+        agent_cfg = config.agents.get(aid)
+        raw = _b(agent_cfg.budget) if agent_cfg else _b(BudgetConfig())
+        eff = _b(resolve_effective_budget(aid, config))
+        legacy_agents[aid] = {"configured": raw, "effective": eff}
+
     return {
         "coding": {
             "defaults": _gb(config.defaults.coding_budget),
@@ -167,6 +182,9 @@ def _budget_payload(config, agent_ids: list[str]) -> dict:
             "defaults": _b(config.defaults.budget),
             "agents": sdk_agents,
         },
+        # -- legacy superset (see comment above) --
+        "defaults": _b(config.defaults.budget),
+        "agents": legacy_agents,
         # The provider spend-forecast ceilings Optimize's Budget projection
         # reads — surfaced here so they're visible/editable where users
         # otherwise only see the enforcement caps above.
