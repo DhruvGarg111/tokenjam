@@ -1531,6 +1531,11 @@ code.md-code {
 .sidebar a.nav-child { display: none; padding-left: 38px; font-size: 13px; color: var(--text-faint); }
 .sidebar a.nav-child.active { color: var(--accent); }
 .sidebar a.nav-child .icon { font-size: 12px; opacity: .6; }
+/* A reference entry: always visible (NOT a nav-child), but set apart from the
+   live data views above it by a rule and a quieter weight. No `display` rule
+   here on purpose — nothing may make this conditional on the active view. */
+.sidebar a.nav-reference { margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--text-dim); }
+.sidebar a.nav-reference .icon { opacity: .7; }
 .nav-badge { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text-faint); margin-left: auto; }
 .sz-link { color: var(--brand); cursor: pointer; text-decoration: none; }
 .sz-link:hover { text-decoration: underline; }
@@ -1730,8 +1735,19 @@ code.md-code {
   <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
   <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="observe"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
-  <a href="#/optimize/guide" class="nav-link nav-child" data-view="optimize" data-param="guide" data-lens="observe"><span class="icon">&#8627;</span> Analyzer guide</a>
   <a href="#/budget" class="nav-link" data-view="budget" data-lens="observe"><span class="icon">$</span> Budget</a>
+  <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
+       parent section is the active view (see App()'s route effect), so as a
+       child of Optimize this entry was invisible from Traces / Cost / Alerts /
+       Drift / Budget — i.e. from everywhere except the one screen whose output
+       you already had in front of you, which is exactly when you least need to
+       be told what the analyzers are. The route resolved and something did
+       link to it, but only conditionally, and "a user has a path to it" has to
+       hold from wherever the user actually is.
+       Last in the Observe group and separated, because it is a reference page
+       rather than a live data view: it reads no window, has no filters, and
+       does not belong interleaved with the screens that do. -->
+  <a href="#/guide" class="nav-link nav-reference" data-view="guide" data-lens="observe"><span class="icon">?</span> Analyzer guide</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
@@ -7692,17 +7708,16 @@ function OptimizeView({ params }) {
   const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
   return html`
-    ${/* The guide link is rendered UNCONDITIONALLY, outside every data branch.
-          The sidebar's own guide entry is a nav-child, which only appears once
-          you are already on Optimize; this is the link that makes the page
-          reachable from the screen it explains, including while the store is
-          cold, while a scan is in flight, and after a failed read — the exact
-          states in which a reader is most likely to be wondering what these
-          checks are (Critical Rule 24: a route nothing links to is not a
-          surface). */ ''}
+    ${/* In-context entry point, rendered UNCONDITIONALLY, outside every data
+          branch — so it is there while the store is cold, while a scan is in
+          flight, and after a failed read, which are the states a reader is most
+          likely to be wondering what these checks are. The sidebar carries the
+          guide as a top-level Observe entry (that is what makes it reachable
+          from anywhere at all); this link is the contextual one, offered on the
+          screen whose cards it explains. */ ''}
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Optimize <${PlanBadge} framing=${framing} />
-      <a class="sz-link" href="#/optimize/guide" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
+      <a class="sz-link" href="#/guide" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
@@ -8035,7 +8050,11 @@ function AnalyzerGuideView() {
   return html`
     <div class="page-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       Analyzer guide
-      <a class="sz-link" href="#/optimize" style="font-size:13px;font-weight:400">← Back to Optimize</a>
+      ${/* Forward, not "back": this is a top-level Observe page now, reachable
+            from any screen, so a reader may well have arrived without ever
+            visiting Optimize. Pointing AT the cards is true from anywhere;
+            "back" would be a guess about where they came from. */ ''}
+      <a class="sz-link" href="#/optimize" style="font-size:13px;font-weight:400">See these on the Optimize screen →</a>
     </div>
 
     ${st.error ? html`<div class="chart-card" style="border-color:var(--error)">
@@ -8052,7 +8071,13 @@ function AnalyzerGuideView() {
       ` : uncovered ? html`
         <div class="guide-banner">Your recent sessions look like a <b>${GUIDE_PERSONA_LABELS[resolved] || resolved}</b> setup, and a guide for that setup has not been written yet. What follows describes <b>${GUIDE_PERSONA_LABELS[shown]}</b>, so parts of it may not match how you work. The checks that actually run for you are still decided by your own setup, not by this page.</div>
       ` : html`
-        <div class="guide-banner">Nothing has classified this install yet, so what follows is the <b>${GUIDE_PERSONA_LABELS[shown]}</b> guide. Once a scan has run, this page describes whichever setup your sessions turn out to match.</div>
+        ${/* Names the thing that is actually missing: the analyzer SCAN, not
+              the data. "Nothing has classified this install yet" reads as "you
+              have no sessions", which on a corpus of thousands would be the
+              page claiming less than its data supports — the same defect class
+              as claiming more. Wording deliberately mirrors the Optimize
+              screen's own cold state so the two agree. */ ''}
+        <div class="guide-banner">No analyzer scan has completed yet, so your setup has not been classified. What follows is the <b>${GUIDE_PERSONA_LABELS[shown]}</b> guide; once a scan has run, this page describes whichever setup your sessions turn out to match.</div>
       `}
 
       <${GuideBody} persona=${shown} sets=${sets} />
@@ -11902,7 +11927,7 @@ function DashboardView({ params }) {
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
-  optimize: 'observe', budget: 'observe',
+  optimize: 'observe', budget: 'observe', guide: 'observe',
 };
 
 // ============================
@@ -11938,8 +11963,12 @@ const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
 // screen was the same AnalyticsView the Dashboard already embeds as its
 // "Explore" section, so the separate route was a second door to one room);
 // #/status and #/runs are silent aliases for Sessions (they render the same
-// StatusView); #/optimize/summarize is the Summarize sub-view and
-// #/optimize/guide the analyzer guide. Anything else is its own view key.
+// StatusView); #/optimize/summarize is the Summarize sub-view. The analyzer
+// guide is a TOP-LEVEL route (#/guide) — it was briefly a sub-view of Optimize,
+// which made its sidebar entry a nav-child and therefore invisible from every
+// other screen; `#/optimize/guide` survives as a silent alias so any link that
+// already points at the old hash keeps working (the effect in App() rewrites
+// the address bar to the canonical form). Anything else is its own view key.
 function primaryKeyFor(route) {
   const v = route.view;
   if (v === 'overview' || v === 'analytics') return 'dashboard';
@@ -11947,6 +11976,13 @@ function primaryKeyFor(route) {
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   if (v === 'optimize' && route.param === 'guide') return 'guide';
   return v;
+}
+
+// True for the retired `#/optimize/guide` hash only. Kept as a named predicate
+// so the alias is stated once and both the router and the canonicalising effect
+// read the same rule.
+function isLegacyGuideRoute(route) {
+  return route.view === 'optimize' && route.param === 'guide';
 }
 
 // Detail overlay for an id-keyed drill-in (mounts fresh per id), else null.
@@ -11980,6 +12016,20 @@ function App() {
       history.replaceState(null, '', '#/review');
     }
   }, []);
+
+  // Canonicalise the retired `#/optimize/guide` hash to `#/guide`. The router
+  // already renders the right view for either (primaryKeyFor), so this exists
+  // for the SIDEBAR: the guide's nav entry keys on `data-view="guide"`, and on
+  // the legacy hash the active view is still `optimize`, which would light up
+  // the wrong row. replaceState leaves no history entry (so Back does not
+  // bounce between the two spellings) and fires no hashchange, hence the
+  // explicit re-read.
+  useEffect(() => {
+    if (isLegacyGuideRoute(route)) {
+      history.replaceState(null, '', '#/guide');
+      setRoute(getRoute());
+    }
+  }, [route.view, route.param]);
 
   // Update active nav link + reveal nested children of the active section +
   // keep the Improve/Observe lens pill in sync with the current route (self-

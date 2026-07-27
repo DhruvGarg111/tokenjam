@@ -4719,27 +4719,67 @@ def test_optimize_view_renders_a_cold_state_instead_of_empty_cards(html):
 # reason to exist and a later edit could quietly drop it.
 
 
+def test_analyzer_guide_nav_entry_is_unconditional_not_a_nav_child(html):
+    """The bug this pins actually shipped. The guide was a `nav-child`, and
+    App()'s route effect sets `el.style.display = (v === view) ? 'flex' : 'none'`
+    for EVERY `.nav-child` -- so the entry existed in the file, a grep-style test
+    passed, and the sidebar still showed nothing on Traces / Cost / Alerts /
+    Drift / Budget. A string-presence assertion cannot tell those apart, so this
+    asserts the property that differs: the entry must not be a nav-child, and
+    must not carry a data-param (the attribute the child-visibility rule keys
+    on). Reachability has to hold from wherever the user is, not just from the
+    one screen the page explains."""
+    line = next(
+        ln for ln in html.splitlines()
+        if 'href="#/guide"' in ln and "nav-link" in ln
+    )
+    assert "nav-child" not in line, (
+        "the guide nav entry is a nav-child again -- it will be display:none "
+        "everywhere except its parent section"
+    )
+    assert "data-param=" not in line
+    assert 'data-view="guide"' in line
+    assert 'data-lens="observe"' in line
+    # No CSS rule scoped to this entry may reintroduce a display condition.
+    css_rules = [ln for ln in html.splitlines() if ln.startswith(".sidebar a.nav-reference")]
+    assert css_rules, "the nav-reference styling vanished"
+    assert not any("display" in ln for ln in css_rules)
+
+    # Nothing may hide it based on the active view. The route effect's only
+    # display mutation is the nav-child branch; assert it stays scoped there.
+    eff = html[html.index("document.querySelectorAll('.nav-link').forEach"):]
+    eff = eff[:eff.index("}, [route.view, route.param]);")]
+    display_lines = [ln for ln in eff.splitlines() if "style.display" in ln]
+    assert len(display_lines) == 1, (
+        "a second display mutation appeared in the nav effect; the guide entry "
+        "may now be hidden by the active view"
+    )
+    # ...and that single mutation lives inside the nav-child branch.
+    assert "el.classList.contains('nav-child')" in eff
+    assert eff.index("el.classList.contains('nav-child')") < eff.index(display_lines[0])
+
+
 def test_analyzer_guide_is_reachable_from_the_optimize_screen(html):
-    """Critical Rule 24: a route that resolves is not a surface. Two links must
-    point AT the guide -- the sidebar child, and an unconditional link on the
-    Optimize page itself (the nav-child only appears once you are already on
-    Optimize, and Optimize's data branches can all be empty)."""
-    assert (
-        'href="#/optimize/guide" class="nav-link nav-child" '
-        'data-view="optimize" data-param="guide"'
-    ) in html
+    """The contextual entry point, on the screen whose cards it explains. It
+    renders before any `st.opt` / `scan.known` guard, so a cold or failed store
+    still offers the way in."""
     fn_start = html.index("function OptimizeView({ params })")
-    fn_end = html.index("// Optimize ▸ Guide", fn_start)
+    fn_end = html.index("// Optimize \u25b8 Guide", fn_start)
     fn = html[fn_start:fn_end]
-    assert 'href="#/optimize/guide"' in fn
-    # ...and it hangs off the page title, which renders before any `st.opt` /
-    # `scan.known` guard, so a cold or failed store still offers the way in.
-    title_at = fn.index('Optimize <${PlanBadge}')
-    link_at = fn.index('href="#/optimize/guide"')
-    assert link_at - title_at < 400, "guide link drifted out of the always-rendered title block"
-    # And the router actually resolves it, else the links are decoration.
-    assert "if (v === 'optimize' && route.param === 'guide') return 'guide';" in html
+    assert 'href="#/guide"' in fn
+    title_at = fn.index("Optimize <${PlanBadge}")
+    link_at = fn.index('href="#/guide"')
+    assert link_at - title_at < 600, "guide link drifted out of the always-rendered title block"
+
+
+def test_analyzer_guide_routes_resolve_and_old_hash_still_works(html):
+    """`#/guide` is canonical; `#/optimize/guide` is the retired spelling and
+    must keep working for anything already pointing at it."""
     assert "['guide',     AnalyzerGuideView]," in html
+    assert "guide: 'observe'," in html, "the guide must sit in the Observe lens"
+    assert "if (v === 'optimize' && route.param === 'guide') return 'guide';" in html
+    assert "function isLegacyGuideRoute(route)" in html
+    assert "history.replaceState(null, '', '#/guide');" in html
 
 
 def test_analyzer_guide_reads_the_gate_from_the_server_not_a_js_copy(html):
