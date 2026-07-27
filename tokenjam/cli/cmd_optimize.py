@@ -853,6 +853,16 @@ def _render_report(
     if report.notes:
         console.print()
 
+    # Said out loud, because the alternative is three analyzers rendering as
+    # "nothing found" when the truth is that they never looked (root
+    # anti-pattern 22). See `core/optimize/scope.py`.
+    if report.filesystem_scan_skipped_reason:
+        console.print(
+            "  [dim]deadweight, relearn and summarize did not run: "
+            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
+        )
+        console.print()
+
     # An analyzer the user typed by name that this persona's skip gate dropped
     # would otherwise render as silence, which reads as a broken command. The
     # gate is deliberately invisible when it fires on the default (unnamed)

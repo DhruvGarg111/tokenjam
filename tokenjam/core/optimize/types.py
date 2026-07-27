@@ -360,6 +360,15 @@ class OptimizeReport:
     # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
     # recompute it from a bare `conn`.
     persona:   str = "unknown"
+    # Why the filesystem-reading analyzers (deadweight, relearn, summarize)
+    # scanned nothing, when they scanned nothing — see
+    # `core/optimize/scope.py`. `None` means they DID scan, which is a
+    # different statement from "scanned and found nothing" and must render
+    # differently (root anti-pattern 22): an empty deadweight finding under a
+    # suppressed scope reads as "no dead MCP servers" when the truth is that
+    # no config was ever looked at. One field on the report rather than one
+    # per finding, so every surface reads the same answer.
+    filesystem_scan_skipped_reason: str | None = None
 
 
 @dataclass
@@ -392,6 +401,13 @@ class AnalyzerContext:
     # looking at an SDK caller (e.g. deciding fix modality) read it here
     # instead of re-deriving it from `conn`.
     persona:                str            = "unknown"
+    # Which filesystem the filesystem-reading analyzers (deadweight, relearn,
+    # summarize) may read, and why. Resolved once in `runner.build_report` via
+    # `core.optimize.scope.resolve_analyzer_scope` — an analyzer must never
+    # re-derive a root from `Path.home()` or the env var itself, or `--db`
+    # stops isolating it. `None` only in a hand-built context (tests): treat it
+    # as the unscoped default. See `core/optimize/scope.py` for the contract.
+    scope:                  Any            = None
 
 
 # ---------------------------------------------------------------------------

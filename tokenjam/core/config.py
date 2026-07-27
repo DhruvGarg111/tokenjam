@@ -64,6 +64,13 @@ class DefaultsConfig:
 class StorageConfig:
     path:           str = "~/.tj/telemetry.duckdb"
     retention_days: int = 90
+    # Runtime provenance, never read from or written to TOML: True when `path`
+    # came from an explicit `--db` rather than config discovery. The
+    # filesystem-reading analyzers scope themselves off it (see
+    # `core/optimize/scope.py`) — a config file that happens to name the same
+    # path is a normal run, so the two cases have to stay distinguishable
+    # after the override has been applied.
+    path_is_explicit: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -283,6 +290,14 @@ class OptimizeConfig:
     # tool-call-signature cluster needs at least this many member sessions
     # before it's recommended for script-replacement.
     min_cluster_instances: int = 20
+    # The transcript/config root the filesystem-reading analyzers (deadweight,
+    # relearn, summarize) may read — the `--projects-root` flag writes here.
+    # `None` defers to the precedence chain in `core/optimize/scope.py`: the
+    # TJ_CLAUDE_PROJECTS_ROOT env var, then suppression under an explicit
+    # `--db`, then `~/.claude/projects`. Unlike every other field in this
+    # section this is a SCOPE, not a sensitivity threshold — it decides which
+    # filesystem is evidence, not how eager an analyzer is about it.
+    projects_root: str | None = None
     # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
     # server needs to be configured-present in at least this many distinct
     # sessions, with zero invocations across all of them, to be flagged dead.
@@ -765,6 +780,7 @@ def _parse(raw: dict) -> TjConfig:
             "scan_min_rescan_seconds", OptimizeConfig.scan_min_rescan_seconds)),
         scan_ui_poll_seconds=int(optimize_raw.get(
             "scan_ui_poll_seconds", OptimizeConfig.scan_ui_poll_seconds)),
+        projects_root=optimize_raw.get("projects_root") or None,
     )
 
     defaults_raw = raw.get("defaults", {})
