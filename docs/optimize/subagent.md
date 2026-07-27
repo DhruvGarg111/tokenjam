@@ -56,7 +56,7 @@ Rendering follows the same plan-tier-aware convention as the rest of `tj optimiz
 
 `past_overspend_usd` and `past_overspend_tokens` are quantified from two components, each with an independent "contributes nothing rather than invent a number" floor:
 
-- **`over_powered`** — priced at `claude-sonnet-5` (one tier down from Opus/Fable) over the exact same token mix the flagged subagent was billed for — a pure model-swap delta, no token-count change. This is a *narrower* step than [Downsize](downsize.md)'s own opus→haiku two-tier jump: Downsize's ladder is tuned for structurally tiny (Sonnet-shaped) whole sessions and can afford the aggressive drop, but this analyzer prices every premium-tier subagent, including full agent-loop ones, so it earns the more defensible one-tier-down target instead.
+- **`over_powered`** — priced at `claude-sonnet-5` (one tier down from Opus/Fable/Mythos) over the exact same token mix the flagged subagent was billed for — a pure model-swap delta, no token-count change. This is a *narrower* step than [Downsize](downsize.md)'s own opus→haiku two-tier jump: Downsize's ladder is tuned for structurally tiny (Sonnet-shaped) whole sessions and can afford the aggressive drop, but this analyzer prices every premium-tier subagent, including full agent-loop ones, so it earns the more defensible one-tier-down target instead.
 - **`over_provisioned`** — priced on the context *excess* over the subagent's own dispatch cohort's median (same calling agent + model, at least 5 like-shaped peers), at the cache-read rate (context arrives overwhelmingly as cache reads).
 
 `estimate_confidence` is `"heuristic"` and `estimate_basis` reads:

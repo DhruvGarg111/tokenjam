@@ -18,8 +18,9 @@ from tokenjam.core.optimize.analyzers.context_resend import (
     _percentile,
 )
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
-from tokenjam.core.pricing import get_rates
 from tests.factories import make_llm_span, make_session, make_tool_span
+from tests.rate_bands import implied_rate as _implied_rate
+from tests.rate_bands import price_band, rate_for_window
 
 UTC = timezone.utc
 
@@ -58,11 +59,18 @@ def _seed_session(db, session_id, sizes, *, provider="anthropic",
         ))
 
 
+# The window every test in this file analyzes. Named, not inlined, because the
+# rate assertions have to ask the pricing table about the SAME window the
+# analyzer priced — the analyzer bills each turn at its own timestamp, so "the
+# rate" is a property of this window, not of today.
+WINDOW_SINCE = datetime(2026, 5, 1, tzinfo=UTC)
+WINDOW_UNTIL = datetime(2026, 5, 30, tzinfo=UTC)
+
+
 def _run(db, config):
-    since = datetime(2026, 5, 1, tzinfo=UTC)
-    until = datetime(2026, 5, 30, tzinfo=UTC)
-    report = build_report(db=db, config=config, since=since, until=until,
-                           findings=["resend"])
+    report = build_report(db=db, config=config,
+                          since=WINDOW_SINCE, until=WINDOW_UNTIL,
+                          findings=["resend"])
     return report.findings["resend"]
 
 
@@ -265,7 +273,7 @@ def test_observed_cost_is_priced_per_token_class_and_never_the_avoidable_figure(
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
 
-    rates = get_rates("anthropic", "claude-haiku-4-5")
+    rates = rate_for_window("anthropic", "claude-haiku-4-5", WINDOW_SINCE, WINDOW_UNTIL)
     # Fully uncached, so the whole repeat volume bills at the input rate and
     # there are no cache reads to add.
     heavy_repeat_tokens = 3000  # sum=4000, max=1000
@@ -288,7 +296,7 @@ def test_observed_cost_prices_cache_reads_at_the_cache_read_rate(db):
     _seed_session(db, "pad1", [500])
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
-    rates = get_rates("anthropic", "claude-haiku-4-5")
+    rates = rate_for_window("anthropic", "claude-haiku-4-5", WINDOW_SINCE, WINDOW_UNTIL)
     # Every cache read IS re-sent context: 4 turns x 1000 cached tokens.
     assert _partitioned_cost(finding) == pytest.approx(
         round(4000 / 1_000_000 * rates.cache_read_per_mtok, 6)
@@ -347,8 +355,8 @@ def test_observed_cost_prices_each_turn_at_its_own_model_not_the_dominant_one(db
     _seed_session(db, "pad2", [500])
     finding = _run(db, _config())
 
-    opus = get_rates("anthropic", "claude-opus-4-8")
-    haiku = get_rates("anthropic", "claude-haiku-4-5")
+    opus = rate_for_window("anthropic", "claude-opus-4-8", WINDOW_SINCE, WINDOW_UNTIL)
+    haiku = rate_for_window("anthropic", "claude-haiku-4-5", WINDOW_SINCE, WINDOW_UNTIL)
     # sum=4000, max=1000 (tie) -> repeat_tokens=3000, split evenly across the
     # 4 equally-sized turns: 750 uncached-repeat tokens per turn.
     per_turn_uncached_repeat = 750
@@ -577,17 +585,14 @@ def test_offloadable_share_discloses_its_behavioural_basis_and_sample_size(db):
 # Critical Rule 28: the token and dollar aggregates must count the SAME events
 # --------------------------------------------------------------------------
 #
-# These are RATE assertions, never hardcoded dollar amounts. Rule 28 is explicit
-# about why: a hardcoded number passes happily while both fields drift together,
-# whereas a basis mismatch always throws the implied per-token rate orders of
-# magnitude out of any real price band, so only the rate can catch it. The band
-# is DERIVED from the pricing table at test time rather than written down,
-# because the table now carries a rate-history axis and a variant axis — today's
-# opus cache-read rate is not a constant, and a literal would rot into a false
-# green the next time a rate row lands. The analyzer prices with a bare
-# `get_rates(provider, model)` (no `at=`, standard variant), i.e. the rate in
-# effect NOW, so these read the table exactly the same way; if the analyzer ever
-# starts pricing at each turn's own timestamp, these helpers move with it.
+# These are RATE assertions, never hardcoded dollar amounts, and the band is
+# DERIVED from the pricing table at test time rather than written down — see
+# `tests/rate_bands.py`, which is where the reasoning and the shared helpers
+# live now. The one thing worth repeating here: the analyzer prices each turn at
+# that turn's OWN timestamp, so these ask the table about WINDOW_SINCE..
+# WINDOW_UNTIL rather than about today. That is what keeps the assertion aimed
+# at the same question the analyzer answered, instead of merely agreeing with it
+# by making the same mistake.
 
 _OFFLOAD_CORPUS_MODEL = ("anthropic", "claude-opus-4-8")
 
@@ -598,20 +603,7 @@ def _corpus_models(finding) -> list[tuple[str, str]]:
 
 
 def _price_band(finding) -> tuple[float, float]:
-    """(floor, ceiling) of any per-token rate this finding could legitimately
-    imply: no term may be cheaper than the cheapest cache read available, and
-    none may exceed the priciest fresh input token."""
-    rates = [get_rates(p, m) for p, m in _corpus_models(finding)]
-    priced = [r for r in rates if r is not None]
-    assert priced, "corpus has no priced model — the band would be vacuous"
-    return (
-        min(r.cache_read_per_mtok for r in priced),
-        max(r.input_per_mtok for r in priced),
-    )
-
-
-def _implied_rate(usd: float, tokens: int) -> float:
-    return usd / tokens * 1_000_000
+    return price_band(_corpus_models(finding), WINDOW_SINCE, WINDOW_UNTIL)
 
 
 def test_past_overspend_pair_implies_a_rate_inside_a_real_price_band(db):
@@ -649,10 +641,11 @@ def test_each_recoverable_term_implies_the_rate_its_basis_advertises(db):
     # Every in-scope turn in this corpus runs one model, so each term's implied
     # rate is that model's own rate exactly — the tightest form of the check.
     provider, model = _OFFLOAD_CORPUS_MODEL
-    rates = get_rates(provider, model)
-    assert rates is not None
+    rates = rate_for_window(provider, model, WINDOW_SINCE, WINDOW_UNTIL)
     alt = lookup_downgrade(provider, model)
-    alt_rates = get_rates(provider, alt) if alt else None
+    alt_rates = (
+        rate_for_window(provider, alt, WINDOW_SINCE, WINDOW_UNTIL) if alt else None
+    )
     assert alt_rates is not None, "corpus model has no cheaper same-family peer"
 
     assert finding.offload_recoverable_tokens
@@ -748,8 +741,7 @@ def test_rightsize_material_without_a_cheaper_peer_enters_neither_sum(db):
     assert finding.rightsize_recoverable_tokens == 0
     # The offload half still stands on its own, and the pair still divides to
     # this model's cache-read rate.
-    rates = get_rates("anthropic", model)
-    assert rates is not None
+    rates = rate_for_window("anthropic", model, WINDOW_SINCE, WINDOW_UNTIL)
     assert _implied_rate(
         finding.past_overspend_usd, finding.past_overspend_tokens,
     ) == pytest.approx(rates.cache_read_per_mtok, rel=1e-3)

@@ -121,11 +121,12 @@ OPUS_AUDIT_MAX_EXAMPLES = 5
 # agreement matters more than matching the opus-4.x precedent. `claude-sonnet-5`
 # itself downgrades to haiku, same as sonnet-4.x. Keep new premium families in
 # sync with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session
-# has a real routing target — NOTE: `claude-mythos-5` has a row here but is
-# NOT YET in PREMIUM_TIERS (no "mythos" entry in model_tiers.TIER_SUBSTRINGS),
-# so it is invisible to every premium-gated right-sizing flag; the row here
-# only helps the tiny-session secondary case below, which is NOT gated by
-# is_premium_tier.
+# has a real routing target. `claude-mythos-5` used to be a cautionary example
+# of the two lists drifting: it had a row here and a rate in models.toml but no
+# "mythos" entry in model_tiers.TIER_SUBSTRINGS, so it was invisible to every
+# premium-gated flag and only the tiny-session case below (gated on membership
+# HERE, not on is_premium_tier) ever reached it. Both lists now carry it, and
+# `test_every_priced_model_resolves_to_a_tier` fails the next half-added family.
 DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
     "anthropic": {
         "claude-fable-5":    "claude-sonnet-4-6",
