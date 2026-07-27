@@ -386,10 +386,10 @@ def _config_pricing_section() -> dict | None:
     None; config problems surface through the normal config-load path
     elsewhere.
     """
-    from tokenjam.core.config import find_config_file
+    from tokenjam.core.config import resolve_config_path
 
     try:
-        path = find_config_file(os.environ.get("TJ_CONFIG"))
+        path = resolve_config_path()
     except (FileNotFoundError, OSError):
         return None
     if path is None:

@@ -35,7 +35,7 @@ from tokenjam.core.config import (
     AgentConfig,
     BudgetConfig,
     ProviderBudget,
-    find_config_file,
+    resolve_config_path,
     resolve_effective_budget,
     validate_budget_value,
     validate_cycle_start_day,
@@ -110,7 +110,7 @@ class BudgetUpdate(BaseModel):
 @router.post("/budget")
 async def post_budget(request: Request, body: BudgetUpdate):
     config = request.app.state.config
-    config_path_str = find_config_file()
+    config_path_str = resolve_config_path()
     if config_path_str is None:
         return JSONResponse(status_code=400, content={"error": "No config file found"})
 
@@ -145,7 +145,7 @@ async def post_provider_budget(request: Request, body: ProviderBudgetUpdate):
     that Optimize's Budget projection analyzer reads. Distinct from
     `POST /budget` above, which edits the per-agent alert caps."""
     config = request.app.state.config
-    config_path_str = find_config_file()
+    config_path_str = resolve_config_path()
     if config_path_str is None:
         return JSONResponse(status_code=400, content={"error": "No config file found"})
 
