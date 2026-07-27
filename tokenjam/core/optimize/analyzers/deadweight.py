@@ -83,17 +83,22 @@ MIN_SESSIONS_DEADWEIGHT = 5
 MAX_EXAMPLE_SESSIONS = 3
 
 #: Full MCP-connector schema-injection tax, PER CALL, when its tool schemas
-#: are loaded (not deferred) — a documented community/founder-research figure
-#: (~25K tokens/call for an attached MCP connector's injected tool
-#: definitions; see .claude/context/research/evidence/
-#: subscription-vs-cost-framing.md and feature-context-diagnostic.md), NOT a
-#: live per-call measurement — the on-disk transcript carries no per-schema
-#: token count (see core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE).
-#: `estimated`, conservative, cited in the card footnote. The server's tool
-#: definitions ride in the `tools` array of EVERY call in the session, not
-#: just the first — this is the FIRST call's token count; subsequent calls in
-#: the same session re-send it too but are priced at the cache-read rate, not
-#: this rate again (see the per-session multiplier in the tax loop below).
+#: are loaded (not deferred). This is an ASSUMPTION carried into this module,
+#: not a measurement taken here or anywhere in this repo: the on-disk
+#: transcript has no per-schema token count to measure against (see
+#: core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE, the one real in-repo
+#: source for the "~25K tokens/call" figure) — and that note itself describes
+#: the tax for ALL of a session's attached MCP servers COMBINED, not for one
+#: server. This module nonetheless charges the full 25K flat to EVERY
+#: individual server, every call, regardless of how many tools that server
+#: actually exposes. Do not treat this as measured or as a per-server figure
+#: just because it is used that way below — it is neither. Do not change the
+#: value here; a re-derived, era-correct constant is tracked separately.
+#: The server's tool definitions ride in the `tools` array of EVERY call in
+#: the session, not just the first — this is the FIRST call's token count;
+#: subsequent calls in the same session re-send it too but are priced at the
+#: cache-read rate, not this rate again (see the per-session multiplier in
+#: the tax loop below).
 FULL_SCHEMA_TAX_TOKENS = 25_000
 
 #: When a session's transcript shows this server's tools in a DEFERRED
@@ -545,11 +550,18 @@ class _SessionSignal:
     #: assistant-turn model -> turn count, for pricing the token tax at a
     #: representative model's input rate (see ``_dominant_model``).
     models: dict[str, int] = field(default_factory=dict)
-    #: Total assistant turns in the session — each is one API request, so this
-    #: is the session's ACTUAL call count (mirrors context_diagnostic.py's
-    #: one-``TurnComposition``-per-turn convention). A configured MCP server's
-    #: tool schemas ride in the ``tools`` array of every one of these calls,
-    #: not just the first — see the per-call multiplier in the tax loop below.
+    #: Total assistant turns in the session — the session's ACTUAL call count
+    #: (mirrors context_diagnostic.py's one-``TurnComposition``-per-turn
+    #: convention). NOT one per "role == assistant" transcript record: Claude
+    #: Code writes a SEPARATE record per content block (thinking / text /
+    #: tool_use) of a single API response, all sharing one ``message.id``, so
+    #: counting records one-for-one overcounts the real call count by
+    #: however many blocks a response happened to split into. Deduped by
+    #: message key in ``_analyze_session`` below — the same key
+    #: ``_session_usage_from_records`` already dedupes on, for the identical
+    #: reason. A configured MCP server's tool schemas ride in the ``tools``
+    #: array of every one of these (deduped) calls, not just the first — see
+    #: the per-call multiplier in the tax loop below.
     assistant_turns: int = 0
 
 
@@ -565,10 +577,10 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
     (thinking / text / tool_use) of the same API response, all sharing one
     ``message.id`` — counting "role == assistant" records one-for-one with
     API calls overcounts by however many blocks a response happened to split
-    into (measured ~2.19x on a real corpus). ``assistant_turns`` dedupes by
-    ``assistant_message_key`` (the same key ``_session_usage_from_records``
-    already uses for its own dedup, for the identical reason) so it stays
-    the session's ACTUAL call count, not its record count.
+    into. ``assistant_turns`` dedupes by ``assistant_message_key`` (the same
+    key ``_session_usage_from_records`` already uses for its own dedup, for
+    the identical reason) so it stays the session's ACTUAL call count, not
+    its record count.
     """
     signal = _SessionSignal()
     reminder_measured = False
@@ -599,6 +611,13 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
                     reminder_measured = True
 
         if role == "assistant":
+            # Dedupe by message key before counting a call: Claude Code can
+            # write several records for ONE API response (one per content
+            # block, e.g. a thinking block and a text block each get their
+            # own record but share `message.id`). Counting every "assistant"
+            # record here would overcount how many times the schema tax was
+            # actually re-sent -- do not "simplify" this back to a bare
+            # per-record increment.
             message_key = assistant_message_key(record, message, line_no)
             if message_key not in seen_message_keys:
                 seen_message_keys.add(message_key)
@@ -713,8 +732,7 @@ class ServerDeadweight:
     #: price-equivalent basis would make one of them silently answer a
     #: different question than its name claims (Critical Rule 28); this
     #: field used to BE that price-equivalent quantity relabeled as tokens,
-    #: understating the real count by roughly 1/cache_read_ratio (~8x on
-    #: Anthropic's published cache-read rate).
+    #: understating the real count by roughly 1/cache_read_ratio.
     estimated_tax_tokens_per_session: int
     #: Window-scoped total: the SUM of each present session's own literal
     #: token count (first call's full schema + every later call's full
@@ -1184,6 +1202,15 @@ def compute_deadweight_finding(
             usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
 
         other_sources = _other_sources(server)
+        # The CLAIM stays aggregated across every source that declares this
+        # server (that is what actually happened this window), but the FIX
+        # is deliberately scoped to the one canonical `source` rather than
+        # made multi-target: extending the single-file MCP-remove apply path
+        # to edit several files atomically is a real, separate feature, not
+        # a one-line change, and disclosing the gap here is what keeps a
+        # partial fix honest in the meantime. Do not "complete" this by
+        # silently widening the claim to imply the one apply now covers
+        # every source -- widen the apply first, or leave both as they are.
         # "Remove or project-scope" is only a real two-option choice for a
         # USER-scoped (global) server -- narrowing it to project scope is an
         # actual alternative. A server already at project scope has nothing
