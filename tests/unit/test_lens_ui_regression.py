@@ -2615,20 +2615,72 @@ def test_summarize_nav_child_and_route(html):
 
 def test_summarize_component_present(html):
     assert "function SummarizeView" in html
-    # The four-phase flow (engine gate → curate → run → review) is what makes the
-    # screen worth more than the all-or-nothing CLI (DEC-034 granularity).
-    assert "const [phase, setPhase] = useState('engine')" in html
+    # Looking is free: the screen lands on the candidate list (curate) with no
+    # engine choice required. The engine is only demanded inline at the
+    # Finish/Approve step, the moment a rewrite is actually requested.
+    assert "const [phase, setPhase] = useState('curate')" in html
+    assert "const [phase, setPhase] = useState('engine')" not in html
     for phase in ("phase === 'review'", "phase === 'run'", "phase === 'curate'"):
         assert phase in html, f"missing phase branch {phase}"
 
 
 def test_summarize_engine_gate_is_capabilities_driven(html):
-    # The page starts on a capability-gated engine chooser (never defaulted), so a
+    # The engine chooser (rendered inline at the Finish/Approve step, not on
+    # its own landing page) is capability-gated and never defaulted, so a
     # dead engine (no key / no `claude`) is disabled with its reason.
     assert "api('/summarize/capabilities')" in html
     assert "const avail = cap ? cap.available : false;" in html
     # all three engines are offered; claude_p is normalized to the wire's claude-p
     assert "id === 'claude_p' ? 'claude-p' : id" in html
+
+
+def test_summarize_candidates_render_with_no_engine_selected(html):
+    # Looking is free: the landing phase is 'curate' (the candidate list), and
+    # nothing about rendering that list depends on an engine having been
+    # picked. Only producing a rewrite (Finish -> Approve) demands a tool.
+    start = html.index("function SummarizeView")
+    end = html.index("\n}\n", start)
+    body = html[start:end]
+    assert "const [phase, setPhase] = useState('curate')" in body
+    # the candidate table's render guard is `!loading` only -- no `engine`
+    # check gates whether the list (as opposed to a gate page) is shown.
+    listbox_at = body.index('<div class="cur-listbox">\n      <table class="cur-table">')
+    guard_at = body.rindex("${!loading ? html`", 0, listbox_at)
+    guard_to_list = body[guard_at:listbox_at]
+    assert "engine" not in guard_to_list
+
+
+def test_summarize_load_scan_runs_on_mount(html):
+    # The scan used to be deferred until an engine was picked (pickEngine ->
+    # loadScan()), which is exactly the gate this ticket removes. The mount
+    # effect must now kick off loadScan() unconditionally alongside caps/
+    # staged/backups, with no engine precondition anywhere in that effect.
+    assert "useEffect(() => { loadScan(); loadCaps(); loadStaged(); loadBackups(); }, []);" in html
+    assert "const pickEngine" not in html
+
+
+def test_summarize_scan_loading_state_precedes_any_count_or_empty_copy(html):
+    # Root anti-pattern 22: no count and no empty-state string may render
+    # while the scan fetch is unresolved. `loading` must start true (the
+    # mount effect always fires a scan, so the very first render -- before
+    # the effect has run -- must not be able to reach the empty-state /
+    # count branch), and every count/empty-state string for the candidate
+    # list must live behind the `!loading` guard, never unconditionally.
+    assert "const [loading, setLoading] = useState(true);" in html
+    start = html.index("function SummarizeView")
+    end = html.index("\n}\n", start)
+    body = html[start:end]
+    # the "N shown" count and the "No summarizable files found" empty-state
+    # copy are both inside the same `${!loading ? html`...` : null}` block.
+    loading_gate_at = body.index("${!loading ? html`")
+    shown_at = body.index("${visible.length} shown", loading_gate_at)
+    empty_at = body.index("No summarizable files found.", loading_gate_at)
+    assert loading_gate_at < shown_at
+    assert loading_gate_at < empty_at
+    # and the gate must close (` : null}`) only after both, i.e. loading is
+    # not flipped back to allow either to leak out from under it.
+    gate_close_at = body.index("` : null}", empty_at)
+    assert shown_at < gate_close_at and empty_at < gate_close_at
 
 
 def test_summarize_curator_wires_to_candidates_scan(html):
@@ -4488,11 +4540,23 @@ def test_dashboard_use_tokens_is_local_only(html):
 
 
 def _summarize_engine_view(html: str) -> str:
-    """The `phase === 'engine'` render — the back link, heading, intro
-    paragraph, and the three API/Claude CLI/Manual mode cards."""
-    start = html.index("if (phase === 'engine') {")
-    end = html.index("if (phase === 'run' && engine !== 'manual') {", start)
-    return html[start:end]
+    """The engine-choice surface: the curate (landing) header — back link,
+    heading, intro paragraph — plus the inline engine picker that now renders
+    at the Finish/Approve step, inside the approve modal, instead of on its
+    own `phase === 'engine'` gate page. Deliberately excludes the rest of
+    curate (filters, candidate table, staged/backups tallies) so this stays
+    scoped to the content that actually moved, not everything now sharing
+    the same `curate` return statement."""
+    h_start = html.index("// phase === 'curate'")
+    h_end = html.index("<div class=${'cur-tally'", h_start)
+    header = html[h_start:h_end]
+    e_start = html.index("const eng = (id, name, tag, desc) => {")
+    e_end = html.index("\n  };", e_start) + len("\n  };")
+    eng_fn = html[e_start:e_end]
+    p_start = html.index("${modal === 'approve' && !engine ? html`", h_end)
+    p_end = html.index("` : html`", p_start)
+    picker = html[p_start:p_end]
+    return header + eng_fn + picker
 
 
 def test_summarize_back_link_is_not_the_brand_blue_sz_link(html):
