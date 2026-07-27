@@ -2366,14 +2366,15 @@ def _render_summarize(
     via `--json`.
 
     The per-file line is the one-time, per-CALL reduction (`file_reduction_
-    tokens`); `past_overspend_tokens` and `past_overspend_usd`
-    are both per-WINDOW, because these files are always-on context and the
-    reduction is realized on every session that loads them (see
-    core/optimize/analyzers/summarize.py). The window line only appears
-    when the analyzer could observe how many sessions actually load the files
-    — it is never fabricated from a default rate — and it goes through
-    `render_savings` so a subscription/local plan sees the same framing every
-    other analyzer gives it.
+    tokens`); `past_overspend_tokens` and `past_overspend_usd` are both
+    per-WINDOW, priced by how each file actually LOADS: always-on text (a
+    CLAUDE.md, a rules file, a skill/command/agent's frontmatter) on every call
+    of every loading session, and a skill/command/agent BODY only on the
+    occasions it was observed being invoked (see
+    core/optimize/analyzers/summarize.py). The window line only appears when the
+    analyzer could observe those counts — it is never fabricated from a default
+    rate — and it goes through `render_savings` so a subscription/local plan
+    sees the same framing every other analyzer gives it.
     """
     console.print(_finding_header(marker, "Summarize:"))
     if not finding.candidates:
@@ -2399,11 +2400,22 @@ def _render_summarize(
             console.print(
                 f"       [green]~{savings}[/green] across the "
                 f"[bold]{finding.sessions_examined}[/bold] session(s) in this "
-                f"window that re-send these files on every call"
+                f"window: always-on text on every call; skill / command / agent "
+                f"bodies only when invoked"
             )
+            if getattr(finding, "invocations_observed", False):
+                console.print(
+                    f"       [dim]{finding.invocations_total:,} invocation(s) "
+                    f"observed across {finding.transcripts_examined:,} "
+                    f"transcript(s).[/dim]"
+                )
     for c in finding.candidates[:5]:
+        # An on-demand file's per-call figure is only realized on the calls that
+        # follow an invocation, so the class is named rather than left implied.
+        load_class = getattr(c, "load_class", "always")
+        loads = "always-on" if load_class == "always" else f"on demand: {load_class}"
         console.print(
-            f"       [dim]{c.path}[/dim]  [dim]({c.scope})[/dim]  "
+            f"       [dim]{c.path}[/dim]  [dim]({c.scope}, {loads})[/dim]  "
             f"~{format_tokens(c.est_tokens_saved)} saved  "
             f"[dim]{c.reduction_pct}% reduction[/dim]"
         )
