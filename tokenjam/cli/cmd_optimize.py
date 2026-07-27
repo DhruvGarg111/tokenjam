@@ -700,6 +700,13 @@ def _render_validation(result: Any) -> None:
     console.print(f"\n[dim]{_rich_escape(result.caveat)}[/dim]")
 
 
+def _format_plan_multiplier(multiplier: float) -> str:
+    """Render implied-API-value / plan-fee multiplier for subscription users."""
+    if multiplier < 0.1:
+        return "<0.1×"
+    return f"{multiplier:.1f}×"
+
+
 def _render_report(
     report: OptimizeReport,
     agent: str | None,
@@ -741,7 +748,7 @@ def _render_report(
             console.print(
                 f"[dim]Implied API value: "
                 f"[bold]{format_cost(w.total_cost_usd)}[/bold] — about "
-                f"{multiplier:.1f}× your plan cost.[/dim]\n"
+                f"{_format_plan_multiplier(multiplier)} your plan cost.[/dim]\n"
             )
         else:
             console.print(

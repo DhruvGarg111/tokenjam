@@ -247,6 +247,9 @@ def _print_savings_summary(savings: dict) -> None:
         f"[dim]({savings.get('decisions', 0)} decisions, label={savings.get('label')})[/dim]"
     )
     console.print(f"[dim]{escape(savings.get('disclaimer', ''))}[/dim]")
+    console.print(
+        "[dim]Run [bold]tj optimize[/bold] for detail on recoverable savings.[/dim]"
+    )
 
 
 def _collect_rows(config: TjConfig) -> list[PolicyRow]:
