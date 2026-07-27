@@ -230,7 +230,7 @@ def sum_windowed(
 def window_report(
     *,
     since: str | None,
-    applied: RelearnWindowTotal | None,
+    applied: dict[str, Any] | None,
     available: Sequence[str],
     unavailable_reason: str | None = None,
     clusters_in_window: int | None = None,
@@ -239,21 +239,24 @@ def window_report(
     """The block a route publishes so a reader can see WHICH window produced
     the figures beside it, and which population each figure covers.
 
-    ``since`` is what the caller asked for; ``applied`` is what actually
-    existed. They differ whenever a caller asks for a span the detector did not
+    ``since`` is what the caller asked for; ``applied`` is the windowed TOTAL
+    that actually existed (already serialized, since it comes off the JSON
+    cache). They differ whenever a caller asks for a span the detector did not
     precompute, and a surface that renders the requested label over figures
     computed for another one is the mixed-basis defect in miniature.
     """
     return {
         "since_requested": since,
-        "applied": applied.label if applied is not None else None,
-        "window_days": applied.window_days if applied is not None else None,
-        "window_start": applied.window_start if applied is not None else None,
-        "window_end": applied.window_end if applied is not None else None,
+        "applied": applied.get("label") if applied is not None else None,
+        "window_days": applied.get("window_days") if applied is not None else None,
+        "window_start": applied.get("window_start") if applied is not None else None,
+        "window_end": applied.get("window_end") if applied is not None else None,
         "available": list(available),
         "clusters_in_window": clusters_in_window,
         "clusters_omitted_outside_window": clusters_omitted,
-        "clusters_unknown": applied.clusters_unknown if applied is not None else None,
+        "clusters_unknown": (
+            applied.get("clusters_unknown") if applied is not None else None
+        ),
         "unavailable_reason": unavailable_reason,
         "population_note": (
             "the rows in this response cover the applied window only; the "

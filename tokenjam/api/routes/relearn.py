@@ -23,10 +23,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     agent_persona_mix,
@@ -42,6 +43,7 @@ from tokenjam.core.optimize import (
     relearn_proposals,
     relearn_store,
 )
+from tokenjam.core.optimize.relearn_window import resolve_window_label, window_report
 
 router = APIRouter()
 
@@ -184,8 +186,87 @@ def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
     }
 
 
+_NO_WINDOWED_FIGURES = (
+    "this cached result was produced before bounded window figures existed, so "
+    "no window could be applied. The rows below are the full unbounded "
+    "observation. Refresh the proposals to get windowed figures"
+)
+
+
+def _apply_window(
+    finding: Any, since: str | None,
+) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
+    """Bound a cached finding to a trailing window.
+
+    Returns ``(finding, window_block, windowed_total)``. The bounded figures were
+    computed by the DETECTOR and cached (see ``core/optimize/relearn_window.py``
+    for why they cannot be derived here: the cached cluster keeps a scalar
+    occurrence count, and the only surviving dates are on a three-item
+    newest-first example list). This function therefore SELECTS a precomputed
+    window; it never computes one.
+
+    Two populations exist in the result and both are named rather than blended.
+    The rows are the clusters with at least one occurrence inside the window; the
+    finding's own ``past_overspend_*`` totals still cover every cluster,
+    including the omitted ones, and ``past_overspend_windowed`` is the figure
+    that covers exactly the rows. ``window_block`` says how many were omitted, so
+    a shorter list is never mistaken for a quieter corpus.
+
+    A cache with no windowed figures at all cannot honor the window. Returning an
+    empty list would claim the window observed nothing and returning the
+    unbounded rows under the requested label would publish a corpus-wide total as
+    a 24-hour one, so the rows pass through unfiltered and the block states that
+    no window was applied and why.
+    """
+    available = list((finding or {}).get("past_overspend_windows") or {}) \
+        if isinstance(finding, dict) else []
+    if since is None:
+        return finding, window_report(
+            since=None, applied=None, available=available,
+        ), None
+    if not isinstance(finding, dict) or not available:
+        return finding, window_report(
+            since=since, applied=None, available=available,
+            unavailable_reason=_NO_WINDOWED_FIGURES,
+        ), None
+
+    label = resolve_window_label(since, available)
+    total = dict(finding["past_overspend_windows"][label])
+    clusters = finding.get("clusters") or []
+    kept: list[Any] = []
+    omitted = 0
+    for cluster in clusters:
+        windows = cluster.get("past_overspend_windows") if isinstance(cluster, dict) else None
+        bucket = (windows or {}).get(label) if isinstance(windows, dict) else None
+        if bucket is None:
+            # No windowed figure for this cluster: its occurrences carry no
+            # parseable timestamps, so whether it recurred in the window is
+            # UNKNOWN. Kept (dropping it would assert it did not) and stamped so
+            # a reader is not shown an absent figure as a zero one.
+            kept.append({**cluster, "window": None, "window_unknown": True})
+            continue
+        if not bucket.get("occurrences"):
+            omitted += 1
+            continue
+        kept.append({**cluster, "window": bucket, "window_unknown": False})
+
+    bounded = {**finding, "clusters": kept}
+    return bounded, window_report(
+        since=since, applied=total, available=available,
+        clusters_in_window=len(kept), clusters_omitted=omitted,
+    ), total
+
+
 @router.get("/relearn/proposals", dependencies=[Depends(require_api_key)])
-def get_relearn_proposals(request: Request) -> dict[str, Any]:
+def get_relearn_proposals(
+    request: Request,
+    since: str | None = Query(
+        None,
+        description="Lookback window (e.g. 30d, 7d, 24h). Bounds the clusters "
+                    "and the dollar figures to occurrences inside the window. "
+                    "Omit for the full unbounded observation.",
+    ),
+) -> dict[str, Any]:
     """Cached relearn-detector proposals for the Review inbox.
 
     Returns ``{"status": "ready"|"computing"|"never_run", "computed_at":
@@ -208,9 +289,37 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
     reads only on-disk Claude Code transcripts and therefore never surfaces
     anything for an SDK-dominant window, rather than reading as "you're doing
     great."
+
+    ``since`` bounds the result to a trailing window, using the same helper and
+    the same 400-on-malformed contract ``/cost``, ``/alerts``, ``/traces`` and
+    ``/optimize`` use. This endpoint previously took no window at all, so the
+    Dashboard's window selector governed three of its five Health tiles and
+    silently did nothing to "Pending fixes": the identical cluster list came back
+    for ``24h`` and ``90d``. The bounded figures come off the cache (the detector
+    computes them; see ``_apply_window``), so a ``since`` with no precomputed
+    bucket resolves to the NEAREST one and ``window.applied`` names which. Never
+    the label that was asked for, when that is not the label the figures were
+    computed under.
+
+    ``window``, ``past_overspend_windowed`` and ``data_span`` are always present.
+    ``past_overspend_windowed`` is ``None`` when no window was applied: an absent
+    figure, not a zero one.
     """
+    since_error: str | None = None
+    if since is not None:
+        from tokenjam.utils.time_parse import parse_since
+
+        try:
+            parse_since(since)
+        except ValueError as exc:
+            since_error = str(exc)
+    if since_error is not None:
+        raise HTTPException(status_code=400, detail=f"Invalid since: {since_error}")
+
     cached = relearn_store.read_cache(config=_config(request))
     computing = relearn_store.is_computing()
+    conn = _conn(request)
+    data_span = available_data_span(conn).to_dict()
     if cached is None:
         return {
             "status": "computing" if computing else "never_run",
@@ -218,6 +327,15 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "finding": None,
             "framing": _framing(request),
             "persona": _persona(request),
+            "window": window_report(
+                since=since, applied=None, available=[],
+                unavailable_reason=(
+                    "no detector result has been cached yet, so there is nothing "
+                    "to bound to a window"
+                ) if since is not None else None,
+            ),
+            "past_overspend_windowed": None,
+            "data_span": data_span,
         }
     finding = cached.get("finding")
     if isinstance(finding, dict):
@@ -225,12 +343,16 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
         # proposal id or the advise-only reason existed still resolves without
         # waiting for a recompute. Idempotent.
         finding = relearn_proposals.stamp_proposal_ids(finding)
+    finding, window, windowed_total = _apply_window(finding, since)
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": _with_example_resolvability(finding, _conn(request)),
+        "finding": _with_example_resolvability(finding, conn),
         "framing": _framing(request),
         "persona": _persona(request),
+        "window": window,
+        "past_overspend_windowed": windowed_total,
+        "data_span": data_span,
     }
 
 
