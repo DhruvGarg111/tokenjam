@@ -823,13 +823,35 @@ def run(ctx: AnalyzerContext) -> None:
             turn_rates = rates_at(t.provider, t.model, at)
             if turn_rates is None or turn_rates.cache_read_per_mtok <= 0:
                 continue
+            # `offloadable_share` is a SCOPE factor. It answers "how much of
+            # this tail is delegable work at all" — NOT what fraction of users
+            # will comply, and NOT a confidence haircut on a figure we believe.
+            # Read as a realization discount it invites a correction that does
+            # not apply, because there is no realization factor here to make
+            # consistent with anything.
+            #
+            # It is measured BEHAVIOURALLY (the share of context-introducing
+            # volume already routed through subagents, sampled from sessions
+            # that delegate at all) because the structural measure it stands in
+            # for — per-tool-call delegability — is computed nowhere in this
+            # tree. That is a known weakness of the proxy, not a preference;
+            # `_offloadable_share_disclosure` states it in the user-facing
+            # basis every time the figure is shown.
+            #
+            # Removing it would not undiscount this figure, it would enlarge
+            # the claim: the whole tail would then be asserted delegable.
+            #
+            # `model_downgrade`'s driver-role case carries no such factor and is
+            # NOT inconsistent with this — it scopes by SELECTION instead. See
+            # the paired note in `_driver_session_arithmetic`.
             offloadable_tail = tail_tokens * offloadable_share
             offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
             offload_tokens_total += round(offloadable_tail)
-            # Same tail at a hypothetical 100% share: the ceiling the share
-            # discount is applied to, kept so the card can separate "outside
-            # the tail definition" from "discounted by the measured share"
-            # rather than presenting one opaque gap.
+            # Same tail at a hypothetical full share: the ceiling the scope
+            # factor is applied to, kept so the card can separate "outside the
+            # tail definition" from "outside the measured delegable share"
+            # rather than presenting one opaque gap. (Deliberately not called a
+            # discount — see the note above on what kind of factor this is.)
             offload_ceiling_total += tail_tokens / 1_000_000 * turn_rates.cache_read_per_mtok
 
             # Right-sizing stacks independently: the same offloaded material
