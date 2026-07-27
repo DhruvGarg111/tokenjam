@@ -191,6 +191,71 @@ def test_anthropic_get_final_message_raise_never_escapes_the_wrapper():
 
 
 # ---------------------------------------------------------------------------
+# Streaming data-quality and call identity share one final message
+# ---------------------------------------------------------------------------
+#
+# Both are read off `get_final_message()`, and the wrapper calls it exactly
+# once. Nothing else in either feature's tests would notice if that single
+# call started serving only one of them, so these two pin the pairing.
+
+def test_anthropic_drained_stream_records_both_identity_and_usage():
+    """A completed stream stamps the provider's response id AND its usage.
+
+    The id names the API CALL rather than this observation of it, so a
+    backfill that later restates the same call is recognised instead of
+    counted twice. It is only available on the final message — the same
+    object the usage comes from.
+    """
+    from tokenjam.otel.semconv import GenAIAttributes
+    from tokenjam.sdk.integrations.anthropic import _StreamWrapper
+
+    span = _FakeSpan()
+
+    class _Identified(_FakeAnthropicStream):
+        def get_final_message(self):
+            message = super().get_final_message()
+            message.id = "msg_stream_01"
+            return message
+
+    stream = _Identified(
+        [_anthropic_text_event("Hi")],
+        final_usage=SimpleNamespace(input_tokens=90, output_tokens=12),
+    )
+
+    with _StreamWrapper(stream, span) as wrapped:
+        list(wrapped)
+
+    assert span.attributes[GenAIAttributes.RESPONSE_ID] == "msg_stream_01"
+    assert span.attributes[GenAIAttributes.OUTPUT_TOKENS] == 12
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is True
+
+
+def test_anthropic_undrained_stream_stamps_no_identity_and_still_reports_the_gap():
+    """No final message means neither fact is known — and saying so is the point.
+
+    An unstamped span is what every span carried before call identity existed,
+    so the accounting side degrades to its old behavior rather than inventing
+    an id; the data-quality signature must still be recorded, since "usage
+    missing" is the signal the analyzer exists to read.
+    """
+    from tokenjam.otel.semconv import GenAIAttributes
+    from tokenjam.sdk.integrations.anthropic import _StreamWrapper
+
+    span = _FakeSpan()
+    stream = _FakeAnthropicStream(
+        [_anthropic_text_event("Hel"), _anthropic_text_event("lo")],
+        final_usage=SimpleNamespace(input_tokens=90, output_tokens=12),
+    )
+
+    with _StreamWrapper(stream, span) as wrapped:
+        next(iter(wrapped))
+
+    assert GenAIAttributes.RESPONSE_ID not in span.attributes
+    assert span.attributes[TjAttributes.STREAMING] is True
+    assert span.attributes[TjAttributes.STREAM_USAGE_REPORTED] is False
+
+
+# ---------------------------------------------------------------------------
 # Proxy SSE tap
 # ---------------------------------------------------------------------------
 
