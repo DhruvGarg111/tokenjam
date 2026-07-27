@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterator
 
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.pricing import classify_pricing_source
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
 from tokenjam.core.models import (
@@ -380,6 +381,10 @@ def parse_claude_code_session(
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_creation,
         )
+        # Provenance for cost_usd (mirrors CostEngine.process_span on the live
+        # path — backfilled spans are pre-priced and never reach it, see
+        # ingest.py's was_pre_priced handling, so it's stamped here instead).
+        pricing_source = classify_pricing_source(provider, model)
         # Persist the cache read/write split, mirroring the live ingest path
         # (#245). cache_tokens = cache-READ only; cache_write_tokens =
         # cache-CREATION (priced higher). Collapsing them into one field made
@@ -433,6 +438,7 @@ def parse_claude_code_session(
             cache_tokens=cache_read,
             cache_write_tokens=cache_creation,
             cost_usd=cost,
+            pricing_source=pricing_source,
             request_type="completion",
             conversation_id=sid_str,
             attributes=llm_attrs,

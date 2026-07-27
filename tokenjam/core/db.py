@@ -106,7 +106,9 @@ class StorageBackend(Protocol):
     # used to satisfy by reaching into `db.conn` directly. Having them on the
     # protocol keeps those paths behind the abstraction and lets InMemoryBackend
     # exercise them in unit tests.
-    def update_span_cost(self, span_id: str, cost_usd: float) -> None: ...
+    def update_span_cost(
+        self, span_id: str, cost_usd: float, pricing_source: str | None = None,
+    ) -> None: ...
     def increment_session_cost(self, session_id: str, delta_usd: float) -> None: ...
     def get_distinct_agent_ids(self) -> list[str]: ...
     def get_active_session(self, agent_id: str) -> SessionRecord | None: ...
@@ -198,7 +200,7 @@ _SPAN_BULK_COLUMNS: tuple[str, ...] = (
     "request_type", "conversation_id", "events", "billing_account",
     "cache_write_tokens", "request_params", "request_tools", "sub_agent_id",
     "tenant_id", "feature", "environment", "service_version", "commit_sha",
-    "prompt_template_id", "prompt_template_version",
+    "prompt_template_id", "prompt_template_version", "pricing_source",
 )
 
 # read_json column -> type. Timestamps are read as VARCHAR and cast to TIMESTAMPTZ
@@ -219,6 +221,7 @@ _SPAN_BULK_READ_TYPES: dict[str, str] = {
     "tenant_id": "VARCHAR", "feature": "VARCHAR", "environment": "VARCHAR",
     "service_version": "VARCHAR", "commit_sha": "VARCHAR",
     "prompt_template_id": "VARCHAR", "prompt_template_version": "VARCHAR",
+    "pricing_source": "VARCHAR",
 }
 
 # Columns that need a cast in the SELECT (read as VARCHAR, stored as TIMESTAMPTZ).
@@ -298,6 +301,7 @@ def _span_to_json_obj(span: NormalizedSpan) -> dict:
         "commit_sha": span.commit_sha,
         "prompt_template_id": span.prompt_template_id,
         "prompt_template_version": span.prompt_template_version,
+        "pricing_source": span.pricing_source,
     }
 
 
@@ -621,6 +625,16 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_id       TEXT;\n"
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS prompt_template_version  TEXT"
     )),
+    # Migration 18: pricing_source on spans — provenance for cost_usd (HOW the
+    # rate resolved: exact / date_stripped / context_tag / override /
+    # default_fallback — see pricing.classify_pricing_source). Nullable;
+    # existing spans stay NULL on upgrade (their provenance was never
+    # recorded and can't be reconstructed after the fact). Populated going
+    # forward by CostEngine.process_span at ingest. Root-caused by an unpriced
+    # model (no models.toml row) silently pricing its cache tokens at zero via
+    # calculate_cost's fallback — the fallback figure and a real rate were
+    # otherwise indistinguishable once only cost_usd remained.
+    (18, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS pricing_source TEXT"),
 ]
 
 
@@ -652,6 +666,7 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("spans",    "commit_sha",              "TEXT"),               # migration 17
     ("spans",    "prompt_template_id",      "TEXT"),               # migration 17
     ("spans",    "prompt_template_version", "TEXT"),               # migration 17
+    ("spans",    "pricing_source",          "TEXT"),               # migration 18
 ]
 
 
@@ -971,6 +986,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         commit_sha=d.get("commit_sha"),
         prompt_template_id=d.get("prompt_template_id"),
         prompt_template_version=d.get("prompt_template_version"),
+        pricing_source=d.get("pricing_source"),
     )
 
 
@@ -1390,10 +1406,10 @@ class DuckDBBackend:
                 "request_type, conversation_id, events, billing_account, "
                 "cache_write_tokens, request_params, request_tools, sub_agent_id, "
                 "tenant_id, feature, environment, service_version, commit_sha, "
-                "prompt_template_id, prompt_template_version"
+                "prompt_template_id, prompt_template_version, pricing_source"
                 ") VALUES "
                 "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
-                "$29,$30,$31,$32,$33,$34,$35)",
+                "$29,$30,$31,$32,$33,$34,$35,$36)",
                 [
                     span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                     span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -1407,6 +1423,7 @@ class DuckDBBackend:
                     span.sub_agent_id,
                     span.tenant_id, span.feature, span.environment, span.service_version,
                     span.commit_sha, span.prompt_template_id, span.prompt_template_version,
+                    span.pricing_source,
                 ],
             )
 
@@ -2315,12 +2332,28 @@ class DuckDBBackend:
 
     # -- issue #309: queries moved off direct db.conn access in callers --
 
-    def update_span_cost(self, span_id: str, cost_usd: float) -> None:
+    def update_span_cost(
+        self, span_id: str, cost_usd: float, pricing_source: str | None = None,
+    ) -> None:
+        """Persist a computed span cost, optionally stamping its provenance.
+
+        `pricing_source` is `None` for callers that only know the dollar
+        figure (existing tests, any future caller that hasn't adopted
+        provenance yet) — in that case the column is left untouched rather
+        than overwritten with NULL, so a span's recorded provenance from an
+        earlier call is never silently erased by a later cost-only update.
+        """
         with self._write_lock:
-            self.conn.execute(
-                "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
-                [cost_usd, span_id],
-            )
+            if pricing_source is not None:
+                self.conn.execute(
+                    "UPDATE spans SET cost_usd = $1, pricing_source = $2 WHERE span_id = $3",
+                    [cost_usd, pricing_source, span_id],
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
+                    [cost_usd, span_id],
+                )
 
     def increment_session_cost(self, session_id: str, delta_usd: float) -> None:
         with self._write_lock:

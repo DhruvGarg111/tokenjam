@@ -230,3 +230,38 @@ def test_cost_engine_no_op_when_provider_missing(db: InMemoryBackend, engine: Co
     engine.process_span(span)
 
     assert _span_cost(db, span) is None
+
+
+def _span_pricing_source(db: InMemoryBackend, span) -> str | None:
+    for s in db.get_trace_spans(span.trace_id):
+        if s.span_id == span.span_id:
+            return s.pricing_source
+    return None
+
+
+def test_cost_engine_stamps_pricing_source_exact(db: InMemoryBackend, engine: CostEngine) -> None:
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=1000, output_tokens=200,
+    )
+    db.insert_span(span)
+
+    engine.process_span(span)
+
+    assert span.pricing_source == "exact"
+    assert _span_pricing_source(db, span) == "exact"
+
+
+def test_cost_engine_stamps_pricing_source_default_fallback(
+    db: InMemoryBackend, engine: CostEngine,
+) -> None:
+    span = make_llm_span(
+        provider="never_seen_provider", model="never_seen_model",
+        input_tokens=1000, output_tokens=200,
+    )
+    db.insert_span(span)
+
+    engine.process_span(span)
+
+    assert span.pricing_source == "default_fallback"
+    assert _span_pricing_source(db, span) == "default_fallback"
