@@ -124,11 +124,6 @@ def _render_reuse_report(
     """
     from tokenjam import __version__
     from tokenjam.core.export.reuse_report import write_reuse_report
-    from tokenjam.core.framing import (
-        dominant_plan,
-        plan_tier_mix,
-        pricing_mode_for,
-    )
     from tokenjam.core.optimize import build_report, report_from_dict
     from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -160,7 +155,6 @@ def _render_reuse_report(
         report = report_from_dict(resp)
         finding = report.findings.get("reuse")
         planning_texts = resp.get("planning_texts") or {}
-        pricing_mode = resp.get("pricing_mode", "unknown")
     else:
         try:
             since_dt = parse_since(since)
@@ -173,9 +167,11 @@ def _render_reuse_report(
             agent_id=agent_id, findings=["reuse"],
         )
         finding = report.findings.get("reuse")
-        pricing_mode = pricing_mode_for(
-            dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
-        )
+
+    # Always "api": the Reuse report no longer differentiates its
+    # recoverable figures by billing mode (product decision — dollars are
+    # always legitimate regardless of subscription vs API billing).
+    pricing_mode = "api"
 
     if finding is None or not finding.clusters:
         console.print(
