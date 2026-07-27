@@ -8227,10 +8227,11 @@ function diffBlocks(diffText) {
 }
 
 function SummarizeView({ params }) {
-  // Flow: engine (capability gate) → curate → run → review. The engine is
-  // chosen per visit (page starts on the gate, never defaulted).
-  const [phase, setPhase] = useState('engine');
-  const [engine, setEngine] = useState(null);          // 'api' | 'claude-p' | 'manual'
+  // Flow: curate (landing — candidates load immediately, no tool choice) →
+  // run → review. Looking is free; the engine is only demanded inline, at
+  // the Finish/Approve step, the moment a rewrite is actually requested.
+  const [phase, setPhase] = useState('curate');
+  const [engine, setEngine] = useState(null);          // 'api' | 'claude-p' | 'manual'; chosen at Approve time
   const [caps, setCaps] = useState(null);
   const [capErr, setCapErr] = useState(null);
 
@@ -8239,7 +8240,9 @@ function SummarizeView({ params }) {
   const [staged, setStaged] = useState([]);            // staged records (CheckVerdict + source_sha256)
   const [backups, setBackups] = useState([]);          // applied files that still have a gzip backup (undo surface)
   const [dataErr, setDataErr] = useState(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true: the mount effect always kicks off a scan, so the very first
+  // render must show the loading treatment, never an unearned "no candidates".
+  const [loading, setLoading] = useState(true);
   const [recursive, setRecursive] = useState(false);
   const [repoScope, setRepoScope] = useState(false);
   const scanSeq = useRef(0);   // discards a slower earlier scan's response (out-of-order landing)
@@ -8316,10 +8319,12 @@ function SummarizeView({ params }) {
     catch (e) { /* backups are a convenience surface; don't block the screen on them */ }
   };
 
-  // Mount: capabilities (which engines work) + any already-staged work, so the
-  // start screen can offer "review N staged" WITHOUT forcing an engine choice
-  // (reviewing/applying staged rewrites needs no LLM — only running does).
-  useEffect(() => { loadCaps(); loadStaged(); loadBackups(); }, []);
+  // Mount: candidates (so the landing view is the list, not a gate), engine
+  // capabilities (needed once the user reaches Approve), and any already-staged
+  // work, so the screen can also offer "review N staged" WITHOUT forcing an
+  // engine choice (reviewing/applying staged rewrites needs no LLM — only
+  // running does; looking never needed one either).
+  useEffect(() => { loadScan(); loadCaps(); loadStaged(); loadBackups(); }, []);
 
   // While a batch run is in flight, tick once a second so the in-flight row shows
   // live elapsed time (a claude-p file can take 30-90s; silence reads as "hung").
@@ -8330,7 +8335,22 @@ function SummarizeView({ params }) {
     return () => clearInterval(id);
   }, [runActive]);
 
-  const pickEngine = e => { setEngine(e); setPhase('curate'); loadScan(); };
+  // Engine card renderer, shared by the inline picker inside the Approve
+  // modal (the only place a tool is ever demanded — see the Finish/Approve
+  // footer below). Picking a card just sets `engine`; the picker step and the
+  // "run via X" confirm step stay separate clicks so an unavailable engine's
+  // reason is visible before anything runs.
+  const eng = (id, name, tag, desc) => {
+    const cap = caps ? caps[id] : null;
+    const avail = cap ? cap.available : false;
+    const val = id === 'claude_p' ? 'claude-p' : id;
+    return html`<button class="sz-engine" disabled=${!avail} onClick=${() => avail && setEngine(val)}>
+      <div class="sz-eng-name">${name}</div>
+      <div class="sz-eng-tag">${tag}</div>
+      <div class="sz-eng-desc">${desc}</div>
+      ${!avail && cap && cap.reason ? html`<div class="sz-eng-off badge badge-closed">${cap.reason}</div>` : null}
+    </button>`;
+  };
 
   // ---- curator ----
   const seg = (val, set, opts, label) => html`
@@ -8505,41 +8525,6 @@ function SummarizeView({ params }) {
   };
 
   // ======================= RENDER =======================
-  if (phase === 'engine') {
-    const eng = (id, name, tag, desc) => {
-      const cap = caps ? caps[id] : null;
-      const avail = cap ? cap.available : false;
-      const val = id === 'claude_p' ? 'claude-p' : id;
-      return html`<button class="sz-engine" disabled=${!avail} onClick=${() => avail && pickEngine(val)}>
-        <div class="sz-eng-name">${name}</div>
-        <div class="sz-eng-tag">${tag}</div>
-        <div class="sz-eng-desc">${desc}</div>
-        ${!avail && cap && cap.reason ? html`<div class="sz-eng-off badge badge-closed">${cap.reason}</div>` : null}
-      </button>`;
-    };
-    return html`
-      <div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>
-      <div class="page-title">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
-      <div class="sz-note">Rewrites prose only: code, tables, and <code>${'<tj-keep>'}</code> blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
-      ${staged.length ? html`<div class="cur-tally" style="cursor:pointer;margin-top:14px" onClick=${() => setPhase('review')}>
-        <div class="cur-tally-head">
-          <div class="cur-tally-count">${staged.length} <small>staged rewrite(s) ready to review; no engine needed</small></div>
-          <div class="cur-tally-hint">Review & apply →</div>
-        </div>
-      </div>` : null}
-      ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:8px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone: <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
-      <div class="sz-sub" style="font-weight:600;margin:18px 0 2px">Summarize new files</div>
-      <div class="sz-note" style="margin-bottom:6px">How to produce the summaries:</div>
-      ${capErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">Couldn't load engine availability: ${capErr}</div></div>` : null}
-      ${!caps && !capErr ? html`<div class="shimmer" style="height:140px"></div>` : null}
-      ${caps ? html`<div class="sz-engines">
-        ${eng('api', 'API', '$ at cost · your key', 'Calls Anthropic with your key. Billed per rewrite; the review shows cost and break-even.')}
-        ${eng('claude_p', 'Claude CLI', 'against your Claude limits', html`Runs the local <code>claude</code> CLI against your Claude limits, with no dollar cost. Local host only.`)}
-        ${eng('manual', 'Manual', 'no outbound calls', 'Copy a ready-made prompt into any Claude session, paste the reply back. Nothing leaves this machine.')}
-      </div>` : null}
-    `;
-  }
-
   if (phase === 'run' && engine !== 'manual') {
     const rs = runState || { total: runList.length, done: 0, current: null, results: [], running: true };
     const pct = rs.total ? Math.round(rs.done / rs.total * 100) : 100;
@@ -8606,7 +8591,7 @@ function SummarizeView({ params }) {
     const mst = mf ? stOf(mf.path) : null;
     const mfBlocks = mf ? diffBlocks(mf.diff) : [];
     return html`
-      <div style="margin:0 0 4px"><span class="sz-link" onClick=${() => setPhase(engine ? 'curate' : 'engine')}>← ${engine ? 'back to curator' : 'back to start'}</span></div>
+      <div style="margin:0 0 4px"><span class="sz-link" onClick=${() => setPhase('curate')}>← back to curator</span></div>
       <div class="page-title">Summarize <span class="sz-sub">· review & apply</span></div>
       <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b> — click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
       ${dataErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${dataErr}</div></div>` : null}
@@ -8649,7 +8634,7 @@ function SummarizeView({ params }) {
         <span class="dim" style="font-size:12px">Click a row for its diff.</span>
         <a class="cur-btn" style="margin-left:auto;text-decoration:none" href="#/optimize">Done → Optimize</a>
       </div>
-      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved — ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase(engine ? 'curate' : 'engine')}>summarize more →</span></div>` : null}
+      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved — ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase('curate')}>summarize more →</span></div>` : null}
 
       ${backups.length ? html`<div class="opt-section" style="margin:16px 0 4px">
         <div class="opt-title" style="font-size:14px;margin-bottom:2px">Applied earlier — undo</div>
@@ -8698,10 +8683,15 @@ function SummarizeView({ params }) {
     `;
   }
 
-  // phase === 'curate'
+  // phase === 'curate': the landing view. Candidates are fetched on mount
+  // (see the useEffect above) and shown here with no engine choice required:
+  // looking is free, only producing a rewrite (Finish → Approve, below) asks
+  // which tool to use.
   return html`
-    <div style="margin:0 0 4px"><a class="sz-link" href="#/optimize">← Optimize</a> <span class="dim" style="font-size:12px">· engine: ${engine} · <span class="sz-link" onClick=${() => setPhase('engine')}>change</span></span></div>
-    <div class="page-title">Summarize <span class="sz-sub">· curator — pick files to summarize</span></div>
+    <div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>
+    <div class="page-title">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
+    <div class="sz-note">Rewrites prose only: code, tables, and <code>${'<tj-keep>'}</code> blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
+    ${engine ? html`<div class="dim" style="font-size:12px;margin-top:4px">engine: ${engine} · <span class="sz-link" onClick=${() => setEngine(null)}>change</span></div>` : null}
 
     <div class=${'cur-tally' + (addedList.length ? '' : ' empty')} onClick=${() => addedList.length && openModal('review')}>
       <div class="cur-tally-head">
@@ -8712,6 +8702,7 @@ function SummarizeView({ params }) {
     </div>
 
     ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI — <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
+    ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:4px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone: <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
 
     <div class="cur-filters">
       ${seg(kind, setKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
@@ -8767,31 +8758,46 @@ function SummarizeView({ params }) {
     </div>
     ` : null}
 
-    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine} — you review each rewrite before applying.</div>
+    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> ${engine ? html`runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine}` : 'asks which tool to use, then runs the summarizer'} — you review each rewrite before applying.</div>
 
     ${modal ? html`
       <div class="cur-overlay" onClick=${() => setModal(null)}>
         <div class="cur-modal" onClick=${e => e.stopPropagation()}>
           <div class="cur-modal-head">
-            <span class="cur-modal-title">${modal === 'approve' ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'Basket — ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
+            <span class="cur-modal-title">${modal === 'approve' ? (engine ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'How should we summarize ' + added.size + ' file' + (added.size === 1 ? '' : 's') + '?') : 'Basket — ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
             <button class="cur-modal-x" onClick=${() => setModal(null)} title="Close — go back and change">✕</button>
           </div>
           <div class="cur-modal-body">
-            <input class="cur-search" style="width:100%;margin-bottom:10px" placeholder="search basket…" value=${mQuery} onInput=${e => setMQuery(e.target.value)} />
-            ${modalList.length === 0
-              ? html`<div class="dim" style="padding:14px;text-align:center">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
-              : modalList.map((c, i) => html`<div class="cur-mrow" key=${i}>
-                  <span class="path">${c.path}</span>
-                  <span class="dim mono" style="font-size:12px">~${c.est_tokens_saved} tok/call</span>
-                  <button class="rm" title="Remove from basket" onClick=${() => removeAdded(c.path)}>✕</button>
-                </div>`)}
+            ${modal === 'approve' && !engine ? html`
+              <div class="sz-note" style="margin:0 0 10px">Looking is free; producing a rewrite needs a tool. How to produce the summaries:</div>
+              ${capErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">Couldn't load engine availability: ${capErr}</div></div>` : null}
+              ${!caps && !capErr ? html`<div class="shimmer" style="height:140px"></div>` : null}
+              ${caps ? html`<div class="sz-engines">
+                ${eng('api', 'API', '$ at cost · your key', 'Calls Anthropic with your key. Billed per rewrite; the review shows cost and break-even.')}
+                ${eng('claude_p', 'Claude CLI', 'against your Claude limits', html`Runs the local <code>claude</code> CLI against your Claude limits, with no dollar cost. Local host only.`)}
+                ${eng('manual', 'Manual', 'no outbound calls', 'Copy a ready-made prompt into any Claude session, paste the reply back. Nothing leaves this machine.')}
+              </div>` : null}
+            ` : html`
+              <input class="cur-search" style="width:100%;margin-bottom:10px" placeholder="search basket…" value=${mQuery} onInput=${e => setMQuery(e.target.value)} />
+              ${modalList.length === 0
+                ? html`<div class="dim" style="padding:14px;text-align:center">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
+                : modalList.map((c, i) => html`<div class="cur-mrow" key=${i}>
+                    <span class="path">${c.path}</span>
+                    <span class="dim mono" style="font-size:12px">~${c.est_tokens_saved} tok/call</span>
+                    <button class="rm" title="Remove from basket" onClick=${() => removeAdded(c.path)}>✕</button>
+                  </div>`)}
+            `}
           </div>
           <div class="cur-modal-foot">
-            <button class="cur-btn" disabled=${modalList.length === 0} onClick=${clearShownModal}>Clear shown</button>
-            <button class="cur-btn" disabled=${added.size === 0} onClick=${clearAll}>Clear all</button>
-            ${modal === 'approve'
-              ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ' — prep first →' : 'Approve ' + added.size + ' — run via ' + engine + ' →'}</button>`
-              : html`<button class="cur-btn primary" style="margin-left:auto" onClick=${() => setModal(null)}>Done</button>`}
+            ${modal === 'approve' && !engine ? html`
+              <button class="cur-btn" style="margin-left:auto" onClick=${() => setModal(null)}>Cancel</button>
+            ` : html`
+              <button class="cur-btn" disabled=${modalList.length === 0} onClick=${clearShownModal}>Clear shown</button>
+              <button class="cur-btn" disabled=${added.size === 0} onClick=${clearAll}>Clear all</button>
+              ${modal === 'approve'
+                ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ' — prep first →' : 'Approve ' + added.size + ' — run via ' + engine + ' →'}</button>`
+                : html`<button class="cur-btn primary" style="margin-left:auto" onClick=${() => setModal(null)}>Done</button>`}
+            `}
           </div>
         </div>
       </div>` : null}
