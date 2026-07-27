@@ -3930,42 +3930,21 @@ def test_the_applied_panel_gates_on_its_own_read_not_a_page_wide_flag(html):
     assert skel.count("shimmer") == 4
 
 
-# --- Dashboard qualifier banner: early framing from /relearn/proposals ------- #
-def test_dashboard_qualifier_banner_uses_early_framing(html):
-    """The qualifier banner must not wait behind /cost's full-corpus scan when
-    /relearn/proposals already carries the identical window-INDEPENDENT
-    framing fields (qualifier_text/pricing_mode/plan_tier/display_rule),
-    answering in a fraction of the time."""
+# --- Dashboard qualifier banner: removed by product decision ---------------- #
+def test_dashboard_qualifier_banner_is_removed(html):
+    """The subscription-billed qualifier banner ("N% of sessions are
+    subscription-billed...") no longer renders on the Dashboard: subsidized AI
+    pricing is common knowledge now, so the caveat was removed by product
+    decision. `earlyFraming` (the /relearn/proposals early-read wiring that
+    existed only to make this banner appear sooner) is dead with it."""
     dash = _dashboard_src(html)
-    assert "const earlyFraming = (relearnRead.data && relearnRead.data.framing) || framing;" in dash
-    banner_start = dash.index("The pricing-mode caveat")
-    banner = dash[banner_start: dash.index("</div>` : null}", banner_start) + len("</div>` : null}")]
-    assert "earlyFraming && earlyFraming.qualifier_text" in banner
-    assert "html`<div class=\"qualifier\">${earlyFraming.qualifier_text}</div>`" in banner
-    # The skeleton is gated on BOTH reads being unanswered, not just /cost —
-    # otherwise a landed /relearn read with no qualifier would still show the
-    # skeleton, misrepresenting "known and empty" as "not yet known".
-    assert "(!costData && !relearnRead.data)" in banner
-
-
-def test_dashboard_window_scoped_framing_consumers_are_not_repointed(html):
-    """Only the qualifier banner may read `earlyFraming`. Every OTHER consumer
-    of the framing block in DashboardView needs real window totals
-    (window_total_tokens / window_total_cost_usd), which /relearn/proposals
-    hardcodes to 0 — repointing any of these to `earlyFraming` would silently
-    zero out a real figure."""
-    dash = _dashboard_src(html)
-    # useTokens (pricing-mode switch for the run-rate projection).
+    assert "earlyFraming" not in dash
+    assert "qualifier_text" not in dash
+    assert 'class="qualifier"' not in dash
+    assert "qualifier-skel" not in dash
+    # Every other framing consumer in DashboardView is untouched — the removal
+    # was scoped to the banner only, never to `framing` itself.
     assert "const useTokens = !!framing && (framing.pricing_mode" in dash
-    # The run-rate projection's dollar formatting.
     assert "fmtFramedDollar(projected, framing)" in dash
-    # PlanBadge.
     assert "<${PlanBadge} framing=${framing} />" in dash
-    # The Recoverable-waste tiles' fmtFramedSavings call (FIX 4's own site) —
-    # this one needs window totals for its "% of cycle tokens" branch.
     assert "fmtFramedSavings(t.usd, t.tokens, framing)" in dash
-    # None of the above may have been swapped to earlyFraming.
-    assert "useTokens = !!earlyFraming" not in dash
-    assert "fmtFramedDollar(projected, earlyFraming)" not in dash
-    assert "framing=${earlyFraming}" not in dash
-    assert "fmtFramedSavings(t.usd, t.tokens, earlyFraming)" not in dash

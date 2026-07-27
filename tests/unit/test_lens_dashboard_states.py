@@ -352,9 +352,13 @@ def test_the_chart_placeholder_matches_the_chart_height(html):
     assert 'loading && !resp ? html`<div class="shimmer" style="height:220px"></div>`' in html
 
 
-def test_the_pricing_qualifier_holds_its_slot_while_unknown(html):
-    # It appeared 27 seconds in and shoved both triage bands down the page.
-    assert 'class="qualifier qualifier-skel"' in html
+def test_the_pricing_qualifier_banner_is_gone(html):
+    # The subscription-billed pricing qualifier (and its loading skeleton) used
+    # to hold a slot on the Dashboard while /cost or /relearn/proposals had not
+    # yet answered. The banner itself was removed by product decision, so
+    # there is no slot left to hold and no skeleton left to render.
+    assert 'class="qualifier qualifier-skel"' not in html
+    assert 'class="qualifier"' not in html
 
 
 def test_no_panel_is_gated_on_a_page_wide_load_flag(html):

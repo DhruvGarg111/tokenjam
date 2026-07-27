@@ -815,17 +815,6 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 /* "Already optimized" recoverable-tile state (#127) — positive, not a warning. */
 a.rec-tile.ok:hover { border-color: var(--success); }
 .rec-amount.ok { color: var(--success); font-size: 15px; }
-.qualifier {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--warn);
-  border-radius: 4px;
-  padding: 8px 12px;
-  margin-bottom: 16px;
-  font-family: 'Geist Mono', monospace;
-  font-size: 12px;
-  color: var(--text-dim);
-}
 .plan-badge {
   display: inline-flex;
   align-items: center;
@@ -974,13 +963,6 @@ a.health-tile.attn { border-color: var(--warn); }
    heights track the compact tile's own font sizes (.tile-grid.compact sets
    .rec-name 12px, .rec-amount 15px, .rec-hint 10px). */
 .rec-skel { pointer-events: none; }
-/* The qualifier bar's slot while its text is unknown: the real bar's box, its
-   own left accent dropped (there is nothing yet to caveat) and two lines of the
-   height the real two-line caveat renders at. The fill is dropped too, because
-   .shimmer's own gradient runs through var(--surface2) — the same colour the real
-   bar is filled with — so on the filled box the placeholder bars were invisible
-   and the slot read as an empty grey rectangle. */
-.qualifier-skel { border-left-color: var(--border); background: transparent; }
 .band-msg {
   border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
   padding: 12px 14px; font-size: 12.5px; color: var(--text-dim);
@@ -6019,9 +6001,6 @@ function CostView({ params }) {
         <button class="btn" onClick=${load}>Retry</button>
       </div>` : null}
 
-    ${!error && framing && framing.qualifier_text ? html`
-      <div class="qualifier">${framing.qualifier_text}</div>` : null}
-
     ${!error ? html`
       <div class="chart-card">
         <div class="chart-head">
@@ -6671,10 +6650,11 @@ function capitalize(name) {
 // Mirror core/framing's dollars-by-default rule: dollars unless the server
 // explicitly suppressed them (local inference, or an all-unknown plan mix —
 // see dollarsSuppressed below). Subscription no longer suppresses: dollars
-// price all traffic at API list rates and render with framing.qualifier_text
-// carrying the list-price-equivalent caveat. The `window_total_tokens`
-// token-share fallback stays for the rare case a payload only carries
-// `display_rule`-less legacy framing (pricing_mode-only fallback below).
+// price all traffic at API list rates, a list-price equivalent rather than an
+// amount billed (no caveat banner renders for this any more — product
+// decision). The `window_total_tokens` token-share fallback stays for the
+// rare case a payload only carries `display_rule`-less legacy framing
+// (pricing_mode-only fallback below).
 function fmtFramedSavings(usd, tokens, framing) {
   // `framing == null` means "not yet known" (the read that would carry it
   // hasn't landed), NOT "no suppression needed" — dollarsSuppressed(null)
@@ -7331,7 +7311,6 @@ function OptimizeView({ params }) {
     ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
 
     ${!st.loading && st.opt ? html`
-      ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
       ${waste ? html`
         <div class="chart-card">
           <div class="chart-head">
@@ -8325,8 +8304,6 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
     </div>
 
     ${error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load analytics: ${error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
-
-    ${!error && framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
     ${!error && kpis ? (() => {
       // The Spend tile follows the server framing block (single source, never
@@ -10877,24 +10854,12 @@ function DashboardView({ params }) {
 
   // Everything derived from /cost is derived from the ANSWER, never from an empty
   // object standing in for one. `costData` is null until the read lands, and each
-  // consumer below checks it: framing (so PlanBadge and the qualifier stay absent
-  // rather than asserting a plan we have not read), the window total, and the
-  // run-rate caption.
+  // consumer below checks it: framing (so PlanBadge stays absent rather than
+  // asserting a plan we have not read), the window total, and the run-rate
+  // caption.
   const costData = costRead.data;
   const cost = costData || {};
   const framing = costData ? (cost.framing || null) : null;
-  // The qualifier banner only needs the window-INDEPENDENT half of framing
-  // (qualifier_text/pricing_mode/plan_tier/display_rule) — the plan-mix scan
-  // that produces it is the same one /relearn/proposals already runs and
-  // caches, which answers in ~16ms against the same full-corpus mix, versus
-  // /cost's ~27s on a large corpus (#see the read-timing note above). Using
-  // it ONLY for the banner lets the qualifier appear immediately instead of
-  // waiting behind /cost. Never use this for a window-scoped figure: relearn's
-  // own window_total_tokens/window_total_cost_usd are hardcoded to 0, so any
-  // consumer that needs real window totals (the KPI run-rate caption, the
-  // "% of cycle tokens" branch in fmtFramedSavings) must keep reading `framing`
-  // (from costData) instead.
-  const earlyFraming = (relearnRead.data && relearnRead.data.framing) || framing;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   // Series only used to gate the run-rate projection (the chart itself is the
   // explorer's now — spend de-dup); window total drives the run-rate caption.
@@ -10965,21 +10930,6 @@ function DashboardView({ params }) {
       </div>
       <div class="filters" style="margin:0">${winPicker}</div>
     </div>
-    ${/* The pricing-mode caveat, and a placeholder holding its slot while
-          neither /cost nor /relearn/proposals has answered yet. This used to
-          gate on /cost alone, which pays a full-corpus scan (~27s on a large
-          corpus) for a qualifier that is window-INDEPENDENT — /relearn/
-          proposals runs the identical plan-mix scan and caches it (~16ms),
-          so `earlyFraming` lets the caveat appear as soon as EITHER read
-          lands, without the placeholder shoving both triage bands down the
-          page for the length of the slower read. */ ''}
-    ${earlyFraming && earlyFraming.qualifier_text
-      ? html`<div class="qualifier">${earlyFraming.qualifier_text}</div>`
-      : (!costData && !relearnRead.data) ? html`<div class="qualifier qualifier-skel" aria-hidden="true">
-          <div class="shimmer" style="height:11px;width:78%"></div>
-          <div class="shimmer" style="height:11px;width:46%;margin-top:5px"></div>
-        </div>` : null}
-
     ${/* A past-overspend hero band rendered here once. Removed: it read as heavy
           at the top of the page, and the figure now lives as a compact tile on
           the Review inbox, which is the surface you act on it from.
