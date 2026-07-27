@@ -3988,11 +3988,14 @@ def test_summarize_back_link_is_not_the_brand_blue_sz_link(html):
     view = _summarize_engine_view(html)
     assert '<a class="sz-back-link" href="#/optimize">← Optimize</a>' in view
     assert '<a class="sz-link" href="#/optimize">← Optimize</a>' not in view
-    # The new class must actually be monochrome (no var(--brand) anywhere in
-    # its definition), with a non-color hover affordance so it doesn't read
-    # as inert text.
-    assert ".sz-back-link { color: var(--text-dim); text-decoration: none; }" in html
-    assert ".sz-back-link:hover { color: var(--text); text-decoration: underline; }" in html
+    # Founder instruction, verbatim: the back link and its text must be white.
+    # It's full-brightness (var(--text)) at rest — NOT var(--text-dim) — with
+    # the underline-on-hover as its non-color clickable affordance, since a
+    # brighten-on-hover signal isn't available once the resting state is
+    # already full strength.
+    assert ".sz-back-link { color: var(--text); text-decoration: none; }" in html
+    assert ".sz-back-link { color: var(--text-dim); text-decoration: none; }" not in html
+    assert ".sz-back-link:hover { text-decoration: underline; }" in html
 
 
 def test_summarize_back_link_has_breathing_room_before_heading(html):
@@ -4005,10 +4008,14 @@ def test_summarize_back_link_has_breathing_room_before_heading(html):
 
 def test_summarize_disabled_reason_is_not_amber(html):
     # "set TJ_ANTHROPIC_API_KEY to enable" used to render in var(--warn)
-    # (amber/yellow) via a bespoke .sz-eng-off color rule. It now reuses the
-    # existing (previously unused) monochrome .badge-closed treatment instead
-    # of introducing a new color.
+    # (amber/yellow) via a bespoke .sz-eng-off color rule. Founder instruction,
+    # repeated: this text must be white, not just "not amber" — so it keeps
+    # the .badge-closed pill's recessed background (still legible with white
+    # text in both themes) but its own .sz-eng-off.badge-closed rule pins the
+    # text color back to var(--text), overriding .badge-closed's normal
+    # var(--text-dim).
     assert ".sz-eng-off { font-size: 12px; color: var(--warn); margin-top: 10px; }" not in html
+    assert ".sz-eng-off.badge-closed { color: var(--text); }" in html
     view = _summarize_engine_view(html)
     assert '<div class="sz-eng-off badge badge-closed">${cap.reason}</div>' in view
 

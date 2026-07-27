@@ -1584,12 +1584,12 @@ code.md-code {
 .inbox-more { font-size: 11.5px; margin-top: 4px; }
 
 /* Summarize back link — deliberately NOT the brand-blue .sz-link: this one
-   isn't an in-flow action, it's page chrome, so it reads white/dim by default
-   and gets its clickable affordance from the arrow glyph plus a hover
-   underline + brighten (same brighten-on-hover language as .sz-engine below),
-   never from color alone. */
-.sz-back-link { color: var(--text-dim); text-decoration: none; }
-.sz-back-link:hover { color: var(--text); text-decoration: underline; }
+   isn't an in-flow action, it's page chrome. Founder instruction: white text,
+   not blue. It's already full-brightness at rest, so brighten-on-hover isn't
+   available as a hover signal here — the affordance is the leading arrow
+   glyph plus an underline on hover. */
+.sz-back-link { color: var(--text); text-decoration: none; }
+.sz-back-link:hover { text-decoration: underline; }
 /* Engine gate */
 .sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; align-items: stretch; }
 .sz-engine { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; cursor: pointer; transition: border-color .15s, background-color .15s; color: var(--text); font-family: inherit; }
@@ -1603,6 +1603,12 @@ code.md-code {
 .sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); margin-top: 4px; }
 .sz-eng-desc { font-size: 13px; color: var(--text-dim); margin-top: 10px; line-height: 1.55; flex: 1; }
 .sz-eng-off { margin-top: 10px; }
+/* Founder instruction, repeated: the disabled-reason text ("set
+   TJ_ANTHROPIC_API_KEY to enable") must render white, not amber and not the
+   dim grey .badge-closed normally carries. Keep the badge's recessed pill
+   background (it still reads as a deliberate label against it in both
+   themes) but override just the text color back up to full strength. */
+.sz-eng-off.badge-closed { color: var(--text); }
 
 /* Curator / review filterable box */
 .cur-filters { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:0 0 14px; }
