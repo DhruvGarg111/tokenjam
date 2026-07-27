@@ -181,6 +181,36 @@ def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
     assert relearn_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
 
 
+def test_relearn_recompute_preserves_cost_window_and_excluded(tmp_path):
+    """A relearn detector recompute must not silently forget a non-default
+    cost window or the excluded block a prior cost-proposals recompute wrote.
+
+    Both routes fall back to the same `DEFAULT_COST_WINDOW_DAYS` today, so a
+    dropped `cost_window_days` was invisible on live data -- but the moment a
+    caller stores a non-default window, `write_cache` (the relearn job's own
+    write into the shared cache file) must round-trip it rather than reset
+    the headline's label back to the default on the next relearn pass.
+    """
+    path = tmp_path / "relearn_cache.json"
+    relearn_store.write_cost_proposals(
+        [{"kind": "cost", "analyzer": "trim", "signature": "cost:trim:x"}],
+        path=path,
+        window_days=14,
+        excluded={"summarize": {"past_overspend_usd": 3.5}},
+    )
+    cost_block = relearn_store.read_cost_proposals(path=path)
+    assert cost_block["cost_window_days"] == 14
+    assert cost_block["cost_excluded"] == {"summarize": {"past_overspend_usd": 3.5}}
+
+    # A relearn recompute lands on the SAME cache file, on its own cadence.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=11), path=path)
+
+    cost_block_after = relearn_store.read_cost_proposals(path=path)
+    assert cost_block_after["cost_proposals"][0]["signature"] == "cost:trim:x"
+    assert cost_block_after["cost_window_days"] == 14
+    assert cost_block_after["cost_excluded"] == {"summarize": {"past_overspend_usd": 3.5}}
+
+
 # --- Subagent right-sizing: the apply-capable 4th analyzer --------------------
 
 def _sub_finding(models=("claude-opus-4-8",)):
