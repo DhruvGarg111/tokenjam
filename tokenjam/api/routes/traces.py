@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
@@ -75,6 +76,7 @@ async def list_traces(
     traces = db.get_traces(filters)
     total_count = db.count_traces(filters) if hasattr(db, "count_traces") else len(traces)
     stats = db.get_trace_cost_stats(filters) if hasattr(db, "get_trace_cost_stats") else None
+    conn = getattr(db, "conn", None)
     return {
         "traces": [
             {
@@ -101,6 +103,10 @@ async def list_traces(
         "total_count": total_count,
         "framing": _traces_framing(request, agent_id),
         "outlier_rule": _outlier_rule_dict(stats),
+        # `available_days` (core/data_span.py) so the Traces window selector
+        # can derive its options from what the store actually holds, the same
+        # way the Dashboard's does — instead of a fixed 24h/7d/30d/90d list.
+        "data_span": available_data_span(conn).to_dict(),
     }
 
 

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
+from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
@@ -604,6 +605,11 @@ async def get_cost(
         # group_by, so switching the dropdown to an uninstrumented dimension
         # doesn't require a second round-trip to know it'll be empty.
         "attribution_coverage": _dimension_coverage(conn, agent_id, since_dt, until_dt),
+        # `available_days` (core/data_span.py) so the Cost view's own window
+        # selector can derive its options from what the store actually holds,
+        # the same way the Dashboard's does — instead of a fixed 24h/7d/30d/90d
+        # list that can offer a window with nothing behind it.
+        "data_span": available_data_span(conn).to_dict(),
     }
 
 

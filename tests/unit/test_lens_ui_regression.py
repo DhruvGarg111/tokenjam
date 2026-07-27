@@ -47,13 +47,21 @@ def _no_comments(text: str) -> str:
 
 
 def test_traces_window_select_exposes_longer_supported_windows(html):
-    # Traces honors these URL/API windows already; keep the filter dropdown in sync
-    # so #/traces?since=30d and #/traces?since=90d render selected options.
+    # Traces honors these URL/API windows already; the filter dropdown must stay
+    # in sync so #/traces?since=30d and #/traces?since=90d render as selected
+    # options. The dropdown no longer hardcodes them -- it derives from the
+    # store's real data span via the shared `windowOptionsWithCurrent` helper
+    # (see test_window_selectors_derive_from_data_span), but 1h is Traces' own
+    # always-offered floor (finer than the shared ladder's 24h) and must survive
+    # the refactor without becoming a second, duplicate "Last 1h" option.
     traces_start = html.index("function TracesListView")
     traces_end = html.index("function dedup", traces_start)
     traces_view = html[traces_start:traces_end]
-    assert '<option value="30d">Last 30d</option>' in traces_view
-    assert '<option value="90d">Last 90d</option>' in traces_view
+    assert '<option value="1h">Last 1h</option>' in traces_view
+    assert "windowOptionsWithCurrent(dataSpan ? dataSpan.available_days : null, since)" in traces_view
+    assert ".filter(w => w.value !== '1h')" in traces_view
+    assert '<option value="24h">Last 24h</option>' not in traces_view
+    assert '<option value="30d">Last 30d</option>' not in traces_view
 
 
 def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
@@ -65,43 +73,165 @@ def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
     assert 'label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"' not in html
 
 
-def test_dashboard_window_options_derive_from_data_span(html):
+def test_window_selectors_derive_from_data_span(html):
     # The Dashboard window selector used to be a fixed 24h/7d/30d/90d list with
     # no relation to how much telemetry the store actually holds -- offering
     # 90d over a two-month corpus, and unable to reach past 90d on a longer
-    # one. It must now derive from core/data_span.py's `available_days`
-    # (served on /drift and /relearn/proposals), not a hardcoded list.
-    const_start = html.index("const DASHBOARD_STANDARD_WINDOWS")
-    start = html.index("function dashboardWindowOptions")
-    end = html.index("function DashboardView", start)
+    # one. It derives from core/data_span.py's `available_days`, not a
+    # hardcoded list. That derivation (`standardWindowOptions` /
+    # `windowOptionsWithCurrent`) was Dashboard-only at first
+    # (`dashboardWindowOptions`/`DASHBOARD_STANDARD_WINDOWS`) and is now shared
+    # by Cost, Traces and Optimize too, each reading `data_span` off its own
+    # already-fetched payload (/cost, /traces, /optimize) rather than a fourth
+    # copy-pasted ladder or a second round-trip to /drift or /relearn.
+    const_start = html.index("const STANDARD_WINDOWS")
+    start = html.index("function standardWindowOptions")
+    with_current_end = html.index("\n}\n", html.index("function windowOptionsWithCurrent")) + 3
     consts = html[const_start:start]
-    fn = html[start:end]
+    fn = html[start:with_current_end]
 
     # The always-safe floor entry exists and is what an unknown span falls
     # back to.
     assert "{ value: '24h', label: 'Last 24h', days: 1 }" in consts
 
-    # Unknown span (not yet read) offers only the always-safe floor, never a
-    # wrong option set asserted ahead of the data.
-    assert "if (availableDays == null) return [DASHBOARD_STANDARD_WINDOWS[0]];" in fn
+    # Unknown (or non-positive/unusable) span offers only the always-safe
+    # floor, never a wrong option set asserted ahead of the data.
+    assert "if (availableDays == null || availableDays <= 0) return [STANDARD_WINDOWS[0]];" in fn
 
     # Known span: only windows at-or-under the available span, plus one final
     # option at the real span itself.
     assert "w.days <= availableDays" in fn
     assert "value: `${availableDays}d`" in fn
 
+    # `validSince` must accept that custom exact-span value, or selecting it
+    # gets silently reverted to the default on the very next render -- the
+    # dropdown would show the pick while the page queried a different window.
+    assert "const _CUSTOM_DAYS_RE = /^\\d+d$/;" in html
+    assert "_CUSTOM_DAYS_RE.test(v)" in html
+
     dash_start = html.index("function DashboardView")
     dash_end = html.index("function ", dash_start + 1)
     dash_view = html[dash_start:dash_end]
 
-    # Wired to the server-provided data_span, not re-derived client-side.
+    # Dashboard: wired to the server-provided data_span, not re-derived
+    # client-side. The old unconditional four-option list is gone from the
+    # picker itself.
     assert "driftRead.data.data_span" in dash_view
     assert "relearnRead.data.data_span" in dash_view
-    assert "dashboardWindowOptions(availableDays)" in dash_view
-
-    # The old unconditional four-option list is gone from the picker itself.
+    assert "windowOptionsWithCurrent(availableDays, since)" in dash_view
     assert '<option value="24h">Last 24h</option>\n      <option value="7d">Last 7d</option>' not in dash_view
-    assert "winOptionsWithCurrent.map(w => html`<option value=${w.value}>${w.label}</option>`)" in dash_view
+
+    cost_start = html.index("function CostView")
+    cost_end = html.index("\nfunction TopTenantsPanel", cost_start)
+    cost_view = html[cost_start:cost_end]
+    assert "costResp.data_span.available_days" in cost_view
+    assert 'value="24h">Last 24h</option>\n        <option value="7d">Last 7d' not in cost_view
+
+    traces_start = html.index("function TracesListView")
+    traces_end = html.index("function dedup", traces_start)
+    traces_view = html[traces_start:traces_end]
+    assert "dataSpan.available_days" in traces_view
+    assert "setDataSpan(td.data_span || null);" in traces_view
+
+    opt_start = html.index("function OptimizeView")
+    opt_end = html.index("function ", opt_start + 1)
+    opt_view = html[opt_start:opt_end]
+    assert "st.opt.data_span.available_days" in opt_view
+    assert 'value="7d">Last 7d</option>\n        <option value="30d">Last 30d' not in opt_view
+
+
+def test_window_ladder_adds_exactly_one_intermediate_rung(html):
+    # standardWindowOptions offers base rungs (24h/7d/30d) clamped to the
+    # span, ONE intermediate rung (the largest INTERMEDIATE_RUNG_DAYS
+    # candidate strictly below the span), then the exact span itself. Pinned
+    # against the operator's own three worked examples, run by hand through
+    # the actual algorithm (this file has no JS runner in CI, so the pin is
+    # the exact source text rather than an executed assertion):
+    #   67  days -> 24h, 7d, 30d, 60d, 67d   (not 90d -- 90 is not < 67)
+    #   112 days -> 24h, 7d, 30d, 90d, 112d  (not ALSO 60d -- only the
+    #               LARGEST qualifying candidate is added, never every one)
+    #   42  days -> 24h, 7d, 30d, 42d        (no intermediate rung clears
+    #               42 at all, so none is added)
+    # A naive "every standard rung under the span" reading would wrongly add
+    # both 60d and 90d for the 112-day case -- that's the one case that rules
+    # it out, so it is the one pinned literally below.
+    assert "const INTERMEDIATE_RUNG_DAYS = [60, 90, 120, 180, 365];" in html
+    start = html.index("function standardWindowOptions")
+    end = html.index("\n}\n", start) + 3
+    fn = html[start:end]
+    assert "const intermediateDays = INTERMEDIATE_RUNG_DAYS.filter(d => d < availableDays).pop();" in fn
+    assert "if (intermediateDays != null) {" in fn
+
+    # Sub-30-day spans drop base rungs the corpus can't support rather than
+    # ever offering a window with nothing behind it (the original defect) --
+    # STANDARD_WINDOWS itself is filtered by `w.days <= availableDays` first,
+    # so a 12-day corpus naturally yields 24h/7d (30d filtered out) then the
+    # exact-span push adds 12d, with no separate sub-30 branch required.
+    const_start = html.index("const STANDARD_WINDOWS")
+    consts = html[const_start:html.index("function standardWindowOptions")]
+    assert "{ value: '30d', label: 'Last 30d', days: 30 }" in consts
+    assert "{ value: '90d'" not in consts  # 90d moved to INTERMEDIATE_RUNG_DAYS
+
+    # Non-positive/unusable spans degrade to the always-safe floor, same as
+    # the not-yet-known (null) case -- never a confusing single "Last 0d" or
+    # empty option list.
+    assert "if (availableDays == null || availableDays <= 0) return [STANDARD_WINDOWS[0]];" in fn
+
+
+def test_detail_views_show_a_layout_shaped_skeleton_not_bare_loading_text(html):
+    # Session/Run/Trace detail and Status/Drift/Budget's "still loading" state
+    # used to be a bare centered "Loading X..." replacing the whole page —
+    # the weaker half of the not-yet-known/known-and-empty/known-and-populated
+    # distinction this file otherwise enforces everywhere else (a bare
+    # placeholder doesn't assert a wrong number, but it still throws away the
+    # real layout's shape, so content visibly jumps in when it finally
+    # arrives). Each now renders a skeleton shaped like its own real layout
+    # (CardGridSkeleton / TableRowsSkeleton / a purpose-built one) instead.
+    stripped = _no_comments(html)
+    for bare in (
+        "Loading session...", "Loading run...", "Loading trace...",
+        "Loading history…",
+    ):
+        assert bare not in stripped
+
+    # Status/Drift/Budget's bare "Loading..." literal must not survive either
+    # -- narrower than a blanket ban on the word "Loading" (which legitimately
+    # appears in InboxLoadingNote's stated-not-animated caption, a DIFFERENT,
+    # already-correct pattern: a caption alongside skeleton tiles that are
+    # already rendering, not a replacement for them).
+    assert '<div class="empty">Loading...</div>' not in stripped
+
+    assert "function CardGridSkeleton(count, rows = 3)" in html
+    assert "function TableRowsSkeleton(headers, rowCount)" in html
+    assert "function SessionDetailSkeleton({ backBtn })" in html
+
+    status_start = html.index("function StatusView")
+    status_end = html.index("\nfunction ", status_start + 1)
+    assert "CardGridSkeleton(6)" in html[status_start:status_end]
+
+    drift_start = html.index("function DriftView")
+    drift_end = html.index("\nfunction ", drift_start + 1)
+    assert "TableRowsSkeleton(" in html[drift_start:drift_end]
+
+    budget_start = html.index("function BudgetView")
+    budget_end = html.index("\nfunction ", budget_start + 1)
+    assert "TableRowsSkeleton(" in html[budget_start:budget_end]
+
+    session_start = html.index("function SessionDetailView")
+    session_end = html.index("\nfunction ", session_start + 1)
+    assert "<${SessionDetailSkeleton} backBtn=${backBtn} />" in html[session_start:session_end]
+
+    run_start = html.index("function RunDetailView")
+    run_end = html.index("\nfunction ", run_start + 1)
+    assert "TableRowsSkeleton(" in html[run_start:run_end]
+
+    trace_start = html.index("function TraceDetailView")
+    trace_end = html.index("\nfunction ", trace_start + 1)
+    assert "shimmer" in html[trace_start:trace_end]
+
+    expect_start = html.index("function ExpectationHistory")
+    expect_end = html.index("\nfunction ", expect_start + 1)
+    assert "TableRowsSkeleton(['When', 'Outcome', 'Run', 'Note'], 2)" in html[expect_start:expect_end]
 
 
 # --- #126: Downsize typed slot always rendered ----------------------------- #

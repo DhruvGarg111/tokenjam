@@ -2030,7 +2030,16 @@ function getRoute() {
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
 const SINCE_VALUES = ['1h', '24h', '7d', '30d', '90d'];
 const _RANGE_RE = /^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/;
-function validSince(v) { return SINCE_VALUES.includes(v) || _RANGE_RE.test(v); }
+// A window selector derived from the store's real data span (standardWindowOptions
+// below) can offer an exact-span option outside the standard ladder (e.g. "67d"
+// on a corpus with 67 days of history) — the backend's own `parse_since` already
+// accepts any `\d+d` (see `_RELATIVE_PATTERN` in utils/time_parse.py). Without
+// this, selecting that exact-span option got silently reverted to the default:
+// `validSince` rejected it, `readParam` logged a warning and fell back, and the
+// URL kept showing the selection while the page silently queried a different
+// window than the one displayed as selected.
+const _CUSTOM_DAYS_RE = /^\d+d$/;
+function validSince(v) { return SINCE_VALUES.includes(v) || _RANGE_RE.test(v) || _CUSTOM_DAYS_RE.test(v); }
 
 // Read a filter from URL params with a default + optional validator. Bad /
 // unparseable values fall back to the default with a console.warn, never throw.
@@ -2779,6 +2788,44 @@ function archivedCountLabel(shown, total) {
   return shown + ' of ' + total.toLocaleString('en-US');
 }
 
+// A generic "N card tiles in a grid" skeleton, shaped like the `.cards`/
+// `.card`/`.card-header`/`.card-row` geometry every card-grid screen already
+// uses (Status's session tiles, Session/Run detail's overview cards) --
+// content fills these in rather than replacing a differently-shaped block.
+// `rows` is how many `.card-row`-shaped lines each tile shows.
+function CardGridSkeleton(count, rows = 3) {
+  return html`
+    <div class="cards" aria-hidden="true">
+      ${Array.from({ length: count }, (_, i) => html`
+        <div class="card" key=${i}>
+          <div class="card-header"><span class="shimmer" style="display:inline-block;height:13px;width:60%"></span></div>
+          ${Array.from({ length: rows }, (_, j) => html`
+            <div class="card-row" key=${j}>
+              <span class="shimmer" style="display:inline-block;height:11px;width:${40 + (j * 11) % 30}%"></span>
+              <span class="shimmer" style="display:inline-block;height:11px;width:${25 + (j * 7) % 20}%"></span>
+            </div>`)}
+        </div>`)}
+    </div>`;
+}
+
+// A generic table-shaped skeleton (header row + N shimmer rows), for screens
+// whose loaded content is a plain data table (Drift's per-agent metrics,
+// Budget's per-agent/per-provider caps) -- same fill-in-don't-replace
+// convention as CardGridSkeleton above, just table-shaped instead of card-grid
+// shaped.
+function TableRowsSkeleton(headers, rowCount) {
+  return html`
+    <table aria-hidden="true">
+      <thead><tr>${headers.map((h, i) => html`<th key=${i}>${h}</th>`)}</tr></thead>
+      <tbody>
+        ${Array.from({ length: rowCount }, (_, i) => html`
+          <tr key=${i}>
+            ${headers.map((_, j) => html`<td key=${j}><span class="shimmer" style="display:inline-block;height:11px;width:${j === 0 ? 70 : 40 + (j * 13) % 25}%"></span></td>`)}
+          </tr>`)}
+      </tbody>
+    </table>`;
+}
+
 // ============================
 // Status View
 // ============================
@@ -2816,7 +2863,7 @@ function StatusView({ params }) {
   // Restore scroll position when returning from a session/run detail page.
   useScrollMemory('status', !!data);
 
-  if (!data) return html`<div class="empty">Loading...</div>`;
+  if (!data) return html`<div class="page-title">Sessions</div>${CardGridSkeleton(6)}`;
   const sdkServices = data.sdk_services || [];
   if (!data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
@@ -4712,6 +4759,50 @@ function MapBoardSection({ sessionId }) {
   `;
 }
 
+// The session-detail loading placeholder, shaped like the real layout below
+// (back button, title, the two overview/cost cards' row geometry, the tab bar,
+// a few table-row placeholders) so real content FILLS IN rather than replacing
+// a bare centered "Loading session..." with a differently-shaped block -- the
+// same convention `AppliedSkeletonRow` uses. Kept immediately above
+// `SessionDetailView` so the two shapes are edited together; a skeleton that
+// drifts from the layout it stands in for causes exactly the visible jump it
+// exists to prevent.
+function SessionDetailSkeleton({ backBtn }) {
+  const cardRow = (labelW, valueW) => html`
+    <div class="card-row">
+      <span class="shimmer" style=${'display:inline-block;height:11px;width:' + labelW}></span>
+      <span class="shimmer" style=${'display:inline-block;height:11px;width:' + valueW}></span>
+    </div>`;
+  return html`
+    ${backBtn}
+    <div class="shimmer" style="height:22px;width:220px;margin-top:12px"></div>
+    <div class="shimmer" style="height:11px;width:160px;margin:8px 0 16px"></div>
+    <div class="cards">
+      <div class="card" aria-hidden="true">
+        <div class="card-header"><span class="shimmer" style="display:inline-block;height:13px;width:70px"></span></div>
+        ${cardRow('50px', '90px')}
+        ${cardRow('60px', '70px')}
+        ${cardRow('50px', '110px')}
+        ${cardRow('70px', '60px')}
+        ${cardRow('60px', '80px')}
+      </div>
+      <div class="card" aria-hidden="true">
+        <div class="card-header"><span class="shimmer" style="display:inline-block;height:13px;width:100px"></span></div>
+        ${cardRow('40px', '70px')}
+        ${cardRow('80px', '60px')}
+        ${cardRow('80px', '60px')}
+        ${cardRow('70px', '50px')}
+      </div>
+    </div>
+    <div class="tab-bar" aria-hidden="true">
+      <span class="shimmer" style="display:inline-block;height:13px;width:110px"></span>
+      <span class="shimmer" style="display:inline-block;height:13px;width:70px;margin-left:14px"></span>
+      <span class="shimmer" style="display:inline-block;height:13px;width:60px;margin-left:14px"></span>
+    </div>
+    <div class="shimmer" style="height:200px;margin-top:16px"></div>
+  `;
+}
+
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -4734,7 +4825,7 @@ function SessionDetailView({ sessionId }) {
   const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/sessions'}>← Back to sessions</button>`;
 
   if (error) return html`<div>${backBtn}<div class="empty">Session not found.<code>${sessionId}</code></div></div>`;
-  if (!data) return html`<div>${backBtn}<div class="empty">Loading session...</div></div>`;
+  if (!data) return html`<${SessionDetailSkeleton} backBtn=${backBtn} />`;
 
   const s = data.session;
   const tools = data.tools || [];
@@ -5083,7 +5174,7 @@ function ExpectationHistory({ expectation }) {
     <div class="card" style="margin-bottom:12px">
       <div class="card-header">${expectation.name}</div>
       ${expectation.description ? html`<div style=${{ ...label, marginBottom: '8px' }}>${expectation.description}</div>` : null}
-      ${runs == null ? html`<div style=${label}>Loading history…</div>`
+      ${runs == null ? TableRowsSkeleton(['When', 'Outcome', 'Run', 'Note'], 2)
         : runs.length === 0 ? html`<div style=${label}>No reruns recorded yet.</div>`
         : html`<div class="table-wrap"><table>
             <thead><tr><th>When</th><th>Outcome</th><th>Run</th><th>Note</th></tr></thead>
@@ -5122,7 +5213,12 @@ function RunDetailView({ runId }) {
   const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/sessions'}>← Back to sessions</button>`;
 
   if (error) return html`<div>${backBtn}<div class="empty">Run not found.<code>${runId}</code></div></div>`;
-  if (!data) return html`<div>${backBtn}<div class="empty">Loading run...</div></div>`;
+  if (!data) return html`
+    <div>
+      ${backBtn}
+      <div class="shimmer" style="height:22px;width:180px;margin-top:12px"></div>
+      ${TableRowsSkeleton(['Session', 'Status', 'Project', 'Tokens', 'Tool calls', 'Cost', 'Last seen', ''], 5)}
+    </div>`;
 
   const r = data.run;
   const sessions = data.sessions || [];
@@ -5229,6 +5325,11 @@ function TracesListView({ params }) {
   // matches the flags actually rendered. Null until the first fetch resolves,
   // or if the backend didn't ship the block (older server behind a newer UI).
   const [outlierRule, setOutlierRule] = useState(null);
+  // The window selector's own options, derived from the store's real data
+  // span (core/data_span.py) rather than a fixed list — same mechanism the
+  // Dashboard uses. Null until the first fetch answers, in which case the
+  // selector falls back to its always-safe floor via standardWindowOptions.
+  const [dataSpan, setDataSpan] = useState(null);
   const TRACE_PAGE_SIZE = 100;
   // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
   // until the first /traces fetch settles, show a loading shimmer rather than
@@ -5250,6 +5351,7 @@ function TracesListView({ params }) {
     setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
     setTotalCount(td.total_count ?? nextTraces.length);
     setOutlierRule(td.outlier_rule || null);
+    setDataSpan(td.data_span || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
@@ -5288,10 +5390,9 @@ function TracesListView({ params }) {
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
-        <option value="24h">Last 24h</option>
-        <option value="7d">Last 7d</option>
-        <option value="30d">Last 30d</option>
-        <option value="90d">Last 90d</option>
+        ${windowOptionsWithCurrent(dataSpan ? dataSpan.available_days : null, since)
+          .filter(w => w.value !== '1h')
+          .map(w => html`<option value=${w.value}>${w.label}</option>`)}
       </select>
       <select value=${result} onChange=${e => setFilter('result', e.target.value)}>
         <option value="">All results</option>
@@ -5367,7 +5468,17 @@ function TraceDetailView({ traceId }) {
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
-  if (!spans.length) return html`<div class="empty">Loading trace...</div>`;
+  // Waterfall-shaped: staggered-indent, staggered-width shimmer bars standing
+  // in for the span tree rows below, so the real waterfall fills in rather
+  // than replacing a differently-shaped centered line.
+  if (!spans.length) return html`
+    <div aria-hidden="true" style="padding:8px 0">
+      ${[0, 1, 1, 2, 1, 0].map((depth, i) => html`
+        <div key=${i} style=${'display:flex;align-items:center;gap:8px;padding:6px 0;padding-left:' + (depth * 22) + 'px'}>
+          <span class="shimmer" style=${'display:inline-block;height:11px;width:' + (160 - depth * 20) + 'px'}></span>
+          <span class="shimmer" style=${'display:inline-block;height:9px;flex:' + (5 - depth) + ' 1 0'}></span>
+        </div>`)}
+    </div>`;
 
   // Build tree
   const byId = {};
@@ -6096,10 +6207,8 @@ function CostView({ params }) {
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
-        <option value="24h">Last 24h</option>
-        <option value="7d">Last 7d</option>
-        <option value="30d">Last 30d</option>
-        <option value="90d">Last 90d</option>
+        ${windowOptionsWithCurrent(costResp && costResp.data_span ? costResp.data_span.available_days : null, since)
+          .map(w => html`<option value=${w.value}>${w.label}</option>`)}
       </select>
       <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
         <option value="total">Total</option>
@@ -6341,7 +6450,9 @@ function DriftView({ params }) {
     return () => clearInterval(t);
   }, [agentId]);
 
-  if (!data) return html`<div class="empty">Loading...</div>`;
+  if (!data) return html`
+    <div class="page-title">Drift Detection</div>
+    ${TableRowsSkeleton(['Metric', 'Baseline', 'Latest', 'Z-score', ''], 4)}`;
 
   // /drift returns a single-agent shape when agent_id is set; normalize to a list.
   const agents = data.agents || (data.agent_id ? [data] : []);
@@ -6586,7 +6697,9 @@ function BudgetView({ params }) {
   // data still on screen -- it renders as a scoped banner above the content
   // instead, same pattern the Dashboard uses for its own /cost failures.
   if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
-  if (!data) return html`<div class="empty">Loading...</div>`;
+  if (!data) return html`
+    <div class="page-title">Budget</div>
+    ${TableRowsSkeleton(['Scope', 'Daily (USD)', 'Per-session (USD)', ''], 4)}`;
 
   const agentEntries = Object.entries(data.agents || {});
   const providerBudgets = data.provider_budgets || {};
@@ -7567,9 +7680,9 @@ function OptimizeView({ params }) {
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
-        <option value="7d">Last 7d</option>
-        <option value="30d">Last 30d</option>
-        <option value="90d">Last 90d</option>
+        ${windowOptionsWithCurrent(st.opt && st.opt.data_span ? st.opt.data_span.available_days : null, since)
+          .filter(w => w.value !== '24h')
+          .map(w => html`<option value=${w.value}>${w.label}</option>`)}
       </select>
       <select value=${compare} onChange=${e => setFilter('compare', e.target.value)}>
         <option value="">No comparison</option>
@@ -11016,35 +11129,76 @@ const OPTIMIZE_WAIT_MIN = Math.round(OPTIMIZE_WAIT_MS / 60000);
 // placeholder through to the answer.
 const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];
 
-// Candidate Dashboard windows, ascending. Only entries whose day count fits
-// within the store's actually-available data span (core/data_span.py,
-// `available_days` on the /drift and /relearn/proposals responses) are ever
-// offered -- a corpus with two months of data should not offer 90d (nothing
-// behind it), and a corpus with 120 days should be able to reach past 90d.
-const DASHBOARD_STANDARD_WINDOWS = [
+// Candidate windows, ascending, for every screen with a window selector. Only
+// entries whose day count fits within the store's actually-available data
+// span (core/data_span.py, `available_days` -- served on /drift,
+// /relearn/proposals, /cost, /traces and /optimize) are ever offered -- a
+// corpus with two months of data should not offer 90d (nothing behind it),
+// and a corpus with 120 days should be able to reach past 90d. Originally
+// Dashboard-only (`DASHBOARD_STANDARD_WINDOWS`/`dashboardWindowOptions`);
+// generalised so Cost, Traces and Optimize derive their own selectors from the
+// same one list instead of each hardcoding its own 24h/7d/30d/90d options —
+// which is what let those three screens offer a window the machine had no
+// data for while being unable to offer its actual full span.
+//
+// These are the ALWAYS-candidate base rungs (clamped to the span below);
+// 90d+ live in INTERMEDIATE_RUNG_DAYS instead -- see standardWindowOptions.
+const STANDARD_WINDOWS = [
   { value: '24h', label: 'Last 24h', days: 1 },
   { value: '7d', label: 'Last 7d', days: 7 },
   { value: '30d', label: 'Last 30d', days: 30 },
-  { value: '90d', label: 'Last 90d', days: 90 },
 ];
 
-// The Dashboard window <option> list, derived from the data span rather than
-// hardcoded. `availableDays` is null while the span hasn't been read yet --
-// in that not-yet-known state only the always-safe floor (24h) is offered,
-// so the selector never asserts an option set it can't yet back up (the same
-// not-yet-known / known-and-empty / known-and-populated distinction the rest
-// of this file uses for other panels). Once known, every standard window at
-// or under the available span is offered, plus one final option at the real
-// span itself (e.g. 66 days of data -> 24h, 7d, 30d, 66d) unless a standard
-// window already lands on that exact day count.
-function dashboardWindowOptions(availableDays) {
-  if (availableDays == null) return [DASHBOARD_STANDARD_WINDOWS[0]];
-  const options = DASHBOARD_STANDARD_WINDOWS.filter(w => w.days <= availableDays);
+// Candidate rungs for the ONE intermediate option between the 30d base rung
+// and the exact-span option. Only the LARGEST candidate STRICTLY BELOW the
+// span is ever added -- never every candidate under the span. That distinction
+// is load-bearing: a naive "every standard rung under the span" reading would
+// offer 24h/7d/30d/60d/90d/112d on a 112-day corpus, when the operator's own
+// worked example wants 24h/7d/30d/90d/112d (no 60d) -- 112 has TWO qualifying
+// candidates (60 and 90) and only the larger one may render.
+const INTERMEDIATE_RUNG_DAYS = [60, 90, 120, 180, 365];
+
+// The window <option> list for a selector, derived from the data span rather
+// than hardcoded. `availableDays` is null (or non-positive -- a measurement
+// that can't back up even the 24h floor) while the span hasn't been read yet
+// or isn't usable -- in that not-yet-known state only the always-safe floor
+// (24h) is offered, so the selector never asserts an option set it can't yet
+// back up (the same not-yet-known / known-and-empty / known-and-populated
+// distinction the rest of this file uses for other panels).
+//
+// Once known: every base rung (24h/7d/30d) at or under the span; below 30
+// days that means fewer than three base rungs survive at all (e.g. a 12-day
+// corpus offers only 24h/7d, then the exact span -- never a rung with nothing
+// behind it, which was the original defect). Then the one largest
+// INTERMEDIATE_RUNG_DAYS candidate strictly below the span, if any (worked
+// examples: 67 days -> ...,30d,60d,67d; 112 days -> ...,30d,90d,112d, not
+// both 60d and 90d; 42 days -> ...,30d,42d, no intermediate at all since 42
+// clears no INTERMEDIATE_RUNG_DAYS candidate). Finally the exact span itself,
+// unless a rung already landed on that exact day count (never a duplicate
+// entry for a span that lands exactly on 30d, 60d, ...).
+function standardWindowOptions(availableDays) {
+  if (availableDays == null || availableDays <= 0) return [STANDARD_WINDOWS[0]];
+  const options = STANDARD_WINDOWS.filter(w => w.days <= availableDays);
+  const intermediateDays = INTERMEDIATE_RUNG_DAYS.filter(d => d < availableDays).pop();
+  if (intermediateDays != null) {
+    options.push({ value: `${intermediateDays}d`, label: `Last ${intermediateDays}d`, days: intermediateDays });
+  }
   const largest = options[options.length - 1];
   if (!largest || largest.days !== availableDays) {
     options.push({ value: `${availableDays}d`, label: `Last ${availableDays}d`, days: availableDays });
   }
   return options;
+}
+
+// The currently-selected window (from the URL) may predate the span answer,
+// or may no longer fit a freshly-measured span -- always keep it selectable
+// so a <select> built from `standardWindowOptions` never silently snaps to a
+// different value out from under a read that already used it.
+function windowOptionsWithCurrent(availableDays, since) {
+  const options = standardWindowOptions(availableDays);
+  return options.some(w => w.value === since)
+    ? options
+    : options.concat([{ value: since, label: `Last ${since}` }]);
 }
 
 function DashboardView({ params }) {
@@ -11222,18 +11376,9 @@ function DashboardView({ params }) {
   const dataSpan = (driftRead.data && driftRead.data.data_span)
     || (relearnRead.data && relearnRead.data.data_span) || null;
   const availableDays = dataSpan ? dataSpan.available_days : null;
-  const winOptions = dashboardWindowOptions(availableDays);
-  // The currently-selected window (from the URL) may predate the span answer,
-  // or may no longer fit a freshly-measured span -- always keep it selectable
-  // so the <select> never silently snaps to a different value out from under
-  // the reads that already used it.
-  const winOptionValues = new Set(winOptions.map(w => w.value));
-  const winOptionsWithCurrent = winOptionValues.has(since)
-    ? winOptions
-    : winOptions.concat([{ value: since, label: `Last ${since}` }]);
   const winPicker = html`
     <select value=${since} onChange=${e => setWin(e.target.value)}>
-      ${winOptionsWithCurrent.map(w => html`<option value=${w.value}>${w.label}</option>`)}
+      ${windowOptionsWithCurrent(availableDays, since).map(w => html`<option value=${w.value}>${w.label}</option>`)}
     </select>`;
 
   // Everything derived from /cost is derived from the ANSWER, never from an empty
