@@ -472,6 +472,11 @@ def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
     # Honesty caveat present.
     assert "spot-check" in OPUS_QUOTA_AUDIT_CAVEAT.lower()
     assert "safe to downgrade" in out
+    # The subscription-billed qualifier banner was removed by product
+    # decision: tj no longer differentiates its messaging between
+    # subscription and API users.
+    assert "subscription-billed" not in out
+    assert "list-price equivalent" not in out
 
 
 def test_cli_api_persona_shows_dollar_counterfactual(db, monkeypatch):

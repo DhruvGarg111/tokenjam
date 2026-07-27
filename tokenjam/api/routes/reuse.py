@@ -23,7 +23,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.export.reuse_report import gather_planning_texts
-from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
 from tokenjam.core.optimize import build_report, report_to_dict
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -63,14 +62,15 @@ def get_reuse_clusters(
 
     finding = report.findings.get("reuse")
     conn = getattr(db, "conn", None)
-    # Skeleton text + pricing mode both need the DB; the daemon owns it here.
+    # Skeleton text needs the DB; the daemon owns it here. `pricing_mode` is
+    # always "api": the reuse report no longer differentiates its recoverable
+    # figures by billing mode (product decision — dollars are always
+    # legitimate regardless of subscription vs API billing). The field is
+    # kept in the payload for shape compatibility with existing consumers.
     if finding is not None and finding.clusters and conn is not None:
         payload["planning_texts"] = gather_planning_texts(conn, finding)
-        payload["pricing_mode"] = pricing_mode_for(
-            dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
-        )
     else:
         payload["planning_texts"] = {}
-        payload["pricing_mode"] = "unknown"
+    payload["pricing_mode"] = "api"
 
     return payload
