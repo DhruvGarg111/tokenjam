@@ -9,7 +9,7 @@ import click
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import (
     AgentConfig,
-    find_config_file,
+    resolve_config_path,
     resolve_effective_budget,
     validate_budget_value,
     write_config,
@@ -50,8 +50,10 @@ def cmd_budget(
         _show_budgets(config, ctx.obj.get("db"), output_json)
         return
 
-    # Write mode — find config file on disk
-    config_path_str = find_config_file()
+    # Write mode — find config file on disk, honoring TJ_CONFIG so writes land
+    # in the same file `config` (ctx.obj["config"], loaded above) was read
+    # from — otherwise the budget update silently splits from the live config.
+    config_path_str = resolve_config_path()
     if config_path_str is None:
         raise click.ClickException(
             "No config file found. Run 'tj onboard' to create one."

@@ -7,7 +7,7 @@ import duckdb
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.core.config import find_config_file, load_config
+from tokenjam.core.config import load_config, resolve_config_path
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -108,7 +108,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
 def _check_config() -> dict:
     try:
-        path = find_config_file()
+        path = resolve_config_path()
         if path is None:
             return {"name": "Config file", "level": "error",
                     "message": "No config file found. Run `tj onboard` to create one."}

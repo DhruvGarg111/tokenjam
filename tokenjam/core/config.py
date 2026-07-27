@@ -527,25 +527,50 @@ def find_config_file(override: str | None = None) -> Path | None:
     return None
 
 
+def resolve_config_path(override: str | None = None) -> Path | None:
+    """
+    The single source of truth for "which config file is this process using".
+
+    Precedence: an explicit ``override`` wins, then the ``TJ_CONFIG``
+    environment variable, then ``find_config_file``'s ``SEARCH_PATHS`` walk.
+    ``load_config`` resolves through here, so any call site that independently
+    needs the config path — to write back to the file config was read from
+    (budget updates), to report it (``tj doctor``), or to hand it to a
+    subprocess (``tj mcp``, the MCP server) — must call this too, never bare
+    ``find_config_file()``. A bare call ignores ``TJ_CONFIG`` and silently
+    splits reads (TJ_CONFIG-aware, via ``load_config``) from writes/reports
+    (search-path only) across two different files.
+
+    Like ``find_config_file``, raises ``FileNotFoundError`` when an explicit
+    override or ``TJ_CONFIG`` points at a path that doesn't exist — this
+    matches ``load_config``'s fail-loud contract. Callers that must stay
+    resilient to a bad ``TJ_CONFIG`` (e.g. the bare ``tj`` landing screen,
+    which renders before any config is validated) should not use this
+    function directly; see ``cli/home.py``.
+    """
+    if override is None:
+        override = os.environ.get("TJ_CONFIG") or None
+    return find_config_file(override)
+
+
 def load_config(path: str | None = None) -> TjConfig:
     """
     Load config from file, merge with defaults, return TjConfig.
 
     When no explicit ``path`` is given, honor the ``TJ_CONFIG`` environment
-    variable before falling back to the search-path discovery order. This keeps
-    SDK-bootstrapped processes (``ensure_initialised`` and the SDK integrations,
-    which call ``load_config()`` with no argument) consistent with the CLI — the
-    CLI already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the
-    path in, so without this the SDK silently wrote spans to the global DB even
+    variable before falling back to the search-path discovery order (via
+    ``resolve_config_path``). This keeps SDK-bootstrapped processes
+    (``ensure_initialised`` and the SDK integrations, which call
+    ``load_config()`` with no argument) consistent with the CLI — the CLI
+    already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the path
+    in, so without this the SDK silently wrote spans to the global DB even
     when ``TJ_CONFIG`` pointed elsewhere (#196). An explicit ``path`` argument
     still wins over the env var.
 
     IMPORTANT: tomllib requires binary mode "rb" -- not text mode "r".
     Using "r" raises TypeError at runtime.
     """
-    if path is None:
-        path = os.environ.get("TJ_CONFIG") or None
-    config_path = find_config_file(path)
+    config_path = resolve_config_path(path)
     if config_path is None:
         return TjConfig(version="1")
 

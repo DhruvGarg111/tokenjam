@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 import duckdb
 
-from tokenjam.core.config import find_config_file, load_config
+from tokenjam.core.config import load_config, resolve_config_path
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -69,7 +69,7 @@ def cmd_mcp(ctx: click.Context) -> None:
     """
     from tokenjam.mcp.server import mcp, init
 
-    config_path = find_config_file()
+    config_path = resolve_config_path()
     if config_path is not None:
         config = load_config(str(config_path))
         host = config.api.host
