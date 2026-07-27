@@ -379,6 +379,11 @@ def parse_claude_code_session(
             output_tokens=output_tokens,
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_creation,
+            # A transcript is history: price each turn at the rate in effect
+            # when it ran, not at today's. `ts` is the same instant this span's
+            # start_time gets below; None (no timestamp parsed) falls back to
+            # the current rate, matching what start_time does.
+            at=ts,
         )
         # Persist the cache read/write split, mirroring the live ingest path
         # (#245). cache_tokens = cache-READ only; cache_write_tokens =

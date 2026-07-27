@@ -2,9 +2,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -39,6 +41,38 @@ DEFAULT_OUTPUT_PER_MTOK = 2.00
 # key never collides — see _split_pricing_raw().
 MODEL_SECTION_KEY = "models"
 
+# Reserved section name for *variant* definitions — the price axis that is not
+# the model and not the time. A variant is a different way of buying the SAME
+# model id: `fast` (Anthropic's fast mode bills the same model at a premium),
+# `batch` (the Batch API bills a flat fraction of standard), `cache-1h` (the
+# 1-hour cache TTL writes at a different multiple of the input rate). Lives at
+# `[variants]` in the standalone pricing file and `[pricing.variants]` in the
+# main config. No provider is named "variants", so the reserved key never
+# collides — see _split_pricing_raw().
+VARIANT_SECTION_KEY = "variants"
+
+#: The variant every existing row implicitly declares, and the default for any
+#: lookup that doesn't ask for another one.
+STANDARD_VARIANT = "standard"
+
+#: Reserved key inside a `[provider.model]` table holding its list of dated /
+#: variant rate rows: `[[provider.model.rates]]`.
+RATE_ROWS_KEY = "rates"
+
+#: The four per-MTok rate fields a row may carry.
+RATE_FIELDS: tuple[str, ...] = (
+    "input_per_mtok",
+    "output_per_mtok",
+    "cache_read_per_mtok",
+    "cache_write_per_mtok",
+)
+
+# Sort key for a row with no `valid_from` ("has always applied").
+_BEGINNING_OF_TIME = datetime.min.replace(tzinfo=timezone.utc)
+
+# Dedupe the "unknown variant" warning to one line per (model, variant) pair.
+_UNKNOWN_VARIANT_WARNED: set[tuple[str, str]] = set()
+
 
 @dataclass(frozen=True)
 class ModelRates:
@@ -46,6 +80,34 @@ class ModelRates:
     output_per_mtok: float
     cache_read_per_mtok: float = 0.0
     cache_write_per_mtok: float = 0.0
+
+
+@dataclass(frozen=True)
+class RateRow:
+    """One rate in a model's history: what it costs, from when, in which variant.
+
+    `valid_from is None` means "has always applied" — the shape every existing
+    single-rate `[provider.model]` row parses to, which is why adding this axis
+    left `models.toml` valid unchanged.
+    """
+    rates: ModelRates
+    valid_from: datetime | None = None
+    variant: str = STANDARD_VARIANT
+
+
+@dataclass(frozen=True)
+class VariantSpec:
+    """A model-independent variant, expressed relative to the standard rate.
+
+    `absolute` pins a field to a dollar figure; `multipliers` maps a field to
+    `(factor, of_field)` meaning `factor * standard.<of_field>` — the cross-field
+    form exists because Anthropic's 1-hour cache write is priced as a multiple of
+    the model's INPUT rate, not of its 5-minute cache-write rate. A field named
+    in neither map keeps the standard value.
+    """
+    name: str
+    absolute: dict[str, float] = field(default_factory=dict)
+    multipliers: dict[str, tuple[float, str]] = field(default_factory=dict)
 
 
 def _rates_from(raw: dict) -> ModelRates:
@@ -58,16 +120,192 @@ def _rates_from(raw: dict) -> ModelRates:
     )
 
 
+def as_utc(value: datetime) -> datetime:
+    """Normalize a datetime to tz-aware UTC (naive input is assumed UTC)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_valid_from(value: Any) -> datetime | None:
+    """Coerce a row's `valid_from` to tz-aware UTC, or None when absent/unparseable.
+
+    TOML gives a bare `2026-09-01` as a `date` and `2026-09-01T00:00:00Z` as a
+    `datetime`; a user override written through the config may leave it a string.
+    An unparseable value degrades to None ("always applied") rather than dropping
+    the row — a rate the user declared should still price something.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return as_utc(value)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return as_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError:
+            log.warning("Unparseable pricing valid_from %r; treating the rate as always-applied.",
+                        value)
+            return None
+    return None
+
+
+def _now() -> datetime:
+    """Current time, tz-aware UTC (Critical Rule 9 — never datetime.now())."""
+    from tokenjam.utils.time_parse import utcnow
+
+    return utcnow()
+
+
+def _rate_field_values(raw: dict) -> dict[str, float]:
+    """The rate fields explicitly present in a raw row (absent fields omitted)."""
+    return {
+        name: float(raw[name])
+        for name in RATE_FIELDS
+        if isinstance(raw.get(name), (int, float)) and not isinstance(raw.get(name), bool)
+    }
+
+
+def _inherit(base: ModelRates, overrides: dict[str, float]) -> ModelRates:
+    """A copy of `base` with the named fields replaced.
+
+    This is what makes a partial row legible: a dated row that only changes
+    input/output keeps the model's cache rates rather than silently zeroing them.
+    """
+    values = {name: getattr(base, name) for name in RATE_FIELDS}
+    values.update(overrides)
+    return ModelRates(**values)
+
+
+def _select_row(rows: list[RateRow], at: datetime) -> RateRow | None:
+    """The row in effect at `at`: the latest one whose window has opened.
+
+    When `at` predates every row (a span older than the earliest rate we know),
+    the EARLIEST row is returned rather than None — an old span priced at the
+    oldest known rate is better than an unpriced span, and the alternative
+    (falling through to the flat default) would be a bigger lie.
+    """
+    if not rows:
+        return None
+    started = [r for r in rows if r.valid_from is None or r.valid_from <= at]
+    if started:
+        return max(started, key=lambda r: r.valid_from or _BEGINNING_OF_TIME)
+    return min(rows, key=lambda r: r.valid_from or _BEGINNING_OF_TIME)
+
+
+def _rows_from_model(raw: dict) -> tuple[RateRow, ...]:
+    """Parse one `[provider.model]` table into its ordered rate rows.
+
+    Two forms, and the first is the whole backward-compatibility story:
+
+      [anthropic.claude-haiku-4-5]        # flat -> exactly one row,
+      input_per_mtok = 1.00               #   valid_from=None, variant=standard
+      output_per_mtok = 5.00
+
+      [[anthropic.claude-sonnet-5.rates]] # optional additional rows
+      valid_from = 2026-09-01             #   a rate change, dated
+      input_per_mtok = 3.00
+
+      [[anthropic.claude-opus-5.rates]]   # or a variant of the same model
+      variant = "fast"
+      input_per_mtok = 10.00
+
+    Both may coexist: the flat keys are the model's base standard rate and the
+    list adds to it. A row's absent fields inherit from the standard rate in
+    effect at that row's own `valid_from`.
+    """
+    entries = raw.get(RATE_ROWS_KEY)
+    entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    base_fields = _rate_field_values(raw)
+
+    rows: list[RateRow] = []
+    # The flat keys are the base standard row. Kept even when they're absent and
+    # there are no entries, so a malformed table still resolves to the default
+    # flat rate exactly as it did before this axis existed.
+    if base_fields or not entries:
+        rows.append(RateRow(rates=_rates_from(raw)))
+
+    parsed = [
+        (
+            str(e.get("variant", STANDARD_VARIANT)),
+            _parse_valid_from(e.get("valid_from")),
+            _rate_field_values(e),
+        )
+        for e in entries
+    ]
+
+    # Standard rows first, oldest first, each inheriting from its predecessor —
+    # so a dated row that only moves input/output keeps the cache rates.
+    standard = sorted(
+        [p for p in parsed if p[0] == STANDARD_VARIANT],
+        key=lambda p: p[1] or _BEGINNING_OF_TIME,
+    )
+    for _, valid_from, fields in standard:
+        prior = _select_row(rows, valid_from or _BEGINNING_OF_TIME)
+        base = prior.rates if prior is not None else _rates_from({})
+        rows.append(RateRow(rates=_inherit(base, fields), valid_from=valid_from))
+
+    # Then non-standard rows, each inheriting from the standard rate in effect
+    # at its own valid_from.
+    for variant, valid_from, fields in parsed:
+        if variant == STANDARD_VARIANT:
+            continue
+        prior = _select_row(rows, valid_from or _BEGINNING_OF_TIME)
+        base = prior.rates if prior is not None else _rates_from({})
+        rows.append(RateRow(
+            rates=_inherit(base, fields), valid_from=valid_from, variant=variant,
+        ))
+
+    return tuple(rows)
+
+
+def _parse_variant_spec(name: str, raw: dict) -> VariantSpec:
+    """Parse one `[variants.<name>]` table.
+
+    Each field is either a plain number (an absolute per-MTok rate) or an inline
+    table `{ multiplier = 0.5 }` / `{ multiplier = 2.0, of = "input_per_mtok" }`.
+    """
+    absolute: dict[str, float] = {}
+    multipliers: dict[str, tuple[float, str]] = {}
+    for field_name in RATE_FIELDS:
+        value = raw.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            absolute[field_name] = float(value)
+        elif isinstance(value, dict):
+            factor = value.get("multiplier")
+            if isinstance(factor, (int, float)) and not isinstance(factor, bool):
+                of_field = value.get("of", field_name)
+                if of_field in RATE_FIELDS:
+                    multipliers[field_name] = (float(factor), str(of_field))
+    return VariantSpec(name=name, absolute=absolute, multipliers=multipliers)
+
+
+def _apply_variant(base: ModelRates, spec: VariantSpec) -> ModelRates:
+    """Derive a variant's rates from a model's standard rates."""
+    overrides = dict(spec.absolute)
+    for field_name, (factor, of_field) in spec.multipliers.items():
+        overrides[field_name] = factor * getattr(base, of_field)
+    return _inherit(base, overrides)
+
+
 def _split_pricing_raw(
     raw: dict,
-) -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelRates]]:
-    """Split a raw pricing dict into (provider_table, model_keyed).
+) -> tuple[
+    dict[str, dict[str, tuple[RateRow, ...]]],
+    dict[str, tuple[RateRow, ...]],
+    dict[str, VariantSpec],
+]:
+    """Split a raw pricing dict into (provider_table, model_keyed, variants).
 
-    Two explicit forms, told apart deterministically by section name (no
+    Three explicit forms, told apart deterministically by section name (no
     value-shape guessing, no ordering dependency):
 
       [models]                          # reserved model-keyed section ->
       "claude-haiku-4-5" = { ... }      #   keyed by bare model name
+
+      [variants]                        # reserved variant section ->
+      [variants.batch]                  #   model-independent price variants
 
       [anthropic]                       # any other section is a provider ->
       "claude-haiku-4-5" = { ... }      #   keyed by (provider, model)
@@ -75,16 +313,22 @@ def _split_pricing_raw(
     A model-keyed entry wins regardless of the inferred provider, so it can
     rescue a span whose provider resolved to "unknown" (#194/#200).
     """
-    provider_table: dict[str, dict[str, ModelRates]] = {}
-    model_keyed: dict[str, ModelRates] = {}
+    provider_table: dict[str, dict[str, tuple[RateRow, ...]]] = {}
+    model_keyed: dict[str, tuple[RateRow, ...]] = {}
+    variants: dict[str, VariantSpec] = {}
     for key, val in raw.items():
         if not isinstance(val, dict):
+            continue
+        if key == VARIANT_SECTION_KEY:
+            for variant_name, spec in val.items():
+                if isinstance(spec, dict):
+                    variants[variant_name] = _parse_variant_spec(variant_name, spec)
             continue
         target = model_keyed if key == MODEL_SECTION_KEY else provider_table.setdefault(key, {})
         for model_name, rates in val.items():
             if isinstance(rates, dict):
-                target[model_name] = _rates_from(rates)
-    return provider_table, model_keyed
+                target[model_name] = _rows_from_model(rates)
+    return provider_table, model_keyed, variants
 
 
 def _user_pricing_file() -> Path | None:
@@ -166,8 +410,12 @@ def _override_raw_sources() -> list[dict]:
     return sources
 
 
-def _build_pricing() -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelRates]]:
-    """Assemble the merged (provider_table, model_keyed) pricing structures.
+def _build_pricing() -> tuple[
+    dict[str, dict[str, tuple[RateRow, ...]]],
+    dict[str, tuple[RateRow, ...]],
+    dict[str, VariantSpec],
+]:
+    """Assemble the merged (provider_table, model_keyed, variants) structures.
 
     Precedence, highest first:
       user model-keyed override  >  user [provider.model] override
@@ -176,18 +424,21 @@ def _build_pricing() -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelR
     The packaged table is the base; each override source (see
     _override_raw_sources) is merged over it per provider/model, and its
     model-keyed entries accumulate into a separate map consulted first by
-    get_rates.
+    get_rates. A user override replaces a model's WHOLE row list (the same
+    replace-the-model semantics the single-rate form always had) and merges
+    variant definitions per variant name.
     """
     with open(PRICING_FILE, "rb") as f:
-        provider_table, model_keyed = _split_pricing_raw(tomllib.load(f))
+        provider_table, model_keyed, variants = _split_pricing_raw(tomllib.load(f))
 
     for raw in _override_raw_sources():
-        prov, mk = _split_pricing_raw(raw)
+        prov, mk, var = _split_pricing_raw(raw)
         for provider, models in prov.items():
             provider_table.setdefault(provider, {}).update(models)
         model_keyed.update(mk)
+        variants.update(var)
 
-    return provider_table, model_keyed
+    return provider_table, model_keyed, variants
 
 
 def load_pricing_sources() -> dict[tuple[str, str], str]:
@@ -207,13 +458,13 @@ def load_pricing_sources() -> dict[tuple[str, str], str]:
     sources: dict[tuple[str, str], str] = {}
 
     with open(PRICING_FILE, "rb") as f:
-        packaged_providers, _ = _split_pricing_raw(tomllib.load(f))
+        packaged_providers, _, _ = _split_pricing_raw(tomllib.load(f))
     for provider, models in packaged_providers.items():
         for model_name in models:
             sources[(provider, model_name)] = "packaged"
 
     for raw in _override_raw_sources():
-        override_providers, _ = _split_pricing_raw(raw)
+        override_providers, _, _ = _split_pricing_raw(raw)
         for provider, models in override_providers.items():
             for model_name in models:
                 sources[(provider, model_name)] = "override"
@@ -222,6 +473,34 @@ def load_pricing_sources() -> dict[tuple[str, str], str]:
 
 
 @lru_cache(maxsize=1)
+def load_pricing_rows() -> dict[str, dict[str, tuple[RateRow, ...]]]:
+    """The full provider-keyed table with every dated / variant row preserved:
+      { provider: { model_name: (RateRow, ...) } }
+
+    This is the structure `get_rates` resolves against. Callers that just want
+    "the rate now" should use load_pricing_table(), which is a view over this.
+    """
+    return _build_pricing()[0]
+
+
+@lru_cache(maxsize=1)
+def load_model_pricing_row_overrides() -> dict[str, tuple[RateRow, ...]]:
+    """Model-keyed (provider-agnostic) overrides, with every row preserved."""
+    return _build_pricing()[1]
+
+
+@lru_cache(maxsize=1)
+def load_rate_variants() -> dict[str, VariantSpec]:
+    """Model-independent variant definitions from the `[variants]` section.
+
+    These express a variant as a transform of a model's standard rate, so a
+    flat-discount variant (the Batch API) or a cache-TTL variant applies to
+    every model without enumerating a row per model. A per-model
+    `[[provider.model.rates]]` row carrying `variant = "..."` wins over these.
+    """
+    return _build_pricing()[2]
+
+
 def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
     """
     Load the packaged pricing/models.toml, then merge optional user overrides
@@ -229,16 +508,30 @@ def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
     and return a nested dict:
       { provider: { model_name: ModelRates } }
 
+    Each model resolves to its **standard-variant rate in effect right now** —
+    the one-rate-per-model view that predates the time and variant axes, kept
+    intact for callers that only need today's list price (`tj pricing list`).
+    Reach for load_pricing_rows() when the history matters.
+
     Provider-keyed overrides are applied per provider/model, so they can
     correct a packaged rate or add a model the package doesn't ship. Cached
     after first load — restart the process (or call clear_pricing_cache()) to
     pick up changes. Model-keyed overrides live separately; see
     load_model_pricing_overrides().
     """
-    return _build_pricing()[0]
+    now = _now()
+    return {
+        provider: {
+            model: row.rates
+            for model, rows in models.items()
+            if (row := _select_row(
+                [r for r in rows if r.variant == STANDARD_VARIANT], now,
+            )) is not None
+        }
+        for provider, models in load_pricing_rows().items()
+    }
 
 
-@lru_cache(maxsize=1)
 def load_model_pricing_overrides() -> dict[str, ModelRates]:
     """
     Return user-declared rates keyed by **bare model name**, applied
@@ -247,21 +540,31 @@ def load_model_pricing_overrides() -> dict[str, ModelRates]:
 
     Sourced from the reserved model section of the same overrides as
     load_pricing_table (`[models]` in the standalone pricing file,
-    `[pricing.models]` in the main config). Cached — call
-    clear_pricing_cache() to reload.
+    `[pricing.models]` in the main config). Like load_pricing_table this is the
+    standard-variant, in-effect-now view. Cached — call clear_pricing_cache()
+    to reload.
     """
-    return _build_pricing()[1]
+    now = _now()
+    return {
+        model: row.rates
+        for model, rows in load_model_pricing_row_overrides().items()
+        if (row := _select_row(
+            [r for r in rows if r.variant == STANDARD_VARIANT], now,
+        )) is not None
+    }
 
 
 def clear_pricing_cache() -> None:
-    """Clear both pricing caches so the next lookup re-reads from disk.
+    """Clear every pricing cache so the next lookup re-reads from disk.
 
     Use after editing the packaged table or a user override at runtime
     (otherwise changes are picked up only on process restart). Primarily a
-    test hook — both lru_caches must be cleared together to stay consistent.
+    test hook — all caches must be cleared together to stay consistent.
     """
-    load_pricing_table.cache_clear()
-    load_model_pricing_overrides.cache_clear()
+    load_pricing_rows.cache_clear()
+    load_model_pricing_row_overrides.cache_clear()
+    load_rate_variants.cache_clear()
+    _UNKNOWN_VARIANT_WARNED.clear()
 
 
 def _strip_date_suffix(model: str) -> str | None:
@@ -344,9 +647,50 @@ def _normalize_bedrock_model(model: str) -> str | None:
     return normalized if normalized != model else None
 
 
-def get_rates(provider: str, model: str) -> ModelRates | None:
+def _resolve_rows(
+    rows: tuple[RateRow, ...], at: datetime, variant: str,
+) -> ModelRates | None:
+    """Pick the rate a model's rows imply for a given time and variant.
+
+    Order: an explicit per-model variant row wins; then a `[variants]`
+    definition derived from the standard rate in effect at `at`; then the
+    standard rate itself, with a once-per-(model, variant) warning — an
+    unpriced span is worse than a span priced at the rate we do know, but the
+    caller should hear that the premium wasn't applied.
+    """
+    if variant != STANDARD_VARIANT:
+        row = _select_row([r for r in rows if r.variant == variant], at)
+        if row is not None:
+            return row.rates
+
+    standard = _select_row([r for r in rows if r.variant == STANDARD_VARIANT], at)
+    if standard is None:
+        return None
+    if variant == STANDARD_VARIANT:
+        return standard.rates
+
+    spec = load_rate_variants().get(variant)
+    if spec is not None:
+        return _apply_variant(standard.rates, spec)
+    return standard.rates
+
+
+def get_rates(
+    provider: str,
+    model: str,
+    *,
+    at: datetime | None = None,
+    variant: str = STANDARD_VARIANT,
+) -> ModelRates | None:
     """
     Return ModelRates for the given provider/model, or None if not found.
+
+    `at` selects along the TIME axis — the rate whose window contains that
+    instant, so a span recorded before a price change keeps pricing at the rate
+    that actually billed it and a later span picks up the new one. Defaults to
+    now. `variant` selects along the VARIANT axis — a different way of buying
+    the same model id (`fast`, `batch`, a cache TTL); defaults to `standard`,
+    which is what every single-rate row in models.toml declares.
 
     Lookup order (first match wins):
       1. A user **model-keyed** override (bare model name), consulted before
@@ -367,29 +711,55 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
     "aws" key, and the raw boto3 modelId is additionally tried in its
     table-key form (see _normalize_bedrock_model).
     """
+    rows = _find_rate_rows(provider, model)
+    if rows is None:
+        return None
+
+    resolved_at = as_utc(at) if at is not None else _now()
+    rates = _resolve_rows(rows, resolved_at, variant)
+    if (
+        rates is not None
+        and variant != STANDARD_VARIANT
+        and not any(r.variant == variant for r in rows)
+        and variant not in load_rate_variants()
+    ):
+        key = (model, variant)
+        if key not in _UNKNOWN_VARIANT_WARNED:
+            _UNKNOWN_VARIANT_WARNED.add(key)
+            log.warning(
+                "No '%s' variant rate for %s/%s — pricing at the standard rate, "
+                "which understates it if the variant bills at a premium. Declare "
+                "one under [variants.%s] or as a [[%s.%s.rates]] row.",
+                variant, provider, model, variant, provider, model,
+            )
+    return rates
+
+
+def _find_rate_rows(provider: str, model: str) -> tuple[RateRow, ...] | None:
+    """The rate rows for a provider/model, applying the documented lookup order."""
     candidates = _lookup_candidates(model)
 
     # 1. Model-keyed user override — wins regardless of inferred provider.
-    model_keyed = load_model_pricing_overrides()
-    rates = model_keyed.get(model)
-    if rates is not None:
-        return rates
+    model_keyed = load_model_pricing_row_overrides()
+    rows = model_keyed.get(model)
+    if rows is not None:
+        return rows
     for name in candidates:
-        rates = model_keyed.get(name)
-        if rates is not None:
-            return rates
+        rows = model_keyed.get(name)
+        if rows is not None:
+            return rows
 
     # 2. Provider-keyed table (user [provider.model] over packaged).
-    table = load_pricing_table()
+    table = load_pricing_rows()
     lookup_provider = _BEDROCK_PROVIDER_ALIASES.get(provider, provider)
     provider_models = table.get(lookup_provider, {})
-    rates = provider_models.get(model)
-    if rates is not None:
-        return rates
+    rows = provider_models.get(model)
+    if rows is not None:
+        return rows
     for name in candidates:
-        rates = provider_models.get(name)
-        if rates is not None:
-            return rates
+        rows = provider_models.get(name)
+        if rows is not None:
+            return rows
 
     # Bedrock: the raw boto3 modelId ("us.amazon.nova-micro-v1:0") never
     # matches the dot-flattened, unversioned [aws.*] keys — try the
@@ -397,11 +767,36 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
     if lookup_provider == "aws":
         normalized = _normalize_bedrock_model(model)
         if normalized is not None:
-            rates = provider_models.get(normalized)
-            if rates is not None:
-                return rates
+            rows = provider_models.get(normalized)
+            if rows is not None:
+                return rows
 
     return None
+
+
+def variant_price_ratio(variant: str) -> float | None:
+    """What fraction of the standard price a *uniform* variant bills at.
+
+    Only defined for a variant whose `[variants]` definition multiplies every
+    rate field by the same factor and pins none of them absolutely — the Batch
+    API's flat half-price is exactly this shape. Returns None for a variant that
+    is model-specific (`fast`), partial (`cache-1h` touches only cache writes),
+    or undefined, because no single ratio describes it. Callers that need a
+    model's actual rates should call get_rates(..., variant=...) instead.
+    """
+    spec = load_rate_variants().get(variant)
+    if spec is None or spec.absolute:
+        return None
+    if set(spec.multipliers) != set(RATE_FIELDS):
+        return None
+    factors: set[float] = set()
+    for field_name, (factor, of_field) in spec.multipliers.items():
+        if of_field != field_name:
+            return None  # cross-field: not a uniform scaling of the standard rate
+        factors.add(factor)
+    if len(factors) != 1:
+        return None
+    return factors.pop()
 
 
 def provider_for_model(model: str | None) -> str | None:

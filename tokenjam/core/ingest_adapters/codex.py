@@ -258,6 +258,9 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
                 output_tokens=output_total,
                 cache_read_tokens=cached,
                 cache_write_tokens=0,
+                # Rollouts are history: price each turn at the rate in effect
+                # when it ran, not at today's.
+                at=start_time,
             )
 
             spans_by_id[span_id] = NormalizedSpan(

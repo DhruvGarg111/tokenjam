@@ -95,6 +95,15 @@ _REQUEST_PARAM_ATTRS: tuple[str, ...] = (
     GenAIAttributes.REQUEST_SEED,
 )
 
+# Billing-relevant request metadata. Projected into request_params like the
+# sampling params above, but deliberately NOT listed in the block that
+# strip_captured_content drops with the `prompts` toggle: it names which PRICE
+# applied (fast mode bills the same model id at a premium), so dropping it would
+# silently halve the recorded cost of every fast call.
+_RATE_VARIANT_ATTRS: tuple[str, ...] = (
+    TjAttributes.REQUEST_SPEED,
+)
+
 
 def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
     """Remove prompt/completion/tool content from attributes based on capture config.
@@ -143,7 +152,7 @@ def extract_request_capture(span: NormalizedSpan) -> None:
     request_params / request_tools columns.
     """
     params: dict[str, Any] = {}
-    for key in _REQUEST_PARAM_ATTRS:
+    for key in _REQUEST_PARAM_ATTRS + _RATE_VARIANT_ATTRS:
         if key in span.attributes:
             # Store under the short param name (strip the gen_ai.request. prefix).
             params[key.rsplit(".", 1)[-1]] = span.attributes.pop(key)
