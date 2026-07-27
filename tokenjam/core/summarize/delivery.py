@@ -235,6 +235,14 @@ def summarize_via(
         # Priced rewrite usage ÷ Estimate saving (DEC-029): the saving is est_tokens_saved priced at
         # the same model's input rate, via the shared cost engine (consistent fallback with the
         # rewrite cost). Failed checks still cost money, but have no staged saving to amortize.
+        #
+        # Deliberately the only pricing call under this package with no `at=`,
+        # and it is correct here. Everything under core/optimize prices PAST
+        # traffic and must use the rate that billed it (see
+        # `tokenjam.core.optimize.span_pricing`); this prices a rewrite about
+        # to be issued, so today's rate — `get_rates`/`calculate_cost`'s default
+        # — is the rate it will actually bill at. Left bare rather than passing
+        # `at=utcnow()`, which would say the same thing more obscurely.
         from tokenjam.core.cost import calculate_cost
         from tokenjam.core.pricing import get_rates
         model = config.summarize.api_model
