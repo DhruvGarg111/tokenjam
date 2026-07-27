@@ -304,6 +304,13 @@ class ReuseCluster:
     caveat:            str = REUSE_HONESTY_CAVEAT
 
 
+#: Capture modes whose clusters were built, wholly or partly, on tool
+#: signature alone. Every surface that shows a reuse finding must warn on ALL
+#: of these — branching on `== "tool_sequence_only"` is how the partial case
+#: silently rendered as the confident, unqualified path.
+DEGRADED_CAPTURE_MODES = frozenset({"tool_sequence_only", "mixed_prompt_prefix"})
+
+
 @dataclass
 class ReuseFinding:
     """Clusters of sessions with structurally repeated planning calls."""
@@ -313,9 +320,15 @@ class ReuseFinding:
     # declare "with_prompt_prefix" while every cluster member's
     # `prompt_prefix_hash` was None, i.e. advertise content matching while
     # silently degrading to tool-signature-only clustering.
-    capture_mode:  Literal["tool_sequence_only", "with_prompt_prefix"] = (
-        "tool_sequence_only"
-    )
+    # `mixed_prompt_prefix` is the partially-degraded middle: SOME planning
+    # calls carried prompt text and the rest were clustered on tool signature
+    # alone, so the window's clusters do not share one basis. Collapsing it
+    # into `with_prompt_prefix` (the old behavior — any nonzero coverage) made
+    # a partly tool-signature-only result advertise full content matching,
+    # while the basis string on the same finding said the opposite.
+    capture_mode:  Literal[
+        "tool_sequence_only", "mixed_prompt_prefix", "with_prompt_prefix"
+    ] = "tool_sequence_only"
     # Measured share of the window's planning calls that carried prompt text,
     # 0.0-1.0. `None` means "no planning call to measure", never 0.0 — the
     # difference between an unanswered question and a measured absence.

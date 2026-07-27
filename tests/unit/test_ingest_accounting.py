@@ -546,12 +546,21 @@ def _reuse_finding(backend, config: TjConfig) -> ReuseFinding:
     return report.findings["reuse"]
 
 
-def _seed_planning_sessions(backend, *, with_prompt: bool) -> None:
-    """Four sessions sharing one planning skeleton: an LLM call, then tools."""
+def _seed_planning_sessions(
+    backend, *, with_prompt: bool, prompt_sessions: int | None = None,
+) -> None:
+    """Four sessions sharing one planning skeleton: an LLM call, then tools.
+
+    `prompt_sessions` overrides the all-or-nothing `with_prompt` split so a
+    window can be seeded with prompt text on only SOME planning calls — the
+    mixed basis a real install produces when part of its history was ingested
+    live without `OTEL_LOG_USER_PROMPTS=1`.
+    """
+    carrying = prompt_sessions if prompt_sessions is not None else (4 if with_prompt else 0)
     for s in range(4):
         session_id = f"plan-{s}"
         attrs = {"source": "backfill.claude_code"}
-        if with_prompt:
+        if s < carrying:
             attrs[GenAIAttributes.PROMPT_CONTENT] = "cut a patch release"
         backend.insert_span(make_llm_span(
             session_id=session_id, agent_id="claude-code", model=MODEL,
@@ -612,3 +621,37 @@ def test_coverage_is_none_when_there_was_nothing_to_measure():
     finally:
         backend.close()
     assert finding.prompt_capture_coverage is None
+
+
+def test_partial_prompt_capture_is_reported_as_a_mixed_basis():
+    """Nonzero coverage is not full coverage.
+
+    Any prompt-bearing call used to flip the whole finding to
+    `with_prompt_prefix`, while the basis string on the SAME finding said the
+    rest clustered on tool sequence alone — the field and its own explanation
+    contradicting each other. Every surface warns on `tool_sequence_only`
+    only, so a half-guessed result rendered as the confident path.
+    """
+    backend = InMemoryBackend()
+    try:
+        _seed_planning_sessions(backend, with_prompt=False, prompt_sessions=2)
+        finding = _reuse_finding(backend, _config(prompts=True))
+    finally:
+        backend.close()
+
+    assert finding.capture_mode == "mixed_prompt_prefix"
+    assert finding.prompt_capture_coverage == 0.5
+    assert "2 of 4 planning calls carried prompt text" in finding.estimate_basis
+    assert finding.hint and "Only some planning calls" in finding.hint
+
+
+def test_every_degraded_capture_mode_is_flagged_as_degraded():
+    """The renderers branch on this set, so it is what makes the notice fire.
+
+    Pinned as a set rather than per-renderer: the partial case slipped through
+    precisely because three separate surfaces each tested one literal value.
+    """
+    from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
+
+    assert DEGRADED_CAPTURE_MODES == {"tool_sequence_only", "mixed_prompt_prefix"}
+    assert "with_prompt_prefix" not in DEGRADED_CAPTURE_MODES

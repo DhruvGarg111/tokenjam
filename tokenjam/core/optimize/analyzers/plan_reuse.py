@@ -74,6 +74,18 @@ _CAPTURE_ON_NO_CONTENT_HINT = (
     "transcripts on disk."
 )
 
+# The partial case: prompt text was there for some planning calls and not
+# others, so the window's clusters were not all built the same way. Naming the
+# split is the point — a reader comparing two runs otherwise cannot tell a
+# fully content-matched result from one that was half tool-signature guesswork.
+_MIXED_CAPTURE_HINT = (
+    "Only some planning calls in this window carried prompt text; the rest "
+    "were clustered on tool-sequence signatures alone, so these clusters do "
+    "not all rest on the same evidence. Sessions ingested live carry prompt "
+    "text only when Claude Code ran with OTEL_LOG_USER_PROMPTS=1; "
+    "`tj backfill claude-code` recovers it from the transcripts on disk."
+)
+
 
 class _SpanRow(NamedTuple):
     session_id: str
@@ -307,8 +319,17 @@ def run(ctx: AnalyzerContext) -> None:
     finding.prompt_capture_coverage = (
         round(with_prompt / len(plans), 4) if plans else None
     )
-    if with_prompt:
+    if with_prompt and with_prompt == len(plans):
         finding.capture_mode = "with_prompt_prefix"
+    elif with_prompt:
+        # Partly degraded. The prompt-free calls in this window were clustered
+        # on tool signature alone, so the window's clusters do not share one
+        # basis and no surface may present them as content-matched. Claiming
+        # the full mode here contradicted the basis string built two lines
+        # down, which has always said "the rest clustered on tool sequence
+        # alone".
+        finding.capture_mode = "mixed_prompt_prefix"
+        finding.hint = _MIXED_CAPTURE_HINT
     elif prompts_captured and plans:
         # Asked for, not delivered — the case the toggle alone cannot describe.
         finding.hint = _CAPTURE_ON_NO_CONTENT_HINT

@@ -8,6 +8,7 @@ import click
 from rich.markup import escape as _rich_escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
     Framing,
@@ -2017,18 +2018,24 @@ def _render_reuse(
     # `capture_mode` states what clustering ACTUALLY ran on (measured per
     # window), so the degrade is named without asserting a cause the finding
     # cannot know — the accompanying hint carries the remedy.
-    mode_note = (
-        " [dim](tool-sequence only — no prompt text was captured for these "
-        "calls)[/dim]"
-        if finding.capture_mode == "tool_sequence_only"
-        else ""
-    )
+    if finding.capture_mode == "tool_sequence_only":
+        mode_note = (
+            " [dim](tool-sequence only — no prompt text was captured for "
+            "these calls)[/dim]"
+        )
+    elif finding.capture_mode == "mixed_prompt_prefix":
+        mode_note = (
+            " [dim](mixed basis — only some of these calls carried prompt "
+            "text; the rest matched on tool sequence alone)[/dim]"
+        )
+    else:
+        mode_note = ""
     console.print(
         f"     • [bold]{len(finding.clusters)}[/bold] cluster"
         f"{'s' if len(finding.clusters) != 1 else ''} of repeated planning "
         f"detected{mode_note}"
     )
-    if finding.capture_mode == "tool_sequence_only" and finding.hint:
+    if finding.capture_mode in DEGRADED_CAPTURE_MODES and finding.hint:
         console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
 
     for c in finding.clusters[:5]:
