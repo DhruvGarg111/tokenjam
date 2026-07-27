@@ -42,6 +42,7 @@ ANALYZER_ORDER: list[str] = [
     "relearn",
     "verbosity",
     "deadweight",
+    "stream-usage",
 ]
 
 # Analyzers that have NO fix a user of that persona can actually apply.
@@ -128,6 +129,16 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # this corpus; the SDK case is a separate, unmeasured question and is
         # deliberately left ungated.
         "reuse",
+        # Stream-usage flags streamed calls that closed before the provider
+        # emitted its usage payload, so their spend went unrecorded. Its fix
+        # is a request-side change — `stream_options={"include_usage": True}`,
+        # or draining the stream server-side — to code that constructs the
+        # provider call. An interactive coding agent's harness constructs that
+        # call, which puts the lever on the other side of the actionable
+        # ceiling; and the harness drains its own streams, so the failure mode
+        # does not arise here in the first place. This is an SDK-persona
+        # finding: it stays enabled for `sdk` / `mixed` / `unknown`.
+        "stream-usage",
     }),
     # An SDK/API window has no on-disk Claude Code transcript and never
     # populates `sub_agent_id` (no Task-tool subagent-dispatch concept in
@@ -542,6 +553,7 @@ def _build_finding_classes() -> dict:
     from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
         SubagentRightsizingFinding,
     )
+    from tokenjam.core.optimize.analyzers.stream_usage import StreamUsageFinding
     from tokenjam.core.optimize.analyzers.summarize import SummarizeFinding
     from tokenjam.core.optimize.analyzers.workflow_restructure import (
         WorkflowRestructureFinding,
@@ -560,6 +572,7 @@ def _build_finding_classes() -> dict:
         "deadweight": DeadweightFinding,
         "verbosity": VerbosityFinding,
         "resend": ResendFinding,
+        "stream-usage": StreamUsageFinding,
         # Not a registered analyzer name of its own: the downsize analyzer
         # attaches the batch-placement check under this key. It still needs an
         # entry, or the finding is dropped on the daemon path (every consumer

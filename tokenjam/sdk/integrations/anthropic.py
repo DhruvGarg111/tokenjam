@@ -12,7 +12,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_anthropic_completion,
@@ -180,29 +180,75 @@ class AnthropicIntegration:
         self.installed = False
 
 
+def _event_carries_content(event: Any) -> bool:
+    """True when a streamed event delivered generated output to the caller.
+
+    Structural and defensive — an unrecognised event shape counts as no content
+    rather than raising into the caller's iteration.
+    """
+    delta = getattr(event, "delta", None)
+    if delta is None:
+        return False
+    return bool(getattr(delta, "text", None) or getattr(delta, "partial_json", None))
+
+
 class _StreamWrapper:
-    """Wraps an Anthropic stream to capture final usage and end the span."""
+    """Wraps an Anthropic stream to capture final usage and end the span.
+
+    Also records the streaming data-quality signature (see
+    ``TjAttributes.STREAMING``). Anthropic reports output tokens only in the
+    trailing ``message_delta`` / ``message_stop`` pair, which
+    ``get_final_message()`` reads — so a caller that breaks out of the loop or
+    is disconnected mid-response leaves this span with no token counts, which
+    is indistinguishable from a free call unless the span says so itself.
+    """
 
     def __init__(self, stream, span):
         self._stream = stream
         self._span = span
+        self._content_events = 0
 
     def __enter__(self):
         self._stream.__enter__()
         return self
 
+    def _final_usage(self) -> Any:
+        """The final message's usage, or None when the stream never finished.
+
+        ``get_final_message()`` raises when the stream was not consumed to
+        completion, which is exactly the case being detected — so the raise is
+        an answer, not an error, and must not escape ``__exit__``.
+        """
+        getter = getattr(self._stream, "get_final_message", None)
+        if getter is None:
+            return None
+        try:
+            final_message = getter()
+        except Exception:
+            return None
+        return getattr(final_message, "usage", None)
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         result = self._stream.__exit__(exc_type, exc_val, exc_tb)
-        final_message = getattr(self._stream, "get_final_message", lambda: None)()
-        if final_message and hasattr(final_message, "usage"):
+        usage = self._final_usage()
+        if usage is not None:
             self._span.set_attribute(
                 GenAIAttributes.INPUT_TOKENS,
-                final_message.usage.input_tokens,
+                usage.input_tokens,
             )
             self._span.set_attribute(
                 GenAIAttributes.OUTPUT_TOKENS,
-                final_message.usage.output_tokens,
+                usage.output_tokens,
             )
+        # Stamped unconditionally, including on the happy path: the analyzer
+        # needs the complete streams as the peer baseline it estimates the
+        # missing ones against, so "usage reported" is as load-bearing a fact
+        # as "usage missing".
+        self._span.set_attribute(TjAttributes.STREAMING, True)
+        self._span.set_attribute(TjAttributes.STREAM_USAGE_REPORTED, usage is not None)
+        self._span.set_attribute(
+            TjAttributes.STREAM_CONTENT_CHUNKS, self._content_events,
+        )
         if exc_type is None:
             self._span.set_status(trace.Status(trace.StatusCode.OK))
         else:
@@ -211,10 +257,16 @@ class _StreamWrapper:
         return result
 
     def __iter__(self):
-        return iter(self._stream)
+        for event in self._stream:
+            if _event_carries_content(event):
+                self._content_events += 1
+            yield event
 
     def __next__(self):
-        return next(self._stream)
+        event = next(self._stream)
+        if _event_carries_content(event):
+            self._content_events += 1
+        return event
 
 
 def patch_anthropic() -> None:

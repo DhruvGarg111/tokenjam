@@ -489,6 +489,7 @@ _MINOR_FINDING_LABELS = {
     "deadweight":      "Deadweight",
     "placement":       "Batch placement",
     "summarize":       "Summarize",
+    "stream-usage":    "Streaming usage gap",
 }
 
 
@@ -2760,6 +2761,72 @@ def _render_resend_fix(finding, persona: str) -> None:
             )
 
 
+def _render_stream_usage(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the streaming usage gap — streamed calls whose token counts the
+    provider never reported, so their spend is missing from every total.
+
+    This is the one finding on this screen that is NOT a saving. The figure it
+    carries is spend that already happened and was never recorded, so the copy
+    below never says "recoverable" and the accounting note is printed verbatim
+    rather than summarised: a data-quality number sitting among savings
+    numbers is read as a saving unless it says otherwise every time.
+    """
+    console.print(_finding_header(marker, "Streaming usage gap:"))
+    if not finding.call_sites:
+        console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]" if finding.hint
+                      else "     [dim]Every observed stream reported its token "
+                           "usage — no measurement gap in this window.[/dim]")
+        return
+
+    console.print(
+        f"     • [bold]{finding.streams_missing_usage}[/bold] of "
+        f"[bold]{finding.streams_observed}[/bold] streamed calls closed without a "
+        f"usage payload [dim](content was produced; no token counts were "
+        f"reported)[/dim]"
+    )
+    if pricing_mode == "api" and finding.undercounted_usd is not None:
+        console.print(
+            f"     [dim]unrecorded spend[/dim] ~"
+            f"{format_tokens(finding.undercounted_tokens)} tokens / "
+            f"{format_cost(finding.undercounted_usd)} "
+            f"[dim](estimated — see basis below)[/dim]"
+        )
+    elif finding.undercounted_tokens is not None:
+        console.print(
+            f"     [dim]unrecorded spend[/dim] ~"
+            f"{format_tokens(finding.undercounted_tokens)} tokens "
+            f"[dim](no dollar figure on this pricing mode)[/dim]"
+        )
+
+    for site in finding.call_sites[:5]:
+        label = f"{site.provider}/{site.model or 'unknown model'}"
+        if site.agent_id:
+            label += f" [dim]({site.agent_id})[/dim]"
+        console.print(
+            f"       [bold]{_rich_escape(label)}[/bold]  "
+            f"{site.affected_calls} call"
+            f"{'s' if site.affected_calls != 1 else ''} across "
+            f"{site.sessions} session{'s' if site.sessions != 1 else ''}"
+        )
+        console.print(f"          [dim]{_rich_escape(site.derivation)}[/dim]")
+        console.print(f"          [yellow]→[/yellow] {_rich_escape(site.remediation)}")
+        console.print(
+            site.remediation_snippet, markup=False, highlight=False, soft_wrap=True,
+        )
+    if len(finding.call_sites) > 5:
+        console.print(
+            f"       [dim]… and {len(finding.call_sites) - 5} more call site(s). "
+            f"Full detail with [bold]tj optimize stream-usage --json[/bold].[/dim]"
+        )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{_rich_escape(finding.estimate_basis)}[/dim]")
+    console.print(f"     [dim]{_rich_escape(finding.accounting_note)}[/dim]")
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -2774,4 +2841,5 @@ _FINDING_RENDERERS = {
     "deadweight":   _render_deadweight,
     "placement":    _render_placement,
     "summarize":    _render_summarize,
+    "stream-usage": _render_stream_usage,
 }
