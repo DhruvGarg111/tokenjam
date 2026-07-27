@@ -4694,13 +4694,87 @@ def test_budgets_at_risk_cannot_report_ready_off_a_cold_store(html):
 
 
 def test_both_analyzer_surfaces_carry_provenance_and_a_rescan_control(html):
-    # The Dashboard band and the Optimize view both mount the shared ScanBar, so
-    # neither can render figures without saying when they were computed.
-    assert html.count("<${ScanBar}") >= 2
+    # The Dashboard band, the Optimize view and the Review inbox all mount the
+    # shared ScanBar, so none of the three can render figures without saying
+    # when they were computed.
+    assert html.count("<${ScanBar}") >= 3
     # A rescan that FAILED must not look like one that succeeded, so the POST
     # goes through the helper that surfaces the server's reason.
     assert "apiPostOrDetail('/optimize/rescan', {})" in html
     assert "rescan failed: " in html
+
+
+def test_rescan_control_is_a_prominent_accessible_button_not_a_bare_link(html):
+    """Founder constraints: prominent, not dark blue, real hover/active/disabled/
+    focus states, keyboard-operable. A styled <span onClick> link is none of
+    that; a <button> with a dedicated class is."""
+    fn_start = html.index("function ScanBar({ scan, busy, error, onRescan })")
+    fn_end = html.index("\n// A rescan button plus the state", fn_start)
+    fn = html[fn_start:fn_end]
+    assert '<button type="button" class="rescan-ctl' in fn
+    assert "disabled=${scanning}" in fn
+
+    css_start = html.index(".rescan-ctl {")
+    css_end = html.index(".btn-restore {", css_start)
+    css = html[css_start:css_end]
+    # Monochrome accent, never the brand blue used for logo/category fills.
+    assert "var(--brand)" not in css
+    assert "var(--accent)" in css
+    assert ":hover:not(:disabled)" in css
+    assert ":active:not(:disabled)" in css
+    assert ":focus-visible" in css
+    assert ":disabled" in css
+
+
+def test_rescan_control_sits_top_right_of_each_heading_row(html):
+    """Placement requirement: top right of the content area, aligned with the
+    page heading row -- not buried in a filters row or a sub-band."""
+    # Optimize: ScanBar is a sibling of the page-title block inside a
+    # space-between flex row, not inside `.filters` any more.
+    opt_start = html.index("function OptimizeView({ params })")
+    opt_end = html.index("\n// Two lenses, one router", opt_start)
+    opt_fn = html[opt_start:opt_end]
+    head_start = opt_fn.index("justify-content:space-between")
+    filters_start = opt_fn.index('<div class="filters">')
+    scanbar_in_head = opt_fn.index("<${ScanBar}", head_start)
+    assert head_start < scanbar_in_head < filters_start, (
+        "Optimize's ScanBar must render in the heading row, before .filters"
+    )
+
+    # Dashboard: ScanBar renders inside `.ov-head`, alongside the window
+    # picker, not inside the "Recoverable waste" band label any more.
+    dash_start = html.index("function DashboardView({ params })")
+    dash_end = html.index("\nfunction ", dash_start + 1)
+    dash_fn = html[dash_start:dash_end]
+    ov_head_start = dash_fn.index('<div class="ov-head">')
+    ov_head_end = dash_fn.index("</div>\n    </div>", ov_head_start)
+    assert "<${ScanBar}" in dash_fn[ov_head_start:ov_head_end]
+    assert '<div class="band-label">Recoverable waste</div>' in dash_fn
+
+    # Review inbox: ScanBar renders beside the "Inbox" page-title, not as a
+    # bespoke sz-link.
+    inbox_start = html.index("function ReviewInboxView({ params })")
+    inbox_end = html.index("\nfunction ", inbox_start + 1)
+    inbox_fn = html[inbox_start:inbox_end]
+    title_at = inbox_fn.index('<div class="page-title" style="margin-bottom:0">Inbox</div>')
+    scanbar_at = inbox_fn.index("<${ScanBar}", title_at)
+    tab_bar_at = inbox_fn.index('<div class="tab-bar"', title_at)
+    assert title_at < scanbar_at < tab_bar_at
+
+
+def test_review_inbox_rescan_reuses_the_shared_hook_and_surfaces_failure(html):
+    """The inbox re-runs two stores (relearn + cost-advisory) rather than
+    `/optimize/rescan`, but it must still go through apiPostOrDetail (not the
+    silently-swallowing apiPost) so a refused POST reaches the shared
+    ScanBar's error prop instead of failing invisibly."""
+    fn_start = html.index("function ReviewInboxView({ params })")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+    assert "apiPostOrDetail('/relearn/refresh', {})" in fn
+    assert "apiPostOrDetail('/relearn/cost-proposals/refresh', {})" in fn
+    assert "Promise.allSettled" in fn
+    assert "setRefreshError(" in fn
+    assert "error=${refreshError}" in fn
 
 
 def test_auto_rescan_is_visibility_gated_and_killable(html):

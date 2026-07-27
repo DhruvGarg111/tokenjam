@@ -525,6 +525,39 @@ table.archive-list .a-id { color: var(--text); }
 .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-back { margin-bottom: 16px; }
+/* The rescan control (ScanBar) — mounted top-right of the heading row on every
+   analyzer-fed surface (Dashboard, Optimize, Review inbox). Prominent on
+   purpose: this is the one action that turns a stale answer into a fresh
+   one, so it reads as a real button rather than one more inline text link.
+   Deliberately monochrome (var(--accent), not var(--brand)) — brand-blue is
+   reserved for logo/category fills elsewhere, and a rescan is a neutral
+   "run this" action, not a branded one. */
+.rescan-bar { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 400; }
+.rescan-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface2);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 7px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.rescan-ctl-icon { display: inline-block; }
+.rescan-ctl:hover:not(:disabled) { background: rgba(var(--accent-rgb),0.12); }
+.rescan-ctl:active:not(:disabled) { background: rgba(var(--accent-rgb),0.2); }
+.rescan-ctl:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rescan-ctl:disabled, .rescan-ctl.scanning { opacity: 0.6; cursor: not-allowed; }
+.rescan-ctl.scanning .rescan-ctl-icon { animation: rescan-spin 1s linear infinite; }
+@keyframes rescan-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.scan-provenance { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; white-space: nowrap; }
+.scan-error { font-size: 11px; color: var(--error); }
+.scan-degraded { font-size: 11px; color: var(--warn); }
 .btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; position: relative; display: inline-flex; align-items: center; gap: 5px; }
 .btn-restore.copied { border-color: var(--success); color: var(--success); }
 .btn-restore svg { width: 12px; height: 12px; flex-shrink: 0; }
@@ -881,6 +914,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
    placeholder because the gradient stays. */
 @media (prefers-reduced-motion: reduce) {
   .shimmer { animation: none; }
+  .rescan-ctl.scanning .rescan-ctl-icon { animation: none; }
 }
 
 /* Overview + Optimize (issue #114) */
@@ -7209,35 +7243,50 @@ async function rescanAnalyzers() { return apiPostOrDetail('/optimize/rescan', {}
 // stored artifacts with different cadences (this report and the relearn
 // detector's own cache) can legitimately disagree; each stating its own
 // computed-at is what makes that difference explicable rather than a mystery.
+//
+// One component, mounted top-right of the heading row on every analyzer-fed
+// surface (Dashboard, Optimize, Review inbox) so the same provenance text and
+// the same button render everywhere rather than each screen growing its own
+// rescan link. A real <button>, not a styled span, so it is keyboard-operable
+// and gets a focus ring for free; `disabled` while a scan is in flight is
+// what makes "scanning\u2026" actually true rather than just its label.
 function ScanBar({ scan, busy, error, onRescan }) {
+  const scanning = !!(busy || scan.computing);
   const when = scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
       ? 'computed ' + fmtAgo(scan.computedAt) + (scan.windowDays ? ' \u00b7 ' + scan.windowDays + 'd window' : '')
       : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
-  return html`<span style="display:inline-flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-weight:400">
-    <span class="dim" style="font-size:11px">${when}</span>
-    <span class="sz-link" onClick=${onRescan}>\u27f3 ${(busy || scan.computing) ? 'scanning\u2026' : 'Rescan'}</span>
-    ${error ? html`<span style="font-size:11px;color:var(--error)">rescan failed: ${error}</span>` : null}
-    ${scan.degraded ? html`<span style="font-size:11px;color:var(--error)" title=${scan.lastError || ''}>last refresh failed</span>` : null}
+  return html`<span class="rescan-bar">
+    <span class="scan-provenance">${when}</span>
+    <button type="button" class="rescan-ctl${scanning ? ' scanning' : ''}" onClick=${onRescan} disabled=${scanning}
+      aria-label=${scanning ? 'Scanning\u2026' : 'Rescan'}>
+      <span aria-hidden="true" class="rescan-ctl-icon">\u27f3</span>${scanning ? 'Scanning\u2026' : 'Rescan'}
+    </button>
+    ${error ? html`<span class="scan-error">rescan failed: ${error}</span>` : null}
+    ${scan.degraded ? html`<span class="scan-degraded" title=${scan.lastError || ''}>last refresh failed</span>` : null}
   </span>`;
 }
 
-// A rescan button plus the state it needs, shared by both surfaces that carry
-// one. Surfaces the failure: a rescan whose POST was refused reports the
-// server's reason instead of silently looking like a success.
-function useRescan(reload) {
+// A rescan button plus the state it needs, shared by every surface that
+// carries one. `action` defaults to the analyzer-report rescan
+// (`POST /optimize/rescan`); the Review inbox passes its own two-endpoint
+// refresh instead, so all three surfaces share this hook's busy/error/timing
+// behaviour even though what they re-run differs. Surfaces the failure: a
+// rescan whose POST was refused reports the server's reason instead of
+// silently looking like a success.
+function useRescan(reload, action = rescanAnalyzers) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const rescan = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      await rescanAnalyzers();
+      await action();
     } catch (e) {
       setError(e.message || String(e));
     }
     setTimeout(() => { setBusy(false); reload(); }, 1500);
-  }, [reload]);
+  }, [reload, action]);
   return { busy, error, rescan };
 }
 
@@ -7810,9 +7859,12 @@ function OptimizeView({ params }) {
           FAQ as a top-level Improve entry (that is what makes it reachable
           from anywhere at all); this link is the contextual one, offered on the
           screen whose cards it explains. */ ''}
-    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      Optimize <${PlanBadge} framing=${framing} />
-      <a class="sz-link" href="#/faq" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+      <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:0">
+        Optimize <${PlanBadge} framing=${framing} />
+        <a class="sz-link" href="#/faq" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
+      </div>
+      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
@@ -7828,7 +7880,6 @@ function OptimizeView({ params }) {
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
-      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
     </div>
     ${/* The picker above scopes the SPEND chart; the analyzer findings come
           from the background scan's own window. Saying so beats letting a 7d
@@ -10986,6 +11037,7 @@ function ReviewInboxView({ params }) {
   const [reviewQueue, setReviewQueue] = useState([]);
   const [reviewTotal, setReviewTotal] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState(null); // a rescan POST that was refused, honestly surfaced
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
   const [costProps, setCostProps] = useState([]);          // advise-only cost proposals
@@ -11077,13 +11129,42 @@ function ReviewInboxView({ params }) {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [analyzerFocus, costProps]);
 
+  // Two stores, one rescan press: relearn's own cache and the cost-advisory
+  // cache recompute on the same cadence, so one control re-runs both. Unlike
+  // the old fire-and-forget version, a refused POST is not swallowed — the
+  // shared ScanBar control needs an honest error to show (Critical Rule: a
+  // rescan that failed must not look like one that succeeded).
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
-    try { await apiPost('/relearn/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
-    // The cost proposals recompute on the same cadence.
-    try { await apiPost('/relearn/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
+    setRefreshError(null);
+    const results = await Promise.allSettled([
+      apiPostOrDetail('/relearn/refresh', {}),
+      apiPostOrDetail('/relearn/cost-proposals/refresh', {}),
+    ]);
+    const failed = results.filter(r => r.status === 'rejected');
+    if (failed.length) {
+      setRefreshError(failed.map(r => (r.reason && (r.reason.message || String(r.reason))) || 'unknown error').join('; '));
+    }
     setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
   }, [load, loadCost]);
+
+  // A scan-state shape ScanBar can render, built from the inbox's own two
+  // reads rather than from `/optimize` — same control, different store. The
+  // relearn cache's own computed_at is the header's provenance (it already
+  // was, before this reused the shared component); `degraded`/`lastError`
+  // come from the cost-advisory half, since that is the one that already
+  // tracked a failed-but-not-fatal recompute.
+  const inboxScan = {
+    fetchFailed: false,
+    computedAt: d.computedAt,
+    windowDays: null,
+    computing: d.status === 'computing' || costStatus === 'computing',
+    degraded: costDegraded,
+    lastError: costLastError,
+    status: (d.status === 'never_run' && costStatus === 'never_run')
+      ? 'never_run'
+      : (d.status === 'error' || costStatus === 'error' ? 'error' : 'ready'),
+  };
 
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
@@ -11289,11 +11370,12 @@ function ReviewInboxView({ params }) {
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <div class="page-title" style="margin-bottom:0">Inbox</div>
       ${/* Scan provenance belongs beside the control that re-runs it, not in a
-            per-tab header: it describes the whole inbox, and the Rescan link is
-            already the one place that reports scan state. */ ''}
-      <span style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
-        ${d.computedAt ? html`<span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
-        <span class="sz-link" onClick=${doRefresh}>⟳ ${refreshing || d.status === 'computing' || costStatus === 'computing' ? 'scanning…' : 'Rescan now'}</span>
+            per-tab header: it describes the whole inbox, and the shared
+            rescan control (ScanBar, also on the Dashboard and Optimize
+            screens) is already the one place that reports scan state. */ ''}
+      <span style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        ${d.sessionsScanned != null ? html`<span class="scan-provenance">${d.sessionsScanned} sessions scanned</span>` : null}
+        <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} onRescan=${doRefresh} />
       </span>
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
@@ -11812,7 +11894,10 @@ function DashboardView({ params }) {
         <div class="page-title" style="margin:0">Dashboard</div>
         <${PlanBadge} framing=${framing} />
       </div>
-      <div class="filters" style="margin:0">${winPicker}</div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div class="filters" style="margin:0">${winPicker}</div>
+        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
+      </div>
     </div>
     ${/* A past-overspend hero band rendered here once. Removed: it read as heavy
           at the top of the page, and the figure now lives as a compact tile on
@@ -11861,10 +11946,7 @@ function DashboardView({ params }) {
         ${html`
             <div class="dash-triage">
               <div class="dash-col">
-                <div class="band-label" style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
-                  <span>Recoverable waste</span>
-                  <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
-                </div>
+                <div class="band-label">Recoverable waste</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
