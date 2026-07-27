@@ -7979,33 +7979,46 @@ function OptimizeView({ params }) {
 // `sub_agent_id` (i.e. already dispatched to a worker), so the two describe
 // disjoint populations for the flagship detection each card reports on.
 //
-// This is a card for EVERY registered analyzer (`ANALYZER_REGISTRY` in
-// `core/optimize/`), not only the ones that produce cards on the Optimize
-// screen for the Claude Code persona -- `order` below lists the live ones
-// first, then the ones gated off for Claude Code, and the two groups are
-// never interleaved. The live/gated split and the reasoning inside each
-// gated entry's description are grounded in
-// `.claude/product-state/ANALYZER-PERSONA-MATRIX.md` (the durable decision
-// record for persona gating) plus the gated analyzer's own module docstring,
-// not re-derived here. `placement` is a sub-check `downsize` attaches, not
-// its own registry entry, so it has no card of its own -- it is covered
-// inside Downsize's description of what the driver-role case claims.
+// This is a card for every analyzer whose check ends in a fix a user could
+// apply -- NOT every name in `ANALYZER_REGISTRY` (`core/optimize/`). Those
+// are different lists: `budget-projection` and `stream-usage` both live in
+// the registry, but neither ends in anything to change (budget-projection is
+// a spend forecast against a ceiling; stream-usage corrects a spend FIGURE,
+// it recovers nothing), so neither gets a card. The other 6 gated-off names
+// below (cache, cache-recommend, reuse, script, trim, verbosity) DO end in a
+// fix in the abstract -- they are gated off for Claude Code specifically
+// (no lever that persona can reach, or the check cannot fire for it), which
+// is a different, narrower kind of exclusion than "has no fix at all". A
+// newly-registered analyzer must be triaged against this same rule by a
+// human before it gets a card here; see
+// `test_analyzer_guide_covers_the_reviewed_user_facing_analyzer_list` in
+// `tests/unit/test_lens_ui_regression.py`, which fails loudly (naming the
+// analyzer) when a registry name is in neither this object's `order` nor its
+// own explicit excluded list, rather than silently doing nothing or
+// silently adding a card.
+//
+// `order` below lists the live-for-Claude-Code ones first, then the ones
+// gated off for Claude Code, and the two groups are never interleaved. The
+// live/gated split and the reasoning inside each gated entry's description
+// are grounded in `.claude/product-state/ANALYZER-PERSONA-MATRIX.md` (the
+// durable decision record for persona gating) plus the gated analyzer's own
+// module docstring, not re-derived here. `placement` is a sub-check
+// `downsize` attaches, not its own registry entry, so it has no card of its
+// own -- it is covered inside Downsize's description of what the
+// driver-role case claims.
 //
 // Static and complete by construction, so this page needs no server fetch:
 // which analyzers exist and which are gated for Claude Code are both decided
 // in code (the analyzer registry and the persona gate map in
 // `core/optimize/runner.py`), not at runtime.
-// `tests/unit/test_lens_ui_regression.py` cross-checks this object against
-// the live registry so a newly-registered analyzer with no entry here fails
-// CI instead of silently falling behind.
 const GUIDE_ENTRIES = {
   'claude-code': {
     order: [
       // Live for Claude Code: these produce cards on the Optimize screen.
-      'downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn', 'budget-projection',
+      'downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn',
       // Gated off for Claude Code: documented here, never shown as an empty
       // card on Optimize.
-      'cache', 'cache-recommend', 'reuse', 'script', 'stream-usage', 'trim', 'verbosity',
+      'cache', 'cache-recommend', 'reuse', 'script', 'trim', 'verbosity',
     ],
     entries: {
       downsize: {
@@ -8052,13 +8065,6 @@ const GUIDE_ENTRIES = {
           'The fix is to write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
         ],
       },
-      'budget-projection': {
-        title: 'Budget projection',
-        description: [
-          'A forecast, not a mistake: this one is not looking for a mistake at all. It compares your current run rate against the monthly ceiling you configured for a provider, and flags when the two are heading for a collision.',
-          'There is nothing here to apply. It tells you about exposure; the response is to spend less or to raise the ceiling.',
-        ],
-      },
       // ---- Gated off for Claude Code, documented rather than hidden ---- //
       cache: {
         title: 'Cache',
@@ -8086,13 +8092,6 @@ const GUIDE_ENTRIES = {
         description: [
           'Script looks for a tool-call pattern repeated often enough, in the exact same order, to be worth replacing with a small deterministic script instead of asking the agent to redo it by hand each time.',
           'It does not show up here: its match requires a session\'s entire ordered call sequence to repeat exactly, and on real coding sessions one extra file read is enough to break the match, so it essentially never fires. It is off because it cannot fire, not because it was turned off.',
-        ],
-      },
-      'stream-usage': {
-        title: 'Stream usage',
-        description: [
-          'Stream usage is not a savings check. A streamed call can close without ever reporting how many tokens it used, which makes your spend total read LOW rather than high; this check flags that gap so the figure can be corrected, not shrunk.',
-          'It does not show up here: an interactive coding agent drains its own streams rather than proxying someone else\'s, so this gap does not occur for it, and there would be no request-side setting to change even if it did.',
         ],
       },
       trim: {
@@ -8135,7 +8134,7 @@ function GuideBody() {
 function AnalyzerGuideView() {
   return html`
     <div class="page-title">FAQ</div>
-    <div class="guide-prose" style="margin-bottom:14px">Below is every check tokenjam can run, in two groups: first the ones that actually produce cards on the Optimize screen for this setup, then the ones that are turned off for it, with the reason why. Figures on a live check's card are estimates from your own history, offered as candidates to review before you act on them.</div>
+    <div class="guide-prose" style="margin-bottom:14px">Below is every check that ends in something you could change, in two groups: first the ones that actually produce cards on the Optimize screen for this setup, then the ones that are turned off for it, with the reason why. Figures on a live check's card are estimates from your own history, offered as candidates to review before you act on them.</div>
     <${GuideBody} />
   `;
 }

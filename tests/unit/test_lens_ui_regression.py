@@ -4898,23 +4898,56 @@ def test_analyzer_guide_persona_box_is_gone_and_helper_retired(html):
     assert "uncovered" not in html
 
 
-def test_analyzer_guide_covers_every_registered_analyzer(html):
-    """The founder's ask: a real card for every analyzer, not just the subset
-    live for this persona -- derived from the registry (source of truth),
-    never from memory or from the retired hidden-checks card's text. Live
-    (Claude-Code-runnable) analyzers come first, gated ones after, and the
-    two groups must not interleave. `placement` is a sub-check `downsize`
-    attaches, not its own registry entry, so it must NOT get its own card."""
-    from tokenjam.core.optimize import ANALYZER_REGISTRY
-    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+# The page's inclusion rule is NOT "is it in the analyzer registry" -- it is
+# "does the check end in a fix a user could apply". `budget-projection` (a
+# spend forecast against a ceiling, no fix claimed -- see
+# ANALYZER-PERSONA-MATRIX.md line 95) and `stream-usage` (corrects a spend
+# FIGURE, recovers nothing) both live in the registry and both fail that
+# rule, so neither gets a card even though they're gated-off-for-nobody
+# (they run for every persona). This is a REVIEWED, human-curated list, not
+# something a rule can derive from the registry alone -- so a newly
+# registered analyzer must show up in exactly one of the two sets below
+# before this test will pass, forcing a human decision instead of letting
+# the page silently drift (either by never gaining a card, or by gaining an
+# unreviewed one).
+_FAQ_SHOWN_ANALYZERS = {
+    "downsize", "subagent", "resend", "summarize", "deadweight", "relearn",
+    "cache", "cache-recommend", "reuse", "script", "trim", "verbosity",
+}
+_FAQ_EXCLUDED_ANALYZERS = {
+    "budget-projection": "informational forecast against a ceiling, no fix claimed (ANALYZER-PERSONA-MATRIX.md)",
+    "stream-usage": "corrects a spend FIGURE (a data-quality gap); recovers nothing, ends in no fix",
+}
 
-    registered = sorted(ANALYZER_REGISTRY)
+
+def test_analyzer_guide_covers_the_reviewed_user_facing_analyzer_list(html):
+    """A real card for every analyzer that ends in a fix a user could apply,
+    derived from the registry but filtered through a human-reviewed
+    inclusion rule -- never "every registry name" and never memory or the
+    retired hidden-checks card's text. Live (Claude-Code-runnable) analyzers
+    come first, gated ones after, never interleaved. `placement` is a
+    sub-check `downsize` attaches, not its own registry entry, so it must
+    NOT get its own card. Fails loudly, naming the analyzer, if a
+    newly-registered one is in neither `_FAQ_SHOWN_ANALYZERS` nor
+    `_FAQ_EXCLUDED_ANALYZERS` -- that is the point: a human has to triage it,
+    the page must never silently do nothing or silently add an unreviewed
+    card."""
+    from tokenjam.core.optimize import ANALYZER_REGISTRY
+
+    registered = set(ANALYZER_REGISTRY)
     assert registered, "the registry itself must not be empty"
-    disabled = disabled_analyzers_for_persona("claude-code")
-    # `placement` is a documented non-registry exception (attached to
-    # `downsize`); everything else `disabled_analyzers_for_persona` names for
-    # claude-code must be a real registered analyzer.
-    assert disabled - {"placement"} <= set(registered)
+
+    reviewed = _FAQ_SHOWN_ANALYZERS | set(_FAQ_EXCLUDED_ANALYZERS)
+    unreviewed = registered - reviewed
+    assert not unreviewed, (
+        f"analyzer(s) {sorted(unreviewed)} are registered but neither shown "
+        "on the FAQ page nor explicitly excluded -- triage each against the "
+        "\"ends in a fix\" rule and add it to _FAQ_SHOWN_ANALYZERS or "
+        "_FAQ_EXCLUDED_ANALYZERS (with a reason) before this test can pass"
+    )
+    # Every excluded name really is registered (no stale exclusion entries).
+    stale_exclusions = set(_FAQ_EXCLUDED_ANALYZERS) - registered
+    assert not stale_exclusions, f"stale exclusion(s), no longer registered: {stale_exclusions}"
 
     entries_start = html.index("const GUIDE_ENTRIES = {")
     entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
@@ -4924,8 +4957,15 @@ def test_analyzer_guide_covers_every_registered_analyzer(html):
     assert order_match, "could not find claude-code's `order` array"
     order_names = re.findall(r"'([a-z][a-z-]*)'", order_match.group(1))
 
-    for name in registered:
-        assert name in order_names, f"{name} has no entry in the FAQ's order list"
+    assert set(order_names) == _FAQ_SHOWN_ANALYZERS, (
+        "the FAQ's `order` list must match the reviewed shown-analyzer set exactly"
+    )
+    for name in _FAQ_EXCLUDED_ANALYZERS:
+        assert name not in order_names, f"{name} is excluded but still has a card"
+        assert re.search(r"(^|\s)'?%s'?:\s*\{" % re.escape(name), entries_block) is None, (
+            f"{name} is excluded but still has an entries[...] card"
+        )
+    for name in order_names:
         assert re.search(r"(^|\s)'?%s'?:\s*\{" % re.escape(name), entries_block), (
             f"{name} is listed in `order` but has no entries[...] card"
         )
@@ -4934,8 +4974,10 @@ def test_analyzer_guide_covers_every_registered_analyzer(html):
         "and must not get its own card"
     )
 
-    live = [n for n in order_names if n in registered and n not in disabled]
-    gated = [n for n in order_names if n in registered and n in disabled]
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+    disabled = disabled_analyzers_for_persona("claude-code")
+    live = [n for n in order_names if n not in disabled]
+    gated = [n for n in order_names if n in disabled]
     assert live and gated, "expect at least one live and one gated analyzer for claude-code"
     # Not interleaved: every live name's index precedes every gated name's.
     assert max(order_names.index(n) for n in live) < min(order_names.index(n) for n in gated), (
@@ -5035,20 +5077,20 @@ def test_analyzer_guide_card_has_one_heading_one_description(html):
     assert "entry.description" in fn
 
     # Every entry (live and gated) carries a `description` array, not the old
-    # three-field shape, and there is exactly one per registered analyzer
-    # (14, per `test_analyzer_guide_covers_every_registered_analyzer`).
+    # three-field shape, and there is exactly one per shown analyzer (per
+    # `test_analyzer_guide_covers_the_reviewed_user_facing_analyzer_list`).
     entries_start = html.index("const GUIDE_ENTRIES = {")
     entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
     entries = html[entries_start:entries_end]
     assert "blurb: '" not in entries
     assert "mistake: '" not in entries
     assert "fix: '" not in entries
-    assert entries.count("description: [") == 14
+    assert entries.count("description: [") == len(_FAQ_SHOWN_ANALYZERS)
 
     # Gated cards stay brief: at most 2 short paragraphs (what it looks for,
     # why it is off here), never the 3-paragraph enrichment a live card like
     # Downsize/Subagent carries.
-    for name in ("cache", "cache-recommend", "reuse", "script", "stream-usage", "trim", "verbosity"):
+    for name in ("cache", "cache-recommend", "reuse", "script", "trim", "verbosity"):
         needle = f"{name}: {{" if re.match(r"^[a-z][a-z0-9]*$", name) else f"'{name}': {{"
         entry_start = entries.index(needle)
         desc_start = entries.index("description: [", entry_start)
