@@ -972,12 +972,42 @@ def ingest_claude_code(
     use_bulk = conn is not None and not reingest
     pending: list[NormalizedSpan] = []
     pending_ids: set[str] = set()
+    # Session-total deltas wait for the spans they describe. Nothing here has
+    # transaction control — every statement auto-commits — so the only lever on
+    # a mid-run interruption is ORDER, and the two orders fail very differently:
+    #
+    #   delta first  → the row counts spans that were still only in `pending`
+    #                  and died with the process. The next run re-parses those
+    #                  files, finds the span_ids genuinely absent, calls them
+    #                  new, and adds the SAME delta a second time. The drift
+    #                  compounds on every interrupted run and nothing heals it:
+    #                  the end-of-run recompute never ran.
+    #   spans first  → the row is briefly LOW. The spans are durable, so the
+    #                  next run dedups them away (delta zero) and the
+    #                  unconditional `recompute_session_totals_from_spans`
+    #                  below rewrites the row from `SUM(spans)`.
+    #
+    # An undercount that self-heals beats an overcount that accumulates, so the
+    # deltas ride with their spans and are applied only after the append lands.
+    pending_deltas: list[SessionRecord] = []
 
     def _flush_pending() -> None:
         if pending:
             _flush_pending_spans(db, pending)
             pending.clear()
             pending_ids.clear()
+        for delta in pending_deltas:
+            try:
+                db.upsert_session(delta, accumulate_totals=True)
+            except Exception:
+                # The end-of-run recompute reconciles every seen session from
+                # SUM(spans), so a dropped delta costs accuracy only if this
+                # run also dies before it — the same self-healing undercount.
+                logger.warning(
+                    "session total delta failed for %s; will reconcile from spans",
+                    delta.session_id, exc_info=True,
+                )
+        pending_deltas.clear()
 
     for parsed in iter_claude_code_sessions(
         root=root, since=since, capture=capture, max_sessions=max_sessions,
@@ -1003,14 +1033,6 @@ def ingest_claude_code(
         if use_bulk:
             try:
                 new_spans = _dedup_new_spans(conn, parsed, duplicate_scan)
-                # The session row gains exactly what this file's spans add.
-                # `new_spans` is what the deferred flush will INSERT, so the
-                # row and `SUM(spans)` agree once the flush lands, and a
-                # re-run of the same file adds nothing.
-                db.upsert_session(
-                    session_totals_delta(parsed, plan_tier, new_spans),
-                    accumulate_totals=True,
-                )
             except Exception as exc:
                 result.files_failed += 1
                 if len(result.sample_errors) < 5:
@@ -1021,14 +1043,23 @@ def ingest_claude_code(
             # flat zero that only jumps at the final flush. The `pending_ids` guard
             # keeps the same span_id out of one `read_json` batch twice (span_ids
             # are session-scoped and unique in practice — this is belt-and-braces).
-            queued = 0
+            queued_spans: list[NormalizedSpan] = []
             for span in new_spans:
                 if span.span_id in pending_ids:
                     continue
                 pending_ids.add(span.span_id)
                 pending.append(span)
-                queued += 1
-            _record_insert_outcome(result, parsed, queued, 0)
+                queued_spans.append(span)
+            # The session row gains exactly what this file's spans add — the
+            # spans QUEUED, not the ones merely found new, so a span_id the
+            # `pending_ids` guard dropped is not counted for a row it will
+            # never appear in. Queued alongside those spans and applied by
+            # `_flush_pending` once the append lands, so the row and
+            # `SUM(spans)` agree, and a re-run of the same file adds nothing.
+            pending_deltas.append(
+                session_totals_delta(parsed, plan_tier, queued_spans)
+            )
+            _record_insert_outcome(result, parsed, len(queued_spans), 0)
             if len(pending) >= _BULK_FLUSH_SPAN_TARGET:
                 _flush_pending()
         else:
