@@ -375,7 +375,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .badge-active { background: rgba(12,228,144,0.15); color: var(--success); }
 .badge-idle { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge-stale { background: rgba(245,166,35,0.12); color: var(--warn); }
-.badge-closed { background: rgba(140,140,140,0.15); color: var(--text-dim); }
+.badge-closed, .badge-neutral { background: rgba(140,140,140,0.15); color: var(--text-dim); }
 .badge-critical { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-warning { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge-info { background: rgba(61,142,255,0.15); color: var(--info); }
@@ -740,6 +740,19 @@ table.archive-list .a-id { color: var(--text); }
   font-weight: 700;
   margin-bottom: 12px;
 }
+/* The "why there is nothing here" block under the Drift empty state. */
+.drift-empty-why {
+  max-width: 620px;
+  margin: 16px auto 0;
+  text-align: left;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-faint);
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+}
+.drift-empty-why div + div { margin-top: 8px; }
 
 /* Empty state */
 .empty {
@@ -760,6 +773,16 @@ table.archive-list .a-id { color: var(--text); }
 .expand-toggle.open { transform: rotate(90deg); }
 
 /* Alert detail expand */
+.alerts-ack-error {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  background: rgba(238,0,0,0.08);
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  color: var(--error);
+}
 .alert-detail {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -1842,6 +1865,21 @@ async function apiPost(path, body) {
   if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
+  });
+  // Any mutation invalidates cached reads so stale data never lingers.
+  clearApiCache();
+  if (!resp.ok) throw new Error(`API ${resp.status}`);
+  return resp.json();
+}
+
+// PATCH sibling of apiPost, for endpoints that flip a flag on an existing row
+// (alert acknowledgement). Same header + cache-invalidation contract.
+async function apiPatch(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
+  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
+  const resp = await fetch('/api/v1' + path, {
+    method: 'PATCH', headers, body: JSON.stringify(body || {}),
   });
   // Any mutation invalidates cached reads so stale data never lingers.
   clearApiCache();
@@ -6412,6 +6450,8 @@ function AlertsView({ params }) {
 
   const [alerts, setAlerts] = useState([]);
   const [expanded, setExpanded] = useState(null);
+  const [acking, setAcking] = useState(null);
+  const [ackError, setAckError] = useState(null);
 
   const load = useCallback(async () => {
     const d = await api('/alerts', {
@@ -6424,6 +6464,22 @@ function AlertsView({ params }) {
   }, [severity, unread, agentId, since]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  // Acknowledge flips `acknowledged` server-side; reloading afterwards is what
+  // keeps the "Unread only" filter honest, since an acknowledged alert is no
+  // longer unread and must drop out of that list.
+  const acknowledge = useCallback(async (alertId) => {
+    setAcking(alertId);
+    setAckError(null);
+    try {
+      await apiPatch(`/alerts/${encodeURIComponent(alertId)}/acknowledge`);
+      await load();
+    } catch (e) {
+      setAckError(`Could not acknowledge alert: ${e.message}`);
+    } finally {
+      setAcking(null);
+    }
+  }, [load]);
 
   return html`
     <div class="page-title">Alerts</div>
@@ -6441,9 +6497,10 @@ function AlertsView({ params }) {
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
+    ${ackError ? html`<div class="alerts-ack-error">${ackError}</div>` : null}
     ${alerts.length === 0 ? html`<div class="empty">No alerts fired. Configure sensitive actions in ${'`tj.toml`'}.</div>` : html`
       <div class="table-wrap"><table>
-        <thead><tr><th></th><th>Time</th><th>Severity</th><th>Type</th><th>Title</th><th>Agent</th></tr></thead>
+        <thead><tr><th></th><th>Time</th><th>Severity</th><th>Type</th><th>Title</th><th>Agent</th><th>Status</th></tr></thead>
         <tbody>
           ${alerts.map(a => html`
             <tr class="clickable" onClick=${() => setExpanded(expanded === a.alert_id ? null : a.alert_id)}>
@@ -6453,8 +6510,16 @@ function AlertsView({ params }) {
               <td>${friendlyAlertType(a.type)}</td>
               <td>${a.title}</td>
               <td class="mono">${a.agent_id || '-'}</td>
+              <td onClick=${e => e.stopPropagation()}>
+                ${a.acknowledged
+                  ? html`<span class="badge badge-neutral">acknowledged</span>`
+                  : html`<button class="btn" disabled=${acking === a.alert_id}
+                      onClick=${() => acknowledge(a.alert_id)}>
+                      ${acking === a.alert_id ? 'Acknowledging...' : 'Acknowledge'}
+                    </button>`}
+              </td>
             </tr>
-            ${expanded === a.alert_id ? html`<tr><td colspan="6"><div class="alert-detail">${JSON.stringify(a.detail, null, 2)}</div></td></tr>` : null}
+            ${expanded === a.alert_id ? html`<tr><td colspan="7"><div class="alert-detail">${JSON.stringify(a.detail, null, 2)}</div></td></tr>` : null}
           `)}
         </tbody>
       </table></div>
@@ -6482,7 +6547,20 @@ function DriftView({ params }) {
 
   // /drift returns a single-agent shape when agent_id is set; normalize to a list.
   const agents = data.agents || (data.agent_id ? [data] : []);
-  if (!agents.length) return html`<div class="empty">No drift baselines built yet. Run at least 10 completed live sessions for a single agent to establish its behavioral baseline (note: drift baselines are computed per-agent, and only from live sessions, so historical backfilled sessions will not build a baseline).</div>`;
+  // An honest empty state says WHY there is nothing here, not just that there is
+  // nothing. Two of the three reasons are permanent for most users: interactive
+  // coding agents are deliberately never baselined (the API applies the same
+  // persona gate the detector does), and backfilled history never builds one.
+  if (!agents.length) return html`
+    <div class="page-title">Drift Detection</div>
+    <div class="empty">
+      <div>No drift baselines to compare against.</div>
+      <div class="drift-empty-why">
+        <div>Drift compares a service against its own past behavior, so it needs a baseline: at least 10 completed sessions for one agent.</div>
+        <div>Interactive coding sessions are not baselined. A Claude Code or Codex session varies by design; one mean and standard deviation over that workload measures nothing, so no baseline is built or shown for those agents.</div>
+        <div>Baselines build only from live sessions. Backfilled history is not baselined, so importing past transcripts will not produce one.</div>
+      </div>
+    </div>`;
 
   const metrics = [
     ['Input tokens', 'avg_input_tokens', 'stddev_input_tokens', 'input_tokens'],
@@ -6509,29 +6587,32 @@ function DriftView({ params }) {
                 const latest = a.latest_session ? a.latest_session[latestKey] : null;
                 let z = null;
                 let zDisplay = '-';
-                if (avg != null && latest != null) {
-                  if (std != null && std > 0) {
-                    z = (latest - avg) / std;
-                    zDisplay = z.toFixed(2);
-                  } else if (std === 0 || std == null) {
-                    // Match drift.py z_score: inf when stddev=0 and value != mean
-                    if (latest !== avg) {
-                      z = Infinity;
-                      zDisplay = 'inf';
-                    } else {
-                      z = 0;
-                      zDisplay = '0.00';
-                    }
-                  }
+                // A baseline with zero spread cannot judge anything. Every
+                // sampled session had the same value, so any movement divides by
+                // zero and reads as an infinite deviation. That is an absence of
+                // evidence, not a regression, so this renders a neutral "cannot
+                // judge" row rather than a red drift verdict with `inf` in it.
+                // The Python z_score() is unchanged; this is a display decision.
+                const noVariance = avg != null && latest != null && (std == null || std === 0);
+                if (avg != null && latest != null && std != null && std > 0) {
+                  z = (latest - avg) / std;
+                  zDisplay = z.toFixed(2);
+                } else if (noVariance) {
+                  zDisplay = 'n/a';
                 }
-                const pass = z == null || (Number.isFinite(z) && Math.abs(z) < 2);
+                const pass = !noVariance && (z == null || Math.abs(z) < 2);
+                const zColor = noVariance
+                  ? 'var(--text-dim)'
+                  : (pass ? 'var(--success)' : 'var(--error)');
+                const badgeClass = noVariance ? 'badge-neutral' : (pass ? 'badge-ok' : 'badge-critical');
+                const badgeLabel = noVariance ? 'no baseline variance' : (pass ? 'pass' : 'drift');
                 return html`
                   <tr>
                     <td>${label}</td>
                     <td class="mono">${avg != null ? avg.toFixed(1) : '-'}${std != null ? ' +/- ' + std.toFixed(1) : ''}</td>
                     <td class="mono">${latest != null ? (typeof latest === 'number' ? latest.toFixed(1) : latest) : '-'}</td>
-                    <td class="mono" style="color:${pass ? 'var(--success)' : 'var(--error)'}">${zDisplay}</td>
-                    <td><span class="badge ${pass ? 'badge-ok' : 'badge-critical'}">${pass ? 'pass' : 'drift'}</span></td>
+                    <td class="mono" style="color:${zColor}" title=${noVariance ? 'Every sampled session had the same value, so there is no spread to measure a deviation against.' : ''}>${zDisplay}</td>
+                    <td><span class="badge ${badgeClass}">${badgeLabel}</span></td>
                   </tr>
                 `;
               })}
