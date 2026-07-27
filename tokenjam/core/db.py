@@ -202,6 +202,7 @@ _SPAN_BULK_COLUMNS: tuple[str, ...] = (
     "cache_write_tokens", "request_params", "request_tools", "sub_agent_id",
     "tenant_id", "feature", "environment", "service_version", "commit_sha",
     "prompt_template_id", "prompt_template_version", "pricing_source",
+    "sub_agent_type",
 )
 
 # read_json column -> type. Timestamps are read as VARCHAR and cast to TIMESTAMPTZ
@@ -222,7 +223,7 @@ _SPAN_BULK_READ_TYPES: dict[str, str] = {
     "tenant_id": "VARCHAR", "feature": "VARCHAR", "environment": "VARCHAR",
     "service_version": "VARCHAR", "commit_sha": "VARCHAR",
     "prompt_template_id": "VARCHAR", "prompt_template_version": "VARCHAR",
-    "pricing_source": "VARCHAR",
+    "pricing_source": "VARCHAR", "sub_agent_type": "VARCHAR",
 }
 
 # Columns that need a cast in the SELECT (read as VARCHAR, stored as TIMESTAMPTZ).
@@ -303,6 +304,7 @@ def _span_to_json_obj(span: NormalizedSpan) -> dict:
         "prompt_template_id": span.prompt_template_id,
         "prompt_template_version": span.prompt_template_version,
         "pricing_source": span.pricing_source,
+        "sub_agent_type": span.sub_agent_type,
     }
 
 
@@ -636,6 +638,21 @@ MIGRATIONS: list[tuple[int, str]] = [
     # calculate_cost's fallback — the fallback figure and a real rate were
     # otherwise indistinguishable once only cost_usd remained.
     (18, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS pricing_source TEXT"),
+    # Migration 19: sub_agent_type on spans — the STABLE identity of a Claude
+    # Code subagent dispatch, alongside the per-dispatch `sub_agent_id` from
+    # migration 14. `sub_agent_id` is Claude Code's `agentId`, which is minted
+    # fresh per Task dispatch: measured over a real 6,588-session corpus, all
+    # 3,689 distinct values appeared in exactly ONE session each, so no
+    # per-subagent cohort could ever be formed from it and 28.5% of spans were
+    # unclusterable. This column carries the dispatched agent TYPE instead (the
+    # spawning Task/Agent call's `subagent_type` argument), which recurs across
+    # sessions and is the name that resolves to a `.claude/agents/<name>.md`
+    # definition file. Nullable; NULL for main-thread spans, non-Claude-Code
+    # telemetry, and dispatches whose type is a per-dispatch instance label
+    # rather than a reusable definition (see backfill._subagent_type_for).
+    # Populated by the backfill parser from the `agent-<id>.meta.json` sidecar;
+    # `tj backfill --reingest` re-tags pre-column history.
+    (19, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_type TEXT"),
 ]
 
 
@@ -668,6 +685,7 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("spans",    "prompt_template_id",      "TEXT"),               # migration 17
     ("spans",    "prompt_template_version", "TEXT"),               # migration 17
     ("spans",    "pricing_source",          "TEXT"),               # migration 18
+    ("spans",    "sub_agent_type",          "TEXT"),               # migration 19
 ]
 
 
@@ -1017,6 +1035,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),
         sub_agent_id=d.get("sub_agent_id"),
+        sub_agent_type=d.get("sub_agent_type"),
         end_time=d.get("end_time"),
         duration_ms=d.get("duration_ms"),
         status_message=d.get("status_message"),
@@ -1466,10 +1485,11 @@ class DuckDBBackend:
                 "request_type, conversation_id, events, billing_account, "
                 "cache_write_tokens, request_params, request_tools, sub_agent_id, "
                 "tenant_id, feature, environment, service_version, commit_sha, "
-                "prompt_template_id, prompt_template_version, pricing_source"
+                "prompt_template_id, prompt_template_version, pricing_source, "
+                "sub_agent_type"
                 ") VALUES "
                 "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
-                "$29,$30,$31,$32,$33,$34,$35,$36)",
+                "$29,$30,$31,$32,$33,$34,$35,$36,$37)",
                 [
                     span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                     span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -1483,7 +1503,7 @@ class DuckDBBackend:
                     span.sub_agent_id,
                     span.tenant_id, span.feature, span.environment, span.service_version,
                     span.commit_sha, span.prompt_template_id, span.prompt_template_version,
-                    span.pricing_source,
+                    span.pricing_source, span.sub_agent_type,
                 ],
             )
 

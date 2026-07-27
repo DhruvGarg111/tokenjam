@@ -128,6 +128,13 @@ class SubagentRow:
     # cohort the over_provisioned estimate baselines against (see
     # `_dispatch_cohort_key`). Defaulted for round-trip of older payloads.
     agent_id:           str = ""
+    # The STABLE identity: the agent TYPE that was dispatched. `sub_agent_id`
+    # above is per-DISPATCH and never recurs across sessions, so it can name no
+    # agent definition and form no cohort; this is the name that resolves to a
+    # `.claude/agents/<name>.md` file. Empty when the span carries no type
+    # (pre-migration-19 history, or a per-dispatch instance label — see
+    # `backfill._subagent_type_for`). Defaulted for round-trip of older payloads.
+    sub_agent_type:     str = ""
 
 
 @dataclass
@@ -194,6 +201,10 @@ def _compute_rows(
     rows = conn.execute(
         f"SELECT session_id, sub_agent_id, "
         f"FIRST(agent_id) AS agent_id, "
+        # Constant within a (session, dispatch) group — backfill stamps it once
+        # per transcript — so MAX just picks it while ignoring NULLs from any
+        # pre-migration-19 span in the same group.
+        f"MAX(sub_agent_type) AS sub_agent_type, "
         f"arg_max(model, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS model, "
         f"arg_max(provider, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS provider, "
         f"COUNT(*) FILTER (WHERE name = 'gen_ai.llm.call') AS llm_calls, "
@@ -210,8 +221,8 @@ def _compute_rows(
     ).fetchall()
 
     result: list[SubagentRow] = []
-    for (sid, said, row_agent_id, model, provider, llm_calls, tool_calls,
-         in_tok, out_tok, cache_tok, cache_w_tok, cost) in rows:
+    for (sid, said, row_agent_id, said_type, model, provider, llm_calls,
+         tool_calls, in_tok, out_tok, cache_tok, cache_w_tok, cost) in rows:
         in_tok = int(in_tok or 0)
         out_tok = int(out_tok or 0)
         cache_tok = int(cache_tok or 0)
@@ -228,6 +239,7 @@ def _compute_rows(
             session_id=str(sid),
             sub_agent_id=str(said),
             agent_id=str(row_agent_id or ""),
+            sub_agent_type=str(said_type or ""),
             model=model,
             llm_calls=int(llm_calls or 0),
             tool_calls=int(tool_calls or 0),
