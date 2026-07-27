@@ -2620,7 +2620,7 @@ function SdkServicesPanel({ services, framing }) {
         <div class="svc-metric">$${(s.today_cost || 0).toFixed(2)}<span class="unit">/day</span></div>
         <div class="spark-wrap">
           <div class="spark-col" style="flex:1;min-width:1px">
-            <span class="spark-lab">cost / min · ${fmtCost(s.window_cost)} last 24m</span>
+            <span class="spark-lab">cost / min · ${fmtCost(s.window_cost)} · ${fmtTokens(s.window_tokens)} tokens last 24m</span>
             <${Sparkline} values=${s.cost_per_min} color="var(--brand)" width=${220} height=${30} />
           </div>
           <div class="spark-col" style="width:110px">
@@ -6157,15 +6157,16 @@ function TopTenantsPanel({ tenants, framing }) {
       ` : html`
         <div class="table-wrap"><table>
           <thead><tr>
-            <th>Tenant</th><th>Cost</th><th>Share of total</th><th>Calls</th><th>Trend</th>
+            <th>Tenant</th><th>Cost</th><th>Tokens</th><th>Share of total</th><th>Calls</th><th>Trend</th>
           </tr></thead>
           <tbody>
             ${data.rows.map(r => html`
               <tr>
                 <td class="mono">${r.tenant_id}</td>
                 <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
+                <td>${fmtTokens((r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_tokens || 0) + (r.cache_write_tokens || 0))}</td>
                 <td>${r.share_of_total != null ? (r.share_of_total * 100).toFixed(1) + '%' : '-'}</td>
-                <td>${fmtTokens(r.call_count)}</td>
+                <td>${fmtCount(r.call_count)}</td>
                 <td>${r.delta_pct != null
                   ? html`<${TrendChip} pct=${r.delta_pct} prevThin=${false} />`
                   : html`<span class="dim">new</span>`}</td>
