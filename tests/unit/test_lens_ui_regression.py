@@ -2613,6 +2613,18 @@ def test_summarize_nav_child_and_route(html):
     assert "el.style.display = (v === view) ? 'flex' : 'none';" in html
 
 
+def test_summarize_tj_keep_not_double_escaped(html):
+    """htm/Preact tagged templates build static text children via
+    `createTextNode`, so an HTML entity written directly into the template
+    (e.g. `&lt;tj-keep&gt;`) is never decoded -- it renders on screen as the
+    literal text `&lt;tj-keep&gt;` rather than `<tj-keep>`. The fix is
+    JS-expression interpolation (`${'<tj-keep>'}`), which Preact assigns as a
+    real text node instead of re-parsing; both `tj-keep` mentions in the file
+    must use that form, and the escaped form must not appear anywhere."""
+    assert "&lt;tj-keep&gt;" not in html, "tj-keep must not be HTML-entity-escaped"
+    assert html.count("${'<tj-keep>'}") == 2
+
+
 def test_summarize_component_present(html):
     assert "function SummarizeView" in html
     # The four-phase flow (engine gate → curate → run → review) is what makes the
@@ -4584,15 +4596,22 @@ def test_summarize_engine_view_has_no_unrendered_backticks(html):
 
 
 def test_summarize_tj_keep_token_is_escaped_and_code_styled(html):
-    # `<tj-keep>` used to be interpolated as a bare JS string (`${'<tj-keep>'}`)
-    # which rendered as plain, unstyled angle-bracket text sitting oddly in
-    # the sentence. It's still inserted as escaped text (never a real
-    # unknown-tag risk to htm's parser), but now explicitly HTML-escaped and
-    # wrapped in <code> so it reads as a token, not stray prose.
+    # This test previously asserted the token was written as the literal
+    # markup `<code>&lt;tj-keep&gt;</code>` -- but htm/Preact tagged
+    # templates build STATIC text children via `createTextNode`, which never
+    # decodes HTML entities (that only happens when a browser parses real
+    # HTML, which htm does not do). That "fix" was itself the double-escaping
+    # bug: it rendered on screen as the literal text `&lt;tj-keep&gt;`
+    # instead of `<tj-keep>`. The actual fix is JS-expression interpolation
+    # (`${'<tj-keep>'}`), still wrapped in <code> for styling -- the same
+    # idiom already used a few hundred lines later in the diff-review phase's
+    # own "unchanged lines are kept verbatim" note, which this test also pins
+    # so the two can't drift apart again.
     view = _summarize_engine_view(html)
-    assert "<code>&lt;tj-keep&gt;</code>" in view
-    assert "${'<tj-keep>'}" not in view
-    assert "Rewrites prose only: code, tables, and <code>&lt;tj-keep&gt;</code> blocks stay verbatim." in view
+    assert "&lt;tj-keep&gt;" not in view, "the entity-escaped form must never render"
+    assert "<code>${'<tj-keep>'}</code>" in view
+    assert "Rewrites prose only: code, tables, and <code>${'<tj-keep>'}</code> blocks stay verbatim." in view
+    assert html.count("${'<tj-keep>'}") == 2, "both mentions must use the same interpolation idiom"
 
 
 def test_summarize_engine_intro_uses_colon_not_em_dash(html):
@@ -4794,6 +4813,64 @@ def test_analyzer_guide_is_reachable_from_the_optimize_screen(html):
     assert link_at - title_at < 600, "FAQ link drifted out of the always-rendered title block"
 
 
+def test_analyzer_guide_heading_has_no_optimize_backlink(html):
+    """The founder asked for the "See these on the Optimize screen ->" link
+    next to the FAQ heading to be deleted entirely -- the heading row is just
+    the heading now. This is the FAQ page's OWN title block, distinct from
+    the forward link OptimizeView renders pointing AT the FAQ (that one, and
+    its `sz-link` class, are unrelated and must stay)."""
+    view_start = html.index("function AnalyzerGuideView()")
+    view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
+    view = html[view_start:view_end]
+    assert "See these on the Optimize screen" not in view
+    assert '<div class="page-title">FAQ</div>' in view
+    assert "sz-link" not in view
+
+
+def test_analyzer_guide_content_is_fully_static_no_fetch_no_loading_state(html):
+    """The page used to fetch `/optimize/analyzers` and `/optimize` before it
+    knew which checks to show, which needed a loading state. It now carries a
+    card for EVERY registered analyzer, in a fixed order, with each card's
+    live/gated status written into its own static prose -- so which checks
+    exist and which are gated for Claude Code are both already decided in
+    code (`ANALYZER_REGISTRY`, `PERSONA_DISABLED_ANALYZERS`) at build time,
+    not at request time. Nothing on this page depends on a network read
+    answering, so it renders immediately: no `useState`, no `useEffect`, no
+    `api(...)` call, and no shimmer/skeleton of any kind."""
+    view_start = html.index("function AnalyzerGuideView()")
+    view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
+    view = html[view_start:view_end]
+    assert "useState" not in view
+    assert "useEffect" not in view
+    assert "useCallback" not in view
+    assert "api(" not in view
+    assert "shimmer" not in view
+    assert "st.loading" not in view
+    assert "st.error" not in view
+    assert '<div class="page-title">FAQ</div>' in view
+    assert "<${GuideBody} />" in view
+
+
+def test_analyzer_guide_prose_fills_the_card_width(html):
+    """The founder's complaint: the prose inside each FAQ card (and the intro
+    paragraph) was clamped to a ~74ch editorial measure while the card itself
+    spanned the full page width, leaving a large empty column on the right.
+    `.guide-prose` is used ONLY on the FAQ page (never by any other screen),
+    so widening it here cannot affect anything else; `.opt-line`, which every
+    OTHER Optimize-family card uses for its body text, carries no such
+    clamp, and that is the width this page should match. Card padding
+    (`.opt-section`) must stay intact -- the fix is the text filling the
+    card, not touching its edges."""
+    assert re.search(r"\.guide-prose\s*\{[^}]*\}", html)
+    assert not re.search(r"\.guide-prose\s*\{[^}]*max-width[^}]*\}", html), (
+        "the FAQ card prose must not be clamped to an editorial measure"
+    )
+    # The persona callout banner class is retired along with the box itself.
+    assert ".guide-banner" not in html
+    # Card padding untouched.
+    assert ".opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }" in html
+
+
 def test_analyzer_guide_routes_resolve_and_old_hash_still_works(html):
     """`#/faq` is canonical; `#/optimize/guide` and `#/guide` are the retired
     spellings and must keep working for anything already pointing at them."""
@@ -4805,70 +4882,186 @@ def test_analyzer_guide_routes_resolve_and_old_hash_still_works(html):
     assert "history.replaceState(null, '', '#/faq');" in html
 
 
-def test_analyzer_guide_reads_the_gate_from_the_server_not_a_js_copy(html):
-    """Which checks apply is Python's answer (`PERSONA_DISABLED_ANALYZERS` ->
-    `/optimize/analyzers`). The guide may own PROSE keyed by analyzer name, but
-    never a membership decision -- a JS copy of the map desyncs the first time
-    the Python side changes."""
-    fn_start = html.index("function GuideBody({ persona, sets })")
-    fn_end = html.index("function AnalyzerGuideView()", fn_start)
-    fn = html[fn_start:fn_end]
-    # Membership comes from the payload on both sides: what runs, what is gated.
-    assert "sets.runs" in fn
-    assert "sets.disabled" in fn
-    view_start = html.index("function AnalyzerGuideView()")
-    view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
-    view = html[view_start:view_end]
-    assert "api('/optimize/analyzers')" in view
-    # No persona-keyed analyzer-name list anywhere in the guide's own source:
-    # the prose maps are keyed by name, but nothing decides membership from
-    # a persona conditional in JS.
-    guide_start = html.index("const GUIDE_PERSONA_LABELS = {")
-    guide = _no_comments(html[guide_start:view_end])
-    assert "PERSONA_DISABLED_ANALYZERS" not in guide
-    assert "disabled_analyzers_for_persona" not in guide
+def test_analyzer_guide_persona_box_is_gone_and_helper_retired(html):
+    """The founder asked for the persona callout box ("Written for **Claude
+    Code**, which is what your recent sessions look like.") to be deleted
+    entirely, render path and all -- not just its text. `GUIDE_PERSONA_LABELS`
+    fed only that box (and its two sibling variants: the "uncovered" and
+    "unclassified" cases), so it retires with it rather than staying as a
+    dead helper. The persona VALUE itself (`GUIDE_ENTRIES['claude-code']`)
+    still drives which card set and order render, and that use stays."""
+    assert "GUIDE_PERSONA_LABELS" not in html
+    assert "Written for" not in html
+    assert "which is what your recent sessions look like" not in html
+    assert "has not been written yet" not in html
+    assert "Nothing has classified this install yet" not in html
+    assert "uncovered" not in html
+
+
+def test_analyzer_guide_covers_every_registered_analyzer(html):
+    """The founder's ask: a real card for every analyzer, not just the subset
+    live for this persona -- derived from the registry (source of truth),
+    never from memory or from the retired hidden-checks card's text. Live
+    (Claude-Code-runnable) analyzers come first, gated ones after, and the
+    two groups must not interleave. `placement` is a sub-check `downsize`
+    attaches, not its own registry entry, so it must NOT get its own card."""
+    from tokenjam.core.optimize import ANALYZER_REGISTRY
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+
+    registered = sorted(ANALYZER_REGISTRY)
+    assert registered, "the registry itself must not be empty"
+    disabled = disabled_analyzers_for_persona("claude-code")
+    # `placement` is a documented non-registry exception (attached to
+    # `downsize`); everything else `disabled_analyzers_for_persona` names for
+    # claude-code must be a real registered analyzer.
+    assert disabled - {"placement"} <= set(registered)
+
+    entries_start = html.index("const GUIDE_ENTRIES = {")
+    entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
+    entries_block = html[entries_start:entries_end]
+
+    order_match = re.search(r"order:\s*\[(.*?)\],\n\s*entries:", entries_block, re.S)
+    assert order_match, "could not find claude-code's `order` array"
+    order_names = re.findall(r"'([a-z][a-z-]*)'", order_match.group(1))
+
+    for name in registered:
+        assert name in order_names, f"{name} has no entry in the FAQ's order list"
+        assert re.search(r"(^|\s)'?%s'?:\s*\{" % re.escape(name), entries_block), (
+            f"{name} is listed in `order` but has no entries[...] card"
+        )
+    assert "placement" not in order_names, (
+        "placement is a downsize sub-check, not its own registry entry, "
+        "and must not get its own card"
+    )
+
+    live = [n for n in order_names if n in registered and n not in disabled]
+    gated = [n for n in order_names if n in registered and n in disabled]
+    assert live and gated, "expect at least one live and one gated analyzer for claude-code"
+    # Not interleaved: every live name's index precedes every gated name's.
+    assert max(order_names.index(n) for n in live) < min(order_names.index(n) for n in gated), (
+        "live and gated analyzer cards must not be interleaved"
+    )
+
+
+def test_analyzer_guide_no_longer_carries_a_hidden_checks_card(html):
+    """The founder asked for the "Checks that are not shown here" card to be
+    deleted entirely, not just hidden -- along with the old gated-analyzer
+    prose map (`hidden:`) that used to feed it. Gated analyzers now get a
+    real card each (`test_analyzer_guide_covers_every_registered_analyzer`),
+    not a bundled list."""
+    guide_start = html.index("const GUIDE_ENTRIES = {")
+    guide_end = html.index("function GuideCheck({ name, entry })", guide_start)
+    entries = html[guide_start:guide_end]
+    assert "hidden:" not in entries
+    body_start = html.index("function GuideBody()")
+    body_end = html.index("function AnalyzerGuideView()", body_start)
+    body = html[body_start:body_end]
+    assert "guide-not-shown" not in body
+    assert "hiddenNames" not in body
+    assert "Checks that are not shown here" not in html
+    assert "guide-hidden-list" not in html
 
 
 def test_analyzer_guide_states_the_downsize_vs_subagent_distinction(html):
-    """The founder could not tell these two apart; that is the page's whole
-    reason to exist. The contrast must be stated as WHERE vs WHO, and must say
-    that a session can only trip one of them."""
-    start = html.index("const GUIDE_KEY_CONTRAST = {")
-    end = html.index("const GUIDE_ENTRIES = {", start)
-    block = html[start:end]
-    assert "Downsize is about WHERE the work happened." in block
-    assert "Subagent is about WHO did it" in block
-    assert "only considers sessions that never delegated at all" in block
-    # Rendered ABOVE the per-check cards, not buried in one of them.
-    body_start = html.index("function GuideBody({ persona, sets })")
-    body_end = html.index("function AnalyzerGuideView()", body_start)
-    body = html[body_start:body_end]
-    assert body.index("GUIDE_KEY_CONTRAST.title") < body.index("GuideCheck")
+    """The founder could not tell these two apart; that used to be answered by
+    a separate callout card, which is now gone. The distinction (WHERE vs WHO,
+    and that a session can only trip one of them) must instead live inside
+    EACH of the two sections' own descriptions, so either stands alone."""
+    assert "GUIDE_KEY_CONTRAST" not in html, "the retired callout must not come back"
+    assert ".guide-key {" not in html, "the retired callout's CSS must not come back"
+
+    entries_start = html.index("const GUIDE_ENTRIES = {")
+    entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
+
+    downsize_start = html.index("downsize: {", entries_start)
+    assert downsize_start < entries_end
+    downsize_end = html.index("subagent: {", downsize_start)
+    downsize = html[downsize_start:downsize_end]
+    assert "Downsize is about WHERE the work happened" in downsize
+    assert "never dispatched a subagent" in downsize
+    assert "Subagent check answers instead" in downsize
+
+    subagent_start = downsize_end
+    subagent_end = html.index("resend: {", subagent_start)
+    subagent = html[subagent_start:subagent_end]
+    assert "Subagent is about WHO did the work" in subagent
+    assert "only ever looks at spans already dispatched to a worker" in subagent
+    assert "moves out of Downsize" in subagent
 
 
-def test_analyzer_guide_ships_no_unwritten_persona_as_placeholder_prose(html):
-    """Only Claude Code content was validated. An unwritten persona gets a
-    banner naming the gap -- never invented copy, and never a silent fallback
-    that reads as if it were written for the reader's setup."""
-    start = html.index("const GUIDE_ENTRIES = {")
-    end = html.index("function guideMissingEntry(name)", start)
-    entries = html[start:end]
-    # Exactly one persona is populated.
-    assert entries.count("    order: [") == 1
-    assert "'claude-code': {" in entries
-    for absent in ("'sdk': {", "'mixed': {", "'unknown': {"):
-        assert absent not in entries, f"{absent} must not carry unvalidated prose"
-    view_start = html.index("function AnalyzerGuideView()")
-    view = html[view_start:html.index("// Optimize ▸ Summarize (Track B)", view_start)]
-    assert "has not been written yet" in view
-    assert "Nothing has classified this install yet" in view
+def test_analyzer_guide_downsize_subagent_claim_matches_the_analyzers(html):
+    """The distinction rewritten into the Downsize/Subagent sections makes a
+    factual claim about how the underlying analyzers are scoped (never
+    delegated / already delegated). Pin the claim against the analyzer source
+    so a future change to either analyzer's scoping is forced to revisit this
+    prose instead of leaving it to quietly go stale."""
+    repo_root = _UI.parent.parent.parent
+    downgrade_src = (
+        repo_root / "tokenjam/core/optimize/analyzers/model_downgrade.py"
+    ).read_text()
+    # The driver-role case (Downsize's flagship detection) is documented, in
+    # its own basis string shown to users, as requiring zero delegation.
+    assert "never dispatched a subagent" in downgrade_src
+    assert "these sessions dispatch no subagent, so they carry no subagent spans" in downgrade_src
+
+    subagent_src = (
+        repo_root / "tokenjam/core/optimize/analyzers/subagent_rightsizing.py"
+    ).read_text()
+    # subagent_rightsizing only ever reads spans already tagged as dispatched
+    # to a worker.
+    assert "sub_agent_id IS NOT NULL" in subagent_src
+
+
+def test_analyzer_guide_card_has_one_heading_one_description(html):
+    """Every card on the page gets exactly one heading and one description,
+    no "WHAT IT LOOKS FOR" / "WHAT TO DO ABOUT IT" sub-headings inside it.
+    The description may still be several paragraphs of prose -- that
+    plurality is how the WHERE/WHO enrichment (and every card's former
+    blurb+mistake+fix) fits -- but there is exactly one `opt-title` per
+    `GuideCheck` and no `guide-lead` sub-heading class left anywhere in the
+    file. Applies to gated-analyzer cards too, and their descriptions must
+    stay noticeably shorter than a live card's (no padding to match length)."""
+    assert "guide-lead" not in html, "sub-heading class must be fully retired"
+    assert "What it looks for" not in html
+    assert "What to do about it" not in html
+
+    fn_start = html.index("function GuideCheck({ name, entry })")
+    fn_end = html.index("function GuideBody()", fn_start)
+    fn = html[fn_start:fn_end]
+    assert fn.count("opt-title") == 1
+    assert "entry.blurb" not in fn
+    assert "entry.mistake" not in fn
+    assert "entry.fix" not in fn
+    assert "entry.description" in fn
+
+    # Every entry (live and gated) carries a `description` array, not the old
+    # three-field shape, and there is exactly one per registered analyzer
+    # (14, per `test_analyzer_guide_covers_every_registered_analyzer`).
+    entries_start = html.index("const GUIDE_ENTRIES = {")
+    entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
+    entries = html[entries_start:entries_end]
+    assert "blurb: '" not in entries
+    assert "mistake: '" not in entries
+    assert "fix: '" not in entries
+    assert entries.count("description: [") == 14
+
+    # Gated cards stay brief: at most 2 short paragraphs (what it looks for,
+    # why it is off here), never the 3-paragraph enrichment a live card like
+    # Downsize/Subagent carries.
+    for name in ("cache", "cache-recommend", "reuse", "script", "stream-usage", "trim", "verbosity"):
+        needle = f"{name}: {{" if re.match(r"^[a-z][a-z0-9]*$", name) else f"'{name}': {{"
+        entry_start = entries.index(needle)
+        desc_start = entries.index("description: [", entry_start)
+        desc_end = entries.index("],", desc_start)
+        paragraphs = re.findall(r"^\s+'", entries[desc_start:desc_end], re.M)
+        assert len(paragraphs) <= 2, f"{name}'s gated-card description should stay brief"
 
 
 def test_analyzer_guide_makes_no_guaranteed_saving_claim(html):
     """Honesty discipline (Critical Rule 14) governs every user-visible string:
     estimates are candidates to review, never a promised saving, and the page
     never discusses how a figure was derived."""
-    start = html.index("const GUIDE_PERSONA_LABELS = {")
+    start = html.index("const GUIDE_ENTRIES = {")
     end = html.index("// Optimize ▸ Summarize (Track B)", start)
     guide = html[start:end]
     for banned in ("saves you", "you will save", "guaranteed", "realization rate",

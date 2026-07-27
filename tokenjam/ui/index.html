@@ -1016,21 +1016,14 @@ a.health-tile.attn { border-color: var(--warn); }
 .opt-table tr.flagged td { color: var(--warn); }
 .opt-caveat { font-size: 12px; font-style: italic; color: var(--warn); margin-top: 10px; }
 
-/* FAQ (Improve ▸ FAQ, formerly Observe ▸ Optimize ▸ Guide). Reading surface,
-   not a data surface: one column capped at a comfortable measure, generous
-   leading. It reuses .opt-section for the card frame so it can never drift
-   from the Optimize cards it explains. */
-.guide-prose { font-size: 13.5px; line-height: 1.65; color: var(--text); max-width: 74ch; margin: 6px 0; }
-.guide-prose.dim { color: var(--text-dim); }
-.guide-lead { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim); margin: 12px 0 2px; }
+/* FAQ (Improve ▸ FAQ, formerly Observe ▸ Optimize ▸ Guide). It reuses
+   .opt-section for the card frame so it can never drift from the Optimize
+   cards it explains, and (like .opt-line on those cards) the prose fills the
+   card's full content width -- no editorial measure clamp. `.guide-prose` is
+   used ONLY on this page, so widening it here cannot affect any other
+   screen. */
+.guide-prose { font-size: 13.5px; line-height: 1.65; color: var(--text); margin: 6px 0; }
 .guide-name { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); font-weight: 400; }
-/* The downsize-vs-subagent contrast. Accented because telling those two apart
-   is the single question this page exists to answer. */
-.guide-key { border-left: 3px solid var(--accent); background: var(--surface2); border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 14px; }
-.guide-banner { font-size: 13px; line-height: 1.6; color: var(--text-dim); background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin-bottom: 14px; max-width: 74ch; }
-.guide-hidden-list { list-style: none; padding: 0; margin: 8px 0 0; }
-.guide-hidden-list li { font-size: 13px; line-height: 1.6; color: var(--text-dim); padding: 4px 0; border-bottom: 1px solid var(--border); }
-.guide-hidden-list li:last-child { border-bottom: 0; }
 
 /* Session Story */
 .story-callout {
@@ -7889,220 +7882,180 @@ function OptimizeView({ params }) {
 // today. An unwritten persona gets an honest banner naming the gap, never
 // invented copy: text describing an SDK user's levers, written from a corpus of
 // interactive coding sessions, would be fabrication.
-const GUIDE_PERSONA_LABELS = {
-  'claude-code': 'Claude Code',
-  'sdk': 'SDK and API',
-  'mixed': 'mixed (Claude Code and SDK)',
-  'unknown': 'unclassified',
-};
-
-// The contrast the page is built around. Rendered before the per-check list.
-const GUIDE_KEY_CONTRAST = {
-  personas: ['claude-code'],
-  title: 'Downsize and Subagent are not the same check',
-  paras: [
-    'Downsize is about WHERE the work happened. It looks at work carried out inline, in the main thread, on an expensive model, when it could have been handed to a worker instead.',
-    'Subagent is about WHO did it, once you had already decided to delegate. The work went to a worker; the worker was simply bigger than the job needed.',
-    'A session can only trip one of them. Downsize only considers sessions that never delegated at all, so the moment a worker is involved the question stops being "should this have been delegated" and becomes "was the right worker chosen".',
-  ],
-};
-
-// Per-check prose. `mistake` is what the check looks for; `fix` is what you do
-// about it. Deliberately no numbers, no field names, no thresholds: those live
-// on the cards, which is where a reader can see them against their own data.
+// Per-check prose: one heading, one description (a few paragraphs of flowing
+// text). Deliberately no numbers, no field names, no thresholds: those live on
+// the cards, which is where a reader can see them against their own data.
+//
+// Downsize and Subagent used to share a separate callout card stating the
+// distinction between them (WHERE the work happened vs. WHO did it); that
+// card is gone, and the distinction is written into each of their own
+// descriptions instead, so either section stands alone. The WHERE/WHO framing
+// and the "a session can only trip one of them" claim are grounded in how
+// `model_downgrade.py`'s driver-role case and `subagent_rightsizing.py` are
+// actually scoped: the driver-role case (the bulk of what Downsize flags) only
+// admits sessions that never dispatched a subagent at all, and
+// `subagent_rightsizing` only ever reads spans already tagged with a
+// `sub_agent_id` (i.e. already dispatched to a worker), so the two describe
+// disjoint populations for the flagship detection each card reports on.
+//
+// This is a card for EVERY registered analyzer (`ANALYZER_REGISTRY` in
+// `core/optimize/`), not only the ones that produce cards on the Optimize
+// screen for the Claude Code persona -- `order` below lists the live ones
+// first, then the ones gated off for Claude Code, and the two groups are
+// never interleaved. The live/gated split and the reasoning inside each
+// gated entry's description are grounded in
+// `.claude/product-state/ANALYZER-PERSONA-MATRIX.md` (the durable decision
+// record for persona gating) plus the gated analyzer's own module docstring,
+// not re-derived here. `placement` is a sub-check `downsize` attaches, not
+// its own registry entry, so it has no card of its own -- it is covered
+// inside Downsize's description of what the driver-role case claims.
+//
+// Static and complete by construction, so this page needs no server fetch:
+// which analyzers exist and which are gated for Claude Code are both decided
+// in code (the analyzer registry and the persona gate map in
+// `core/optimize/runner.py`), not at runtime.
+// `tests/unit/test_lens_ui_regression.py` cross-checks this object against
+// the live registry so a newly-registered analyzer with no entry here fails
+// CI instead of silently falling behind.
 const GUIDE_ENTRIES = {
   'claude-code': {
-    order: ['downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn', 'budget-projection'],
+    order: [
+      // Live for Claude Code: these produce cards on the Optimize screen.
+      'downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn', 'budget-projection',
+      // Gated off for Claude Code: documented here, never shown as an empty
+      // card on Optimize.
+      'cache', 'cache-recommend', 'reuse', 'script', 'stream-usage', 'trim', 'verbosity',
+    ],
     entries: {
       downsize: {
         title: 'Downsize',
-        blurb: 'Heavy work done inline that a worker should have taken',
-        mistake: 'A context-heavy piece of work is carried out in the main thread, on an expensive model, rather than handed to a worker. Everything read in the main thread stays in the main thread, and is sent again on every turn that follows, so the cost of that reading keeps compounding for as long as the session runs. The longer the session, the more the original decision costs.',
-        fix: 'A standing rule that sends context-heavy sub-tasks to a worker, so the reading lands in the worker and only its conclusion comes back. Pair it with a cheaper model pinned for that worker.',
+        description: [
+          'Downsize is about WHERE the work happened: a context-heavy piece of work carried out inline, in the main thread, on an expensive model, rather than handed to a worker. Everything read in the main thread stays in the main thread, and is sent again on every turn that follows, so the cost of that reading keeps compounding for as long as the session runs. The longer the session, the more the original decision costs.',
+          'The main way this check flags a session requires that the session never dispatched a subagent at all. The moment a worker gets involved, the question this check is asking (should this have been delegated) is no longer open; whether the worker chosen was the right size is a different question, and it is what the Subagent check answers instead.',
+          'The fix is a standing rule that sends context-heavy sub-tasks to a worker, so the reading lands in the worker and only its conclusion comes back. Pair it with a cheaper model pinned for that worker.',
+        ],
       },
       subagent: {
         title: 'Subagent',
-        blurb: 'Delegated, but to a worker larger than the job',
-        mistake: 'The work was delegated, which was the right call, but the worker was over-sized for it: a premium model where a cheaper one would have done, or far more context handed over than the task ever needed.',
-        fix: 'Pin a cheaper model for that worker. The delegation stays; only the size of what you dispatched changes.',
+        description: [
+          'Subagent is about WHO did the work, once delegation had already happened: the work went to a worker, which was the right call, but the worker itself was over-sized for the job, a premium model where a cheaper one would have done, or far more context handed over than the task ever needed.',
+          'This check only ever looks at spans already dispatched to a worker, so it never asks whether the work should have been delegated in the first place; that question belongs to Downsize, which (for the case that carries most of its money) only considers sessions where no worker was ever dispatched. A session that delegates moves out of Downsize\'s territory and into Subagent\'s instead of tripping both.',
+          'The fix is to pin a cheaper model for that worker. The delegation stays; only the size of what you dispatched changes.',
+        ],
       },
       resend: {
         title: 'Context resend',
-        blurb: 'The same context, charged again every turn',
-        mistake: 'Context accumulates in the main thread and is re-sent with every subsequent turn, long after the turn that actually needed it. Nothing about it is re-read by you, but all of it travels with each request.',
-        fix: 'Move the work that produced it to a worker, so its output never lands in your thread in the first place. Then right-size that worker so the offload is not simply a more expensive way to read the same files.',
+        description: [
+          'The same context, charged again every turn: context accumulates in the main thread and is re-sent with every subsequent turn, long after the turn that actually needed it. Nothing about it is re-read by you, but all of it travels with each request.',
+          'The fix is to move the work that produced it to a worker, so its output never lands in your thread in the first place. Then right-size that worker so the offload is not simply a more expensive way to read the same files.',
+        ],
       },
       summarize: {
         title: 'Summarize',
-        blurb: 'Always-loaded instruction files that run long',
-        mistake: 'Instruction files that are always in context, such as CLAUDE.md, rules and skills, carry more prose than they need. Length there is not paid once; it is paid on every call of every session that loads the file.',
-        fix: 'A reviewed rewrite that shortens the prose and keeps the structure exactly as it was. Each rewrite is shown as a diff you approve file by file, and nothing is written until you say so.',
+        description: [
+          'Always-loaded instruction files that run long: files that are always in context, such as CLAUDE.md, rules and skills, carry more prose than they need. Length there is not paid once; it is paid on every call of every session that loads the file.',
+          'The fix is a reviewed rewrite that shortens the prose and keeps the structure exactly as it was. Each rewrite is shown as a diff you approve file by file, and nothing is written until you say so.',
+        ],
       },
       deadweight: {
         title: 'Deadweight',
-        blurb: 'A connected tool nothing ever calls',
-        mistake: 'An MCP server is connected but never actually used. Its tool definitions still ship with every request, so you pay to describe capabilities that go untouched.',
-        fix: 'Remove the server, or disable it for the projects that do not use it.',
+        description: [
+          'A connected tool nothing ever calls: an MCP server is connected but never actually used. Its tool definitions still ship with every request, so you pay to describe capabilities that go untouched.',
+          'The fix is to remove the server, or disable it for the projects that do not use it.',
+        ],
       },
       relearn: {
         title: 'Relearn',
-        blurb: 'The same mistake, session after session',
-        mistake: 'The agent runs into the same class of problem repeatedly across sessions and works it out again each time, because nothing carried the answer forward.',
-        fix: 'Write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
+        description: [
+          'The same mistake, session after session: the agent runs into the same class of problem repeatedly across sessions and works it out again each time, because nothing carried the answer forward.',
+          'The fix is to write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
+        ],
       },
       'budget-projection': {
         title: 'Budget projection',
-        blurb: 'A forecast, not a mistake',
-        mistake: 'This one is not looking for a mistake at all. It compares your current run rate against the monthly ceiling you configured for a provider, and flags when the two are heading for a collision.',
-        fix: 'There is nothing here to apply. It tells you about exposure; the response is to spend less or to raise the ceiling.',
+        description: [
+          'A forecast, not a mistake: this one is not looking for a mistake at all. It compares your current run rate against the monthly ceiling you configured for a provider, and flags when the two are heading for a collision.',
+          'There is nothing here to apply. It tells you about exposure; the response is to spend less or to raise the ceiling.',
+        ],
       },
-    },
-    // Why a check the reader may have heard of is absent for this setup. Keyed
-    // by the name the server reports as gated off, so the copy and the gate can
-    // never disagree about which ones need an explanation.
-    hidden: {
-      cache: 'How a request reuses earlier context is decided by the harness that builds the request, not by you.',
-      'cache-recommend': 'Same reason: the setting this would ask you to change is not one a coding-agent user can reach.',
-      placement: 'Moving work onto a slower, cheaper lane only makes sense when nobody is waiting on the answer, which is never true of an interactive session.',
-      trim: 'Shortening a prompt template needs a prompt template you can edit, and an interactive coding agent writes its own.',
-      verbosity: 'The only available remedy is a blanket instruction to answer in fewer words, which buys tokens by making the agent less useful everywhere. That is not a trade this product makes.',
-      script: 'Its way of recognising a repeated workflow did not hold up against real coding sessions, where one extra file read is enough to break the match.',
-      reuse: 'It rests on a claim telemetry cannot support for interactive work: that two pieces of planning were interchangeable. The idea is worth rebuilding; the current version is not shown.',
+      // ---- Gated off for Claude Code, documented rather than hidden ---- //
+      cache: {
+        title: 'Cache',
+        description: [
+          'Cache checks how much of a request is served from the model provider\'s cache instead of billed fresh, and flags a provider and model whose reuse rate is sitting below where it should be.',
+          'It does not show up here: which part of a request gets cached is decided by the harness that builds the request, not by you, so there is no lever this check could hand you. It is still off, not missing; it will not appear later.',
+        ],
+      },
+      'cache-recommend': {
+        title: 'Cache recommend',
+        description: [
+          'Cache recommend looks for a stable, repeated prefix worth marking for explicit caching, such as project instructions that stay the same across turns.',
+          'It does not show up here, for the same reason as Cache: setting that flag on a request is something the harness does, not something you can reach. It is off on purpose, not broken and not pending.',
+        ],
+      },
+      reuse: {
+        title: 'Reuse',
+        description: [
+          'Reuse looks for a session that re-planned work an earlier session had already planned, on the idea that the second pass could have reused the first instead of starting over.',
+          'It does not show up here: measured against real interactive sessions, the claim that two planning passes were actually interchangeable does not hold up, so this check stays off rather than offer a fix built on a foundation that is not there.',
+        ],
+      },
+      script: {
+        title: 'Script',
+        description: [
+          'Script looks for a tool-call pattern repeated often enough, in the exact same order, to be worth replacing with a small deterministic script instead of asking the agent to redo it by hand each time.',
+          'It does not show up here: its match requires a session\'s entire ordered call sequence to repeat exactly, and on real coding sessions one extra file read is enough to break the match, so it essentially never fires. It is off because it cannot fire, not because it was turned off.',
+        ],
+      },
+      'stream-usage': {
+        title: 'Stream usage',
+        description: [
+          'Stream usage is not a savings check. A streamed call can close without ever reporting how many tokens it used, which makes your spend total read LOW rather than high; this check flags that gap so the figure can be corrected, not shrunk.',
+          'It does not show up here: an interactive coding agent drains its own streams rather than proxying someone else\'s, so this gap does not occur for it, and there would be no request-side setting to change even if it did.',
+        ],
+      },
+      trim: {
+        title: 'Trim',
+        description: [
+          'Trim looks for low-value tokens inside a prompt template that are worth cutting to shorten every call built from that template.',
+          'It does not show up here: it needs a prompt template you can edit, and an interactive coding agent constructs and sends its own prompts, so there is no template file this check could point you at.',
+        ],
+      },
+      verbosity: {
+        title: 'Verbosity',
+        description: [
+          'Verbosity flags a session whose output ran noticeably longer than similarly-shaped sessions, on the idea that some of that length was not necessary.',
+          'It does not show up here: the only available fix is a blanket instruction to answer in fewer words everywhere, which trades away how useful the agent is just to save tokens, and that is not a trade this product makes.',
+        ],
+      },
     },
   },
 };
-
-// Prose for a check the server says runs but this file has no entry for. Better
-// than dropping it silently: the reader was just told it runs.
-function guideMissingEntry(name) {
-  return {
-    title: capitalize(name),
-    blurb: 'Not written up yet',
-    mistake: 'This check runs for your setup, but its plain-language write-up has not been added to this guide yet. Its card on the Optimize screen states what it found.',
-    fix: null,
-  };
-}
 
 function GuideCheck({ name, entry }) {
   return html`<section class="opt-section" id=${'guide-' + name}>
     <div class="opt-title">
       <span>${entry.title} <span class="guide-name">${name}</span></span>
     </div>
-    <div class="guide-prose dim" style="margin-top:-4px">${entry.blurb}</div>
-    <div class="guide-lead">What it looks for</div>
-    <div class="guide-prose">${entry.mistake}</div>
-    ${entry.fix ? html`
-      <div class="guide-lead">What to do about it</div>
-      <div class="guide-prose">${entry.fix}</div>` : null}
+    ${entry.description.map((p, i) => html`<div key=${i} class="guide-prose">${p}</div>`)}
   </section>`;
 }
 
-// One persona's guide: the contrast callout, then a card per check the server
-// says runs, then the deliberately-absent list. `runs` and `hidden` both come
-// straight from `/optimize/analyzers`; this function chooses order and words,
-// never membership.
-function GuideBody({ persona, sets }) {
-  const guide = GUIDE_ENTRIES[persona];
-  if (!guide || !sets) return null;
-  const runs = sets.runs || [];
-  const ordered = [
-    ...guide.order.filter(n => runs.includes(n)),
-    ...runs.filter(n => !guide.order.includes(n)),
-  ];
-  const hiddenNames = (sets.disabled || []).filter(n => guide.hidden[n]);
-  // Only worth stating where both halves of the contrast actually run — and
-  // the server decides that, not this file. On a setup where one of them is
-  // gated off there are no two things to tell apart.
-  const contrast = GUIDE_KEY_CONTRAST.personas.includes(persona) &&
-    runs.includes('downsize') && runs.includes('subagent');
+// One card per registered analyzer, in `guide.order` (live-for-Claude-Code
+// first, gated-off-for-Claude-Code after, never interleaved). Fully static:
+// see the comment above `GUIDE_ENTRIES` for why this needs no server fetch.
+function GuideBody() {
+  const guide = GUIDE_ENTRIES['claude-code'];
   return html`
-    ${contrast ? html`
-      <div class="guide-key">
-        <div class="opt-title" style="margin-bottom:6px"><span>${GUIDE_KEY_CONTRAST.title}</span></div>
-        ${GUIDE_KEY_CONTRAST.paras.map((p, i) => html`<div key=${i} class="guide-prose">${p}</div>`)}
-      </div>` : null}
-    ${ordered.map(n => html`<${GuideCheck} key=${n} name=${n} entry=${guide.entries[n] || guideMissingEntry(n)} />`)}
-    ${hiddenNames.length ? html`
-      <section class="opt-section" id="guide-not-shown">
-        <div class="opt-title"><span>Checks that are not shown here</span></div>
-        <div class="guide-prose">tokenjam has more checks than the ones above. The rest are held back for this setup on purpose, because their only remedy is a setting a ${GUIDE_PERSONA_LABELS[persona] || persona} user does not control, or because they did not earn their place. A check with no reachable fix is a diagnosis you can do nothing with, so it is left off rather than shown as an empty card.</div>
-        <ul class="guide-hidden-list">
-          ${hiddenNames.map(n => html`<li key=${n}><b>${(ANALYZER_META[n] && ANALYZER_META[n].title) || capitalize(n)}</b>. ${guide.hidden[n]}</li>`)}
-        </ul>
-      </section>` : null}
+    ${guide.order.map(n => html`<${GuideCheck} key=${n} name=${n} entry=${guide.entries[n]} />`)}
   `;
 }
 
 function AnalyzerGuideView() {
-  const [st, setSt] = useState({ loading: true, error: null, sets: null, persona: null });
-
-  const load = useCallback(async () => {
-    setSt(s => ({ ...s, loading: true, error: null }));
-    try {
-      // The gate, always. Static config, so it answers on a cold store too.
-      const sets = await api('/optimize/analyzers');
-      // The persona of the stored report, when there IS one. Best-effort: a
-      // cold or failed read means "not classified yet", which the banner says
-      // in words rather than defaulting to a persona nobody measured.
-      const opt = await api('/optimize').catch(() => null);
-      const persona = (opt && opt.report_available !== false && opt.persona) || null;
-      setSt({ loading: false, error: null, sets, persona });
-    } catch (e) {
-      setSt({ loading: false, error: e.message || String(e), sets: null, persona: null });
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  // Which persona's guide is actually rendered, and why. Three cases, each with
-  // its own honest sentence:
-  //   written        the resolved persona has a guide -> show it, no caveat
-  //   unclassified   nothing has classified this install -> show the default
-  //                  guide, say that it is the default
-  //   unwritten      resolved to a persona with no guide -> say so plainly and
-  //                  show the written one clearly labelled as another setup's
-  const DEFAULT_PERSONA = 'claude-code';
-  const resolved = st.persona;
-  const written = resolved && GUIDE_ENTRIES[resolved];
-  const shown = written ? resolved : DEFAULT_PERSONA;
-  const sets = st.sets && st.sets.personas ? st.sets.personas[shown] : null;
-  const uncovered = st.sets && st.sets.personas && shown === DEFAULT_PERSONA && resolved && !written;
-
   return html`
-    <div class="page-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      FAQ
-      ${/* Forward, not "back": this is a top-level Improve page now, reachable
-            from any screen, so a reader may well have arrived without ever
-            visiting Optimize. Pointing AT the cards is true from anywhere;
-            "back" would be a guess about where they came from. */ ''}
-      <a class="sz-link" href="#/optimize" style="font-size:13px;font-weight:400">See these on the Optimize screen →</a>
-    </div>
-
-    ${st.error ? html`<div class="chart-card" style="border-color:var(--error)">
-      <div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load the analyzer list: ${st.error}</div>
-      <button class="btn" onClick=${load}>Retry</button>
-    </div>` : null}
-    ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
-
-    ${!st.loading && !st.error && sets ? html`
-      <div class="guide-prose" style="margin-bottom:14px">Every card on the Optimize screen comes from one of the checks below. Each one looks for a different way tokens get spent without buying anything, and each ends in something you can change. Figures on the cards are estimates from your own history, offered as candidates to review before you act on them.</div>
-
-      ${written && !uncovered ? html`
-        <div class="guide-banner">Written for <b>${GUIDE_PERSONA_LABELS[shown]}</b>, which is what your recent sessions look like.</div>
-      ` : uncovered ? html`
-        <div class="guide-banner">Your recent sessions look like a <b>${GUIDE_PERSONA_LABELS[resolved] || resolved}</b> setup, and a guide for that setup has not been written yet. What follows describes <b>${GUIDE_PERSONA_LABELS[shown]}</b>, so parts of it may not match how you work. The checks that actually run for you are still decided by your own setup, not by this page.</div>
-      ` : html`
-        ${/* Names the thing that is actually missing: the analyzer SCAN, not
-              the data. "Nothing has classified this install yet" reads as "you
-              have no sessions", which on a corpus of thousands would be the
-              page claiming less than its data supports — the same defect class
-              as claiming more. Wording deliberately mirrors the Optimize
-              screen's own cold state so the two agree. */ ''}
-        <div class="guide-banner">No analyzer scan has completed yet, so your setup has not been classified. What follows is the <b>${GUIDE_PERSONA_LABELS[shown]}</b> guide; once a scan has run, this page describes whichever setup your sessions turn out to match.</div>
-      `}
-
-      <${GuideBody} persona=${shown} sets=${sets} />
-    ` : null}
+    <div class="page-title">FAQ</div>
+    <div class="guide-prose" style="margin-bottom:14px">Below is every check tokenjam can run, in two groups: first the ones that actually produce cards on the Optimize screen for this setup, then the ones that are turned off for it, with the reason why. Figures on a live check's card are estimates from your own history, offered as candidates to review before you act on them.</div>
+    <${GuideBody} />
   `;
 }
 
@@ -8436,7 +8389,7 @@ function SummarizeView({ params }) {
     return html`
       <div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>
       <div class="page-title">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
-      <div class="sz-note">Rewrites prose only: code, tables, and <code>&lt;tj-keep&gt;</code> blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
+      <div class="sz-note">Rewrites prose only: code, tables, and <code>${'<tj-keep>'}</code> blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
       ${staged.length ? html`<div class="cur-tally" style="cursor:pointer;margin-top:14px" onClick=${() => setPhase('review')}>
         <div class="cur-tally-head">
           <div class="cur-tally-count">${staged.length} <small>staged rewrite(s) ready to review; no engine needed</small></div>
