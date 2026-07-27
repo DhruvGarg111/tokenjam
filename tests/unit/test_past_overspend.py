@@ -726,13 +726,20 @@ def test_the_observed_figure_renders_from_the_server_block_only(ui):
     assert ui.count("<${PastOverspendTile}") == 1
     assert "PastOverspendBand" not in ui, "the removed band must not linger"
     assert "setCostPastOverspend(r.past_overspend || null)" in ui
-    assert "setHeroPast((r && r.past_overspend) || null)" in ui
-    # The hero fetches on its OWN effect rather than inside the Dashboard's
-    # triage Promise.all: that batch resolves only when its slowest member
-    # does (a 30-day analyzer sweep), and a headline that waits on an analyzer
-    # sweep is a headline nobody sees. Verified live: the triage band was
-    # still showing its loading shimmer minutes after the page settled.
-    assert "api('/relearn/cost-proposals')\n      .then(r => { if (live) setHeroPast" in ui
+    # One render site now has exactly one reader. The Dashboard used to keep its
+    # own `heroPast` copy of this read for a band it no longer renders, so the
+    # page paid for a request per mount and displayed nothing from it; it is gone.
+    # This assertion is the same guarantee stated the other way round: nothing may
+    # read that block except the surface that renders it.
+    assert "setHeroPast" not in ui
+    dash = ui[ui.index("function DashboardView"):ui.index("// Two lenses, one router")]
+    # The FETCH, not the string: a comment in that view still names the endpoint,
+    # deliberately, to say where the figure must come from if it is re-added.
+    assert "api('/relearn/cost-proposals')" not in dash
+    # If a Dashboard summary of this figure is ever re-added, it must read the
+    # server's own `past_overspend` block rather than reduce over rendered cards.
+    # That rule now lives in a comment at the old render site, so keep it findable.
+    assert "past_overspend` block, the same one" in ui
 
 
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):

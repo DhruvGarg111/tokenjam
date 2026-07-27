@@ -941,6 +941,66 @@ a.health-tile.attn { border-color: var(--warn); }
 .health-value { font-family: 'Geist Mono', monospace; font-size: 24px; font-weight: 700; }
 .health-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 .health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
+/* --- Triage band: the states that are NOT "here is your answer" ------------ */
+/* A health tile whose source has not answered. The number slot renders a
+   shimmer (still checking) or a neutral "?" (the read failed), never a 0: on
+   this band a zero reads as an all-clear ("no unread alerts", "no agents
+   drifting"), which is the single most misleading thing an unknown figure could
+   claim. The .attn border is withheld too — an unanswered read is no basis for
+   raising an alarm either.
+
+   Geometry follows the Review inbox's skeleton conventions rather than being
+   invented here, so a reader switching pages cannot tell the two were built
+   separately: bar heights track the real element's font-size (the value bar is
+   24px, matching .health-value), bars keep .shimmer's own 6px radius rather than
+   overriding it, spacing is stated inline at the markup, and the only motion is
+   .shimmer. Read off that screen's source, not copied from it: its skeletons are
+   not factored into anything a tile can reuse (InboxSkeletonRow is a list-row
+   shape; its stat-tile placeholder is inline markup inside InboxStatTiles), and
+   extracting one would mean editing a region another worker owns. */
+.health-value-skel { height: 24px; max-width: 2.4em; margin: 3px 0; }
+.health-value.unknown { color: var(--text-faint); }
+/* Recoverable-waste band placeholders. Skeleton tiles hold the band's shape
+   while the analyzer sweep runs, so a slow answer reads as pending rather than
+   as a page that broke; .band-msg carries the honest sentence for a wait that
+   ran out or a read that failed, and is deliberately wordy where the tiles are
+   terse — "we do not know" needs a reason and a next step, a number does not.
+
+   A tile placeholder MIRRORS the real tile's internals (name line, amount line,
+   two clamped hint lines) instead of standing in as one solid block, which is the
+   inbox skeleton's own stated rule: real content should FILL a placeholder in
+   rather than replace a differently-shaped thing. It reuses .rec-tile for the box
+   so border, radius and padding cannot drift from the answered state, and its bar
+   heights track the compact tile's own font sizes (.tile-grid.compact sets
+   .rec-name 12px, .rec-amount 15px, .rec-hint 10px). */
+.rec-skel { pointer-events: none; }
+/* The qualifier bar's slot while its text is unknown: the real bar's box, its
+   own left accent dropped (there is nothing yet to caveat) and two lines of the
+   height the real two-line caveat renders at. The fill is dropped too, because
+   .shimmer's own gradient runs through var(--surface2) — the same colour the real
+   bar is filled with — so on the filled box the placeholder bars were invisible
+   and the slot read as an empty grey rectangle. */
+.qualifier-skel { border-left-color: var(--border); background: transparent; }
+.band-msg {
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  padding: 12px 14px; font-size: 12.5px; color: var(--text-dim);
+}
+.band-msg.warn { border-left: 3px solid var(--warn); }
+.band-msg.err { border-left: 3px solid var(--error); }
+.band-msg b {
+  display: block; color: var(--text); font-family: 'Geist Mono', monospace;
+  font-size: 12.5px; font-weight: 600; margin-bottom: 5px;
+}
+.band-msg p { margin: 0 0 9px; line-height: 1.5; max-width: 52ch; }
+.band-note { margin-top: 8px; font-size: 11.5px; color: var(--text-faint); line-height: 1.45; max-width: 52ch; }
+.band-stale { font-size: 12px; color: var(--warn); margin-bottom: 8px; }
+.band-stale .sz-link { margin-left: 6px; }
+/* The reduced-motion guard for these placeholders is NOT here: it lives on
+   `.shimmer` itself, up with the primitive's own definition, so every shimmer in
+   the app inherits one guard. This block briefly carried a second copy of that
+   rule (the Dashboard and the Review inbox reached for it independently); the
+   duplicate is gone rather than kept, because two rules for one primitive is
+   exactly the drift that lets two screens' skeletons diverge. */
 .opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
@@ -5510,10 +5570,28 @@ function fmtPerItemCost(costUsd, tokenTotal, framing) {
 // Integer count with thousand separators (#262): "23954" → "23,954". For the
 // Sessions / Events KPI tiles, which are exact counts (not abbreviated like
 // fmtTokens "23.9k").
+//
+// NOTE the null case: this returns the STRING "0", and fmtCost(null) likewise
+// returns "$0.0000". Both are long-standing behaviour of formatters shared by
+// every screen in the app, so they are left exactly as they are; the guard for
+// "the payload never reported this field" belongs at the call site, which is
+// what kpiFigure() below does. Do not hand either formatter a value you have
+// not confirmed exists.
 function fmtCount(n) {
   if (n == null) return '0';
   return Math.round(n).toLocaleString('en-US');
 }
+
+// The single glyph this app uses in place of a figure it does not have. Not a 0,
+// and not a dash either (a dash reads as "none"); a question mark is the one mark
+// that cannot be mistaken for a measurement. Shared by the Health tiles and the
+// KPI row so one page never shows two different kinds of "unknown".
+const UNKNOWN_FIGURE = '?';
+
+// Format a KPI field, or say we do not have it. A field the server omitted is
+// UNKNOWN, and "0 Sessions" for an unreported count is the same lie as a health
+// tile showing 0 for a read that failed.
+const kpiFigure = (v, fmt) => (v == null ? UNKNOWN_FIGURE : fmt(v));
 
 // The Spend KPI tile under plan-tier framing (#262). For SUBSCRIPTION, the
 // confusing "% of cycle" is replaced by an honest implied-value MULTIPLIER —
@@ -5524,13 +5602,20 @@ function fmtCount(n) {
 // already conveys volume. Returns {label, value} or null (drop the tile).
 function spendTileDisplay(spendUsd, framing) {
   const mode = framing && framing.pricing_mode;
+  // An unreported spend field is unknown, not zero. Both branches below would
+  // otherwise manufacture one: `(null || 0) / fee` renders "0.0× plan value" and
+  // fmtCost(null) renders "$0.0000", and on a spend tile a zero reads as "this
+  // window cost you nothing". Checked before the mode branches so neither can.
+  const unknown = spendUsd == null;
   if (mode === 'subscription') {
     if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
-    const mult = (spendUsd || 0) / framing.plan_monthly_usd;  // == (% of cycle) / 100
+    if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };
+    const mult = spendUsd / framing.plan_monthly_usd;    // == (% of cycle) / 100
     return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
   }
   if (mode === 'local') return null;                     // no plan fee to multiply against
-  return { label: 'Spend', value: fmtCost(spendUsd) };   // api / unknown → dollars
+  // api / unknown → dollars
+  return { label: 'Spend', value: unknown ? UNKNOWN_FIGURE : fmtCost(spendUsd) };
 }
 
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
@@ -6726,11 +6811,157 @@ function rankTiles(tiles, findingRank) {
     .map(x => x.t);
 }
 
-function HealthTile({ label, value, attention, href, sub }) {
-  return html`<a class="health-tile ${attention ? 'attn' : ''}" href=${href}>
-    <div class="health-value">${value}</div>
+// ---- One independently-settling read ------------------------------------- //
+// Every panel on the Dashboard is fed by exactly one of these, and each one
+// carries its OWN latency and its OWN failure. Sharing a load flag across them
+// (the previous single `Promise.all`) is what let a 27-second endpoint decide
+// when a 13-second panel was allowed to paint, and what left the page with
+// nothing on it in the meantime.
+//
+// `phase` is 'loading' | 'ready' | 'error'. `data` is the last COMPLETE payload
+// or null; those two together are the whole contract every panel renders from,
+// and no panel may read `data` without checking whether it is null:
+//   data != null              -> we have an answer, figures may be stated
+//   data == null, 'loading'   -> unknown, still working: skeleton, never a 0
+//   data == null, 'error'     -> unknown, failed: say so, never a 0
+// A held answer survives a failed REFRESH deliberately: it was true when it was
+// read, which is a much better thing to show than a blank.
+//
+// `deps` follows the useCallback convention: change them and the read is re-run.
+// A deps change also DROPS the held answer, because the deps are the question
+// (`since` is in there) and last window's figures under this window's label
+// would be a fresh lie rather than a stale truth.
+function useTriageRead(run, deps) {
+  const [st, setSt] = useState({ phase: 'loading', data: null, error: null });
+  const gen = useRef(0);          // generation counter; stale settles are dropped
+  const inFlight = useRef(false);
+
+  const refresh = useCallback(() => {
+    // Never stack reads on a slow endpoint. The 30s poll calls this on every
+    // tick, and on a corpus where a read takes 27 seconds an unguarded poll
+    // would keep opening new queries against a DB the previous one still holds.
+    if (inFlight.current) return;
+    const g = ++gen.current;
+    inFlight.current = true;
+    setSt(s => ({ phase: 'loading', data: s.data, error: null }));
+    run().then(
+      (data) => {
+        inFlight.current = false;
+        setSt(s => (gen.current === g ? { phase: 'ready', data, error: null } : s));
+      },
+      (err) => {
+        inFlight.current = false;
+        setSt(s => (gen.current === g
+          ? { phase: 'error', data: s.data, error: err.message || String(err) } : s));
+      },
+    );
+  }, deps);
+
+  useEffect(() => {
+    setSt({ phase: 'loading', data: null, error: null });
+    refresh();
+    // Bump the generation so a settle from the superseded question cannot write
+    // into the new one.
+    return () => { gen.current++; inFlight.current = false; };
+  }, [refresh]);
+
+  return { phase: st.phase, data: st.data, error: st.error, refresh };
+}
+
+// The render status of a panel fed by one useTriageRead, in the vocabulary
+// HealthTile and the bands speak. A held answer counts as 'ready' even if the
+// latest refresh failed: the figure was true when it was read.
+function readStatus(read) {
+  if (!read) return 'loading';
+  if (read.data != null) return 'ready';
+  return read.phase === 'error' ? 'error' : 'loading';
+}
+
+// ---- Triage-band state machine (honest-absence rules) --------------------- //
+// The Dashboard's two triage bands each make FACTUAL CLAIMS ("no recoverable
+// candidates", "0 unread alerts", "within baseline"). Every one of those claims
+// needs a completed read behind it, and the reads behind them are independently
+// fallible and — for /optimize, an analyzer sweep that is minutes long on a
+// large history — independently slow. The original code funnelled all of them
+// through `.catch(() => <empty default>)`, which erases the difference between
+// "the answer is nothing" and "there is no answer": a timed-out /optimize
+// arrived at the tiles as an empty report and printed "No recoverable
+// candidates." over a corpus holding thousands of dollars of them.
+//
+// So the decision of what a band is ALLOWED TO SAY is factored out here, into
+// two pure functions with no rendering in them. They are the single place that
+// rule lives, and being pure they are directly testable under node
+// (tests/unit/test_lens_dashboard_states.py, same extraction trick as
+// test_lens_select_all_behaviour.py) rather than only string-matched.
+
+// What the "Recoverable waste" band renders, from its read's outcome.
+//   phase — 'loading' | 'ready' | 'timeout' | 'error' (see DashboardView)
+//   data  — the last COMPLETE /optimize payload we hold, or null for none ever
+// Returns one of:
+//   'tiles'    — complete answer, candidates to show
+//   'none'     — complete answer, nothing recoverable. The ONLY state permitted
+//                to state that there is nothing here.
+//   'stale'    — we hold a complete answer AND the latest refresh did not land;
+//                show the old tiles, labelled as the last complete result.
+//   'scanning' — no answer yet and still waiting.
+//   'timeout'  — stopped waiting without an answer. Unknown, not empty.
+//   'failed'   — the read errored. Unknown, not empty.
+function recoverableBandState(phase, data, tileCount) {
+  // A held answer always wins over the absence of a fresh one: showing the last
+  // complete result (labelled) beats blanking a band we do have numbers for.
+  if (data) {
+    if (phase === 'timeout' || phase === 'error') return 'stale';
+    return tileCount > 0 ? 'tiles' : 'none';
+  }
+  if (phase === 'timeout') return 'timeout';
+  if (phase === 'error') return 'failed';
+  return 'scanning';
+}
+
+// Why a tile has no figure, in its own words. A tile inherits its source's
+// outcome, so it can be specific: "still scanning" (the read is outstanding past
+// the band's wait) is a different fact from "couldn't load" (it failed), and
+// telling the user which one it is decides whether waiting is worth anything.
+const HEALTH_UNKNOWN_SUB = {
+  loading: 'checking',
+  timeout: 'still scanning',
+  error: "couldn't load",
+};
+
+// What goes in a health tile's number slot. 'loading' returns null, meaning the
+// caller renders a shimmer there instead; anything other than an answered read
+// returns the unknown mark. A caller cannot get a number out of this function
+// for a source that did not answer, which is the point: the zero it would
+// otherwise have derived from an empty fallback is the dangerous placeholder.
+// 'timeout' does NOT return null — an indefinite shimmer would read as progress
+// past the point where we have admitted we do not know.
+function healthValueFor(status, value) {
+  if (status === 'ready') return String(value);
+  if (status === 'loading') return null;
+  return UNKNOWN_FIGURE;
+}
+
+// `status` decides what the tile may SAY, independently of `value`:
+//   'ready'   — the source answered; render the figure and let `attention` and
+//               `sub` speak
+//   'loading' — no answer yet; shimmer in the number slot, "checking" sub-line
+//   'timeout' — outstanding past the band's wait; "?" and "still scanning"
+//   'error'   — the source failed; "?" and "couldn't load"
+function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
+  const shown = healthValueFor(status, value);
+  const unknown = status !== 'ready';
+  return html`<a class="health-tile ${!unknown && attention ? 'attn' : ''}" href=${href}>
+    ${shown === null
+      ? html`<div class="shimmer health-value-skel" title="still checking"></div>`
+      : html`<div class="health-value ${unknown ? 'unknown' : ''}">${shown}</div>`}
     <div class="health-label">${label}</div>
-    ${sub ? html`<div class="health-sub">${sub}</div>` : null}
+    ${/* The sub-line is where the unknown states explain themselves. An answered
+          tile keeps whatever caption the caller gave it; an unanswered one
+          replaces it, because that caption ("all clear", "within baseline") is
+          exactly the claim we have no basis for. */ ''}
+    ${unknown
+      ? html`<div class="health-sub">${HEALTH_UNKNOWN_SUB[status] || HEALTH_UNKNOWN_SUB.error}</div>`
+      : (sub ? html`<div class="health-sub">${sub}</div>` : null)}
   </a>`;
 }
 
@@ -7924,6 +8155,13 @@ function downloadCsv(filename, text) {
 // `embedded` drops the standalone title + window picker so the host screen
 // owns those. Default args keep this signature call-compatible even though
 // nothing invokes it bare anymore.
+// Four placeholders for the four KPI tiles the row settles into (Spend, Tokens,
+// Sessions, Events), so the row occupies its final height from first paint. A
+// subscription/local corpus with no declared plan fee drops the Spend tile, in
+// which case the row narrows by one when the answer lands; holding four is still
+// the closer guess than holding none.
+const KPI_SKELETON_TILES = [0, 1, 2, 3];
+
 function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null }) {
   const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
     agent_id: '', provider: '', model: '', tool: '' };
@@ -8096,11 +8334,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
           series: kpiSparkValues(resp, 'spend'), delta: deltas.spend });
       }
-      tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
+      // kpiFigure, not the bare formatter: a field the payload omitted renders as
+      // unknown rather than as fmtCount(null)'s "0" or fmtTokens(null)'s dash.
+      tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: kpiFigure(kpis.tokens, fmtTokens),
         series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
-      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: fmtCount(kpis.sessions),
+      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: kpiFigure(kpis.sessions, fmtCount),
         series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
-      tiles.push({ key: 'events', label: 'Events', cost: false, value: fmtCount(kpis.events),
+      tiles.push({ key: 'events', label: 'Events', cost: false, value: kpiFigure(kpis.events, fmtCount),
         series: kpiSparkValues(resp, 'events'), delta: deltas.events });
       return html`
         <div class="kpi-row">
@@ -8111,6 +8351,30 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         </div>
         ${kpiCaption ? html`<div class="kpi-caption">${kpiCaption}</div>` : null}`;
     })() : null}
+
+    ${/* The KPI row holds its final position while the numbers are unknown.
+          Returning null here (the old behaviour) meant the row simply did not
+          exist until /analytics answered, so on a large corpus the entire chart
+          below it jumped down the page tens of seconds after first paint. Four
+          placeholders, matching the four tiles that follow, in the app's own
+          .shimmer; a placeholder cannot be mistaken for a figure, whereas the
+          row's absence plus a chart sitting high on the page reads as a page
+          that has finished loading. Not shown once `kpis` exists, and not shown
+          on a REFRESH over numbers already on screen. */ ''}
+    ${!error && !kpis ? html`
+      <div class="kpi-row" aria-hidden="true">
+        ${KPI_SKELETON_TILES.map(i => html`
+          <div key=${i} class="kpi-tile">
+            <div class="kpi-top">
+              <div class="kpi-num" style="flex:1">
+                <div class="shimmer" style="height:20px;width:56%"></div>
+                <div class="shimmer" style="height:11px;width:38%;margin-top:6px"></div>
+              </div>
+              <div class="shimmer" style="height:24px;width:64px;flex-shrink:0;border-radius:3px"></div>
+            </div>
+            <div class="shimmer" style="height:11px;width:70px;margin-top:8px"></div>
+          </div>`)}
+      </div>` : null}
 
     ${!error ? html`
       <div class="chart-card" style=${loading ? 'opacity: 0.5; pointer-events: none; transition: opacity 0.2s' : 'transition: opacity 0.2s'}>
@@ -8126,7 +8390,9 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
               <button class="btn" onClick=${() => setFilter('group_by', 'agent')}>Group by Agent</button>
             </div>
           </div>`
-          : loading && !resp ? html`<div class="shimmer" style="height:200px"></div>`
+          /* Same height the real chart renders at, so the switch to a chart
+             moves nothing below it. */
+          : loading && !resp ? html`<div class="shimmer" style="height:220px"></div>`
           : emptyFromStack ? html`
             <div class="empty" style="padding:32px 16px;text-align:center">
               <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
@@ -10324,12 +10590,28 @@ function ReviewInboxView({ params }) {
   `;
 }
 
+// How long the recoverable-waste band waits before it admits it does not know.
+// Measured against a real 794MB corpus over a 30-day window: 356s idle, 480s
+// while the page was also polling, both HTTP 200 with findings. The cap sits
+// above the worse of those with headroom, so an answer that IS coming still
+// lands in the normal state and the notice never cries wolf on a scan that was
+// simply slow. A cap that is too LOW is the failure mode to avoid here: the
+// request is not cancelled at the cap, so a late answer still fills the band in,
+// and the only cost of waiting longer is a shimmer nobody can read a claim into.
+const OPTIMIZE_WAIT_MS = 10 * 60 * 1000;
+const OPTIMIZE_WAIT_MIN = Math.round(OPTIMIZE_WAIT_MS / 60000);
+// Skeleton tiles held during the sweep. Six, because that is what the band
+// settles into on a claude-code corpus once the persona gate has dropped the
+// analyzers with no fix for it (measured: resend, summarize, downsize,
+// deadweight, subagent, relearn), so the grid keeps the same row count from the
+// placeholder through to the answer.
+const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];
+
 function DashboardView({ params }) {
   const since = readParam(params, 'since', '30d', validSince);
   // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
   // only the window changes, so the hero keeps its slice across window switches.
   const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: '30d' });
-  const [d, setD] = useState({ loading: true, empty: false, error: null });
 
   // A retired #/analytics link lands here (primaryKeyFor aliases it to
   // 'dashboard') with its metric/group_by/stack/chart/since params intact, but
@@ -10346,68 +10628,147 @@ function DashboardView({ params }) {
     if (el) el.scrollIntoView({ block: 'start' });
   }, [params]);
 
-  // Triage fetch — same parallel fast=true pattern as Overview (#124): /cost is
-  // load-bearing (no .catch), the rest degrade individually. The Analytics hero
-  // fetches independently, so a triage failure never blanks the explorer.
-  const load = useCallback(async () => {
-    try {
-      // Fetch /cost (load-bearing, no .catch) alongside /status and the rest so
-      // the empty gate can consider HISTORICAL spend, not just live agents. A DB
-      // whose sessions are all >24h old reports 0 active agents but still has a
-      // full cost history — that user upgrading to review past spend must NOT
-      // see "No data yet" (the front door was gating purely on active agents and
-      // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces, relearn] = await Promise.all([
-        api('/cost', { since, group_by: 'day' }),
-        api('/status').catch(() => ({ agents: [] })),
-        api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
-        api('/optimize', { since, fast: 'true' }).catch(() => null),
-        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
-        api('/drift').catch(() => ({ agents: [] })),
-        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
-        api('/relearn/proposals').catch(() => ({ finding: null })),
-      ]);
-      // "No data yet" only when there is genuinely NO telemetry: no cost history
-      // AND no tokens AND no sessions/agents AND no traces. Historical cost or
-      // an optimize finding is enough to render the tiles.
-      const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;
-      const hasAgents = !!(status.agents && status.agents.length);
-      const hasTraces = !!(traces.traces && traces.traces.length);
-      const empty = !hasCost && !hasAgents && !hasTraces;
-      setD({ loading: false, empty, error: null, cost, compare, opt,
-        alerts: al.alerts || [], drift, traces: traces.traces || [],
-        pendingFixes: ((relearn && relearn.finding && relearn.finding.clusters) || []).length });
-    } catch (e) {
-      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
-    }
-  }, [since]);
+  // ---- One read per source, never one load flag for the page ---------------- //
+  // These six reads used to be awaited together in a single Promise.all, which
+  // made every panel on the page as slow as the slowest of them. Measured against
+  // a real 794MB corpus: /traces and /status answer in ~13.6s, /cost in 27.0s,
+  // and the analyzer sweep behind /optimize in 356s. Batched, the four Health
+  // tiles that never touch /cost still appeared 27 seconds late, and while the
+  // whole batch was outstanding the page had nothing to show at all. Each read
+  // now settles on its own and the panel it feeds paints the moment ITS answer
+  // lands. /optimize keeps a richer state machine of its own below, because it is
+  // the only one slow enough to need a bounded wait.
+  const costRead = useTriageRead(() => api('/cost', { since, group_by: 'day' }), [since]);
+  const statusRead = useTriageRead(() => api('/status'), []);
+  const alertsRead = useTriageRead(() => api('/alerts', { since, unread: 'true' }), [since]);
+  const driftRead = useTriageRead(() => api('/drift'), []);
+  const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6 }), [since]);
+  const relearnRead = useTriageRead(() => api('/relearn/proposals'), []);
 
-  // The hero's data is fetched on its OWN effect, deliberately not folded into
-  // the triage `Promise.all` above: that batch resolves only when its SLOWEST
-  // member does (a 30-day `/optimize` pass over a large DB is minutes), and a
-  // headline stat that waits on an analyzer sweep is a headline nobody sees.
-  // This read is a cheap lookup of an already-stored block (it never triggers a
-  // recompute) and is the SAME endpoint the Review inbox headline reads, so the
-  // two surfaces state one number computed once server-side.
-  const [heroPast, setHeroPast] = useState(null);
-  useEffect(() => {
-    let live = true;
-    api('/relearn/cost-proposals')
-      .then(r => { if (live) setHeroPast((r && r.past_overspend) || null); })
-      .catch(() => { /* the hero is additive; a failure just hides it */ });
-    return () => { live = false; };
+  // ---- The recoverable-waste read, on its own state machine ---------------- //
+  // GET /optimize runs the analyzer sweep server-side. Measured against a real
+  // 794MB local corpus over a 30-day window it answered HTTP 200 with five
+  // findings after 356s idle and 480s while the page was also polling.
+  // `fast=true` only drops `trim`, which is persona-disabled on a claude-code
+  // corpus anyway, so the flag buys nothing here. That cost is a server-side
+  // problem tracked separately and is not what this code fixes. What this code
+  // fixes is the UI's account of it:
+  // the band must never turn a non-answer into a claim of absence, and must stay
+  // honest for the several minutes an answer can legitimately take without
+  // reading as frozen.
+  //
+  // `phase` is the single source of truth for what the band may say:
+  //   'loading' — a sweep is in flight; we do not know yet
+  //   'ready'   — a response arrived; `data` is what it said
+  //   'timeout' — we stopped waiting; still unknown
+  //   'error'   — the read failed; still unknown
+  // 'timeout' and 'error' stay distinct because the user's next move differs
+  // (keep waiting on something still running, vs. retry something that broke),
+  // and neither may ever be rendered as 'ready' with an empty report.
+  const [optState, setOptState] = useState({ phase: 'loading', data: null, error: null });
+  // A sweep that is still running server-side even though we stopped waiting for
+  // it. Tracked separately from `phase` precisely because 'timeout' does NOT
+  // mean the request went away.
+  const optInFlight = useRef(false);
+  const optRun = useRef(0);       // generation counter; stale settles are dropped
+  const optTimer = useRef(null);
+
+  const armOptWait = useCallback(() => {
+    const run = optRun.current;
+    clearTimeout(optTimer.current);
+    optTimer.current = setTimeout(() => {
+      // Only a still-'loading' read of THIS generation may time out; a sweep that
+      // already answered (or was superseded) is untouched.
+      setOptState(s => (optRun.current === run && s.phase === 'loading'
+        ? { phase: 'timeout', data: s.data, error: null } : s));
+    }, OPTIMIZE_WAIT_MS);
   }, []);
 
+  const loadOptimize = useCallback(() => {
+    // Never more than ONE sweep in flight. The 30s poll below used to re-enter
+    // this read unconditionally; with a 45s response cache in front of an
+    // endpoint that takes minutes, every other poll opened ANOTHER concurrent
+    // sweep over the same DuckDB file, so the page got slower the longer it
+    // stayed open. That contention is why the same request measured 356s idle
+    // and 480s with the page polling.
+    if (optInFlight.current) return;
+    const run = ++optRun.current;
+    optInFlight.current = true;
+    // Keep any answer we already hold while refreshing: a slow refresh must not
+    // blank numbers that are still the last complete result.
+    setOptState(s => ({ phase: 'loading', data: s.data, error: null }));
+    armOptWait();
+
+    const resolve = (next) => {
+      optInFlight.current = false;
+      clearTimeout(optTimer.current);
+      setOptState(s => (optRun.current === run ? next(s) : s));
+    };
+    // The request is deliberately NOT abandoned when the wait runs out: it is a
+    // read whose answer is still worth having whenever it lands, so this handler
+    // stays attached past the timeout and fills the band in on its own. The page
+    // recovers without the user doing anything, rather than stranding them on a
+    // timeout notice for an answer that did eventually arrive.
+    api('/optimize', { since, fast: 'true' }).then(
+      data => resolve(() => ({ phase: 'ready', data, error: null })),
+      err => resolve(s => ({ phase: 'error', data: s.data, error: err.message || String(err) })),
+    );
+  }, [since, armOptWait]);
+
+  // Two different next moves behind one control, because the two unknown states
+  // have two different causes. On a TIMEOUT the sweep is still running, so the
+  // useful action is to go back to waiting and let it land; firing a second
+  // sweep would only add another minutes-long scan of the same DB and slow the
+  // first one down. On an ERROR nothing is in flight, so it issues a fresh read.
+  const retryOptimize = () => {
+    if (optInFlight.current) {
+      setOptState(s => ({ phase: 'loading', data: s.data, error: null }));
+      armOptWait();
+      return;
+    }
+    loadOptimize();
+  };
+
   useEffect(() => {
-    load();
-    // The live tiles (/status, /traces, /alerts, /drift) are excluded from the
-    // GET cache, so each poll refetches them fresh; the slow /cost, /optimize and
-    // /relearn reads honor the short cache TTL (refresh within ~45s).
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
-    const onVis = () => { if (document.visibilityState === 'visible') load(); };
-    document.addEventListener('visibilitychange', onVis);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
-  }, [load]);
+    loadOptimize();
+    return () => {
+      // Invalidate this generation so a late settle cannot write into a view
+      // that has moved to a different window.
+      optRun.current++;
+      optInFlight.current = false;
+      clearTimeout(optTimer.current);
+    };
+  }, [loadOptimize]);
+
+  // Every read refreshes on the same 30s cadence, but each one refreshes ITSELF:
+  // useTriageRead's in-flight guard makes a tick a no-op for any read still
+  // working, so a slow endpoint is simply polled less often than a fast one
+  // instead of holding the fast ones back or stacking queries behind itself.
+  // The live reads (/status, /traces, /alerts, /drift) are excluded from the GET
+  // cache so each tick refetches them fresh; /cost, /optimize and /relearn honor
+  // the short cache TTL (refresh within ~45s).
+  //
+  // The tick callback is reached through a ref rather than closed over by the
+  // effect, so the interval is installed ONCE. Listing the six refresh callbacks
+  // as effect deps would tear down and reinstall the timer on every window change
+  // (and any render that changed one of their identities), which on a page whose
+  // reads take tens of seconds means a 30s timer that can keep being reset before
+  // it ever fires.
+  const pollRef = useRef(null);
+  pollRef.current = () => {
+    costRead.refresh(); statusRead.refresh(); alertsRead.refresh();
+    driftRead.refresh(); tracesRead.refresh(); relearnRead.refresh();
+    // The sweep is polled too, so a wait that timed out still gets picked back
+    // up without the user asking; loadOptimize's own in-flight guard makes this
+    // a no-op while one is running, so the poll can never stack sweeps.
+    loadOptimize();
+  };
+  useEffect(() => {
+    const tick = () => { if (document.visibilityState === 'visible') pollRef.current(); };
+    const timer = setInterval(tick, 30000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', tick); };
+  }, []);
 
   const winPicker = html`
     <select value=${since} onChange=${e => setWin(e.target.value)}>
@@ -10417,12 +10778,18 @@ function DashboardView({ params }) {
       <option value="90d">Last 90d</option>
     </select>`;
 
-  const cost = d.cost || {};
-  const framing = cost.framing || null;
+  // Everything derived from /cost is derived from the ANSWER, never from an empty
+  // object standing in for one. `costData` is null until the read lands, and each
+  // consumer below checks it: framing (so PlanBadge and the qualifier stay absent
+  // rather than asserting a plan we have not read), the window total, and the
+  // run-rate caption.
+  const costData = costRead.data;
+  const cost = costData || {};
+  const framing = costData ? (cost.framing || null) : null;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   // Series only used to gate the run-rate projection (the chart itself is the
   // explorer's now — spend de-dup); window total drives the run-rate caption.
-  const series = (!d.loading && !d.empty && !d.error) ? buildCostSeries(cost, 'total', useTokens) : null;
+  const series = costData ? buildCostSeries(cost, 'total', useTokens) : null;
   const cyc = cycleRemaining(cost.cycle);
   let projection = null;
   if (series && series.data[1] && series.data[1].length) {
@@ -10431,16 +10798,53 @@ function DashboardView({ params }) {
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
-  const tiles = (!d.loading && !d.empty && !d.error) ? recoverableTiles(d.opt) : [];
-  const budgets = (d.opt && d.opt.budgets) || [];
+  // ---- The front door's own claim ------------------------------------------ //
+  // "No data yet. TokenJam is listening." asserts that this user has recorded
+  // nothing, so all three of its inputs must have ANSWERED before it may be
+  // shown. A /cost, /status or /traces read that is outstanding or failed means
+  // "we could not check", never "you have none"; while any of them is unknown the
+  // page renders the normal bands, which state their own uncertainty, instead of
+  // telling a user with a full history that nothing has been recorded.
+  const statusAgents = (statusRead.data && statusRead.data.agents) || [];
+  const traceList = (tracesRead.data && tracesRead.data.traces) || [];
+  const hasCost = !!costData && ((cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0);
+  const emptyKnown = !!costData && !!statusRead.data && !!tracesRead.data;
+  const isEmpty = emptyKnown && !hasCost && !statusAgents.length && !traceList.length;
+
+  // Tiles are derived ONLY from an answer we actually hold. Passing an absent
+  // report into recoverableTiles() is the original bug in one line: a missing
+  // report and an empty report both flatten to [], and the band then printed
+  // "No recoverable candidates." for a read that had simply not come back.
+  const optData = optState.data;
+  const tiles = optData ? recoverableTiles(optData) : [];
+  const bandState = recoverableBandState(optState.phase, optData, tiles.length);
+
+  // Budgets ride on the same /optimize payload, so the "Budgets at risk" tile
+  // inherits that read's outcome: 0 with the caption "none configured" is a
+  // claim about the user's config, and an unanswered sweep cannot make it.
+  const budgets = (optData && optData.budgets) || [];
   const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
-  const driftN = driftSignalCount(d.drift);
-  const errTraces = (d.traces || []).filter(t => t.status_code === 'error').length;
+  // Mirrors the band's own phase rather than flattening to "failed": a sweep
+  // still running past the wait says "still scanning", one that errored says it
+  // couldn't load, and the two must not be reported as the same thing.
+  const budgetStatus = optData ? 'ready' : optState.phase;
+
+  // Each remaining health figure comes from its OWN read, and readStatus() is
+  // what decides whether the figure may be shown at all. Each tile therefore
+  // paints as soon as its own endpoint answers: /alerts and /drift no longer wait
+  // behind the 27-second /cost read they have nothing to do with.
+  const alertList = (alertsRead.data && alertsRead.data.alerts) || [];
+  const relearnClusters = (relearnRead.data && relearnRead.data.finding
+    && relearnRead.data.finding.clusters) || [];
+  const driftN = driftSignalCount(driftRead.data);
+  const errTraces = traceList.filter(t => t.status_code === 'error').length;
 
   // Run-rate projection folded into a one-line caption under the explorer's KPI
   // row — the dashboard's single spend headline lives there, not as a separate
   // chart (de-dup). Framed (tokens for subscription/local), never raw $.
-  const kpiCaption = (!d.loading && !d.empty && !d.error && projection && projection !== '—')
+  // Requires `projection`, which requires `costData`, so this caption cannot be
+  // built from an unanswered read.
+  const kpiCaption = (projection && projection !== '—')
     ? ('At this pace, ~' + projection + ' by ' + cyc.label + ' — linear run-rate, not a forecast')
     : null;
 
@@ -10452,33 +10856,104 @@ function DashboardView({ params }) {
       </div>
       <div class="filters" style="margin:0">${winPicker}</div>
     </div>
-    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+    ${/* The pricing-mode caveat, and a placeholder holding its slot while /cost
+          is unknown. Without the placeholder this bar appeared 27 seconds after
+          first paint and shoved both triage bands down the page at that moment.
+          On a corpus with no caveat to state the slot collapses when the answer
+          lands, which is one shift either way; on the subscription-billed corpora
+          that do carry one (the common case) it is zero. */ ''}
+    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>`
+      : !costData ? html`<div class="qualifier qualifier-skel" aria-hidden="true">
+          <div class="shimmer" style="height:11px;width:78%"></div>
+          <div class="shimmer" style="height:11px;width:46%;margin-top:5px"></div>
+        </div>` : null}
 
-    ${/* THE HERO STAT. Past tense, window-observed, above everything else on
-          the page: it answers "why should I care" before any surface below it
-          answers "what should I do". Deliberately NOT inside the triage band
-          — that band's tiles are forward-looking opportunity figures in
-          accent-blue, and this one is a diagnosis of money already spent.
-          Different row, different colour treatment, different tense; a reader
-          must not be able to add the two together. */ ''}
-    ${/* The past-overspend hero band rendered here. Removed: it read as heavy
-          at the top of the page. The figure now lives as a compact tile on
-          the Review inbox — the surface you act on it from. `heroPast` is
-          still fetched on its own effect below and deliberately left in
-          place: re-adding any Dashboard summary of this figure must reuse
-          that same server block rather than reduce over whatever cards
-          happen to be rendered. */ ''}
+    ${/* A past-overspend hero band rendered here once. Removed: it read as heavy
+          at the top of the page, and the figure now lives as a compact tile on
+          the Review inbox, which is the surface you act on it from.
 
-    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
+          The rules if it is ever re-added here, which are the reason this note
+          survives the code: it is a PAST-TENSE diagnosis of money already spent,
+          so it must not sit inside the triage band, whose tiles are
+          forward-looking opportunity figures in accent-blue. Different row,
+          different colour treatment, different tense; a reader must never be
+          able to add the two together. And the number must come from
+          GET /relearn/cost-proposals' own `past_overspend` block, the same one
+          the inbox headline reads, so the two surfaces state one figure computed
+          once server-side, never a client-side reduction over whatever cards
+          happen to be rendered.
+
+          The Dashboard's own fetch of that endpoint is gone. It set state no
+          band read, so it cost a request per mount and rendered nothing. On a
+          page where the reads take tens of seconds, an unrendered one does not
+          earn its place; re-add the fetch WITH the band, not before it. */ ''}
+
+    ${isEmpty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
       : html`
         <!-- Triage band: recoverable waste + health. Spend is NOT shown here —
              it lives once, in the explorer's Spend KPI tile + chart below. -->
-        ${d.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:8px">Couldn't load triage: ${d.error}</div><button class="btn" onClick=${load}>Retry</button></div>`
-          : d.loading ? html`<div class="shimmer" style="height:90px"></div>`
-          : html`
+        ${/* No blanket "the whole band is loading" shimmer any more. That single
+              90px grey rectangle stood in for BOTH bands until the slowest read
+              in the batch resolved, which on a large corpus meant several
+              minutes of an anonymous grey box that named nothing it was waiting
+              for. Each band now renders its own labelled structure immediately
+              and each tile states its own read's status, so the page is
+              legible from the first paint. */ ''}
+        ${/* A /cost failure is reported as a SCOPED banner, not by replacing the
+              bands. It used to blank the whole triage row ("Couldn't load
+              triage"), which threw away five health tiles whose reads had
+              nothing to do with /cost and may well have succeeded. The banner
+              names what is missing (the spend framing and the run-rate caption)
+              and everything else keeps rendering. */ ''}
+        ${costRead.phase === 'error' && !costData ? html`
+          <div class="band-msg err" style="margin-bottom:14px">
+            <b>Couldn't load spend for this window.</b>
+            <p>${costRead.error}</p>
+            <p>The plan badge and the run-rate caption are missing because of it; everything else on this page is unaffected.</p>
+            <button class="btn" onClick=${costRead.refresh}>Try again</button>
+          </div>` : null}
+        ${html`
             <div class="dash-triage">
               <div class="dash-col">
                 <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+                ${/* recoverableBandState() decided which of the six states this
+                      is; the branches below only render. The ONE branch allowed
+                      to say there is nothing recoverable is 'none', which
+                      requires a completed response. */ ''}
+                ${bandState === 'scanning' ? html`
+                  <div class="tile-grid compact">
+                    ${/* Mirrors the answered tile below: name line, amount line,
+                          two clamped hint lines, inside the real .rec-tile box.
+                          Same bar-height-tracks-font-size convention the Review
+                          inbox's skeletons use, so the two pages read as one. */ ''}
+                    ${REC_SKELETON_TILES.map(i => html`
+                      <div class="rec-tile rec-skel" key=${i} aria-hidden="true">
+                        <div class="shimmer" style="height:12px;width:52%"></div>
+                        <div class="shimmer" style="height:15px;width:64%;margin-top:8px"></div>
+                        <div class="shimmer" style="height:10px;width:100%;margin-top:8px"></div>
+                        <div class="shimmer" style="height:10px;width:78%;margin-top:4px"></div>
+                      </div>`)}
+                  </div>
+                  <div class="band-note">Scanning your history for recoverable waste. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
+                ${bandState === 'timeout' ? html`
+                  <div class="band-msg warn">
+                    <b>Still scanning after ${OPTIMIZE_WAIT_MIN} minutes.</b>
+                    <p>We don't know yet whether there is recoverable waste in this window. The scan hasn't answered; that is not the same as an all-clear, so this band is showing you nothing rather than a zero.</p>
+                    <button class="btn" onClick=${retryOptimize}>Keep waiting</button>
+                  </div>` : null}
+                ${bandState === 'failed' ? html`
+                  <div class="band-msg err">
+                    <b>Couldn't scan for recoverable waste.</b>
+                    <p>${optState.error || 'The request failed.'}</p>
+                    <p>Until this succeeds there is no basis for saying whether recoverable waste exists here, so no figure is shown.</p>
+                    <button class="btn" onClick=${retryOptimize}>Try again</button>
+                  </div>` : null}
+                ${bandState === 'stale' ? html`
+                  <div class="band-stale">
+                    ⚠ the latest scan ${optState.phase === 'timeout' ? 'has not answered yet' : 'failed'}; these are the last complete results
+                    <span class="sz-link" onClick=${retryOptimize}>${optState.phase === 'timeout' ? 'keep waiting' : 'try again'}</span>
+                  </div>` : null}
+                ${bandState === 'tiles' || bandState === 'none' || bandState === 'stale' ? html`
                 <div class="tile-grid compact">
                   ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
                     : tiles.map(t => {
@@ -10504,21 +10979,34 @@ function DashboardView({ params }) {
                         ${explain ? html`<div class="rec-hint">${explain}</div>` : null}
                       </a>`;
                     })}
-                </div>
+                </div>` : null}
               </div>
               <div class="dash-col">
                 <div class="band-label">Health at a glance</div>
+                ${/* Every tile below carries the status of the read it is derived
+                      from. Each one used to take its figure from a `.catch(() =>
+                      <empty>)` fallback, so a failed read published a 0 with a
+                      reassuring caption: "0 unread alerts / all clear",
+                      "0 agents drifting / within baseline", "0 budgets at risk /
+                      none configured". Those are the worst possible lies on a
+                      health band, because a zero here reads as "you are fine".
+                      An unanswered read now renders a shimmer or a "?" and says
+                      which it is. Each `status` names the tile's OWN read, which
+                      is also why the tiles no longer appear together: each one
+                      paints when its own endpoint answers. */ ''}
                 <div class="tile-grid compact">
-                  <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
-                    sub="the loop, review inbox" />
-                  <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
-                    href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
+                  <${HealthTile} label="Pending fixes" value=${relearnClusters.length} attention=${relearnClusters.length > 0} href="#/review"
+                    status=${readStatus(relearnRead)} sub="the loop, review inbox" />
+                  <${HealthTile} label="Unread alerts" value=${alertList.length} attention=${alertList.length > 0}
+                    status=${readStatus(alertsRead)}
+                    href="#/alerts?unread=true" sub=${alertList.length ? alertList[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
-                    sub=${driftN ? 'review baselines' : 'within baseline'} />
+                    status=${readStatus(driftRead)} sub=${driftN ? 'review baselines' : 'within baseline'} />
                   <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
+                    status=${budgetStatus}
                     sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
-                  <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
-                    sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
+                  <${HealthTile} label="Recent activity" value=${traceList.length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
+                    status=${readStatus(tracesRead)} sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
                 </div>
               </div>
             </div>`}
