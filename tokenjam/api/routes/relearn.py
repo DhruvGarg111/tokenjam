@@ -39,6 +39,7 @@ from tokenjam.core.framing import (
 from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
+    inbox_contribution,
     relearn_apply,
     relearn_proposals,
     relearn_store,
@@ -186,6 +187,27 @@ def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
     }
 
 
+def _headline_window_days(cached: Any) -> int:
+    """The window the Review inbox headline is LABELLED with.
+
+    Read from the cost block's own ``cost_window_days`` (the window the stored
+    cost figures were observed over), falling back to the recompute default when
+    a cache predates the key or carries a zero. BOTH inbox endpoints resolve it
+    through this one function: the headline aggregate lives on
+    ``/relearn/cost-proposals`` while relearn's rows come from
+    ``/relearn/proposals``, and if the two resolved the window differently a row
+    would publish a contribution the headline never counted. Same key on both
+    payloads (``read_cache`` returns the raw file, ``read_cost_proposals`` a
+    projection of it), so one helper serves both.
+    """
+    raw = cached.get("cost_window_days") if isinstance(cached, dict) else None
+    try:
+        days = int(raw or 0)
+    except (TypeError, ValueError):
+        days = 0
+    return days or cost_proposals_mod.DEFAULT_COST_WINDOW_DAYS
+
+
 _NO_WINDOWED_FIGURES = (
     "this cached result was produced before bounded window figures existed, so "
     "no window could be applied. The rows below are the full unbounded "
@@ -304,6 +326,17 @@ def get_relearn_proposals(
     ``window``, ``past_overspend_windowed`` and ``data_span`` are always present.
     ``past_overspend_windowed`` is ``None`` when no window was applied: an absent
     figure, not a zero one.
+
+    Every cluster carries ``inbox_contribution_usd``/``_tokens``/``_window``/
+    ``_basis``: what that row contributed to the Review inbox's ONE headline
+    total, which ``/relearn/cost-proposals`` publishes and which now covers
+    relearn's rows too (see ``core/optimize/inbox_contribution.py``). It is the
+    bounded figure for the HEADLINE's window, net of the re-read share the
+    ``resend`` proposal prices in full, and it is deliberately NOT re-based by a
+    caller's own ``since``: the inbox's noise floor, its collapsed-tail combined
+    figure and its headline have to read one quantity whatever the reader is
+    filtering, and the selected window's own figure already travels on each row's
+    ``window`` bucket. ``None`` means UNPRICED on that basis, never zero.
     """
     since_error: str | None = None
     if since is not None:
@@ -343,6 +376,20 @@ def get_relearn_proposals(
         # proposal id or the advise-only reason existed still resolves without
         # waiting for a recompute. Idempotent.
         finding = relearn_proposals.stamp_proposal_ids(finding)
+        # What each cluster contributed to the inbox's ONE headline total, on
+        # the headline's own window and net of the re-read share the context
+        # re-send proposal already prices. This is the field the noise floor is
+        # tested against and the collapsed tail sums, so the rows, the hidden-set
+        # note and the headline are one quantity over one population by
+        # construction. See `core/optimize/inbox_contribution.py`; stamped
+        # BEFORE `_apply_window` so a reader's own `since` cannot change which
+        # window the headline's figure was taken from.
+        finding = inbox_contribution.stamp_relearn_contributions(
+            finding,
+            label=inbox_contribution.contribution_window_label(
+                finding, _headline_window_days(cached),
+            ),
+        )
     finding, window, windowed_total = _apply_window(finding, since)
     return {
         "status": "computing" if computing else "ready",
@@ -603,14 +650,27 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
 
     ``past_overspend`` is THE aggregate — the ONLY one this endpoint returns
     (``cost_proposals.past_overspend_rollup``): the sum of
-    ``past_overspend_usd``/``_tokens`` across the OPEN proposals only — every
-    proposal whose signature isn't already in the (non-reverted) cost-applied
-    ledger. It is the AVOIDABLE portion of what the flagged behaviours already
-    cost over the analyzed window, observed rather than projected. Computed
-    here, not client-side, so the Dashboard hero and the Review inbox headline
-    read one server-computed figure and cannot disagree (a browser's local
-    "dismiss" never affects it — dismissing hides a card from one person's
-    view, it doesn't change what's actually still outstanding).
+    ``past_overspend_usd``/``_tokens`` across the OPEN rows of the Review inbox —
+    every row whose signature isn't already in a (non-reverted) applied ledger.
+    It is the AVOIDABLE portion of what the flagged behaviours already cost over
+    the analyzed window, observed rather than projected. Computed here, not
+    client-side, so the Dashboard hero and the Review inbox headline read one
+    server-computed figure and cannot disagree (a browser's local "dismiss" never
+    affects it — dismissing hides a card from one person's view, it doesn't
+    change what's actually still outstanding).
+
+    **IT COVERS EVERY ROW OF THE INBOX, INCLUDING RELEARN'S.** The inbox is one
+    list fed by this endpoint and by ``/relearn/proposals``, so a headline summed
+    over one feed left the other's rows outside it: the collapsed tail's combined
+    figure summed rows of BOTH kinds, and the below-floor note said the hidden
+    items were "still counted in the total above" when most of that money had
+    never entered the total. Each open relearn cluster therefore contributes an
+    ordinary row on the canonical field (``core/optimize/inbox_contribution.py``),
+    carrying the detector's own bounded figure for the window this rollup is
+    labelled with, net of the re-read share the ``resend`` proposal already prices
+    in full. One window over every row, and every dollar once. A cluster whose
+    money cannot be put on that window is disclosed through ``excluded`` rather
+    than counted as nothing.
 
     There is deliberately no second aggregate and no forward/paced one. A
     ``rollup`` key carrying ``estimated_recoverable_*`` plus a
@@ -634,9 +694,18 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     Each proposal carries the same figures per-card
     (``past_overspend_usd``/``_tokens``/``_basis``, plus ``coverage_note`` where
     the avoidable figure was computed over a subset) so a card never re-derives
-    its own headline. relearn contributes NO proposal: its one aggregate card
-    carried only the deleted total, and its per-cluster rows in the Review inbox
-    are where its claim has always lived, counted once."""
+    its own headline.
+
+    Every proposal ALSO carries ``inbox_contribution_usd``/``_tokens``/
+    ``_window``/``_basis``: exactly what that row contributed to the headline
+    above. ``/relearn/proposals`` stamps the same four fields on every relearn
+    cluster, so ONE field spans both feeds and the inbox's noise floor, its
+    collapsed-tail combined figure and this headline are the same quantity over
+    the same population by construction. ``None`` there means UNPRICED, never
+    zero: the floor may not hide such a row and no combined figure may include
+    it. For a cost proposal the contribution IS ``past_overspend_usd`` unchanged;
+    relearn's differs from its row's unbounded figure, which is why the field
+    exists rather than each surface picking a number per row kind."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
@@ -657,14 +726,55 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # NOT accompanied by `active_days`/`n_sessions`: the rollup is a window
     # observation, so there is no pace to project it at and nothing to project
     # from (see `past_overspend_rollup`).
-    rollup_kwargs: dict[str, Any] = {}
-    if block:
-        if block.get("cost_window_days"):
-            rollup_kwargs["window_days"] = block["cost_window_days"]
-        rollup_kwargs["excluded"] = block.get("cost_excluded")
-    past_overspend = cost_proposals_mod.past_overspend_rollup(
-        open_proposals, **rollup_kwargs,
+    window_days = _headline_window_days(block)
+    # RELEARN'S ROWS ARE INBOX ROWS, SO THEIR MONEY IS IN THIS TOTAL. The inbox
+    # is one list fed by two endpoints; a headline summed over one of them left
+    # the other's rows outside it, which made the collapsed tail's combined
+    # figure and the below-floor "still counted in the total above" note false
+    # for the money they described. Each open cluster arrives here as an
+    # ORDINARY row on the one canonical field — no parameter on the rollup, no
+    # second aggregate, no second key — carrying the detector's own bounded
+    # figure for THIS window, net of the re-read share the resend proposal
+    # already prices in full. `core/optimize/inbox_contribution.py` owns that
+    # design and why it is neither of the two mechanisms this repo retired.
+    relearn_cache = relearn_store.read_cache(config=config)
+    relearn_finding = (relearn_cache or {}).get("finding")
+    relearn_label = inbox_contribution.contribution_window_label(
+        relearn_finding, window_days,
     )
+    relearn_applied_sigs = {
+        str(rec.get("signature") or "")
+        for rec in relearn_apply.list_applied(config)
+        if rec.get("state") != "reverted"
+    }
+    relearn_rows = inbox_contribution.relearn_contribution_rows(
+        relearn_finding, label=relearn_label,
+        applied_signatures=relearn_applied_sigs,
+    )
+    # Clusters whose money could NOT be put on this window's basis (a cache
+    # written before bounded figures, or occurrences with no parseable
+    # timestamp). Absent is never zero: stated through the rollup's `excluded`
+    # channel, summed into nothing.
+    unrepresented = inbox_contribution.unrepresented_relearn(
+        relearn_finding, label=relearn_label,
+        applied_signatures=relearn_applied_sigs,
+    )
+    excluded = {
+        **((block.get("cost_excluded") or {}) if block else {}),
+        **inbox_contribution.relearn_excluded_entry(
+            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
+        ),
+    }
+    past_overspend = cost_proposals_mod.past_overspend_rollup(
+        open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
+    )
+    # Every row a reader sees carries what it contributed, cost and relearn
+    # alike, so the noise floor and the tail's combined figure read the SAME
+    # quantity the headline sums instead of each re-deriving one.
+    proposals = [
+        inbox_contribution.stamp_cost_contribution(p, window=f"{window_days}d")
+        for p in proposals
+    ]
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)
