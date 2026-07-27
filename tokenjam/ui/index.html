@@ -5630,24 +5630,31 @@ const UNKNOWN_FIGURE = '?';
 // tile showing 0 for a read that failed.
 const kpiFigure = (v, fmt) => (v == null ? UNKNOWN_FIGURE : fmt(v));
 
-// The Spend KPI tile under plan-tier framing (#262). Used to swap in an
-// implied-value MULTIPLIER ("43.5× plan value") for SUBSCRIPTION instead of
-// a dollar figure; that differentiation is gone by product decision (tj does
-// not differentiate subscription-billed from API-billed users, and dollars
-// price all traffic at API list rates regardless of plan). api / subscription
-// / unknown all render the same plain "Spend" dollar figure now. LOCAL has no
-// marginal dollar cost at all (not a differentiation choice — no vendor
-// bills it), so the tile is still dropped there — the Tokens tile already
-// conveys volume. Returns {label, value} or null (drop the tile).
+// The Spend KPI tile under plan-tier framing (#262). For SUBSCRIPTION, the
+// confusing "% of cycle" is replaced by an honest implied-value MULTIPLIER —
+// "43.5× plan value" (implied API value ÷ the plan's monthly fee, which is just
+// the "% of cycle" number ÷ 100). It is plan VALUE, never "spent $X". api /
+// unknown keep dollars. LOCAL (no plan fee) and a subscription with no declared
+// monthly fee have no denominator, so the tile is dropped — the Tokens tile
+// already conveys volume. Returns {label, value} or null (drop the tile).
 function spendTileDisplay(spendUsd, framing) {
   const mode = framing && framing.pricing_mode;
-  if (mode === 'local') return null;                     // no marginal cost to price
-  // An unreported spend field is unknown, not zero: fmtDashUsd(null) would
-  // render "$0.00", and on a spend tile a zero reads as "this window cost
-  // you nothing". At most 2dp (Dashboard's own precision rule -- this tile
-  // has exactly one caller, AnalyticsView, which only ever renders embedded
-  // on the Dashboard).
-  return { label: 'Spend', value: spendUsd == null ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };
+  // An unreported spend field is unknown, not zero. Both branches below would
+  // otherwise manufacture one: `(null || 0) / fee` renders "0.0× plan value" and
+  // fmtDashUsd(null) renders "$0.00", and on a spend tile a zero reads as "this
+  // window cost you nothing". Checked before the mode branches so neither can.
+  const unknown = spendUsd == null;
+  if (mode === 'subscription') {
+    if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
+    if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };
+    const mult = spendUsd / framing.plan_monthly_usd;    // == (% of cycle) / 100
+    return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
+  }
+  if (mode === 'local') return null;                     // no plan fee to multiply against
+  // api / unknown → dollars, at most 2dp (Dashboard's own precision rule --
+  // this tile has exactly one caller, AnalyticsView, which only ever renders
+  // embedded on the Dashboard).
+  return { label: 'Spend', value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };
 }
 
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
@@ -8382,12 +8389,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 
     ${!error && kpis ? (() => {
       // The Spend tile follows the server framing block (single source, never
-      // re-derived), via spendTileDisplay (#262). Renders the same plain
-      // dollar figure for api/subscription/unknown (product decision: tj
-      // does not differentiate subscription-billed from API-billed users —
-      // the old subscription-only "43.5× plan value" multiplier is gone).
-      // LOCAL has no marginal cost to price at all, so the tile is dropped
-      // there rather than duplicate Tokens (#247).
+      // re-derived). Under SUBSCRIPTION it shows an implied-value MULTIPLIER
+      // ("43.5× plan value", #262) — NOT "% of cycle" and NOT raw tokens (which
+      // duplicated the Tokens tile, #247). Its sparkline/delta still track SPEND
+      // (cost_usd), since the multiplier is just spend rescaled by the plan fee
+      // — so the trend/shape are identical to spend, never raw $. LOCAL / a
+      // subscription with no declared fee have no denominator → the tile is
+      // dropped rather than duplicate Tokens.
       const deltas = resp.kpi_deltas || {};
       const spend = spendTileDisplay(kpis.spend, framing);
       // A prior window with almost no activity makes period-over-period % a
@@ -8406,12 +8414,17 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         && breakdownTotal > 0 && breakdownTotal < (kpis[metric] || 0))
         ? { value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` } : null;
       // Founder request: the Tokens card leads with its dollar value, token
-      // count secondary. Only when there's an actual known figure to show --
-      // never fabricated for LOCAL (spend is null there, no marginal cost to
-      // price at all) or an unreported spend field (spend.value is the
-      // unknown placeholder); both fall back to the plain token headline,
-      // unchanged, with no secondary line.
-      const tokensDollar = (spend && spend.value !== UNKNOWN_FIGURE) ? spend.value : null;
+      // count secondary. Computed independently of `spend` (card 1) rather
+      // than reused from it: card 1 renders an implied-value MULTIPLIER for
+      // SUBSCRIPTION, a different metric entirely, not a dollar figure --
+      // reusing spend.value there would put "43.5× plan value" on the Tokens
+      // card too. LOCAL is the only case with no marginal cost to price at
+      // all; every other pricing mode (api / subscription / unknown) shows
+      // the real dollar amount here. Never fabricated for an unreported
+      // spend field -- falls back to the plain token headline, unchanged,
+      // with no secondary line.
+      const spendMode = framing && framing.pricing_mode;
+      const tokensDollar = (kpis.spend != null && spendMode !== 'local') ? fmtDashUsd(kpis.spend) : null;
       // `dim: true` is this call site's own request for a dimmer sub-line
       // (the founder's "subtitle-scale, dimmer" spec); the #318 breakdown
       // sub (activeSub above) keeps its normal-brightness look unchanged --

@@ -869,13 +869,17 @@ def test_analytics_consumes_endpoint_not_reimplements(html):
 
 
 def test_analytics_respects_plan_tier_framing(html):
-    """spend metric switches to token volume for LOCAL (dollars suppressed --
-    no marginal cost to price at all); never re-derives the suppression rule
-    — reads framing. Subscription used to suppress here too (an implied-value
-    multiplier instead of "% of cycle", #262); that differentiation is gone
-    by product decision (tj does not differentiate subscription-billed from
-    API-billed users), so the Spend KPI tile now renders the same plain
-    dollar figure for subscription as api/unknown via spendTileDisplay."""
+    """The chart/leaderboard's own spend metric switches to token volume for
+    LOCAL only (dollars suppressed -- no marginal cost to price at all); it
+    used to switch for subscription too, that differentiation is gone by
+    product decision (tj does not differentiate subscription-billed from
+    API-billed users) -- never re-derives the suppression rule, reads
+    framing. The Spend KPI tile is separate: it still reframes via
+    spendTileDisplay (implied-value multiplier for subscription, #262)
+    rather than fmtFramedDollar's "% of cycle" -- that tile's multiplier is a
+    genuinely different metric, not a suppression mechanism, so it was never
+    part of the de-differentiation (see test_lens_dashboard_states.py's
+    spendTileDisplay tests)."""
     assert "isSpend && !!framing && framing.pricing_mode === 'local'" in html
     assert "spendTileDisplay(kpis.spend, framing)" in html
 
@@ -1011,12 +1015,11 @@ def test_kpi_series_is_server_computed_not_client_aggregated(html):
 
 
 def test_kpi_spend_tile_respects_framing(html):
-    # The Spend tile reads the framed value from the server block via
-    # spendTileDisplay (#262) — api and subscription both render the same
-    # plain dollar figure now (product decision: tj does not differentiate
-    # subscription-billed from API-billed users; the old "43.5× plan value"
-    # multiplier for subscription is gone). Its sparkline and delta still
-    # track SPEND (cost_usd) regardless.
+    # The Spend tile reads the framed value from the server block (api → $,
+    # subscription → implied-value multiplier "43.5× plan value", #262), never
+    # raw $ for subscription. Its sparkline and delta track SPEND (cost_usd) —
+    # the multiplier is just spend rescaled, so the trend/shape match while the
+    # displayed number is never raw dollars.
     assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
     assert "series: kpiSparkValues(resp, 'spend'), delta: deltas.spend" in html
 
@@ -1180,10 +1183,9 @@ def test_kpi_tiles_clickable_select_metric(html):
 
 def test_spend_tile_distinct_under_subscription(html):
     # #247/#262: the Spend tile no longer falls back to raw tokens (which
-    # duplicated the Tokens tile). It uses spendTileDisplay, which renders a
-    # plain dollar figure for api/subscription/unknown alike (product
-    # decision: no subscription differentiation) and is dropped only for
-    # LOCAL (no marginal cost to price at all → null).
+    # duplicated the Tokens tile). It uses spendTileDisplay (implied-value
+    # multiplier for subscription) and is dropped when no distinct value exists
+    # (local / a subscription with no declared fee → null).
     assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
     assert "if (spend) {" in html
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
@@ -1191,16 +1193,23 @@ def test_spend_tile_distinct_under_subscription(html):
 
 def test_tokens_tile_shows_dollar_headline_with_token_count_secondary(html):
     """Founder request: the Tokens card leads with its dollar value, the
-    token count present but secondary (subtitle-scale, dimmer). Reuses the
-    same `spend` figure spendTileDisplay computed for the Spend card -- there
-    is only one dollar figure per window -- so when both cards render, they
-    show the identical dollar figure under two different labels (flagged, not
-    resolved, in the session report per the founder's own instruction). Falls
-    back to the plain token headline unchanged, with no secondary line, when
-    there is no known dollar figure at all (LOCAL -- spend is null there, no
-    marginal cost to price; or an unreported spend field, the UNKNOWN_FIGURE
-    placeholder) -- never fabricates one."""
-    assert "const tokensDollar = (spend && spend.value !== UNKNOWN_FIGURE) ? spend.value : null;" in html
+    token count present but secondary (subtitle-scale, dimmer). Computed
+    independently of `spend` (card 1), NOT reused from it: card 1 renders an
+    implied-value MULTIPLIER for SUBSCRIPTION ("43.5x plan value"), a
+    different metric entirely, not a dollar figure -- reusing spend.value
+    would have put that multiplier text on the Tokens card too. LOCAL is the
+    only pricing mode with no marginal cost to price at all; every other mode
+    (api / subscription / unknown) shows the real dollar amount here, so for
+    a SUBSCRIPTION account the two cards intentionally show different things
+    (card 1 the multiplier, card 2 the dollar amount) -- no duplication
+    there. For an API/unknown account both cards show the identical dollar
+    figure under two different labels (flagged, not resolved, in the session
+    report per the founder's own instruction). Falls back to the plain token
+    headline unchanged, with no secondary line, when there is no known
+    dollar figure at all (LOCAL, or an unreported spend field) -- never
+    fabricates one."""
+    assert "const spendMode = framing && framing.pricing_mode;" in html
+    assert "const tokensDollar = (kpis.spend != null && spendMode !== 'local') ? fmtDashUsd(kpis.spend) : null;" in html
     assert "value: tokensDollar || kpiFigure(kpis.tokens, fmtTokens), sub: tokensSub," in html
     assert "cost: !!tokensDollar," in html
     assert "label: 'tokens', dim: true" in html
@@ -1476,20 +1485,20 @@ def test_script_cluster_payload_token_total_is_server_side(html):
 
 
 # --- #262: Analytics spend tile = implied-value multiplier, separators, soft delta -- #
-def test_analytics_spend_tile_renders_a_plain_dollar_figure_for_subscription(html):
-    """The Spend tile used to show an implied-value multiplier ("43.5× plan
-    value") for subscription instead of a dollar figure. That differentiation
-    is gone by product decision: tj does not differentiate subscription-billed
-    from API-billed users, so subscription now renders the same plain "Spend"
-    dollar figure as api/unknown. LOCAL is untouched (still dropped -- no
-    marginal cost to price at all, a structurally different case, not a
-    differentiation choice)."""
-    start = html.index("function spendTileDisplay(spendUsd, framing)")
-    fn = html[start: html.index("function PlanBadge", start)]
-    assert "× plan value" not in fn
-    assert "plan_monthly_usd" not in fn
-    assert "if (mode === 'local') return null;" in fn
-    assert "return { label: 'Spend', value: spendUsd == null ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd) };" in fn
+def test_analytics_spend_tile_uses_value_multiplier_for_subscription(html):
+    # The Spend tile shows an implied-value multiplier ("43.5× plan value") for
+    # subscription, never "% of cycle" and never raw $ — plan VALUE, not spend.
+    assert "function spendTileDisplay(spendUsd, framing)" in html
+    assert "+ '× plan value'" in html
+    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd. The `|| 0`
+    # that used to sit on the numerator is gone deliberately: it turned an
+    # unreported spend field into "0.0x plan value", so the null case is now
+    # caught before the division and renders as unknown instead (see
+    # test_lens_dashboard_states.py).
+    assert "const mult = spendUsd / framing.plan_monthly_usd;" in html
+    assert "const unknown = spendUsd == null;" in html
+    # the tile no longer renders fmtFramedDollar (the "% of cycle") for spend
+    assert "const spendVal = fmtFramedDollar(kpis.spend, framing);" not in html
     assert "const spend = spendTileDisplay(kpis.spend, framing);" in html
 
 

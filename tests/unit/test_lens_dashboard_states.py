@@ -283,17 +283,16 @@ def test_an_unreported_kpi_field_is_unknown_not_zero(html):
 
 
 def test_an_unreported_spend_field_does_not_become_a_zero_spend_tile(html):
-    """fmtDashUsd(null) would render "$0.00"; on a spend tile a zero reads as
-    "this window cost you nothing". The subscription-specific "0.0× plan
-    value" manufactured-zero this test used to guard against is gone along
-    with the multiplier branch itself (product decision: no more subscription
-    differentiation) -- the remaining guard is the plain null check on the
-    one dollar path every mode but local now shares."""
+    # `(null || 0) / fee` rendered "0.0× plan value" and fmtDashUsd(null) would
+    # render "$0.00"; on a spend tile a zero reads as "this window cost you
+    # nothing". fmtDashUsd (at most 2dp, the Dashboard's own precision rule)
+    # replaced fmtCost here since this tile has exactly one caller and it only
+    # ever renders on the Dashboard -- the unknown-guard behaviour is unchanged.
     spend = html[html.index("function spendTileDisplay"):]
     spend = spend[:spend.index("function PlanBadge")]
-    assert "value: spendUsd == null ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
-    assert "plan_monthly_usd" not in spend
-    assert "× plan value" not in spend
+    assert "const unknown = spendUsd == null;" in spend
+    assert "if (unknown) return { label: 'Implied value', value: UNKNOWN_FIGURE };" in spend
+    assert "value: unknown ? UNKNOWN_FIGURE : fmtDashUsd(spendUsd)" in spend
 
 
 def test_one_page_shows_one_kind_of_unknown(html):
@@ -516,6 +515,10 @@ def test_fmt_dash_usd_never_prints_a_real_cost_as_free():
 # price all traffic at API list rates regardless of plan. LOCAL is a
 # structurally different case (no marginal cost to price at all -- no vendor
 # bills it), not a differentiation choice, so it is exempt throughout.
+# spendTileDisplay is ALSO exempt (see test_spend_tile_display_is_deliberately_
+# not_deduplicated below): its subscription-only implied-value multiplier is a
+# genuinely different metric, not a suppression mechanism, so it was never
+# part of this de-differentiation.
 # --------------------------------------------------------------------------- #
 def _dedup_source() -> str:
     """Every formatter this suite exercises, lifted straight out of the
@@ -586,13 +589,21 @@ def test_fmt_per_item_cost_renders_identically_for_subscription_and_api():
 
 
 @_node
-def test_spend_tile_display_renders_identically_for_subscription_and_api():
+def test_spend_tile_display_is_deliberately_not_deduplicated():
+    """spendTileDisplay (the Dashboard's Spend KPI card) is the one exception
+    to this suite's subscription/api parity: it is not a suppression
+    mechanism, so it was never part of the de-differentiation. Its
+    implied-value MULTIPLIER for SUBSCRIPTION is a genuinely different
+    metric (implied API-rate value against what the plan costs), which
+    happens to need a plan fee to compute -- not a figure hidden from a
+    subscription user. api still renders the plain dollar figure via
+    fmtDashUsd (this tile only ever renders on the Dashboard, at most 2dp).
+    LOCAL is exempt from both -- the tile is dropped there (no marginal cost
+    to price at all)."""
     api = _run_dedup_js("spendTileDisplay(500, %s)" % _API_FRAMING)
+    assert api == {"label": "Spend", "value": "$500.00"}
     sub = _run_dedup_js("spendTileDisplay(500, %s)" % _SUB_FRAMING)
-    # $500.00, not fmtCost's 4dp: spendTileDisplay uses fmtDashUsd (this tile
-    # only ever renders on the Dashboard, at most 2dp).
-    assert api == sub == {"label": "Spend", "value": "$500.00"}
-    # LOCAL is exempt -- the tile is dropped (no marginal cost to price).
+    assert sub == {"label": "Implied value", "value": "2.5× plan value"}
     assert _run_dedup_js("spendTileDisplay(500, %s)" % _LOCAL_FRAMING) is None
 
 
