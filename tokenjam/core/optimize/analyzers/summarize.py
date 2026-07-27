@@ -17,6 +17,20 @@ break the empty-window overlay invariant (#211) — a dead window must show no
 recoverable waste. The filesystem scan is skipped entirely until the window shows
 activity.
 
+**The file POPULATION is the window's, not the process's.** The scan used to
+enumerate project-scope files from a single `Path.cwd()`, while the window it
+prices spans every repo the user worked in — so every repo except the one the
+process happened to sit in contributed exactly $0.00, and on a real corpus that
+hid the large majority of the true figure. The roots are now derived from the
+working directories the analysed sessions themselves recorded
+(`core/summarize/repo_roots`), read off the same transcript pass that counts
+invocations. A recorded root that no longer exists on disk is counted and
+skipped, never reconstructed. Because a git worktree carries its repo's
+directory name, every checkout of one file matches the same sessions; those
+copies are charged once (see `_copy_key`), while a genuinely stacked pair — a
+meta-repo's `CLAUDE.md` and a sub-repo's, both of which really are loaded — is
+kept, distinguished by whether their roots nest.
+
 **The saving RECURS, but only for the part of a file that is actually
 resident.** The catalog lumps five different things together and they are not
 loaded the same way: `CLAUDE.md` and `.claude/rules/*.md` are re-sent whole at
@@ -78,7 +92,13 @@ from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+from tokenjam.core.summarize.estimate import (
+    DEFAULT_TARGET_RATIO,
+    MIN_OBSERVED_SAMPLES,
+    observed_prose_ratio,
+)
 from tokenjam.core.summarize.invocations import InvocationCounts
+from tokenjam.core.summarize.repo_roots import ResolvedRoots, resolve_roots
 
 logger = logging.getLogger(__name__)
 
@@ -121,16 +141,95 @@ SUMMARIZE_ESTIMATE_BASIS = (
     "figure here; its one-time per-call reduction still appears in "
     "`file_reduction_tokens` and each candidate's own `est_tokens_saved`. A "
     "file MEASURED to be resident in no session and invoked zero times is not "
-    "listed at all, rather than listed at zero. Advisory; review each rewrite "
-    "before applying."
+    "listed at all, rather than listed at zero. {population} {ratio} Advisory; "
+    "review each rewrite before applying."
+)
+
+#: Reduction half of the basis (Critical Rule 14): how much of each file the
+#: figure assumes goes away. Kept separate because the honest answer depends on
+#: whether any rewrite has actually been verified on this machine.
+_RATIO_TARGET = (
+    "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
+    "a saving offered on one could never be realized. The per-file reduction "
+    "assumes prose compresses to {pct:.0f}% of its words, which is the TARGET the "
+    "rewriter is asked for — NOT a measured outcome. Nothing enforces it: there "
+    "is no retry and no gate on hitting the target, and observed rewrites have "
+    "delivered materially less reduction than asked. No verified rewrite sample "
+    "exists here yet ({samples:,} usable so far, {needed:,} needed), so this "
+    "figure is an upper bound on the reduction half and should be read as one. "
+    "It is replaced by the measured ratio automatically once enough rewrites "
+    "have been staged and structure-checked."
+)
+_RATIO_OBSERVED = (
+    "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
+    "a saving offered on one could never be realized. The per-file reduction "
+    "uses the ratio rewrites have ACTUALLY delivered on this machine — prose to "
+    "{pct:.0f}% of its words, measured across {samples:,} structure-checked "
+    "rewrite(s), weighted by prose volume — rather than the target the rewriter "
+    "is asked for, which nothing enforces and which observed rewrites do not "
+    "reach."
 )
 
 
-def _estimate_basis(invocations: "InvocationCounts | None") -> str:
-    """The basis string with the invocation evidence actually used spelled out.
+def _ratio_basis(ratio: float, observed: bool, samples: int) -> str:
+    """How much of each file the figure assumes goes away, stated truthfully."""
+    if observed:
+        return _RATIO_OBSERVED.format(pct=ratio * 100, samples=samples)
+    return _RATIO_TARGET.format(
+        pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+    )
+
+#: Population half of the basis (Critical Rule 14): which files were even looked
+#: at. Stated separately because the honest answer changes with the corpus — how
+#: many repos the window worked in, and how many of them are gone from disk.
+_POPULATION_CORPUS = (
+    "Project-scope files are scanned across the {roots:,} project root(s) this "
+    "window's sessions actually recorded working in, not just the directory "
+    "this process runs from. Where several of those roots hold the same file "
+    "in the same place and telemetry attributes them all to the same repo — a "
+    "git worktree carries its repo's name, so every checkout of one `CLAUDE.md` "
+    "matches the same sessions — that file is charged ONCE, at the copy with "
+    "the most observed loading sessions, so checkouts cannot multiply the "
+    "figure. {vanished}"
+)
+_POPULATION_CWD = (
+    "No session in this window recorded a working directory, so project-scope "
+    "files were scanned only in the directory this process runs from — every "
+    "other repo's always-resident files are missing from these totals rather "
+    "than counted as zero."
+)
+_VANISHED_NONE = "Every recorded root still exists on disk."
+_VANISHED_SOME = (
+    "{vanished:,} further recorded root(s) no longer exist on disk and were "
+    "scanned as nothing — their files cannot be read, so no figure is quoted "
+    "for them and these totals understate the corpus by that much."
+)
+
+
+def _population_basis(roots: "ResolvedRoots | None", scanned: int) -> str:
+    """How the scanned file population was arrived at, stated truthfully."""
+    if roots is None or scanned <= 0:
+        return _POPULATION_CWD
+    vanished = (
+        _VANISHED_SOME.format(vanished=roots.vanished) if roots.vanished
+        else _VANISHED_NONE
+    )
+    return _POPULATION_CORPUS.format(roots=scanned, vanished=vanished)
+
+
+def _estimate_basis(
+    invocations: "InvocationCounts | None",
+    roots: "ResolvedRoots | None" = None,
+    roots_scanned: int = 0,
+    ratio: float = DEFAULT_TARGET_RATIO,
+    ratio_observed: bool = False,
+    ratio_samples: int = 0,
+) -> str:
+    """The basis string with the evidence actually used spelled out.
 
     Critical Rule 14: the basis must state the arithmetic truthfully, so it
-    names the observed invocation total rather than the mechanism alone.
+    names the observed invocation total rather than the mechanism alone, and
+    the file population rather than implying the whole machine was scanned.
     """
     from tokenjam.core.summarize.invocations import INVOCATION_SOURCE
 
@@ -144,7 +243,11 @@ def _estimate_basis(invocations: "InvocationCounts | None") -> str:
             f"{INVOCATION_SOURCE}; {invocations.total_invocations:,} invocation(s) "
             f"observed across {invocations.sessions_scanned:,} transcript(s)"
         )
-    return SUMMARIZE_ESTIMATE_BASIS.format(invocation_source=source)
+    return SUMMARIZE_ESTIMATE_BASIS.format(
+        invocation_source=source,
+        population=_population_basis(roots, roots_scanned),
+        ratio=_ratio_basis(ratio, ratio_observed, ratio_samples),
+    )
 
 # Mandatory caveat (Rule 14) — carried as the dataclass default like the other
 # recoverable findings' caveats (MODEL_DOWNGRADE_CAVEAT etc.) so no surface can
@@ -248,6 +351,30 @@ class SummarizeFinding:
     #: same reason ``sessions_examined``/``calls_per_session`` are.
     invocations_total: int = 0
     transcripts_examined: int = 0
+    #: How many project roots the filesystem scan covered — the observed
+    #: working directories of the window's own sessions, not the one directory
+    #: the process runs from. Carried for the same reason
+    #: ``sessions_examined`` is: the population behind the figure must be
+    #: inspectable, not implied.
+    project_roots_scanned: int = 0
+    #: Recorded working directories that no longer exist on disk. They are
+    #: scanned as nothing (there is no file to read and no fix to offer), so
+    #: this is the size of the finding's known blind spot, not a figure.
+    project_roots_vanished: int = 0
+    #: How many candidate files were dropped as byte-identical COPIES of a file
+    #: already counted (a git worktree duplicates its repo's `CLAUDE.md` once
+    #: per worktree). Each distinct content is charged once, at the copy with
+    #: the most observed loading sessions.
+    duplicate_copies_collapsed: int = 0
+    #: The prose ratio behind every per-file reduction here, and whether it was
+    #: MEASURED from verified rewrites on this machine or is the target the
+    #: rewriter is merely asked for. The distinction is load-bearing: nothing
+    #: enforces the target, and observed rewrites deliver materially less, so an
+    #: unobserved figure is an upper bound rather than an expectation.
+    prose_ratio: float = DEFAULT_TARGET_RATIO
+    prose_ratio_observed: bool = False
+    #: Structure-checked rewrites the ratio was derived from (0 when assumed).
+    prose_ratio_samples: int = 0
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -355,6 +482,22 @@ def _load_profile(ctx: AnalyzerContext) -> _LoadProfile | None:
     )
 
 
+def _matched_repos(path: str, profile: _LoadProfile) -> frozenset[str]:
+    """The telemetry repo labels this project-scope path belongs to.
+
+    Matched by walking the file's ancestor directory names against the repo
+    labels telemetry recorded — the single derivation behind BOTH how many
+    sessions load the file and how many calls each of those sessions makes, so
+    the two can never drift apart. Note what it CANNOT distinguish: a git
+    worktree's directory carries the same name as the repo it was cut from, so
+    every copy matches the same labels. That is why two files matching the same
+    labels in the same slot are treated as one chargeable file (see
+    ``_copy_key``) rather than charged twice.
+    """
+    ancestors = {parent.name for parent in Path(path).parents if parent.name}
+    return frozenset(repo for repo in profile.sessions_by_repo if repo in ancestors)
+
+
 def _sessions_loading(path: str, scope: str, profile: _LoadProfile) -> int:
     """How many of the window's sessions send this file at the head of every call.
 
@@ -366,9 +509,8 @@ def _sessions_loading(path: str, scope: str, profile: _LoadProfile) -> int:
     """
     if scope == "global":
         return profile.sessions_total
-    ancestors = {parent.name for parent in Path(path).parents if parent.name}
     return sum(
-        count for repo, count in profile.sessions_by_repo.items() if repo in ancestors
+        profile.sessions_by_repo[repo] for repo in _matched_repos(path, profile)
     )
 
 
@@ -388,15 +530,11 @@ def _repo_calls_per_session(path: str, scope: str, profile: _LoadProfile) -> flo
     """
     if scope == "global":
         return profile.calls_per_session
-    ancestors = {parent.name for parent in Path(path).parents if parent.name}
-    matched_sessions = sum(
-        count for repo, count in profile.sessions_by_repo.items() if repo in ancestors
-    )
+    matched = _matched_repos(path, profile)
+    matched_sessions = sum(profile.sessions_by_repo[repo] for repo in matched)
     if matched_sessions <= 0:
         return profile.calls_per_session
-    matched_calls = sum(
-        count for repo, count in profile.calls_by_repo.items() if repo in ancestors
-    )
+    matched_calls = sum(profile.calls_by_repo.get(repo, 0) for repo in matched)
     return matched_calls / matched_sessions
 
 
@@ -509,6 +647,118 @@ def _is_measured_zero(candidate: SummarizeCandidate) -> bool:
     )
 
 
+def _slot(path: str, scan_root: str) -> str:
+    """A file's SLOT — its path relative to the root it was found under.
+
+    `CLAUDE.md`, `.claude/commands/ship.md`. Two files in the same slot under
+    two different roots are the same project file seen twice. Falls back to the
+    bare filename when the root is unknown or is not actually a prefix.
+    """
+    name = Path(path).name
+    if not scan_root:
+        return name
+    try:
+        return Path(path).relative_to(scan_root).as_posix()
+    except ValueError:
+        return name
+
+
+def _copy_key(
+    candidate: SummarizeCandidate, scan_root: str, repos: frozenset[str],
+) -> tuple[frozenset[str], str] | None:
+    """The identity two candidates must share to be one chargeable file, or
+    ``None`` for a candidate that must never be collapsed.
+
+    Keyed on **the session population that loads the file, plus the file's
+    slot** — deliberately NOT on the file's content, which is not sufficient
+    and not necessary:
+
+    * NOT sufficient. A corpus-wide scan visits every repo the window worked
+      in, and a git worktree is a copy of its repo, so one repo's `CLAUDE.md`
+      can appear dozens of times. Those copies DRIFT — measured on a real
+      corpus, 65 copies of one `CLAUDE.md` carried 25 distinct content hashes —
+      while `_sessions_loading` matches them all to the same repo by ancestor
+      name and so charges every one of them against the same sessions. Content
+      hashing would collapse the byte-equal ones and leave the drifted ones
+      multiplying a single file's cost, which is money the user cannot act on
+      (Critical Rule 22).
+    * NOT necessary. Two byte-identical files in repos with DIFFERENT session
+      populations (a `CLAUDE.md` copied between two projects) genuinely are
+      loaded twice and genuinely cost twice; content hashing would wrongly
+      merge them and understate.
+
+    Two genuinely different files can only collapse when they occupy the same
+    slot AND are priced against the identical session population — in which
+    case this analyzer cannot tell them apart in the first place, and charging
+    both would be counting one repo's `CLAUDE.md` twice. Collapsing is then the
+    conservative direction, and it is reported (`duplicate_copies_collapsed`).
+
+    A global-scope file is never collapsed: those paths are already unique and
+    every one of them is a distinct file under `~/.claude`.
+    """
+    if candidate.scope == "global" or not repos:
+        return None
+    return (repos, _slot(candidate.path, scan_root))
+
+
+def _is_nested(a: str, b: str) -> bool:
+    """Whether one root path contains the other (or they are the same path).
+
+    This is what separates a genuinely STACKED pair from a duplicate. A
+    meta-repo's `CLAUDE.md` and the `CLAUDE.md` of a sub-repo checked out
+    inside it are both loaded — the harness reads the working directory's file
+    and its ancestors' — and their roots are nested. A worktree cut from that
+    sub-repo lives in a disjoint tree; it is the SAME file seen twice.
+    """
+    pa, pb = Path(a), Path(b)
+    return pa == pb or pa in pb.parents or pb in pa.parents
+
+
+def _collapse_copies(
+    scored: list[
+        tuple["tuple[frozenset[str], str] | None", str, SummarizeCandidate]
+    ],
+) -> tuple[list[SummarizeCandidate], int]:
+    """Charge each distinct file once. Returns ``(kept, collapsed_count)``.
+
+    Within one group — same loading population, same slot — roots are visited
+    shallowest first and a candidate is kept only while it stays nested with
+    every candidate already kept. So an ancestor/descendant stack survives
+    intact, and the first root that sits in a parallel tree (a worktree, a
+    second clone) is dropped as a copy along with everything below it.
+
+    Shallowest-first also decides WHICH copy is reported: the outermost
+    checkout rather than a worktree cut from it, which is the file the user can
+    actually act on (Critical Rule 22). Ordering by size instead would let an
+    incidental checkout both inflate the figure and name itself as the fix.
+    Every candidate in a group shares one session population, so none of them
+    can be better or worse evidenced than the others; the path is the final
+    tiebreak so the choice is deterministic run to run.
+
+    A ``None`` key means "never collapse this one" — an unknown identity is not
+    evidence of sameness.
+    """
+    groups: dict[tuple[frozenset[str], str], list[tuple[str, SummarizeCandidate]]] = {}
+    kept: list[SummarizeCandidate] = []
+    collapsed = 0
+    for key, scan_root, candidate in scored:
+        if key is None:
+            kept.append(candidate)
+            continue
+        groups.setdefault(key, []).append((scan_root, candidate))
+
+    for members in groups.values():
+        members.sort(key=lambda m: (len(Path(m[0]).parts), m[0], m[1].path))
+        roots_kept: list[str] = []
+        for scan_root, candidate in members:
+            if all(_is_nested(scan_root, other) for other in roots_kept):
+                roots_kept.append(scan_root)
+                kept.append(candidate)
+            else:
+                collapsed += 1
+    return kept, collapsed
+
+
 def _invocation_counts(ctx: AnalyzerContext) -> InvocationCounts:
     """Observed skill/command/agent invocations for the window.
 
@@ -548,8 +798,32 @@ def run(ctx: AnalyzerContext) -> None:
 
     from tokenjam.core.summarize.candidates import list_candidates
 
+    # Observed invocation counts for the on-demand half of the model, plus the
+    # working directories the window's sessions recorded. Scanned once for the
+    # whole finding, off the same corpus + persistent parse cache
+    # `deadweight`/`relearn` already use. Runs BEFORE the filesystem scan
+    # because the scan's project population is derived from those cwds.
+    invocations = _invocation_counts(ctx)
+    roots = resolve_roots(invocations.session_cwds)
+
+    # How much of each file the reduction assumes goes away. The target ratio is
+    # what the rewriter is ASKED for and nothing enforces it, so a measured
+    # ratio from verified rewrites on this machine supersedes it whenever one
+    # exists; the basis says which is in force either way (Critical Rule 14).
+    measured_ratio, ratio_samples = observed_prose_ratio(ctx.config)
+    ratio = measured_ratio if measured_ratio is not None else DEFAULT_TARGET_RATIO
+
     try:
-        scan = list_candidates(config=ctx.config)  # read-only, never writes
+        # Project scope spans every repo the window actually worked in — not the
+        # one directory this process happens to sit in, which contributed $0.00
+        # for every other repo in the corpus. `project_roots=None` (no corpus, so
+        # no observed root) keeps the historical cwd scan rather than scanning
+        # nothing. Deliberately NOT passed as `path`: that widens the net to
+        # every `*.md` in a directory and would price `README.md` / `CHANGELOG.md`
+        # as if the harness auto-loaded them (Critical Rule 22).
+        scan = list_candidates(  # read-only, never writes
+            config=ctx.config, project_roots=roots.roots or None, ratio=ratio,
+        )
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the
         # optimize report — but log it: a silent broad-swallow would hide a real
@@ -564,16 +838,22 @@ def run(ctx: AnalyzerContext) -> None:
     # Observed load counts + blended rates for the window. `None` (dead or
     # unpriced window) leaves every candidate tokens-only, exactly as before.
     profile = _load_profile(ctx)
-    # Observed invocation counts for the on-demand half of the model. Scanned
-    # once for the whole finding, off the same corpus + persistent parse cache
-    # `deadweight`/`relearn` already use.
-    invocations = _invocation_counts(ctx)
-    finding.estimate_basis = _estimate_basis(invocations)
+    finding.estimate_basis = _estimate_basis(
+        invocations, roots, scan.project_roots_scanned,
+        ratio, measured_ratio is not None, ratio_samples,
+    )
+    finding.project_roots_scanned = scan.project_roots_scanned
+    finding.project_roots_vanished = roots.vanished
+    finding.prose_ratio = round(ratio, 4)
+    finding.prose_ratio_observed = measured_ratio is not None
+    finding.prose_ratio_samples = ratio_samples
     finding.invocations_observed = invocations.observed
     finding.invocations_total = invocations.total_invocations
     finding.transcripts_examined = invocations.sessions_scanned
 
-    candidates: list[SummarizeCandidate] = []
+    scored: list[
+        tuple["tuple[frozenset[str], str] | None", str, SummarizeCandidate]
+    ] = []
     for c in scan.candidates:
         if c.est_tokens_saved <= 0:
             continue
@@ -627,7 +907,13 @@ def run(ctx: AnalyzerContext) -> None:
         )
         if _is_measured_zero(candidate):
             continue
-        candidates.append(candidate)
+        repos = _matched_repos(c.path, profile) if profile else frozenset()
+        scan_root = str(getattr(c, "scan_root", "") or "")
+        scored.append((_copy_key(candidate, scan_root, repos), scan_root, candidate))
+    # One charge per distinct file, however many roots hold a copy of it.
+    candidates, collapsed = _collapse_copies(scored)
+    candidates.sort(key=lambda c: (-(c.est_usd_saved or 0.0), c.path))
+    finding.duplicate_copies_collapsed = collapsed
     finding.candidates = candidates
     finding.files = len(finding.candidates)
     if finding.candidates:
