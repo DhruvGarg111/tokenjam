@@ -228,7 +228,7 @@ def _bucket_rows(rows: list[tuple]) -> tuple[dict, int, int]:
         # No usage payload. Only count it when content was actually produced:
         # a stream that opened and delivered nothing cost nothing to
         # under-count, and flagging it would inflate the gap with noise.
-        if not int(attrs.get(TjAttributes.STREAM_CONTENT_CHUNKS) or 0) > 0:
+        if int(attrs.get(TjAttributes.STREAM_CONTENT_CHUNKS) or 0) <= 0:
             continue
         missing += 1
         bucket.affected += 1
