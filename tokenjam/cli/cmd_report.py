@@ -157,6 +157,16 @@ def _render_reuse_report(
             raise click.ClickException(
                 f"Failed to fetch reuse clusters from tj serve: {exc}"
             ) from exc
+        # The daemon serves a STORED report. A cold store is not an empty
+        # finding — rendering "no reuse clusters" off a scan that never ran
+        # would be an absence claim the data doesn't support.
+        if resp.get("report_available") is False:
+            raise click.ClickException(
+                "tj serve has not computed an analyzer report yet "
+                f"(status: {resp.get('status') or 'never_run'}). It scans in "
+                "the background on startup and on a schedule; re-run this "
+                "shortly, or press Rescan in the web UI."
+            )
         report = report_from_dict(resp)
         finding = report.findings.get("reuse")
         planning_texts = resp.get("planning_texts") or {}

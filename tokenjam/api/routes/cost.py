@@ -363,40 +363,30 @@ async def get_cost_components(
     total_cost = sum(c["cost_usd"] for c in components)
     total_tokens = sum(c["tokens"] for c in components)
 
-    recoverable: list[dict] = []
-    if conn is not None:
-        try:
-            from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report
+    # The overlay comes from the STORED analyzer report, never a live run: this
+    # endpoint used to call `build_report` inline, dispatching every analyzer
+    # over the corpus on the request thread and taking tens of seconds to
+    # minutes on a real install. `core.optimize.report_store` is kept warm by
+    # the daemon (boot / interval / user-pressed rescan). The component bars
+    # above are unaffected — they are plain measured-spend queries off live
+    # ingest, and ingestion is untouched.
+    from tokenjam.core.optimize import report_store
 
-            # `relearn` is a full-corpus scan the analyzer's OWN docstring
-            # says is too heavy for per-request HTTP use ("callers that serve
-            # this over HTTP MUST cache the result, not compute it per-
-            # request" — core/optimize/analyzers/relearn.py). Worse, its
-            # `RelearnFinding` never carries `past_overspend_usd`, so
-            # `_collect_recoverable` below silently discards its result no
-            # matter what — running it here was guaranteed dead work on every
-            # request. Excluding it by name changes nothing about what this
-            # endpoint returns (verified: no output field ever came from it)
-            # while removing that tax; the Review inbox
-            # (api/routes/relearn.py) already serves relearn's finding from
-            # its own background-refreshed cache. `deadweight` DOES
-            # contribute (it has `past_overspend_usd`) so it still
-            # runs here, but now via the persistent transcript parse cache
-            # (core.transcript_cache, wired into its `run(ctx)` entry point)
-            # so a warm cache makes repeat requests cheap instead of
-            # re-scanning every transcript from scratch each time.
-            findings = [name for name in ANALYZER_REGISTRY if name != "relearn"]
-            report = build_report(
-                db=db, config=config,
-                since=since_dt or utcnow(), until=until_dt or utcnow(),
-                agent_id=agent_id, findings=findings,
-            )
-            recoverable = _collect_recoverable(report)
-        except Exception:
-            recoverable = []
+    scan = report_store.stored_report_block(config)
+    stored = report_store.stored_report(config)
+    recoverable: list[dict] = _collect_recoverable(stored) if stored is not None else []
 
-    total_rec_usd = sum(r["past_overspend_usd"] or 0.0 for r in recoverable)
-    total_rec_tokens = sum(r["past_overspend_tokens"] or 0 for r in recoverable)
+    # A cold store contributes NO overlay and says so via `recoverable_status`.
+    # The totals below stay `None` rather than 0.0 in that case: a `$0.00`
+    # recoverable figure reads as "nothing to recover", which is exactly the
+    # reassurance an un-run scan cannot support.
+    known = stored is not None
+    total_rec_usd: float | None = (
+        float(sum(r["past_overspend_usd"] or 0.0 for r in recoverable)) if known else None
+    )
+    total_rec_tokens: int | None = (
+        int(sum(r["past_overspend_tokens"] or 0 for r in recoverable)) if known else None
+    )
     largest = recoverable[0] if recoverable else None
 
     return {
@@ -404,9 +394,17 @@ async def get_cost_components(
         "total_cost_usd": round(total_cost, 8),
         "total_tokens": total_tokens,
         "recoverable": recoverable,
+        # Freshness of the overlay ONLY — the component bars are live.
+        "recoverable_status": scan["status"],
+        "recoverable_computed_at": scan["computed_at"],
+        "recoverable_window_days": scan["window_days"],
+        "recoverable_available": known,
         # Gross ceiling, magnitude unchanged (see _recoverable_overlap_note) —
-        # NOT a claim that this much is simultaneously recoverable.
-        "total_recoverable_usd": round(total_rec_usd, 8),
+        # NOT a claim that this much is simultaneously recoverable. `None`
+        # means "not measured yet" (cold scan), never zero.
+        "total_recoverable_usd": (
+            round(total_rec_usd, 8) if total_rec_usd is not None else None
+        ),
         "total_recoverable_tokens": total_rec_tokens,
         "recoverable_additive": False,
         "recoverable_overlap_note": _recoverable_overlap_note(recoverable),
@@ -443,25 +441,22 @@ async def get_cost_cache(
     total_captured_tokens = sum(p["captured_tokens"] for p in block["series"])
 
     # Window-level estimated recoverable from the cache-efficacy analyzer (#111
-    # recoverable contract). Best-effort: skip silently if the report can't run.
+    # recoverable contract) — read from the STORED report, never re-run here.
+    # The captured series above is measured spend off live ingest and is
+    # unaffected. `None` throughout means "not measured yet", never zero.
+    from tokenjam.core.optimize import report_store
+
+    scan = report_store.stored_report_block(config)
+    stored = report_store.stored_report(config)
     recoverable_usd: float | None = None
     recoverable_tokens: int | None = None
     estimate_basis = ""
-    if conn is not None:
-        try:
-            from tokenjam.core.optimize import build_report
-            report = build_report(
-                db=db, config=config,
-                since=since_dt or utcnow(), until=until_dt or utcnow(),
-                agent_id=agent_id, findings=["cache"],
-            )
-            cache_finding = (report.findings or {}).get("cache")
-            if cache_finding is not None:
-                recoverable_usd = getattr(cache_finding, "past_overspend_usd", None)
-                recoverable_tokens = getattr(cache_finding, "past_overspend_tokens", None)
-                estimate_basis = getattr(cache_finding, "estimate_basis", "") or ""
-        except Exception:
-            pass
+    if stored is not None:
+        cache_finding = (stored.findings or {}).get("cache")
+        if cache_finding is not None:
+            recoverable_usd = getattr(cache_finding, "past_overspend_usd", None)
+            recoverable_tokens = getattr(cache_finding, "past_overspend_tokens", None)
+            estimate_basis = getattr(cache_finding, "estimate_basis", "") or ""
 
     return {
         **block,
@@ -470,6 +465,10 @@ async def get_cost_cache(
         "past_overspend_usd": recoverable_usd,
         "past_overspend_tokens": recoverable_tokens,
         "estimate_basis": estimate_basis,
+        "recoverable_status": scan["status"],
+        "recoverable_computed_at": scan["computed_at"],
+        "recoverable_window_days": scan["window_days"],
+        "recoverable_available": stored is not None,
         "framing": _framing_block(db, config, agent_id, total_captured, total_captured_tokens),
     }
 

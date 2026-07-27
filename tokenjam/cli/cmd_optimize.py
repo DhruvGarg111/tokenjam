@@ -218,6 +218,14 @@ def cmd_optimize(
                 f"Failed to fetch optimize report from tj serve: {exc}"
             ) from exc
 
+        # The daemon no longer runs analyzers on a request — it serves the
+        # report its background scan stored (`core.optimize.report_store`).
+        # A cold store is NOT an empty report: say "not computed yet" rather
+        # than rendering a report full of zeros that reads as "no waste".
+        if report_dict.get("report_available") is False:
+            _echo_scan_not_ready(report_dict, output_json)
+            return
+
         if report_dict.get("error") == "no_data":
             if output_json:
                 click.echo(json.dumps(report_dict))
@@ -507,6 +515,45 @@ def _reclaimable_share(finding: Any, window_total_tokens: int) -> float | None:
     if tokens is None or window_total_tokens <= 0:
         return None
     return max(float(tokens), 0.0) / window_total_tokens
+
+
+def _echo_scan_not_ready(payload: dict, output_json: bool) -> None:
+    """Report that the daemon's analyzer scan has not produced a result yet.
+
+    Deliberately NOT an empty report and never a set of zeros: "the scan has
+    not completed" and "the scan found nothing" are different claims, and only
+    one of them is true here. `status` distinguishes a never-run store from one
+    whose only attempts errored, so the user is told which.
+    """
+    status = payload.get("status") or "never_run"
+    if output_json:
+        click.echo(json.dumps({
+            "error": "scan_not_ready",
+            "status": status,
+            "last_error": payload.get("last_error"),
+            "message": "The tj serve daemon has not stored an analyzer report yet.",
+        }))
+        return
+    if status == "computing":
+        console.print(
+            "[yellow]Analyzer scan is running.[/yellow] "
+            "[dim]tj serve computes the report in the background; "
+            "re-run this in a moment.[/dim]"
+        )
+    elif status == "error":
+        console.print(
+            "[yellow]The last analyzer scan failed[/yellow] "
+            f"[dim]({payload.get('last_error') or 'no detail recorded'}). "
+            "Nothing has been computed yet — this is not a report of "
+            "zero waste.[/dim]"
+        )
+    else:
+        console.print(
+            "[yellow]No analyzer report has been computed yet.[/yellow] "
+            "[dim]tj serve scans in the background on startup and on a "
+            "schedule. Press Rescan in the web UI, or stop the daemon "
+            "([bold]tj stop[/bold]) to run the analyzers locally.[/dim]"
+        )
 
 
 def _rank_findings(
