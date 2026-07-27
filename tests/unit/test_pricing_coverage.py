@@ -90,3 +90,95 @@ def test_a_dataclass_instance_is_immutable():
                           unpriced_cost_usd=0.0)
     with pytest.raises(Exception):
         cov.measured = False  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# The CLI must render the warning on BOTH paths
+# ---------------------------------------------------------------------------
+#
+# `tj cost` reaches the DB two ways: directly, and — whenever `tj serve` holds
+# the DuckDB lock, which is the mode most installs actually run in — through
+# ApiBackend. The coverage check only ever consulted `db.conn`, so on the
+# daemon path a default-rate cost figure rendered with no warning at all,
+# even though the API response already carried a fully-computed block.
+
+class _NoConnBackend:
+    """An ApiBackend-shaped stand-in: no `.conn`, fetches over HTTP."""
+
+    def __init__(self, block, *, raises=False):
+        self._block = block
+        self._raises = raises
+        self.calls: list[dict] = []
+
+    def fetch_pricing_coverage(self, *, since="7d", agent_id=None):
+        self.calls.append({"since": since, "agent_id": agent_id})
+        if self._raises:
+            raise RuntimeError("daemon went away")
+        return self._block
+
+
+def _render(db, capsys, agent=None):
+    from tokenjam.cli.cmd_cost import _print_pricing_coverage
+
+    _print_pricing_coverage(db, agent, "7d", None)
+    return capsys.readouterr().out
+
+
+def test_daemon_path_renders_the_unpriced_warning(capsys):
+    """The regression: this path printed nothing at all."""
+    db = _NoConnBackend({
+        "measured": True,
+        "unpriced_call_count": 12,
+        "unpriced_cost_usd": 3.5,
+        "unpriced_models": [
+            {"provider": "acme", "model": "mystery-1", "call_count": 12},
+        ],
+        "note": "acme/mystery-1 is not in the pricing table: 12 calls here "
+                "are estimated at tokenjam's default rate.",
+    })
+
+    out = _render(db, capsys)
+
+    assert "acme/mystery-1" in out
+    assert db.calls == [{"since": "7d", "agent_id": None}]
+
+
+def test_daemon_path_stays_silent_when_everything_was_priced(capsys):
+    """Measured and clean is the one case that legitimately says nothing."""
+    db = _NoConnBackend({
+        "measured": True, "unpriced_call_count": 0, "unpriced_cost_usd": 0.0,
+        "unpriced_models": [], "note": None,
+    })
+
+    assert _render(db, capsys).strip() == ""
+
+
+@pytest.mark.parametrize(
+    "db",
+    [
+        _NoConnBackend(None),
+        _NoConnBackend(None, raises=True),
+        _NoConnBackend({"measured": False, "note": None}),
+    ],
+    ids=["no-block", "fetch-failed", "explicitly-unmeasured"],
+)
+def test_an_unmeasured_window_says_so_instead_of_going_quiet(db, capsys):
+    """Silence and a clean bill must not look the same.
+
+    An older daemon, a failed call and a window the server could not measure
+    all mean "nobody checked" — and staying quiet there is indistinguishable
+    from "checked, all good", which is the false all-clear this whole module
+    exists to prevent.
+    """
+    out = _render(db, capsys)
+
+    assert "not checked" in out
+
+
+def test_the_agent_filter_reaches_the_daemon(capsys):
+    """A scoped table must get a scoped coverage answer, not a global one."""
+    db = _NoConnBackend({"measured": True, "note": None, "unpriced_models": []})
+
+    _render(db, capsys, agent="chat-service")
+
+    assert db.calls == [{"since": "7d", "agent_id": "chat-service"}]
