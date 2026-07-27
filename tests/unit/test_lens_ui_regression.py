@@ -332,7 +332,13 @@ def test_overview_error_handling_is_asymmetric(html):
     # contract every panel renders from. That replaced BOTH the empty-default
     # fallbacks and the Promise.all, since a batch resolves only when its slowest
     # member does and these members range from 13s to several minutes.
-    assert "const driftRead = useTriageRead(() => api('/drift'), []);" in html
+    # The property under test is the SHAPE: one useTriageRead per read, settling
+    # into a tagged outcome instead of an empty default. /drift now also sends
+    # the page's window and depends on it (the selector used to govern three of
+    # the five Health tiles and silently skip this one), so the literal moved;
+    # what it is catching has not. The no-empty-default claim is asserted
+    # independently two lines below and is untouched.
+    assert "const driftRead = useTriageRead(() => api('/drift', { since }), [since]);" in html
     assert "function useTriageRead(run, deps) {" in html
     assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" not in html
     assert "api('/drift').catch(() => ({ agents: [] }))" not in html
