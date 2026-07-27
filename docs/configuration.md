@@ -155,6 +155,15 @@ why, and the report carries `filesystem_scan_skipped_reason` so every surface ca
 tell **"scanned, found nothing"** from **"did not scan"**. A run with no flag, no
 environment variable and no `--db` is unaffected.
 
+**The scope bounds writes too, not just reads.** The review inbox's Approve step
+refuses any target outside the scope's home directory — with
+`--projects-root /tmp/demo-home/.claude/projects` that root is `/tmp/demo-home`,
+so a scoped daemon can neither be talked into writing to your real `~`, nor into
+escaping the scope with a `..` path or a symlink pointing out of it. The
+suggested target and this check resolve from the same scope, so what the card
+proposes is always something Approve will accept. Without a scope the allowed
+root is your real home, exactly as before.
+
 ## Budget limits
 
 Budget limits merge per-field: each agent inherits default limits unless it explicitly overrides them.

@@ -125,6 +125,55 @@ def _scoped(projects_root: Path, source: str) -> AnalyzerScope:
     )
 
 
+@dataclass(frozen=True)
+class WriteScope:
+    """The two roots the Approve path needs, derived from ONE resolved scope.
+
+    An approved fix has two halves that must agree: the target the card
+    SUGGESTS, and the root the API is willing to WRITE under. They were derived
+    independently once — the suggestion followed `AnalyzerScope.claude_home`
+    while the API's guard stayed hardcoded to the process's real `Path.home()`
+    — so with `--projects-root` pointed outside `$HOME` the UI suggested a
+    target and the API then refused that exact write. Both halves resolve
+    through this one type now, precisely so they cannot drift apart again.
+
+    * `suggest_root` — where `relearn_apply.default_target_path` roots a
+      user-global suggestion (the scope's Claude home).
+    * `allowed_root` — the OUTERMOST directory an approved write may land in.
+      It is the scope's `home`, not its Claude home, because project-scoped
+      targets (a repo's own `CLAUDE.md`, `.claude/skills/…`) legitimately sit
+      beside `~/.claude` rather than inside it.
+
+    `suggest_root` is always inside-or-equal `allowed_root` by construction
+    (`_home_for` either returns the Claude home's parent or the Claude home
+    itself), which is what makes "the guard can never reject our own
+    suggestion" a property of the type rather than a coincidence.
+    """
+
+    suggest_root: Path
+    allowed_root: Path
+    source: str
+
+
+def resolve_write_scope(
+    config: object | None = None, *, scope: AnalyzerScope | None = None,
+) -> WriteScope:
+    """The suggest/allow roots for this run — pass `scope` when one is already
+    resolved (the analyzer path), `config` when it is not (the API path).
+
+    Never raises and never touches the filesystem, exactly like
+    `resolve_analyzer_scope`. With no `--projects-root`, no env var and no
+    scope override this returns `~/.claude` and `~`, i.e. the allowed root is
+    the real home and the guard behaves byte-for-byte as it always has.
+    """
+    resolved = scope if scope is not None else resolve_analyzer_scope(config)
+    return WriteScope(
+        suggest_root=resolved.claude_home.expanduser(),
+        allowed_root=resolved.home.expanduser(),
+        source=resolved.source,
+    )
+
+
 def resolve_analyzer_scope(config: object | None = None) -> AnalyzerScope:
     """Resolve the filesystem scope for this run — see the module docstring.
 

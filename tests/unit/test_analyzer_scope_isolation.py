@@ -192,3 +192,62 @@ def test_the_distill_cache_keeps_its_historical_path_without_a_config():
     assert relearn._distill_cache_dir() == (
         Path.home() / ".tj" / "distill_cache" / "relearn"
     )
+
+
+# ── The apply-target suggestion and the write guard must agree ─────────────
+# The suggestion followed the scope's Claude home while the API's guard stayed
+# hardcoded to the process's real `Path.home()`, so with `--projects-root`
+# outside `$HOME` the UI suggested a target and the API 403'd that exact write.
+# Both halves resolve through `resolve_write_scope` now; these pin that.
+
+def test_the_suggested_target_is_always_inside_the_allowed_root(tmp_path):
+    """The invariant that makes the two halves unable to disagree: whatever
+    root the suggestion is built from sits inside the root the guard
+    authorizes. Asserted for a conventional scope, a custom-named one, and
+    the unscoped default."""
+    from tokenjam.core.optimize.scope import resolve_write_scope
+
+    for projects_root in (
+        str(tmp_path / "demo-home" / ".claude" / "projects"),
+        str(tmp_path / "just-transcripts"),
+        None,
+    ):
+        write_scope = resolve_write_scope(_Config(projects_root=projects_root))
+        suggest, allowed = write_scope.suggest_root, write_scope.allowed_root
+        assert suggest == allowed or allowed in suggest.parents, (
+            f"{suggest} is not inside {allowed} for projects_root={projects_root}"
+        )
+
+
+def test_the_allowed_root_is_the_real_home_without_a_scope(monkeypatch):
+    """The no-flag default must be byte-for-byte what it always was."""
+    from tokenjam.core.optimize.scope import PROJECTS_ROOT_ENV, resolve_write_scope
+
+    monkeypatch.delenv(PROJECTS_ROOT_ENV, raising=False)
+    assert resolve_write_scope(_Config()).allowed_root == Path.home()
+
+
+def test_an_explicit_db_still_authorizes_only_the_real_home(monkeypatch):
+    """Suppression scopes READS off; it must not widen the WRITE root."""
+    from tokenjam.core.optimize.scope import PROJECTS_ROOT_ENV, resolve_write_scope
+
+    monkeypatch.delenv(PROJECTS_ROOT_ENV, raising=False)
+    assert resolve_write_scope(_Config(db_explicit=True)).allowed_root == Path.home()
+
+
+def test_a_scoped_root_authorizes_its_own_suggested_target(tmp_path):
+    """The exact case that 403'd: `--projects-root` under a throwaway home
+    outside `$HOME`, whose own suggested target must be writable."""
+    from tokenjam.core.optimize.scope import resolve_write_scope
+
+    demo_home = tmp_path / "demo-home"
+    write_scope = resolve_write_scope(
+        _Config(projects_root=str(demo_home / ".claude" / "projects")),
+    )
+    assert write_scope.allowed_root == demo_home
+    suggested = Path(
+        default_target_path(1, "user-global", "", "slug",
+                            claude_home=write_scope.suggest_root),
+    )
+    assert suggested == demo_home / ".claude" / "CLAUDE.md"
+    assert write_scope.allowed_root in suggested.parents

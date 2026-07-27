@@ -284,7 +284,10 @@ def recompute_now(
         # `analyzers/relearn.run` would leak the machine's global transcript
         # tree back in through the cache the served routes read. See
         # `core/optimize/scope.py`.
-        from tokenjam.core.optimize.scope import resolve_analyzer_scope
+        from tokenjam.core.optimize.scope import (
+            resolve_analyzer_scope,
+            resolve_write_scope,
+        )
 
         scope = resolve_analyzer_scope(config)
         if not scope.enabled:
@@ -333,8 +336,12 @@ def recompute_now(
             persona=persona,
             # The apply target has to agree with the scope the findings came
             # from — a card whose evidence is scoped and whose write target is
-            # not describes two different machines.
-            claude_home=scope.claude_home,
+            # not describes two different machines. Routed through
+            # `resolve_write_scope` rather than reading `scope.claude_home`
+            # directly, because the API's write guard authorizes against the
+            # OTHER half of that same type; deriving the two independently is
+            # what let the suggestion and the guard disagree.
+            claude_home=resolve_write_scope(scope=scope).suggest_root,
             # Scoped like every other relearn artifact — the distill cache is a
             # SECOND cache beside this module's own, and it wrote real files
             # under the real ~/.tj even from an isolated config until it was
