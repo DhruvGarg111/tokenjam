@@ -1553,6 +1553,17 @@ code.md-code {
    disk. Scoped to `.inbox-row` so every standalone Optimize panel keeps its own
    measure. */
 .inbox-row .opt-section { padding: 8px 10px; background: transparent; }
+/* The snippet's Copy control sits INSIDE the box rather than on a label line
+   above it. That label line was 20px of a row's height to render the word "Fix"
+   next to a monospace code block on a row whose title already says what is wrong,
+   and it made the driver-role row the tallest on the list. The button is now
+   adjacent to the thing it copies, which is also where a reader looks for it.
+   `padding-right` reserves the button's own width so a long first line cannot run
+   underneath it. Scoped to `.inbox-row`: the standalone Optimize panels have room
+   for a labelled section header and keep theirs. */
+.inbox-row .sz-fixbox { position: relative; margin-top: 10px; }
+.inbox-row .sz-fixbox > .sz-copybox { padding-right: 74px; }
+.inbox-row .sz-fixbox > .sz-copy-slot { position: absolute; top: 6px; right: 8px; z-index: 1; }
 /* Uniform collapsed height for a row's prose, so the LIST can be scanned rather
    than read. Row descriptions come straight from the analyzers and their lengths
    are wildly uneven: `resend` concatenates evidence + advise_text + caveat into
@@ -9233,12 +9244,9 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
               no file it owns to write. The recommendation itself is then the
               deliverable, so it gets the same labelled copy box a cost card's
               snippet gets. */ ''}
-        <div style="margin-top:10px">
-          <div class="opt-title" style="font-size:12.5px">
-            <span>Fix</span>
-            <${CopySnippetButton} text=${fixText} />
-          </div>
-          <div class="sz-copybox" style="margin-top:4px">${fixText}</div>
+        <div class="sz-fixbox">
+          <span class="sz-copy-slot"><${CopySnippetButton} text=${fixText} /></span>
+          <div class="sz-copybox">${fixText}</div>
         </div>
       ` : null}
 
@@ -9875,19 +9883,15 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
       ${prop.suggestion ? (canApply ? html`
         <details class="po-basis">
           <summary>Or copy the command and run it yourself</summary>
-          <div class="opt-title" style="font-size:12.5px">
-            <span>Fix</span>
-            <${CopySnippetButton} text=${prop.suggestion} />
+          <div class="sz-fixbox">
+            <span class="sz-copy-slot"><${CopySnippetButton} text=${prop.suggestion} /></span>
+            <div class="sz-copybox">${prop.suggestion}</div>
           </div>
-          <div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>
         </details>
       ` : html`
-        <div style="margin-top:10px">
-          <div class="opt-title" style="font-size:12.5px">
-            <span>Fix</span>
-            <${CopySnippetButton} text=${prop.suggestion} />
-          </div>
-          <div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>
+        <div class="sz-fixbox">
+          <span class="sz-copy-slot"><${CopySnippetButton} text=${prop.suggestion} /></span>
+          <div class="sz-copybox">${prop.suggestion}</div>
         </div>
       `) : null}
 

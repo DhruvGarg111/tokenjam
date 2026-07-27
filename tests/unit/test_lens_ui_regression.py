@@ -3012,7 +3012,7 @@ def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html)
     # because that text is what changed when the second shape was added.
     snippet_block = card[card.index("${prop.suggestion ? (canApply"):card.index("${canApply ? (needsSourcePath")]
     assert snippet_block.count("<${CopySnippetButton} text=${prop.suggestion} />") == 2
-    assert snippet_block.count('<div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>') == 2
+    assert snippet_block.count('<div class="sz-copybox">${prop.suggestion}</div>') == 2
     # On a row that offers BOTH, the manual command is the secondary exit and sits
     # in a collapsed disclosure: rendering both open made deadweight's row the
     # tallest on the list while offering strictly less than its neighbours. Still
@@ -3023,18 +3023,26 @@ def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html)
 def test_snippet_rows_render_the_snippet_as_the_deliverable(html):
     # THE failure this redesign exists to fix: a row whose fix is a copyable
     # change must show that change, not a bare "Mark applied" with nothing above
-    # it. Both ledgers put the fix in a labelled copy box with a Copy button,
-    # gated on the snippet fact alone so an apply control never suppresses it.
+    # it. Both ledgers put the fix in a copy box with a Copy button, gated on the
+    # snippet fact alone so an apply control never suppresses it.
+    #
+    # The Copy control moved INSIDE the box (`.sz-fixbox` positions it top-right)
+    # when its label line turned out to be 20px spent rendering the word "Fix" next
+    # to a code block. Asserted on the pairing rather than on the old layout: what
+    # matters is that the snippet renders AND is copyable, not where the button sits.
     row_start = html.index("function RecurringMistakeRow")
     row_end = html.index("function RelearnApplyModal", row_start)
     row = html[row_start:row_end]
     assert "${hasSnippet ? html`" in row
     assert "<${CopySnippetButton} text=${fixText} />" in row
-    assert '<div class="sz-copybox" style="margin-top:4px">${fixText}</div>' in row
+    assert '<div class="sz-copybox">${fixText}</div>' in row
+    assert 'class="sz-fixbox"' in row
 
     card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
     assert "${prop.suggestion} />" in card
     assert "${prop.suggestion}</div>" in card
+    # The button is reserved room inside the box rather than overlapping the text.
+    assert ".inbox-row .sz-fixbox > .sz-copybox { padding-right: 74px; }" in html
     # The cost card's "Mark applied" is reachable only as the snippet follow-up.
     # It used to be the catch-all `else`, which asked a reader with no fix on
     # screen to confirm having applied one.
