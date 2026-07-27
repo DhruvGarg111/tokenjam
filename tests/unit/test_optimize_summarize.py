@@ -35,12 +35,36 @@ def _window():
     return utcnow() - timedelta(days=30), utcnow() + timedelta(hours=1)
 
 
-def _cand(path: str, saved: int, *, is_prompt: bool = True, scope: str = "repo") -> Candidate:
+def _cand(path: str, saved: int, *, is_prompt: bool = True, scope: str = "repo",
+          load_class: str = "always", resident: int | None = None,
+          on_demand: int = 0) -> Candidate:
+    """A scan candidate with its load-semantics split filled in.
+
+    ``resident``/``on_demand`` are the two halves of ``saved`` the real scan
+    measures on the file's text (see `core/summarize/load_semantics`); by
+    default the whole reduction is always-resident, which is what a
+    `CLAUDE.md` looks like.
+    """
+    from tokenjam.core.summarize.load_semantics import invocation_key
+
     return Candidate(
         path=path, prose_words=saved * 3, total_chars=saved * 12,
         protected_blocks=0, est_tokens_saved=saved, pricing_mode="api",
         scope=scope, is_prompt=is_prompt,
+        load_class=load_class,
+        invocation_key=invocation_key(path, load_class),
+        always_resident_tokens_saved=saved if resident is None else resident,
+        on_demand_tokens_saved=on_demand,
+        always_resident_chars=(saved if resident is None else resident) * 12,
     )
+
+
+def _skill_cand(path: str, *, resident: int, on_demand: int,
+                scope: str = "global") -> Candidate:
+    """A `.claude/skills/<slug>/SKILL.md`: frontmatter always resident, body
+    delivered only when the skill is invoked."""
+    return _cand(path, resident + on_demand, scope=scope, load_class="skill",
+                 resident=resident, on_demand=on_demand)
 
 
 def _patch_scan(monkeypatch, cands: list[Candidate]) -> None:
@@ -400,3 +424,259 @@ def test_finding_round_trips(db, monkeypatch):
     assert back.candidates[0].reduction_pct == 33     # per-file % survives the round-trip
     assert "meaning may change" in back.caveat        # and the caveat survives the ctor
     assert back.reduction_pct == 33 and back.avg_reduction_pct == 33
+
+
+# --- Load semantics: on-demand files are not always-on context ----------------
+# The defect: every catalog file's WHOLE body was priced as if it were resident
+# in every session, on every call. On a real 30-day corpus that made a skill
+# library nobody had invoked the single most expensive prompt file a user owns,
+# and pushed the cross-analyzer token rollup ABOVE the window's billed tokens.
+
+def _seed_calls(db, sessions: int, calls: int, *, agent_id: str = "claude-code-repo"):
+    for i in range(sessions):
+        sid = f"s{i}"
+        db.upsert_session(make_session(session_id=sid, agent_id=agent_id))
+        for j in range(calls):
+            db.insert_span(make_llm_span(
+                session_id=sid, agent_id=agent_id,
+                provider="anthropic", model="claude-haiku-4-5",
+                input_tokens=100, output_tokens=10,
+                start_time=utcnow() - timedelta(days=1, minutes=j),
+            ))
+
+
+def _corpus(tmp_path, monkeypatch, records_by_session: dict[str, list] | None = None):
+    """Point the invocation scan at a controlled transcript corpus."""
+    import json as _json
+
+    root = tmp_path / "projects"
+    (root / "-repo").mkdir(parents=True)
+    for session_id, records in (records_by_session or {}).items():
+        (root / "-repo" / f"{session_id}.jsonl").write_text(
+            "".join(_json.dumps(r) + "\n" for r in records), encoding="utf-8",
+        )
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(root))
+    monkeypatch.setenv("TJ_TRANSCRIPT_CACHE_DIR", str(tmp_path / "tcache"))
+    return root
+
+
+def _skill_use(slug: str):
+    return {"message": {"content": [
+        {"type": "tool_use", "id": "t", "name": "Skill", "input": {"skill": slug}},
+    ]}}
+
+
+def test_uninvoked_skill_body_is_not_priced_as_always_on_context(
+    db, monkeypatch, tmp_path,
+):
+    """A skill invoked ZERO times in the window costs only its frontmatter.
+
+    Its body is real context when it IS invoked -- see the next test -- but it
+    is not in context on a single call of a session that never invoked it, and
+    pricing it as if it were is what produced the indefensible figure.
+    """
+    _seed_calls(db, sessions=4, calls=5)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("other")]})
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=10, on_demand=9_990),
+    ])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+    c = f.candidates[0]
+
+    assert f.invocations_observed is True
+    assert c.load_class == "skill" and c.invocations == 0
+    # 10 frontmatter tokens x 5 reads x 4 sessions -- the body contributes
+    # nothing because it was never delivered.
+    assert f.past_overspend_tokens == 200
+    # Not the 10,000-token body on every read of every session.
+    assert f.past_overspend_tokens < 10_000 * 5 * 4
+    # The one-time per-call reduction is untouched: the file IS still worth
+    # compressing, and the curate/diff surface still says so.
+    assert f.file_reduction_tokens == 10_000
+
+
+def test_an_invoked_skill_body_is_priced_once_per_observed_invocation(
+    db, monkeypatch, tmp_path,
+):
+    """The opposite error -- charging an invoked body zero -- is also wrong: a
+    long skill that really is run costs real tokens each time."""
+    _seed_calls(db, sessions=4, calls=5)
+    _corpus(tmp_path, monkeypatch, {
+        "s0": [_skill_use("ship"), _skill_use("ship")],
+        "s1": [_skill_use("ship")],
+    })
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=10, on_demand=9_990),
+    ])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+    c = f.candidates[0]
+
+    assert c.invocations == 3
+    # frontmatter (10 x 5 reads x 4 sessions) + body (9,990 x 3 invocations)
+    assert f.past_overspend_tokens == 200 + 9_990 * 3
+
+
+def test_no_transcript_corpus_degrades_both_fields_for_an_on_demand_file(
+    db, monkeypatch, tmp_path,
+):
+    """Critical Rule 28 corollary (a): where the invocation count could not be
+    OBSERVED at all, an on-demand file carries neither a token figure nor a
+    dollar one -- never a number on one side and a zero on the other. An
+    always-resident file in the same scan is unaffected: its basis is intact.
+    """
+    _seed_calls(db, sessions=4, calls=5)
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(tmp_path / "absent"))
+    monkeypatch.setenv("TJ_TRANSCRIPT_CACHE_DIR", str(tmp_path / "tcache"))
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=10, on_demand=9_990),
+        _cand("~/.claude/CLAUDE.md", 1_000, scope="global"),
+    ])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+    by_path = {c.path: c for c in f.candidates}
+    skill = by_path["~/.claude/skills/ship/SKILL.md"]
+    always = by_path["~/.claude/CLAUDE.md"]
+
+    assert f.invocations_observed is False
+    assert skill.invocations is None
+    assert skill.est_usd_saved is None and skill.est_tokens_saved_window is None
+    assert always.est_usd_saved is not None and always.est_tokens_saved_window is not None
+    # The finding still reports the file it COULD price -- 1,000 x 5 x 4.
+    assert f.past_overspend_tokens == 20_000
+    # ...and the basis says why the other one carries nothing.
+    assert "none available" in f.estimate_basis
+
+
+def test_basis_names_the_invocation_evidence_it_used(db, monkeypatch, tmp_path):
+    """Critical Rule 14: the basis states the arithmetic truthfully, including
+    where the invocation multiplier came from."""
+    _seed_calls(db, sessions=2, calls=2)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("ship")]})
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=10, on_demand=90),
+    ])
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    assert "Claude Code transcripts" in f.estimate_basis
+    assert "1 invocation(s) observed" in f.estimate_basis
+    assert f.invocations_total == 1 and f.transcripts_examined == 1
+    # No claim is strengthened anywhere in it.
+    assert "saves you" not in f.estimate_basis
+    assert "estimated" in f.caveat.lower() or "review" in f.caveat.lower()
+
+
+def test_a_session_touching_two_agent_ids_counts_once(db, monkeypatch, tmp_path):
+    """`sessions_loading` for a global file is DISTINCT sessions in the window.
+
+    Summing the per-agent_id `COUNT(DISTINCT session_id)` groups counted such a
+    session twice -- 22% inflation on a real corpus, applied to every global
+    candidate.
+    """
+    db.upsert_session(make_session(session_id="s0", agent_id="claude-code-repo-a"))
+    for agent in ("claude-code-repo-a", "claude-code-repo-b"):
+        db.insert_span(make_llm_span(
+            session_id="s0", agent_id=agent,
+            provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1),
+        ))
+    _corpus(tmp_path, monkeypatch, {})
+    _patch_scan(monkeypatch, [_cand("~/.claude/CLAUDE.md", 1_000, scope="global")])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    assert f.sessions_examined == 1                  # not 2
+    assert f.candidates[0].sessions_loading == 1
+    # 2 calls in that one session -> 1 send + 1 re-read.
+    assert f.calls_per_session == 2.0
+    assert f.past_overspend_tokens == 2_000
+
+
+def test_mixed_finding_stays_inside_the_real_price_band(db, monkeypatch, tmp_path):
+    """Critical Rule 28, restated for the two-term model: the always-resident
+    term bills at a blend of input + cache-read rates and the on-demand term at
+    the input rate, so the implied rate over BOTH must still land between the
+    cache-read rate and the input rate. A basis mismatch on either term throws
+    it orders of magnitude out of band; a hardcoded-number assertion would not
+    notice.
+    """
+    from tokenjam.core.pricing import get_rates
+
+    _seed_calls(db, sessions=4, calls=5)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("ship"), _skill_use("ship")]})
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=120, on_demand=9_880),
+        _cand("~/.claude/CLAUDE.md", 3_000, scope="global"),
+    ])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    input_per_token = rates.input_per_mtok / 1_000_000
+    cache_read_per_token = rates.cache_read_per_mtok / 1_000_000
+
+    assert f.past_overspend_usd is not None and f.past_overspend_tokens
+    implied = f.past_overspend_usd / f.past_overspend_tokens
+    assert cache_read_per_token <= implied <= input_per_token
+    # Strictly inside, not pinned to an endpoint: both terms really contribute.
+    assert cache_read_per_token < implied < input_per_token
+
+
+def test_reduction_pct_keeps_its_one_time_numerator(db, monkeypatch, tmp_path):
+    """The basis change must not leak into the percentage: `reduction_pct` is
+    saved / source tokens and would read as far over 100% the moment sessions,
+    calls or invocations multiplied into its numerator."""
+    _seed_calls(db, sessions=4, calls=5)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("ship")]})
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=10, on_demand=990),
+    ])
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    assert 0 < f.reduction_pct <= 100
+    assert 0 < f.avg_reduction_pct <= 100
+    assert f.file_reduction_tokens == 1_000       # one-time, never window-priced
+
+
+def test_render_summarize_labels_on_demand_files(db, monkeypatch, tmp_path, capsys):
+    """Critical Rule 14 on the CLI surface: the copy must not tell the reader
+    a skill body is re-sent on every call, and it must show the invocation
+    evidence behind the figure it does print."""
+    from tokenjam.cli.cmd_optimize import _render_summarize
+
+    _seed_calls(db, sessions=2, calls=4)
+    _corpus(tmp_path, monkeypatch, {"s0": [_skill_use("ship")]})
+    _patch_scan(monkeypatch, [
+        _skill_cand("~/.claude/skills/ship/SKILL.md", resident=500, on_demand=5_000),
+        _cand("~/.claude/CLAUDE.md", 900, scope="global"),
+    ])
+    since, until = _window()
+    finding = build_report(db=db, config=TjConfig(version="1"),
+                           since=since, until=until,
+                           findings=["summarize"]).findings["summarize"]
+
+    _render_summarize(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out.replace("\n", " ")
+
+    assert "on demand" in out
+    assert "always-on" in out
+    assert "invocation(s) observed" in out
+    # The old, now-false claim that every one of these files is re-sent on
+    # every call must not come back.
+    assert "re-send these files on every call" not in out

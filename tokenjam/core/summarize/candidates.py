@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Iterator
 
+from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
 from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO, tokens_saved
@@ -56,6 +57,26 @@ class Candidate:
     pricing_mode: str
     scope: str                  # "global" | "project" | "repo" | "path"
     is_prompt: bool             # matched a catalog prompt name/location
+    #: How this file reaches the model — ``core/summarize/load_semantics``.
+    #: ``always`` (whole body every session) vs ``skill``/``command``/``agent``
+    #: (frontmatter always, body only when invoked). Defaulted so every
+    #: existing construction of this dataclass keeps working.
+    load_class: str = load_semantics.ALWAYS
+    #: The name an invocation of this file is recorded under (``""`` for an
+    #: always-resident file, which is never "invoked").
+    invocation_key: str = ""
+    #: ``est_tokens_saved`` split across the two load semantics: the part
+    #: removed from what every session carries, and the part removed from what
+    #: arrives only on invocation. They sum to ``est_tokens_saved`` up to the
+    #: rounding in :func:`estimate.tokens_saved`, which floors each part
+    #: independently.
+    always_resident_tokens_saved: int = 0
+    on_demand_tokens_saved: int = 0
+    #: Source size of the always-resident portion (the whole file for an
+    #: ALWAYS-class one, the frontmatter for an on-demand one). The write-side
+    #: budget in ``core/optimize/write_budget`` measures the existing agent-file
+    #: footprint off this, so read and write price the same quantity.
+    always_resident_chars: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -68,6 +89,11 @@ class Candidate:
             "scope": self.scope,
             "is_prompt": self.is_prompt,
             "kind": "prompt" if self.is_prompt else "other",
+            "load_class": self.load_class,
+            "invocation_key": self.invocation_key,
+            "always_resident_tokens_saved": self.always_resident_tokens_saved,
+            "on_demand_tokens_saved": self.on_demand_tokens_saved,
+            "always_resident_chars": self.always_resident_chars,
         }
 
 
@@ -164,10 +190,21 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
     b = analyze(text)
     if b.prose_words < min_prose_words:
         return None
+    # Split the SAME reduction across the two load semantics, measured on the
+    # two halves of the real text rather than apportioned by a ratio: only the
+    # always-resident half is worth (sessions x calls), the on-demand half is
+    # worth (invocations). See core/summarize/load_semantics.
+    load_class = load_semantics.classify(str(path))
+    resident_text, on_demand_text = load_semantics.split_always_resident(text, load_class)
     return Candidate(
         path=str(path), prose_words=b.prose_words, total_chars=b.total_chars,
         protected_blocks=b.protected_blocks, est_tokens_saved=tokens_saved(b, ratio),
         pricing_mode=mode, scope=scope, is_prompt=_is_prompt(path),
+        load_class=load_class,
+        invocation_key=load_semantics.invocation_key(str(path), load_class),
+        always_resident_tokens_saved=tokens_saved(analyze(resident_text), ratio),
+        on_demand_tokens_saved=tokens_saved(analyze(on_demand_text), ratio),
+        always_resident_chars=len(resident_text),
     )
 
 

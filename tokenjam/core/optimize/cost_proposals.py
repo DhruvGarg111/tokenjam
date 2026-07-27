@@ -993,6 +993,14 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
             "sessions_examined": int(getattr(finding, "sessions_examined", 0) or 0),
             "calls_per_session": getattr(finding, "calls_per_session", None),
             "avg_reduction_pct": reduction,
+            # The on-demand half of the figure's inputs, carried for the same
+            # reason the always-on half's are: a skill/command/agent body is
+            # priced by OBSERVED invocations, and a reader should be able to
+            # see that count rather than take the total on trust.
+            "invocations_observed": bool(
+                getattr(finding, "invocations_observed", False),
+            ),
+            "invocations_total": int(getattr(finding, "invocations_total", 0) or 0),
         },
         advise_text=advise,
         past_overspend_usd=usd,

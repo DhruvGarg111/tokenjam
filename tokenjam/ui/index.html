@@ -7762,18 +7762,19 @@ function OptimizeView({ params }) {
               <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b> — ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
             </div>` : null}
             <table class="opt-table" style="margin-top:12px">
-              <thead><tr><th>File</th><th>Scope</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
+              <thead><tr><th>File</th><th>Scope</th><th>Loads</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
               <tbody>
                 ${sfCands.slice(0, 6).map((c, i) => html`<tr key=${i}>
                   <td class="mono" title=${c.path}>${c.path.split('/').slice(-2).join('/')}</td>
                   <td class="dim" style="font-size:11px">${c.scope}</td>
+                  <td class="dim" style="font-size:11px" title=${(c.load_class && c.load_class !== 'always') ? 'Frontmatter is always in context; the body arrives only when this ' + c.load_class + ' is invoked' + (c.invocations != null ? ' (' + c.invocations + ' observed this window)' : '')  : 'Re-sent at the head of every session that loads it'}>${(!c.load_class || c.load_class === 'always') ? 'always-on' : 'on demand'}</td>
                   <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
                   <td class="mono" style="text-align:right">${c.reduction_pct != null ? c.reduction_pct : 0}%</td>
                 </tr>`)}
-                ${sfCands.length > 6 ? html`<tr><td colspan="4" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
+                ${sfCands.length > 6 ? html`<tr><td colspan="5" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
               </tbody>
             </table>
-            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan — advisory; review each rewrite before applying. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
+            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan; advisory, review each rewrite before applying. An "on demand" file realizes that reduction only on the calls that follow an invocation, not on every call. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
           ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
         </section>` : null}
 

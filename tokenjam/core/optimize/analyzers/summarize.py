@@ -17,14 +17,31 @@ break the empty-window overlay invariant (#211) — a dead window must show no
 recoverable waste. The filesystem scan is skipped entirely until the window shows
 activity.
 
-**The saving RECURS; it is not a one-time figure.** Every file in the catalog
-is always-on context: re-sent at the head of every session that loads it, and
-re-read on every call within that session. Compressing it therefore pays on
-each of those, so the recoverable figure is priced the same way each of the
-other cost analyzers' is — over the analyzed window, at the rates the tokens
-actually bill at (first call of a session at the input rate, later calls at the
-cache-read rate, which is 0.100x the input rate for every Anthropic model in
-`pricing/models.toml`). See `_price_reduction`.
+**The saving RECURS, but only for the part of a file that is actually
+resident.** The catalog lumps five different things together and they are not
+loaded the same way: `CLAUDE.md` and `.claude/rules/*.md` are re-sent whole at
+the head of every session that loads them, whereas a `.claude/skills/*/SKILL.md`,
+`.claude/commands/*.md` or `.claude/agents/*.md` surfaces only its frontmatter
+that way and delivers its BODY when it is invoked. Pricing every file's whole
+body as always-resident made a skill library that had not been invoked once in
+the window read as the most expensive prompt file a user owns. So the figure is
+the sum of two separately-observed terms:
+
+    always-resident reduction x (sessions that load it) x (reads per session)
+  + on-demand reduction       x (times it was actually invoked)
+
+The first term bills as before — first send at the input rate, each later call
+in that session at the cache-read rate (0.100x the input rate for every
+Anthropic model in `pricing/models.toml`). The second bills at the input rate,
+once per invocation. The split itself lives in `core/summarize/load_semantics`
+(shared with `core/optimize/write_budget`, which already applied the same rule
+when pricing a WRITE); the invocation counts are observed from Claude Code
+transcripts by `core/summarize/invocations`. See `_price_reduction`.
+
+That second term is a FLOOR: an invoked body stays in that session's context
+for the calls that follow, and those re-reads are not counted here because the
+transcript does not say how many followed. Understating is the safe direction
+(Critical Rule 22).
 
 This is also the ONE analyzer whose fix has a NEGATIVE standing cost: it
 shrinks the always-loaded footprint that the rule-writing analyzers (`relearn`,
@@ -39,11 +56,15 @@ the window, which telemetry counts directly; a project-scope file is loaded
 only by its own repo's sessions, matched through the same `agent_id` -> repo
 derivation `analyzers/relearn.py` uses. A file whose loading sessions cannot be
 identified contributes NEITHER window figure — never a zero, never a rate
-borrowed from a file that did resolve (anti-pattern #22) — but its one-time
+borrowed from a file that did resolve (Critical Rule 22) — but its one-time
 per-call reduction still surfaces via `file_reduction_tokens` and each
-candidate's own `est_tokens_saved`. Every user-visible string says
-"estimated" / "review before applying" — never "saves you"; the mandatory
-`caveat` names summary's one risk (meaning may change, structure won't).
+candidate's own `est_tokens_saved`. The same symmetry governs the on-demand
+term: an on-demand file whose invocations could not be observed at all (no
+transcript corpus) contributes neither figure, while one observed to have been
+invoked ZERO times contributes exactly zero — a measurement, not a gap. Every
+user-visible string says "estimated" / "review before applying" — never "saves
+you"; the mandatory `caveat` names summary's one risk (meaning may change,
+structure won't).
 """
 from __future__ import annotations
 
@@ -55,7 +76,9 @@ from typing import Any
 from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+from tokenjam.core.summarize.invocations import InvocationCounts
 
 logger = logging.getLogger(__name__)
 
@@ -70,20 +93,50 @@ _CC_AGENT_PREFIX = "claude-code-"
 # where the one-time per-call reduction lives instead.
 SUMMARIZE_ESTIMATE_BASIS = (
     "Read-only filesystem scan of catalog prompt files (CLAUDE.md / AGENTS.md / "
-    "globals); prose is summarized, structure kept verbatim. These files are "
-    "ALWAYS-ON context, so the reduction is realized repeatedly, not once: "
-    "`past_overspend_tokens` and `past_overspend_usd` are on the "
-    "SAME basis — both price reduction x (sessions that load the file) x (first "
-    "call at the input rate + each later call in that session at the cache-read "
-    "rate), on the same window basis as the other cost analyzers; the tokens "
-    "field reports that event count in tokens, the dollars field prices it. "
-    "Load counts are observed from telemetry — a global-scope file against "
-    "every session in the window, a project-scope file against its own repo's "
-    "sessions only. A file whose loading sessions cannot be identified carries "
-    "neither figure here; its one-time per-call reduction still appears in "
-    "`file_reduction_tokens` and each candidate's own `est_tokens_saved`. "
-    "Advisory; review each rewrite before applying."
+    "rules / skills / commands / agents / globals); prose is summarized, "
+    "structure kept verbatim. `past_overspend_tokens` and `past_overspend_usd` "
+    "are on the SAME basis — the same event count, one counted and one priced — "
+    "and each file is charged by how it is actually LOADED, not as if all of it "
+    "were always in context. Always-resident text (a whole CLAUDE.md / rules "
+    "file, and the frontmatter of a skill / command / agent, which is what the "
+    "harness lists them by) is charged reduction x sessions that load the file x "
+    "reads per session, first send at the input rate and each later call in that "
+    "session at the cache-read rate. On-demand text (a skill / command / agent "
+    "BODY, which reaches the model only when invoked) is charged reduction x "
+    "OBSERVED invocations, at the input rate, once each. Session load counts "
+    "come from telemetry — a global-scope file against every distinct session in "
+    "the window, a project-scope file against its own repo's sessions only. "
+    "Invocation counts are observed, never assumed ({invocation_source}); zero "
+    "observed invocations is a measurement and prices that body at zero, whereas "
+    "an absent transcript corpus carries NEITHER figure for that file. The "
+    "on-demand term is a floor: an invoked body stays in that session's context "
+    "afterwards and those re-reads are not counted. A file whose loading "
+    "sessions cannot be identified carries neither figure here; its one-time "
+    "per-call reduction still appears in `file_reduction_tokens` and each "
+    "candidate's own `est_tokens_saved`. Advisory; review each rewrite before "
+    "applying."
 )
+
+
+def _estimate_basis(invocations: "InvocationCounts | None") -> str:
+    """The basis string with the invocation evidence actually used spelled out.
+
+    Critical Rule 14: the basis must state the arithmetic truthfully, so it
+    names the observed invocation total rather than the mechanism alone.
+    """
+    from tokenjam.core.summarize.invocations import INVOCATION_SOURCE
+
+    if invocations is None or not invocations.observed:
+        source = (
+            f"{INVOCATION_SOURCE} — none available in this environment, so no "
+            "on-demand file carries a window figure"
+        )
+    else:
+        source = (
+            f"{INVOCATION_SOURCE}; {invocations.total_invocations:,} invocation(s) "
+            f"observed across {invocations.sessions_scanned:,} transcript(s)"
+        )
+    return SUMMARIZE_ESTIMATE_BASIS.format(invocation_source=source)
 
 # Mandatory caveat (Rule 14) — carried as the dataclass default like the other
 # recoverable findings' caveats (MODEL_DOWNGRADE_CAVEAT etc.) so no surface can
@@ -104,6 +157,24 @@ class SummarizeCandidate:
     est_tokens_saved: int
     total_chars: int = 0     # source size (feeds the aggregate reduction %)
     reduction_pct: int = 0   # per-file prose reduction %, computed server-side (no JS chars/4)
+    #: How this file reaches the model: ``always`` (whole body re-sent every
+    #: session) vs ``skill`` / ``command`` / ``agent`` (frontmatter always,
+    #: body only on invocation). See ``core/summarize/load_semantics``.
+    load_class: str = "always"
+    #: ``est_tokens_saved`` split the same way, so a consumer can see WHICH
+    #: half of the file the window figure came from.
+    always_resident_tokens_saved: int = 0
+    on_demand_tokens_saved: int = 0
+    #: Source size of the always-resident portion — the whole file for an
+    #: ALWAYS-class one, the measured frontmatter for an on-demand one. This is
+    #: what ``core/optimize/write_budget.measured_agent_file_tokens`` sizes the
+    #: write budget against, so the read side and the write side charge the
+    #: same standing footprint.
+    always_resident_chars: int = 0
+    #: How many times this file was OBSERVED being invoked in the window.
+    #: ``None`` means "not measured" (no transcript corpus) — never 0, which
+    #: is the real, priceable answer "it was never invoked".
+    invocations: int | None = None
     #: How many of the window's sessions actually load this file, and what the
     #: reduction is worth across them. ``est_usd_saved`` is ``None`` when the
     #: loading sessions could not be identified or no model was priced — a
@@ -159,6 +230,16 @@ class SummarizeFinding:
     sessions_examined: int = 0
     calls_per_session: float | None = None
     rate_basis: str = ""
+    #: Whether the on-demand half of the model had any evidence at all. False
+    #: means no Claude Code transcript corpus was readable, so every
+    #: skill/command/agent candidate degrades to no window figure rather than
+    #: being priced as if it were never invoked.
+    invocations_observed: bool = False
+    #: Total invocation events observed and how many transcripts were read for
+    #: them — the inputs behind the on-demand term, kept inspectable for the
+    #: same reason ``sessions_examined``/``calls_per_session`` are.
+    invocations_total: int = 0
+    transcripts_examined: int = 0
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -177,9 +258,15 @@ def _reduction_pct(est_tokens_saved: int, total_chars: int) -> int:
 class _LoadProfile:
     """How often the window's sessions would re-send an always-on prompt file.
 
-    ``sessions_total`` is every session in the window (what a global-scope file
-    is loaded by); ``sessions_by_repo``/``calls_by_repo`` narrow that for a
-    project-scope file. ``calls_per_session`` is the window-WIDE average number
+    ``sessions_total`` is every DISTINCT session in the window (what a
+    global-scope file is loaded by) — counted once across the whole window, not
+    summed from the per-``agent_id`` groups below, where a session that touched
+    two agent_ids appears in both and inflates the total (measured at 22% on a
+    real 30-day corpus, applied to every global candidate).
+    ``sessions_by_repo``/``calls_by_repo`` narrow that for a project-scope
+    file; those per-repo counts stay per-``agent_id`` on purpose — a session
+    that touched two repos really does load both repos' `CLAUDE.md`.
+    ``calls_per_session`` is the window-WIDE average number
     of LLM calls a session makes — the first sends the file at the input rate,
     each later one re-reads it at the cache-read rate. A project-scope file
     must price against its OWN repo's average, not this blend across every
@@ -212,25 +299,30 @@ def _load_profile(ctx: AnalyzerContext) -> _LoadProfile | None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    where = " AND ".join(clauses)
     try:
         rows = ctx.conn.execute(
             "SELECT agent_id, COUNT(DISTINCT session_id), COUNT(*) "
-            "FROM spans WHERE " + " AND ".join(clauses) + " GROUP BY agent_id",
+            "FROM spans WHERE " + where + " GROUP BY agent_id",
             params,
         ).fetchall()
+        # Counted separately, NOT summed from `rows`: a session that touched
+        # two agent_ids is one session in the window but two rows above.
+        totals = ctx.conn.execute(
+            "SELECT COUNT(DISTINCT session_id), COUNT(*) FROM spans WHERE " + where,
+            params,
+        ).fetchone()
     except Exception:
         logger.debug("summarize analyzer: load-profile query failed", exc_info=True)
         return None
 
     sessions_by_repo: dict[str, int] = {}
     calls_by_repo: dict[str, int] = {}
-    sessions_total = 0
-    calls_total = 0
+    sessions_total = int((totals or (0, 0))[0] or 0)
+    calls_total = int((totals or (0, 0))[1] or 0)
     for agent_id, sessions, calls in rows:
         sessions = int(sessions or 0)
         calls = int(calls or 0)
-        sessions_total += sessions
-        calls_total += calls
         label = str(agent_id or "")
         if label.startswith(_CC_AGENT_PREFIX):
             label = label[len(_CC_AGENT_PREFIX):]
@@ -302,11 +394,21 @@ def _reads_per_session(calls_per_session: float) -> int:
 
 
 def _price_reduction(
-    tokens_saved: int, sessions: int, calls_per_session: float, rates: RateProfile,
+    resident_tokens: int,
+    on_demand_tokens: int,
+    sessions: int,
+    calls_per_session: float,
+    invocations: int,
+    rates: RateProfile,
 ) -> float | None:
-    """What removing ``tokens_saved`` from an always-on file is worth over the
-    window: the reduction, on each loading session, sent once at the input rate
-    and re-read on that session's every later call at the cache-read rate.
+    """What removing this file's prose is worth over the window, by load class.
+
+    The always-resident part (a whole `CLAUDE.md`, or a skill/command/agent's
+    frontmatter) is worth the reduction on each loading session, sent once at
+    the input rate and re-read on that session's every later call at the
+    cache-read rate. The on-demand part (a skill/command/agent BODY) is worth
+    the reduction once per OBSERVED invocation, at the input rate — it is not
+    in context at all until then.
 
     ``calls_per_session`` is the candidate's OWN repo's average (see
     ``_repo_calls_per_session``) for a project-scope file, or the window-wide
@@ -314,28 +416,80 @@ def _price_reduction(
 
     ``None`` when no session loads the file — the saving is real but this
     window carries no evidence of its size, and a zero would misreport that as
-    "worth nothing".
+    "worth nothing". A file that IS loaded but was never invoked returns a real
+    figure (its frontmatter term), which is the honest answer.
     """
-    if sessions <= 0 or tokens_saved <= 0:
+    if sessions <= 0:
         return None
-    rereads = _reads_per_session(calls_per_session) - 1
-    return rates.cost_of(float(tokens_saved), rereads) * sessions
+    total = 0.0
+    if resident_tokens > 0:
+        rereads = _reads_per_session(calls_per_session) - 1
+        total += rates.cost_of(float(resident_tokens), rereads) * sessions
+    if on_demand_tokens > 0 and invocations > 0:
+        total += rates.cost_of(float(on_demand_tokens), 0) * invocations
+    return total
 
 
 def _tokens_saved_over_window(
-    tokens_saved: int, sessions: int, calls_per_session: float,
+    resident_tokens: int,
+    on_demand_tokens: int,
+    sessions: int,
+    calls_per_session: float,
+    invocations: int,
 ) -> int | None:
-    """Actual token volume ``tokens_saved`` is worth across the window: removed
-    once per read (first send + every re-read), on every one of ``sessions``
-    loading sessions — the exact event count ``_price_reduction`` prices in
-    dollars, so the two fields stay on the same basis.
+    """Actual token volume this file's reduction is worth across the window —
+    the EXACT event count ``_price_reduction`` prices in dollars, so the two
+    fields stay on the same basis (Critical Rule 28).
 
     ``None`` on the same "no evidence" condition ``_price_reduction`` returns
     ``None`` for: no session in the window was observed loading this file.
     """
-    if sessions <= 0 or tokens_saved <= 0:
+    if sessions <= 0:
         return None
-    return round(tokens_saved * _reads_per_session(calls_per_session) * sessions)
+    total = 0
+    if resident_tokens > 0:
+        total += resident_tokens * _reads_per_session(calls_per_session) * sessions
+    if on_demand_tokens > 0 and invocations > 0:
+        total += on_demand_tokens * invocations
+    return round(total)
+
+
+def _load_split(candidate: Any) -> tuple[int, int]:
+    """A scan candidate's reduction split into (always-resident, on-demand).
+
+    Reads the split ``core/summarize/candidates`` measured on the real text.
+    A candidate object that predates those fields — a stub from another caller,
+    or a hand-built fixture — carries neither half, and its whole reduction
+    falls back to always-resident (the pre-split behaviour) rather than
+    silently dropping to zero. The two halves of a real candidate can never
+    BOTH be zero while the whole is not: each is floored independently from a
+    slice of the same prose, and a candidate needs 100+ prose words to exist.
+    """
+    total = int(getattr(candidate, "est_tokens_saved", 0) or 0)
+    resident = int(getattr(candidate, "always_resident_tokens_saved", 0) or 0)
+    on_demand = int(getattr(candidate, "on_demand_tokens_saved", 0) or 0)
+    if resident <= 0 and on_demand <= 0:
+        return total, 0
+    return resident, on_demand
+
+
+def _invocation_counts(ctx: AnalyzerContext) -> InvocationCounts:
+    """Observed skill/command/agent invocations for the window.
+
+    Never raises: any failure degrades to ``observed=False``, which makes every
+    on-demand candidate report no window figure rather than one priced as if
+    nothing had ever been invoked.
+    """
+    from tokenjam.core.summarize.invocations import count_invocations
+    from tokenjam.core.transcript_cache import default_cache_dir
+
+    try:
+        return count_invocations(
+            ctx.since, ctx.until, cache_dir=default_cache_dir(ctx.config),
+        )
+    except Exception:
+        logger.debug("summarize analyzer: invocation scan failed", exc_info=True)
+        return InvocationCounts()
 
 
 @register("summarize")
@@ -346,7 +500,7 @@ def run(ctx: AnalyzerContext) -> None:
     catalog-default (a handful of known prompt files) so it's cheap enough for the
     polling Overview; a filesystem hiccup never breaks the optimize report.
     """
-    finding = SummarizeFinding(estimate_basis=SUMMARIZE_ESTIMATE_BASIS)
+    finding = SummarizeFinding(estimate_basis=_estimate_basis(None))
 
     # Window-guard: a dead telemetry window has no calls to realize a per-call
     # saving against, so — like every recoverable finding — contribute nothing
@@ -374,15 +528,37 @@ def run(ctx: AnalyzerContext) -> None:
     # Observed load counts + blended rates for the window. `None` (dead or
     # unpriced window) leaves every candidate tokens-only, exactly as before.
     profile = _load_profile(ctx)
+    # Observed invocation counts for the on-demand half of the model. Scanned
+    # once for the whole finding, off the same corpus + persistent parse cache
+    # `deadweight`/`relearn` already use.
+    invocations = _invocation_counts(ctx)
+    finding.estimate_basis = _estimate_basis(invocations)
+    finding.invocations_observed = invocations.observed
+    finding.invocations_total = invocations.total_invocations
+    finding.transcripts_examined = invocations.sessions_scanned
 
     candidates: list[SummarizeCandidate] = []
     for c in scan.candidates:
         if c.est_tokens_saved <= 0:
             continue
+        load_class = getattr(c, "load_class", load_semantics.ALWAYS)
+        on_demand = load_class in load_semantics.ON_DEMAND_CLASSES
+        resident_tokens, on_demand_tokens = _load_split(c)
         sessions = _sessions_loading(c.path, c.scope, profile) if profile else 0
         calls_per_session = (
             _repo_calls_per_session(c.path, c.scope, profile) if profile else 0.0
         )
+        # Rule 28 corollary (a): "never invoked" (a measurement) prices the
+        # body at zero; "no corpus to look in" is not a measurement, so the
+        # whole candidate degrades rather than being quietly priced as zero.
+        measured_invocations: int | None = None
+        if not on_demand:
+            measured_invocations = 0
+        elif invocations.observed:
+            measured_invocations = invocations.get(
+                getattr(c, "invocation_key", "") or "",
+            )
+        priceable = profile is not None and measured_invocations is not None
         candidates.append(SummarizeCandidate(
             path=c.path,
             kind="prompt" if c.is_prompt else "other",
@@ -390,16 +566,27 @@ def run(ctx: AnalyzerContext) -> None:
             est_tokens_saved=c.est_tokens_saved,
             total_chars=c.total_chars,
             reduction_pct=_reduction_pct(c.est_tokens_saved, c.total_chars),
+            load_class=load_class,
+            always_resident_tokens_saved=resident_tokens,
+            on_demand_tokens_saved=on_demand_tokens,
+            always_resident_chars=int(
+                getattr(c, "always_resident_chars", 0) or 0,
+            ) or (c.total_chars if not on_demand else 0),
+            invocations=measured_invocations if on_demand else None,
             sessions_loading=sessions,
             est_usd_saved=(
                 _price_reduction(
-                    c.est_tokens_saved, sessions, calls_per_session, profile.rates,
+                    resident_tokens, on_demand_tokens, sessions,
+                    calls_per_session, measured_invocations or 0, profile.rates,
                 )
-                if profile else None
+                if priceable and profile is not None else None
             ),
             est_tokens_saved_window=(
-                _tokens_saved_over_window(c.est_tokens_saved, sessions, calls_per_session)
-                if profile else None
+                _tokens_saved_over_window(
+                    resident_tokens, on_demand_tokens, sessions,
+                    calls_per_session, measured_invocations or 0,
+                )
+                if priceable else None
             ),
         ))
     finding.candidates = candidates
