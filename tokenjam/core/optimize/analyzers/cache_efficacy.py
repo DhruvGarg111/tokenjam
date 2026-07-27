@@ -211,12 +211,12 @@ THRASH_READ_WRITE_RATIO_THRESHOLD = 1.0
 # Inter-call gap (minutes) above which the thrash root cause is classified as
 # TTL expiry rather than prefix instability.
 TTL_CAUSE_GAP_MINUTES = 5.0
-# Reference fact (spec sanity table, Anthropic pricing): a 1-hour cache write
-# costs 2x the input rate, vs 1.25x for the default 5-minute write. The live
-# pricing table only tracks one cache-write rate per model, so this multiplier
-# is applied to the model's live `input_per_mtok` rather than a hardcoded $
-# figure — never a raw dollar rate baked into analyzer logic.
-ONE_HOUR_TTL_WRITE_MULTIPLIER = 2.0
+# A 1-hour cache write costs 2x the input rate, vs 1.25x for the default
+# 5-minute write. That relationship is rate DATA, not analyzer logic, so it lives
+# in the pricing table as the `cache-1h` variant (models.toml `[variants]`) and
+# is read through `get_rates(..., variant=ONE_HOUR_TTL_VARIANT)`; the model's
+# 1-hour write rate comes back on `cache_write_per_mtok` like any other rate.
+ONE_HOUR_TTL_VARIANT = "cache-1h"
 
 # A3 — Anthropic's cache breakpoint search looks back at most this many
 # content blocks (spec sanity table).
@@ -541,9 +541,9 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
             # survives the whole session instead of expiring every 5 min),
             # every other write/read event becomes a cache read.
             remaining_as_reads = max(0, len(write_events) + read_events - bursts)
+            ttl_rates = get_rates(provider, model, variant=ONE_HOUR_TTL_VARIANT) or rates
             cost_1hr = (
-                bursts * avg_write_tokens / 1_000_000
-                * (ONE_HOUR_TTL_WRITE_MULTIPLIER * rates.input_per_mtok)
+                bursts * avg_write_tokens / 1_000_000 * ttl_rates.cache_write_per_mtok
                 + remaining_as_reads * avg_write_tokens / 1_000_000
                 * rates.cache_read_per_mtok
             )

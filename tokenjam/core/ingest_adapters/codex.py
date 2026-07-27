@@ -259,6 +259,9 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
                 output_tokens=output_total,
                 cache_read_tokens=cached,
                 cache_write_tokens=0,
+                # Rollouts are history: price each turn at the rate in effect
+                # when it ran, not at today's.
+                at=start_time,
             )
             # Provenance for cost_usd (mirrors CostEngine.process_span on the
             # live path — Codex spans are pre-priced here and never reach it).

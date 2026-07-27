@@ -5,13 +5,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from tokenjam.core.models import NormalizedSpan
 from tokenjam.core.pricing import (
-    get_rates,
-    ModelRates,
-    DEFAULT_INPUT_PER_MTOK,
-    DEFAULT_OUTPUT_PER_MTOK,
     DEFAULT_CACHE_READ_PER_MTOK,
     DEFAULT_CACHE_WRITE_PER_MTOK,
+    DEFAULT_INPUT_PER_MTOK,
+    DEFAULT_OUTPUT_PER_MTOK,
+    STANDARD_VARIANT,
+    ModelRates,
     classify_pricing_source,
+    get_rates,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,17 @@ def calculate_cost(
     output_tokens: int,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
+    *,
+    at: datetime | None = None,
+    variant: str = STANDARD_VARIANT,
 ) -> float:
     """
     Calculate USD cost for a single LLM call.
+
+    `at` is when the call happened: pricing has a time axis, so a call made
+    before a rate change prices at the rate that actually billed it (defaults to
+    now, which is what a live call wants). `variant` is how it was bought —
+    `fast` mode and the Batch API bill the same model id at different rates.
 
     Returns cost rounded to 8 decimal places.
     Falls back to default rates if the provider/model is not in the pricing table.
@@ -47,7 +56,7 @@ def calculate_cost(
     ):
         return 0.0
 
-    rates = get_rates(provider, model)
+    rates = get_rates(provider, model, at=at, variant=variant)
     if rates is None:
         # Warn once per (provider, model) per process — see _UNKNOWN_MODEL_WARNED.
         key = (provider, model)
@@ -82,6 +91,30 @@ def calculate_cost(
         + (cache_write_tokens / 1_000_000) * rates.cache_write_per_mtok
     )
     return round(cost, 8)
+
+
+#: Request-param values that name a non-standard way of buying the same model.
+#: `speed` is Anthropic's fast mode (`speed="fast"`); anything else observed
+#: there is passed through as a variant name so a future variant prices itself
+#: as soon as the table carries a row for it, with `get_rates` warning once when
+#: it doesn't.
+_SPEED_PARAM = "speed"
+
+
+def rate_variant_for_span(span: NormalizedSpan) -> str:
+    """Which pricing variant a span was billed under (`standard` when unknown).
+
+    Read from the captured request params rather than inferred: `speed="fast"`
+    is a request parameter the caller sent, so it is the only honest evidence
+    that the premium rate applied. A span whose capture never saw it prices at
+    the standard rate — understating a fast call, which is the safe direction
+    for a figure checked against a bill, and `get_rates` says so in a warning.
+    """
+    params = span.request_params or {}
+    speed = params.get(_SPEED_PARAM)
+    if isinstance(speed, str) and speed and speed.lower() != STANDARD_VARIANT:
+        return speed.lower()
+    return STANDARD_VARIANT
 
 
 class CostEngine:
@@ -137,6 +170,11 @@ class CostEngine:
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
             cache_write_tokens=cache_write_tokens,
+            # Price the call at the rate in effect WHEN IT HAPPENED, and at the
+            # rate for how it was bought. Cost is computed once at ingest and
+            # stored, so a later rate change never moves this figure.
+            at=span.start_time,
+            variant=rate_variant_for_span(span),
         )
 
         span.cost_usd = cost
