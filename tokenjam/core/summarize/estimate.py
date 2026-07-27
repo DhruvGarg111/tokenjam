@@ -13,9 +13,9 @@ token figure is the one we can stand behind from the file alone.
 `DEFAULT_TARGET_RATIO` is what `session.prepare` puts in the rewriter's prompt
 ("summarize this to N words"). There is no retry loop and no gate on hitting it:
 whatever the model returns is accepted so long as the structure markers survive,
-and observed rewrites deliver materially less reduction than the target asks
-for. Using the ask as the estimate therefore overstates, so this module
-separates the two:
+and rewrites observed while building this delivered materially less than the
+target asks for. Using the ask as the estimate therefore overstates, so this
+module separates the two:
 
 * :data:`DEFAULT_TARGET_RATIO` — what the rewriter is asked for.
 * :func:`observed_prose_ratio` — what rewrites on THIS machine have actually
