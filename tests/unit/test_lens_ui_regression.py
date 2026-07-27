@@ -347,6 +347,32 @@ def _dashboard_src(html: str) -> str:
     return html[start:html.index("// Two lenses, one router", start)]
 
 
+def _cost_view_src(html: str) -> str:
+    """Just CostView's own body."""
+    start = html.index("function CostView")
+    return html[start:html.index("\nfunction TopTenantsPanel", start)]
+
+
+def test_cost_view_load_never_stacks_on_a_slow_backend(html):
+    # CostView's 30s poll used to call `load`/`loadTenants` with no in-flight
+    # guard at all, unlike useTriageRead's own reads. On a slow backend (a
+    # large real corpus) a poll tick firing before the previous cycle settled
+    # queued ANOTHER concurrent /cost + /cost/compare + /cost/cache request on
+    # top of whatever was still running, with no cap — and because the header
+    # renders `total`/`totalTokens` unconditionally (not gated on having ever
+    # received an answer), the page showed a fabricated "$0.0000 (0 tokens)"
+    # for as long as the pile-up kept every request from ever finishing,
+    # looking identical to "no spend" even though the real figure was sitting
+    # in a request that never got to run. Both `load` and `loadTenants` now
+    # guard the same way useTriageRead's `refresh` does.
+    src = _cost_view_src(html)
+    assert "if (loadInFlight.current) return;" in src
+    assert "if (tenantsInFlight.current) return;" in src
+    # The header must never claim a figure before the first answer lands.
+    assert "const hasCostData = costResp != null;" in src
+    assert "!hasCostData ? null : useTokens" in src
+
+
 def _budget_src(html: str) -> str:
     """Just BudgetView's own body."""
     start = html.index("function BudgetView")

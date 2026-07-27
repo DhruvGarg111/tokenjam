@@ -5934,7 +5934,30 @@ function CostView({ params }) {
     totalTokens: 0, framing: null, costResp: null, compare: null, cacheResp: null });
   const [tenants, setTenants] = useState({ loading: true, data: null });
 
+  // In-flight + generation guards, same mechanism as useTriageRead (see its
+  // comment for the failure this prevents): on a slow backend, `refreshAll`'s
+  // 30s poll used to fire `load`/`loadTenants` again regardless of whether the
+  // previous call was still outstanding, with NO cap. Every poll tick added
+  // another concurrent `/cost`, `/cost/compare` and `/cost/cache` request on
+  // top of whatever was still running, and the browser's per-origin connection
+  // limit (6 in Chrome) meant those requests queued behind the growing pile
+  // rather than actually racing it — including the very FIRST load, which
+  // could then starve indefinitely behind its own later polls. The header
+  // (which renders unconditionally, not gated on `loading`) kept showing the
+  // zeroed initial state the whole time, looking identical to "no spend" even
+  // though the real answer was sitting in a request that never got a
+  // connection slot. `gen` also drops a stale settle exactly like
+  // useTriageRead, so a since/groupBy/agentId change never lets an
+  // in-flight-at-the-time-of-the-change request overwrite the newer one.
+  const loadGen = useRef(0);
+  const loadInFlight = useRef(false);
+  const tenantsGen = useRef(0);
+  const tenantsInFlight = useRef(false);
+
   const load = useCallback(async (opts = {}) => {
+    if (loadInFlight.current) return;
+    const g = ++loadGen.current;
+    loadInFlight.current = true;
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
     try {
       const tableGroup = groupBy === 'total' ? 'day' : groupBy;
@@ -5954,10 +5977,13 @@ function CostView({ params }) {
       const totalTokens = d.total_tokens != null
         ? d.total_tokens
         : (d.rows || []).reduce((s, r) => s + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
-      setSt({ loading: false, error: null, rows: d.rows || [], total: d.total_cost_usd || 0,
-        totalTokens, framing: d.framing || null, costResp: d, compare, cacheResp });
+      if (loadGen.current === g) loadInFlight.current = false;
+      setSt(s => (loadGen.current === g ? { loading: false, error: null, rows: d.rows || [],
+        total: d.total_cost_usd || 0, totalTokens, framing: d.framing || null,
+        costResp: d, compare, cacheResp } : s));
     } catch (e) {
-      setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
+      if (loadGen.current === g) loadInFlight.current = false;
+      setSt(s => (loadGen.current === g ? { ...s, loading: false, error: e.message || String(e) } : s));
     }
   }, [since, groupBy, agentId]);
 
@@ -5966,12 +5992,17 @@ function CostView({ params }) {
   // from tenant doesn't blank this panel. Best-effort: a failure renders the
   // panel's own error text, never the whole Cost screen.
   const loadTenants = useCallback(async (opts = {}) => {
+    if (tenantsInFlight.current) return;
+    const g = ++tenantsGen.current;
+    tenantsInFlight.current = true;
     setTenants(s => ({ ...s, loading: true }));
     try {
       const d = await api('/cost/tenants', { since, agent_id: agentId || undefined, top_n: 10 }, opts);
-      setTenants({ loading: false, data: d });
+      if (tenantsGen.current === g) tenantsInFlight.current = false;
+      if (tenantsGen.current === g) setTenants({ loading: false, data: d });
     } catch (e) {
-      setTenants({ loading: false, data: null, error: e.message || String(e) });
+      if (tenantsGen.current === g) tenantsInFlight.current = false;
+      if (tenantsGen.current === g) setTenants({ loading: false, data: null, error: e.message || String(e) });
     }
   }, [since, agentId]);
   // Same cadence as `load` below, in ONE effect: Refresh/the 30s poll used to
@@ -5985,9 +6016,26 @@ function CostView({ params }) {
     loadTenants(opts);
   }, [load, loadTenants]);
 
-  // Poll bypasses the GET cache so the 30s refresh always hits the network.
+  // Reset-on-change, split from the poll timer below exactly like
+  // useTriageRead: the CLEANUP here (not the poll effect's) is what bumps both
+  // generations and clears both in-flight flags BEFORE the next effect run's
+  // `refreshAll()` fires — so a since/groupBy/agentId change always gets a
+  // fresh request immediately (the guard in `load`/`loadTenants` would
+  // otherwise see the OLD window's fetch still marked in-flight and silently
+  // no-op the new one), and the old request's eventual settle is dropped by
+  // the generation check rather than clobbering the new window's result.
   useEffect(() => {
     refreshAll();
+    return () => {
+      loadGen.current++; loadInFlight.current = false;
+      tenantsGen.current++; tenantsInFlight.current = false;
+    };
+  }, [refreshAll]);
+
+  // Poll bypasses the GET cache so the 30s refresh always hits the network —
+  // but the in-flight guards above mean a poll tick that lands while the prior
+  // cycle is still running is a no-op instead of stacking another cycle.
+  useEffect(() => {
     const t = setInterval(() => refreshAll({ noCache: true }), 30000);
     return () => clearInterval(t);
   }, [refreshAll]);
@@ -6022,7 +6070,14 @@ function CostView({ params }) {
   // an invented one), so it shows tokens only; every other mode shows the
   // dollar figure PLUS the token total so neither unit is ever the only one
   // on screen.
-  const totalDisplay = useTokens
+  // `costResp` is the last COMPLETE payload, or null for none ever received —
+  // the same "held answer" contract useTriageRead's states use. Rendering
+  // `total`/`totalTokens` before the first successful load would show the
+  // initial-state zero as though it were the real figure (indistinguishable
+  // from "spent nothing this window"); a slow first load must stay honestly
+  // unknown, never a fabricated $0.
+  const hasCostData = costResp != null;
+  const totalDisplay = !hasCostData ? null : useTokens
     ? (fmtTokens(totalTokens) + ' tokens')
     : `${fmtFramedDollar(total, framing)} (${fmtTokens(totalTokens)} tokens)`;
   const tableMode = groupBy === 'total' ? 'day' : groupBy;
@@ -6062,8 +6117,8 @@ function CostView({ params }) {
           <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
           ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line — the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
           <div class="chart-meta">
-            <span class="chart-total">${totalDisplay}</span>
-            <${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />
+            <span class="chart-total">${hasCostData ? totalDisplay : html`<span class="shimmer" style="display:inline-block;width:140px;height:15px;vertical-align:middle"></span>`}</span>
+            ${hasCostData ? html`<${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />` : null}
           </div>
         </div>
         ${loading ? html`<div class="shimmer" style="height:160px"></div>`
