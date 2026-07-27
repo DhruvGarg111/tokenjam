@@ -361,6 +361,17 @@ def test_the_pricing_qualifier_banner_is_gone(html):
     assert 'class="qualifier"' not in html
 
 
+def test_the_recoverable_waste_heading_has_no_estimated_badge(html):
+    # The amber "estimated" pill beside the "Recoverable waste" band heading
+    # was removed by product decision; the heading text itself is unchanged.
+    # The .estimated-tag CLASS survives (Optimize/Summarize still use it on
+    # their own per-analyzer tiles), so this pins the Dashboard heading's
+    # markup specifically rather than banning the class outright.
+    assert '<div class="band-label">Recoverable waste</div>' in html
+    assert 'Recoverable waste <span class="estimated-tag"' not in html
+    assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)
+
+
 def test_no_panel_is_gated_on_a_page_wide_load_flag(html):
     # The single `d` state object is what coupled them; every panel now reads its
     # own useTriageRead result.
