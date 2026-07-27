@@ -8337,8 +8337,21 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const effStack = stackApplies ? stack : '';
 
   const [st, setSt] = useState({ loading: true, error: null, resp: null });
+  // Generation guard, same mechanism as useTriageRead: `load` has no polling
+  // of its own, but a rapid pivot/window change (metric, group_by, stack,
+  // since, or any filter) fires a NEW request while an OLDER one from the
+  // previous selection can still be in flight. Without dropping a stale
+  // settle, a slower earlier request (e.g. "By: Model", which groups more
+  // rows) landing AFTER a faster later one ("By: Tenant") would silently
+  // overwrite the current selection's chart/legend with the PREVIOUS
+  // dimension's data — the chart would show tenant grouping while the legend
+  // still lists model names, a rendered element outliving the data it
+  // described. `gen` makes only the settle matching the CURRENT selection
+  // allowed to write state.
+  const gen = useRef(0);
 
   const load = useCallback(async () => {
+    const g = ++gen.current;
     setSt(s => ({ ...s, loading: true, error: null }));
     try {
       const resp = await api('/analytics', {
@@ -8346,8 +8359,10 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         agent_id: fAgent || undefined, provider: fProvider || undefined,
         model: fModel || undefined, tool: fTool || undefined,
       });
-      setSt({ loading: false, error: null, resp });
-    } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
+      if (gen.current === g) setSt({ loading: false, error: null, resp });
+    } catch (e) {
+      if (gen.current === g) setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
   }, [metric, groupBy, stack, chart, since, fAgent, fProvider, fModel, fTool]);
 
   useEffect(() => {

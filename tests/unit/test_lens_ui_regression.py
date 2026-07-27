@@ -341,6 +341,33 @@ def test_overview_fetches_in_parallel(html):
     assert "await Promise.all([" in html
 
 
+def _analytics_view_src(html: str) -> str:
+    """Just AnalyticsView's own body."""
+    start = html.index("function AnalyticsView")
+    return html[start:html.index("\nfunction ", start + 1)]
+
+
+def test_analytics_view_drops_a_stale_pivot_settle(html):
+    # AnalyticsView's `load` re-fetches /analytics on every metric/group_by/
+    # stack/chart/since/filter change (the Dashboard's embedded "Explore"
+    # pivot, and the standalone Analytics screen). It has no polling of its
+    # own, but a rapid pivot change (e.g. switching "By: Model" -> "By:
+    # Tenant") fires a NEW request while an older one can still be in flight.
+    # A slower EARLIER request (grouping by model touches more rows) landing
+    # AFTER a faster LATER one (grouping by tenant, which this corpus has none
+    # of) used to unconditionally overwrite state — the chart/KPIs would show
+    # the new dimension's (near-empty) data while something derived from the
+    # stale response lingered, and more generally the displayed pivot could
+    # silently disagree with the selector. Only a settle whose generation
+    # still matches the current one may write state, mirroring useTriageRead's
+    # drop-stale-settle rule.
+    src = _analytics_view_src(html)
+    assert "const gen = useRef(0);" in src
+    assert "const g = ++gen.current;" in src
+    assert "if (gen.current === g) setSt({ loading: false, error: null, resp });" in src
+    assert "if (gen.current === g) setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));" in src
+
+
 def _dashboard_src(html: str) -> str:
     """Just DashboardView's own body, for assertions about what this page fetches."""
     start = html.index("function DashboardView")
