@@ -22,12 +22,18 @@ if TYPE_CHECKING:
               help="Output machine-readable JSON")
 @click.option("--no-color", is_flag=True)
 @click.option("--db", "db_path", default=None, help="Database path override")
+@click.option("--projects-root", "projects_root", default=None,
+              type=click.Path(file_okay=False, path_type=str),
+              help="Transcript/config root the filesystem-reading analyzers "
+                   "(deadweight, relearn, summarize) may read. Defaults to "
+                   "~/.claude/projects; an explicit --db scopes them off "
+                   "unless this is given.")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("-v", "--verbose", is_flag=True)
 @click.pass_context
 def cli(ctx: click.Context, config_path: str | None, output_json: bool,
-        no_color: bool, db_path: str | None, agent: str | None,
-        verbose: bool) -> None:
+        no_color: bool, db_path: str | None, projects_root: str | None,
+        agent: str | None, verbose: bool) -> None:
     """tj - a cost-saving utility for AI agents."""
     ctx.ensure_object(dict)
 
@@ -58,6 +64,13 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     config = load_config(config_path)
     if db_path:
         config.storage.path = db_path
+        # Recorded, not inferred: the filesystem-reading analyzers scope
+        # themselves off whether the store was NAMED by the caller, and once
+        # the override lands on `storage.path` that is no longer recoverable.
+        # See `core/optimize/scope.py` for the contract.
+        config.storage.path_is_explicit = True
+    if projects_root:
+        config.optimize.projects_root = projects_root
 
     # Commands that don't need a database connection
     no_db_commands = {

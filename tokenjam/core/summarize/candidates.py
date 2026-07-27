@@ -183,11 +183,29 @@ def _pricing_mode(config: "TjConfig | None") -> str:
 # Target enumeration
 # --------------------------------------------------------------------------- #
 
-def _global_targets() -> list[Path]:
+def _expand_home(raw: str, home: Path | None) -> str:
+    """Expand a leading `~` against `home`, or the real home when None.
+
+    `home` is the analyzer scope's home (see `core/optimize/scope.py`). The
+    catalog's global paths span several agent homes (`~/.claude`, `~/.gemini`,
+    `~/.codex`), so scoping them means redirecting `~` itself — anything
+    narrower would leave most of the catalog reading the operator's real files
+    while a `--projects-root` was in force.
+    """
+    if home is None:
+        return os.path.expanduser(raw)
+    if raw == "~":
+        return str(home)
+    if raw.startswith("~/"):
+        return str(home / raw[2:])
+    return raw
+
+
+def _global_targets(home: Path | None = None) -> list[Path]:
     """Catalog global/system paths ("~" expanded; glob patterns expanded)."""
     out: list[Path] = []
     for raw in load_catalog().global_paths:
-        ep = os.path.expanduser(raw)
+        ep = _expand_home(raw, home)
         if any(ch in ep for ch in "*?["):
             out.extend(Path(x) for x in sorted(_glob.glob(ep)))
         else:
@@ -267,6 +285,7 @@ def list_candidates(
     min_prose_words: int = MIN_PROSE_WORDS,
     ratio: float = DEFAULT_TARGET_RATIO,
     extra_exts: Iterable[str] = (),
+    home: "Path | None" = None,
 ) -> ScanResult:
     """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes."""
     mode = _pricing_mode(config)
@@ -293,7 +312,7 @@ def list_candidates(
     # 1) Globals (the floor) — always catalog prompts, unless suppressed.
     globals_checked = 0
     if include_global:
-        for gp in _global_targets():
+        for gp in _global_targets(home):
             if gp.exists():
                 globals_checked += 1
                 _add(gp, "global")

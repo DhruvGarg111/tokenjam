@@ -15,6 +15,7 @@ from tokenjam.core.config import TjConfig
 from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
+from tokenjam.core.optimize.scope import resolve_analyzer_scope
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
     OptimizeReport,
@@ -268,6 +269,11 @@ def build_report(
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
         persona=persona,
+        # Resolved exactly once, here, for the same reason the persona is: an
+        # analyzer that re-derives its own root from `Path.home()` or the env
+        # var escapes whatever scope the caller drew, and `--db` stops meaning
+        # anything. See `core/optimize/scope.py`.
+        scope=resolve_analyzer_scope(config),
     )
 
     selected = set(findings) if findings is not None else set(ANALYZER_REGISTRY.keys())
@@ -513,6 +519,11 @@ def report_from_dict(d: dict) -> OptimizeReport:
         notes=list(d.get("notes") or []),
         findings=findings,
         persona=str(d.get("persona", "unknown")),
+        # Round-tripped like every other report-level field: a report rebuilt
+        # from the daemon's cache must still be able to say its filesystem
+        # analyzers never scanned, or a served surface silently reads an
+        # unscanned report as a scanned-and-empty one.
+        filesystem_scan_skipped_reason=d.get("filesystem_scan_skipped_reason") or None,
     )
 
 

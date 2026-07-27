@@ -356,10 +356,21 @@ def run(ctx: AnalyzerContext) -> None:
         ctx.report.findings["summarize"] = finding
         return
 
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.summarize.candidates import list_candidates
 
+    scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
+    if not scope.enabled:
+        # Same reason the sibling filesystem analyzers bail: the catalog scan
+        # reads always-loaded prompt files off the operator's real home, which
+        # an explicit `--db` was asked to isolate away from.
+        ctx.report.filesystem_scan_skipped_reason = scope.reason
+        ctx.report.findings["summarize"] = finding
+        return
+
     try:
-        scan = list_candidates(config=ctx.config)  # read-only, never writes
+        # read-only, never writes; `home` scopes the catalog's `~` paths
+        scan = list_candidates(config=ctx.config, home=scope.home)
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the
         # optimize report — but log it: a silent broad-swallow would hide a real
