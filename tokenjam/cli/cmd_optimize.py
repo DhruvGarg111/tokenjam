@@ -2802,11 +2802,13 @@ def _render_stream_usage(
         )
 
     for site in finding.call_sites[:5]:
-        label = f"{site.provider}/{site.model or 'unknown model'}"
-        if site.agent_id:
-            label += f" [dim]({site.agent_id})[/dim]"
+        # Escape the analyzer-supplied values, never the markup around them:
+        # a model id or agent name can contain brackets Rich would eat as a
+        # style tag, but escaping the whole line prints the tags literally.
+        label = _rich_escape(f"{site.provider}/{site.model or 'unknown model'}")
+        agent = f" [dim]({_rich_escape(site.agent_id)})[/dim]" if site.agent_id else ""
         console.print(
-            f"       [bold]{_rich_escape(label)}[/bold]  "
+            f"       [bold]{label}[/bold]{agent}  "
             f"{site.affected_calls} call"
             f"{'s' if site.affected_calls != 1 else ''} across "
             f"{site.sessions} session{'s' if site.sessions != 1 else ''}"

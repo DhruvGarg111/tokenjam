@@ -321,6 +321,22 @@ def test_the_finding_carries_no_canonical_recoverable_dollar_field(db, cfg):
         assert all(not hasattr(s, banned) for s in finding.call_sites), banned
 
 
+def test_the_serialized_finding_cannot_mint_an_overview_waste_tile(db, cfg):
+    """The Overview's recoverable-waste band is registry-driven off the
+    PRESENCE of `past_overspend_usd` in the serialized finding dict — it reads
+    the payload, not the dataclass — so the key must be absent there too."""
+    from tokenjam.core.optimize import report_to_dict
+
+    _seed_openai_app(db)
+    report = build_report(db, cfg, since=utcnow() - timedelta(days=WINDOW_DAYS))
+
+    payload = report_to_dict(report)["findings"]["stream-usage"]
+
+    assert "past_overspend_usd" not in payload
+    assert payload["undercounted_usd"] is not None  # the figure IS published
+    assert payload["accounting_note"]
+
+
 def test_stream_usage_is_absent_from_the_second_selection_surface():
     """`COST_ANALYZERS` is an independent selector feeding the Review inbox.
     Absence from it is what keeps this finding off the money surfaces."""
