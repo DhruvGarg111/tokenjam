@@ -98,6 +98,22 @@ _RATE_FIELDS: tuple[str, ...] = tuple(
 )
 
 
+#: SQL expression bucketing a span into its UTC calendar day, for an aggregate
+#: query that must stay priceable. Every ``valid_from`` in the pricing table is a
+#: DATE, so a rate can only change at UTC midnight — which makes a UTC-day bucket
+#: the coarsest grouping guaranteed never to straddle a rate change. Group by
+#: this alongside (provider, model) and select ``MIN(start_time)`` as the
+#: bucket's instant, and a rolled-up query satisfies the per-span convention
+#: without being rewritten span by span. Pinned by
+#: `test_rate_boundaries_are_utc_midnight`, which is what makes the guarantee
+#: real rather than a comment.
+#:
+#: The explicit ``AT TIME ZONE 'UTC'`` is load-bearing: casting a TIMESTAMPTZ to
+#: DATE uses the session timezone, so on a non-UTC host the "day" would be a
+#: local day, which straddles UTC midnight by the offset.
+SPAN_UTC_DAY_SQL = "CAST(start_time AT TIME ZONE 'UTC' AS DATE)"
+
+
 def span_instant(when: datetime | None, *, window_start: datetime) -> datetime:
     """The instant to price a span at, given its recorded time may be absent.
 

@@ -24,11 +24,13 @@ from __future__ import annotations
 import json
 import statistics
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import blended_rates, rates_at
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
+from tokenjam.core.pricing import STANDARD_VARIANT, ModelRates
 
 # Minimum input volume to surface a recommendation. Below this, the
 # absolute savings are negligible regardless of efficacy.
@@ -63,6 +65,12 @@ class CacheEfficacyRow:
     efficacy:      float           # cache_tokens / (input_tokens + cache_tokens)
     support:       str             # full | best_effort | unsupported
     flagged:       bool            # surfaced as a recommendation candidate
+    # Earliest span in this (provider, model) group — the instant the row is
+    # priced at. A row is a whole-window aggregate with no instant of its own,
+    # and the pricing table has a time axis; without this the row would price at
+    # today's list rate no matter how old its traffic is. Defaulted for
+    # round-trip of payloads written before the field existed.
+    priced_at:     datetime | None = None
 
 
 # Realistic cache-read efficacy ceiling. The recoverable estimate measures the
@@ -104,6 +112,8 @@ class CacheEfficacyFinding:
 
 def estimate_cache_recoverable(
     rows: list[CacheEfficacyRow],
+    *,
+    window_start: datetime | None = None,
 ) -> tuple[float | None, int | None]:
     """Estimate recoverable spend from closing the cache-efficacy gap.
 
@@ -112,14 +122,31 @@ def estimate_cache_recoverable(
     tokens, and price the shifted tokens at the input-vs-cache rate delta.
     Returns (usd, tokens) summed across rows, or (None, None) when no row has a
     caching dimension to recover against.
-    """
-    from tokenjam.core.pricing import get_rates
 
+    Each row is priced at its OWN earliest traffic (``priced_at``), not at
+    today's list rate — the pricing table has a time axis and this analyzer
+    looks backwards. A row is a whole-window aggregate, so this is the "window
+    bound nearest the traffic" fallback the convention in
+    `tokenjam.core.optimize.span_pricing` sanctions rather than the per-span
+    ideal: exact whenever the row's window holds one rate, and biased to the
+    older rate when it does not.
+
+    A row written before ``priced_at`` existed falls back to ``window_start``,
+    then to the earliest instant any sibling row carries (they all come from one
+    window). A row with none of the three is SKIPPED, not priced at today's
+    rate: an old payload should lose a term, not silently gain a wrong one.
+    """
+    fallback = window_start or min(
+        (r.priced_at for r in rows if r.priced_at is not None), default=None,
+    )
     total_usd = 0.0
     total_tokens = 0
     any_priced = False
     for r in rows:
-        rates = get_rates(r.provider, r.model)
+        at = r.priced_at or fallback
+        if at is None:
+            continue
+        rates = rates_at(r.provider, r.model, at)
         if rates is None or rates.cache_read_per_mtok <= 0:
             continue
         rate_delta = rates.input_per_mtok - rates.cache_read_per_mtok
@@ -158,7 +185,8 @@ def _compute_rows(
     rows = conn.execute(
         f"SELECT provider, model, "
         f"COALESCE(SUM(input_tokens), 0) AS in_tok, "
-        f"COALESCE(SUM(cache_tokens), 0) AS cache_tok "
+        f"COALESCE(SUM(cache_tokens), 0) AS cache_tok, "
+        f"MIN(start_time) AS priced_at "
         f"FROM spans WHERE {where} "
         f"GROUP BY provider, model "
         f"ORDER BY in_tok + cache_tok DESC",
@@ -166,7 +194,7 @@ def _compute_rows(
     ).fetchall()
 
     result: list[CacheEfficacyRow] = []
-    for provider, model, in_tok, cache_tok in rows:
+    for provider, model, in_tok, cache_tok, priced_at in rows:
         in_tok = int(in_tok or 0)
         cache_tok = int(cache_tok or 0)
         total = in_tok + cache_tok
@@ -188,6 +216,7 @@ def _compute_rows(
             efficacy=round(efficacy, 4),
             support=support,
             flagged=flagged,
+            priced_at=priced_at,
         ))
     return result
 
@@ -399,6 +428,30 @@ def _dominant_provider_model(calls: list[_AgentCallRow]) -> tuple[str, str]:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
+def _rates_for_calls(
+    provider: str, model: str, calls: list[_AgentCallRow],
+    *, variant: str = STANDARD_VARIANT,
+) -> ModelRates | None:
+    """The one rate for a per-agent candidate, across the calls it is built from.
+
+    Every figure these candidates produce is ``tokens x rate-component``, so the
+    volume-weighted blend across the calls' own timestamps is exactly what
+    pricing each call at its own rate and summing would give — see
+    `tokenjam.core.optimize.span_pricing`. Weighted by each call's total billed
+    tokens, the volume all three candidate types derive their figures from.
+    """
+    return blended_rates(
+        provider, model,
+        [
+            (
+                c.start_time,
+                float(c.input_tokens + c.cache_tokens + c.cache_write_tokens),
+            )
+            for c in calls
+        ],
+        variant=variant,
+    )
+
 def _inter_call_gap_minutes(calls: list[_AgentCallRow]) -> list[float]:
     """Gaps (minutes) between consecutive calls within the same session."""
     by_session: dict[str, list[Any]] = {}
@@ -467,7 +520,7 @@ def _classify_a1(
     provider, model = _dominant_provider_model(calls)
     prefix = int(_percentile(input_tokens, 0.25))
     sessions = len({c.session_id for c in calls})
-    rates = get_rates(provider, model)
+    rates = _rates_for_calls(provider, model, calls)
     usd: float | None = None
     tokens: int | None = None
     if rates is not None and prefix > 0:
@@ -515,7 +568,7 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
     cause = "ttl" if gap_p50 > TTL_CAUSE_GAP_MINUTES else "instability"
 
     provider, model = _dominant_provider_model(calls)
-    rates = get_rates(provider, model)
+    rates = _rates_for_calls(provider, model, calls)
     wasted_usd: float | None = None
     if rates is not None:
         wasted_usd = round(
@@ -541,7 +594,9 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
             # survives the whole session instead of expiring every 5 min),
             # every other write/read event becomes a cache read.
             remaining_as_reads = max(0, len(write_events) + read_events - bursts)
-            ttl_rates = get_rates(provider, model, variant=ONE_HOUR_TTL_VARIANT) or rates
+            ttl_rates = _rates_for_calls(
+                provider, model, calls, variant=ONE_HOUR_TTL_VARIANT,
+            ) or rates
             cost_1hr = (
                 bursts * avg_write_tokens / 1_000_000 * ttl_rates.cache_write_per_mtok
                 + remaining_as_reads * avg_write_tokens / 1_000_000
@@ -624,7 +679,7 @@ def _classify_a3(
         return None
 
     provider, model = _dominant_provider_model(calls)
-    rates = get_rates(provider, model)
+    rates = _rates_for_calls(provider, model, calls)
     usd: float | None = None
     tokens: int | None = None
     if rates is not None:
@@ -708,7 +763,10 @@ def run(ctx: AnalyzerContext) -> None:
     )
     if not rows and not uncached and not thrash and not lookback:
         return
-    rec_usd, rec_tokens = estimate_cache_recoverable(rows) if rows else (None, None)
+    rec_usd, rec_tokens = (
+        estimate_cache_recoverable(rows, window_start=ctx.since)
+        if rows else (None, None)
+    )
     ctx.report.findings["cache"] = CacheEfficacyFinding(
         rows=rows,
         flagged=[r for r in rows if r.flagged],

@@ -43,14 +43,14 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-from tokenjam.core.cost import calculate_cost
 from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import price_span, rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
 
 # "Produced little": total output tokens below this look like a small task.
 # Used by over_provisioned only — over_powered dropped this clause (see module
@@ -128,6 +128,12 @@ class SubagentRow:
     # cohort the over_provisioned estimate baselines against (see
     # `_dispatch_cohort_key`). Defaulted for round-trip of older payloads.
     agent_id:           str = ""
+    # When this subagent's earliest span ran. Carried so the row can be priced
+    # at the rate that actually billed it rather than at today's list price —
+    # the pricing table has a time axis, and a row is an aggregate with no
+    # instant of its own otherwise. Defaulted for round-trip of older payloads;
+    # `span_pricing.span_instant` supplies the window start when it is absent.
+    started_at:         datetime | None = None
 
 
 @dataclass
@@ -202,7 +208,8 @@ def _compute_rows(
         f"COALESCE(SUM(output_tokens), 0) AS out_tok, "
         f"COALESCE(SUM(cache_tokens), 0) AS cache_tok, "
         f"COALESCE(SUM(cache_write_tokens), 0) AS cache_w_tok, "
-        f"COALESCE(SUM(cost_usd), 0.0) AS cost "
+        f"COALESCE(SUM(cost_usd), 0.0) AS cost, "
+        f"MIN(start_time) AS started_at "
         f"FROM spans WHERE {where} "
         f"GROUP BY session_id, sub_agent_id "
         f"ORDER BY cost DESC",
@@ -211,7 +218,7 @@ def _compute_rows(
 
     result: list[SubagentRow] = []
     for (sid, said, row_agent_id, model, provider, llm_calls, tool_calls,
-         in_tok, out_tok, cache_tok, cache_w_tok, cost) in rows:
+         in_tok, out_tok, cache_tok, cache_w_tok, cost, started_at) in rows:
         in_tok = int(in_tok or 0)
         out_tok = int(out_tok or 0)
         cache_tok = int(cache_tok or 0)
@@ -238,6 +245,7 @@ def _compute_rows(
             cost_usd=round(cost, 8),
             provider=provider,
             flags=flags,
+            started_at=started_at,
         ))
     return result
 
@@ -270,9 +278,12 @@ def _subagent_downgrade_target(provider: str, model: str) -> str | None:
     return lookup_downgrade(provider, model)
 
 
-def _alt_cost_for_row(r: SubagentRow, alt_model: str) -> float | None:
+def _alt_cost_for_row(
+    r: SubagentRow, alt_model: str, *, window_start: datetime,
+) -> float | None:
     """Cost of ``r``'s exact token mix priced at ``alt_model``, or ``None`` when
     the alternative has no pricing data. Routes through
+    :func:`tokenjam.core.optimize.span_pricing.price_span`, and so through
     :func:`tokenjam.core.cost.calculate_cost` — the ONE place that prices all
     four token classes (input + output + cache read + cache write) — rather
     than hand-rolling the arithmetic here a second time (a second hand-rolled
@@ -281,17 +292,22 @@ def _alt_cost_for_row(r: SubagentRow, alt_model: str) -> float | None:
     side). Every token class the original was billed for is priced on the
     alternative side too, so the delta reflects only the rate difference —
     never an artificial saving from dropping a token class the cheaper model
-    would still be charged for."""
-    rates = get_rates(r.provider, alt_model)
-    if rates is None:
-        return None
-    return calculate_cost(
-        r.provider, alt_model, r.input_tokens, r.output_tokens,
+    would still be charged for.
+
+    Priced at the row's OWN start, matching the rate that billed
+    ``r.cost_usd``. Pricing the alternative at today's rate while the observed
+    side is historical would put a rate change into the delta and call it a
+    model-swap saving."""
+    return price_span(
+        r.provider, alt_model, at=span_instant(r.started_at, window_start=window_start),
+        input_tokens=r.input_tokens, output_tokens=r.output_tokens,
         cache_read_tokens=r.cache_tokens, cache_write_tokens=r.cache_write_tokens,
     )
 
 
-def _over_powered_recoverable(rows: list[SubagentRow]) -> tuple[float, int]:
+def _over_powered_recoverable(
+    rows: list[SubagentRow], *, window_start: datetime,
+) -> tuple[float, int]:
     """Conservative recoverable estimate over the over_powered subagents.
 
     For each subagent flagged ``over_powered`` (ran on a premium-tier model,
@@ -318,7 +334,7 @@ def _over_powered_recoverable(rows: list[SubagentRow]) -> tuple[float, int]:
         alt = _subagent_downgrade_target(r.provider, r.model)
         if not alt:
             continue
-        alt_cost = _alt_cost_for_row(r, alt)
+        alt_cost = _alt_cost_for_row(r, alt, window_start=window_start)
         if alt_cost is None:
             continue
         delta = r.cost_usd - alt_cost
@@ -342,7 +358,8 @@ def _dispatch_cohort_key(r: SubagentRow) -> tuple[str, str]:
 
 
 def _over_provisioned_recoverable(
-    rows: list[SubagentRow], *, min_cohort_sessions: int = MIN_COHORT_SESSIONS,
+    rows: list[SubagentRow], *, window_start: datetime,
+    min_cohort_sessions: int = MIN_COHORT_SESSIONS,
 ) -> tuple[float, int]:
     """Recoverable estimate over the over_provisioned subagents.
 
@@ -389,7 +406,9 @@ def _over_provisioned_recoverable(
         excess = int(round((r.input_tokens + r.cache_tokens) - median))
         if excess <= 0:
             continue
-        rates = get_rates(r.provider, r.model)
+        rates = rates_at(
+            r.provider, r.model, span_instant(r.started_at, window_start=window_start),
+        )
         if rates is None:
             continue
         recoverable_usd += excess / 1_000_000 * rates.cache_read_per_mtok
@@ -433,9 +452,9 @@ def run(ctx: AnalyzerContext) -> None:
     # baseline — see `_over_provisioned_recoverable`). None when neither
     # component priced anything — the finding then renders unranked (honest
     # empty estimate), exactly like it did before either could quantify.
-    op_usd, op_tokens = _over_powered_recoverable(flagged)
+    op_usd, op_tokens = _over_powered_recoverable(flagged, window_start=ctx.since)
     ctx_usd, ctx_tokens = _over_provisioned_recoverable(
-        rows, min_cohort_sessions=min_cohort_sessions,
+        rows, window_start=ctx.since, min_cohort_sessions=min_cohort_sessions,
     )
     recoverable_usd = op_usd + ctx_usd
     recoverable_tokens = op_tokens + ctx_tokens

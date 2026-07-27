@@ -122,7 +122,7 @@ def test_cache_recoverable_matches_hand_calculation():
     row = CacheEfficacyRow(
         provider="anthropic", model="claude-opus-4-7",
         input_tokens=1_000_000, cache_tokens=0, efficacy=0.0,
-        support="full", flagged=True,
+        support="full", flagged=True, priced_at=utcnow() - timedelta(days=1),
     )
     usd, tokens = estimate_cache_recoverable([row])
     assert tokens == 800_000
@@ -136,6 +136,7 @@ def test_cache_recoverable_none_when_no_caching_dimension():
         provider="madeup", model="no-such-model",
         input_tokens=1_000_000, cache_tokens=0, efficacy=0.0,
         support="unsupported", flagged=False,
+        priced_at=utcnow() - timedelta(days=1),
     )
     usd, tokens = estimate_cache_recoverable([row])
     assert usd is None
@@ -146,7 +147,7 @@ def test_cache_recoverable_none_when_already_at_ceiling():
     row = CacheEfficacyRow(
         provider="anthropic", model="claude-opus-4-7",
         input_tokens=1_000_000, cache_tokens=4_000_000, efficacy=0.95,
-        support="full", flagged=False,
+        support="full", flagged=False, priced_at=utcnow() - timedelta(days=1),
     )
     usd, tokens = estimate_cache_recoverable([row])
     assert usd is None and tokens is None
