@@ -308,9 +308,18 @@ class ReuseCluster:
 class ReuseFinding:
     """Clusters of sessions with structurally repeated planning calls."""
     clusters:      list[ReuseCluster] = field(default_factory=list)
+    # What clustering ACTUALLY ran on, derived from the analyzed window — never
+    # from the `[capture] prompts` toggle. Echoing the toggle let a report
+    # declare "with_prompt_prefix" while every cluster member's
+    # `prompt_prefix_hash` was None, i.e. advertise content matching while
+    # silently degrading to tool-signature-only clustering.
     capture_mode:  Literal["tool_sequence_only", "with_prompt_prefix"] = (
         "tool_sequence_only"
     )
+    # Measured share of the window's planning calls that carried prompt text,
+    # 0.0-1.0. `None` means "no planning call to measure", never 0.0 — the
+    # difference between an unanswered question and a measured absence.
+    prompt_capture_coverage: float | None = None
     # Recoverable-savings contract (#111). The aggregate uses the conservative
     # cache-reuse number (avg cost x (reps - 1)), never the script-replacement
     # upper bound (avg cost x reps): the first planning call in a cluster was

@@ -2003,9 +2003,12 @@ def _render_reuse(
             console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
         return
 
+    # `capture_mode` states what clustering ACTUALLY ran on (measured per
+    # window), so the degrade is named without asserting a cause the finding
+    # cannot know — the accompanying hint carries the remedy.
     mode_note = (
-        " [dim](tool-sequence only — enable capture.prompts for finer "
-        "clustering)[/dim]"
+        " [dim](tool-sequence only — no prompt text was captured for these "
+        "calls)[/dim]"
         if finding.capture_mode == "tool_sequence_only"
         else ""
     )
@@ -2014,6 +2017,8 @@ def _render_reuse(
         f"{'s' if len(finding.clusters) != 1 else ''} of repeated planning "
         f"detected{mode_note}"
     )
+    if finding.capture_mode == "tool_sequence_only" and finding.hint:
+        console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
 
     for c in finding.clusters[:5]:
         sig_preview = " → ".join(c.tool_signature) if c.tool_signature else "(no tools)"

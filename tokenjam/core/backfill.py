@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
@@ -420,10 +420,18 @@ def parse_claude_code_session(
         start_time = ts or datetime.now(tz=timezone.utc)
 
         # Per-message content (opt-in, gated by [capture]). Default-off leaves
-        # llm_attrs == {"source": ...} so existing behavior is byte-for-byte
-        # unchanged. Keys match GenAIAttributes so downstream consumers (and
+        # llm_attrs carrying provenance only — the ingest source and the call
+        # id below, no content. Keys match GenAIAttributes so downstream consumers (and
         # alert content-stripping) treat backfilled content like live content.
-        llm_attrs: dict = {"source": _CLAUDE_CODE_SOURCE}
+        # `tj.call_id` names the API CALL this span observes, so a second
+        # observer of the same call can be recognised rather than counted
+        # again. The assistant message key is that name on this path: it is
+        # stable across resumes and replays (see core.usage), which is exactly
+        # what the span_id is already derived from.
+        llm_attrs: dict = {
+            "source": _CLAUDE_CODE_SOURCE,
+            TjAttributes.CALL_ID: message_key,
+        }
         if capture.prompts and pending_prompt.strip():
             llm_attrs[GenAIAttributes.PROMPT_CONTENT] = pending_prompt
         if capture.prompts:
@@ -686,6 +694,40 @@ def session_record_from_parsed(
     )
 
 
+def session_totals_delta(
+    parsed: ParsedSession, plan_tier: str, inserted: list[NormalizedSpan],
+) -> SessionRecord:
+    """The session row this file's write ADDS, not the session's whole life.
+
+    A Claude Code session is split across files sharing one session_id (the
+    main-thread transcript plus each `subagents/agent-*.jsonl`), and a backfill
+    ingests them one at a time. `session_record_from_parsed` describes what ONE
+    file saw, so writing it with replace semantics leaves the row holding the
+    last file's totals while `SUM(spans)` holds all of them — the drift
+    `session_cost_drift` reports. Summing over the spans this write actually
+    INSERTED and adding that (`upsert_session(..., accumulate_totals=True)`)
+    makes the row agree with the spans by construction, and makes a re-run of
+    the same file add zero, since nothing is inserted the second time.
+
+    Summed over the inserted spans rather than over the parsed file for the
+    same reason: a span suppressed as another observer's duplicate, or already
+    present, contributed nothing to `SUM(spans)` and must contribute nothing
+    here either.
+    """
+    return replace(
+        session_record_from_parsed(parsed, plan_tier),
+        total_cost_usd=sum(s.cost_usd or 0.0 for s in inserted),
+        input_tokens=sum(s.input_tokens or 0 for s in inserted),
+        output_tokens=sum(s.output_tokens or 0 for s in inserted),
+        cache_tokens=sum(s.cache_tokens or 0 for s in inserted),
+        # Not carried by `session_record_from_parsed` at all, which is its own
+        # under-report: cache WRITES are the priciest bucket.
+        cache_write_tokens=sum(s.cache_write_tokens or 0 for s in inserted),
+        tool_call_count=sum(1 for s in inserted if s.tool_name),
+        error_count=sum(1 for s in inserted if s.status_code == SpanStatus.ERROR),
+    )
+
+
 # --- Ingest -----------------------------------------------------------------
 
 # New spans accumulated before a columnar bulk-append flush. Batching the INSERT
@@ -711,14 +753,15 @@ def _record_insert_outcome(
 
 
 def _apply_session(
-    db, parsed: ParsedSession, plan_tier: str, reingest: bool, result: BackfillResult
+    db, parsed: ParsedSession, plan_tier: str, reingest: bool, result: BackfillResult,
+    scan: DuplicateScan | None = None,
 ) -> None:
     """Per-session insert path (reingest, no-conn fallback, and the bulk-flush
     error fallback). Mirrors the historical per-file behavior including the
     `files_failed` / `sample_errors` accounting on a DB error."""
     try:
         inserted, retagged = _insert_session_idempotent(
-            db, parsed, plan_tier=plan_tier, reingest=reingest
+            db, parsed, plan_tier=plan_tier, reingest=reingest, scan=scan,
         )
     except Exception as exc:
         result.files_failed += 1
@@ -728,14 +771,126 @@ def _apply_session(
     _record_insert_outcome(result, parsed, inserted, retagged)
 
 
-def _dedup_new_spans(conn, parsed: ParsedSession) -> list[NormalizedSpan]:
+def _dedup_new_spans(
+    conn, parsed: ParsedSession, scan: DuplicateScan | None = None,
+) -> list[NormalizedSpan]:
     """Return `parsed`'s spans not already present in the DB — a cheap, indexed,
     chunked existence check. Kept PER SESSION (not batched) so `spans_ingested`
     can be counted the moment a session is processed, giving the progress
     callback monotonically-increasing counts while the actual columnar INSERT is
-    deferred to a batched flush."""
+    deferred to a batched flush.
+
+    Also drops calls the LIVE path already recorded (`scan` carries the
+    running per-call tally across this run's files) — see
+    `_drop_calls_another_source_recorded`."""
     existing = _existing_span_ids(conn, [s.span_id for s in parsed.spans])
-    return [s for s in parsed.spans if s.span_id not in existing]
+    new_spans = [s for s in parsed.spans if s.span_id not in existing]
+    return _drop_calls_another_source_recorded(
+        conn, parsed.session_id, new_spans, scan,
+    )
+
+
+@dataclass
+class DuplicateScan:
+    """Per-run state for cross-source duplicate suppression.
+
+    Threaded through one backfill run so two questions are each asked once
+    rather than once per file:
+
+    * `other_source_present` — is there any non-backfill observation in this
+      store at all? A duplicate needs two observers, so on a machine that has
+      only ever backfilled every per-session lookup would be wasted work.
+    * `suppressed` — how many observations of each call this run has already
+      dropped, keyed (session_id, call fingerprint). A suppressed span is never
+      stored, so without this tally the same duplicate budget would be spent
+      again on the next file of the same session and a genuinely repeated call
+      would be dropped.
+    """
+    other_source_present: bool | None = None
+    suppressed: dict[tuple[str, str], int] = field(default_factory=dict)
+
+
+def _drop_calls_another_source_recorded(
+    conn,
+    session_id: str,
+    new_spans: list[NormalizedSpan],
+    scan: DuplicateScan | None = None,
+) -> list[NormalizedSpan]:
+    """Drop LLM spans describing a call the live path already recorded.
+
+    A session that ran while `tj serve` was up is observed twice: once live, as
+    it happened, and again here when its transcript is parsed. The two
+    observations mint different span_ids, so the existence check above cannot
+    see the overlap and every cost figure prices the call twice. They agree on
+    the call's billed shape, which is what `accounting.call_fingerprint` names.
+
+    Only ever collapses ACROSS ingest sources, and only up to the number of
+    observations the other source actually recorded (`duplicate_budget`) — two
+    identically-shaped calls in one session are two real calls, and dropping
+    one would under-report spend. `scan` carries that budget across the files
+    of one session, which arrive as separate `ParsedSession`s.
+
+    Best-effort: any lookup failure keeps every span. Tool and marker spans are
+    never candidates — they carry no money and no billed shape.
+    """
+    if conn is None or not session_id or not new_spans:
+        return new_spans
+
+    from tokenjam.core.db import (
+        has_spans_from_another_source, stored_observations_by_call,
+    )
+    from tokenjam.core.optimize import accounting
+
+    candidates = [
+        s for s in new_spans
+        if s.name == GenAIAttributes.SPAN_LLM_CALL and s.model and not s.tool_name
+    ]
+    if not candidates:
+        return new_spans
+    if scan is not None:
+        if scan.other_source_present is None:
+            try:
+                scan.other_source_present = has_spans_from_another_source(
+                    conn, _CLAUDE_CODE_SOURCE,
+                )
+            except Exception as exc:
+                logger.warning("duplicate-observation probe skipped: %s", exc)
+                scan.other_source_present = False
+        if not scan.other_source_present:
+            return new_spans
+    try:
+        stored = stored_observations_by_call(conn, session_id)
+    except Exception as exc:  # never let the guard break the ingest
+        logger.warning("duplicate-observation check skipped: %s", exc)
+        return new_spans
+    if not stored:
+        return new_spans
+
+    tally = scan.suppressed if scan is not None else {}
+    dropped: set[str] = set()
+    for span in candidates:
+        fingerprint = accounting.call_fingerprint(
+            session_id, span.model,
+            span.input_tokens or 0, span.output_tokens or 0,
+            span.cache_tokens or 0, span.cache_write_tokens or 0,
+        )
+        by_source = stored.get(fingerprint)
+        if not by_source:
+            continue
+        key = (session_id, fingerprint)
+        already = tally.get(key, 0)
+        if accounting.duplicate_budget(by_source, _CLAUDE_CODE_SOURCE, already) <= 0:
+            continue
+        tally[key] = already + 1
+        dropped.add(span.span_id)
+
+    if not dropped:
+        return new_spans
+    logger.debug(
+        "backfill skipped %d span(s) the live path already recorded (session=%s)",
+        len(dropped), session_id,
+    )
+    return [s for s in new_spans if s.span_id not in dropped]
 
 
 def _flush_pending_spans(db, pending: list[NormalizedSpan]) -> None:
@@ -803,6 +958,9 @@ def ingest_claude_code(
     # a per-file DELETE scoped to session_id would wipe the sibling files' spans,
     # since they carry the same session_id + source tag (#294/#300).
     keep_by_session: dict[str, set[str]] = {}
+    # Cross-source duplicate-suppression state, shared by every file this run
+    # touches (see DuplicateScan).
+    duplicate_scan = DuplicateScan()
 
     # A fresh full backfill (the ~8min/5.6GB hot path) dedups + counts + upserts
     # each session eagerly (so `result` — and any live progress display reading it
@@ -844,8 +1002,15 @@ def ingest_claude_code(
 
         if use_bulk:
             try:
-                new_spans = _dedup_new_spans(conn, parsed)
-                db.upsert_session(session_record_from_parsed(parsed, plan_tier))
+                new_spans = _dedup_new_spans(conn, parsed, duplicate_scan)
+                # The session row gains exactly what this file's spans add.
+                # `new_spans` is what the deferred flush will INSERT, so the
+                # row and `SUM(spans)` agree once the flush lands, and a
+                # re-run of the same file adds nothing.
+                db.upsert_session(
+                    session_totals_delta(parsed, plan_tier, new_spans),
+                    accumulate_totals=True,
+                )
             except Exception as exc:
                 result.files_failed += 1
                 if len(result.sample_errors) < 5:
@@ -867,7 +1032,7 @@ def ingest_claude_code(
             if len(pending) >= _BULK_FLUSH_SPAN_TARGET:
                 _flush_pending()
         else:
-            _apply_session(db, parsed, plan_tier, reingest, result)
+            _apply_session(db, parsed, plan_tier, reingest, result, duplicate_scan)
 
         if progress is not None:
             try:
@@ -910,11 +1075,17 @@ def ingest_claude_code(
         except Exception as exc:  # never let reconciliation break the ingest
             logger.warning("stale-span reconciliation skipped: %s", exc)
 
-    # A Claude Code session is split across files that share one session_id
-    # (main thread + subagents/agent-*.jsonl). The per-file upsert above uses
-    # replace semantics, so each touched session row must be reconciled to the
-    # SUM of its spans -- otherwise it holds only the last file's totals.
-    # Idempotent: a re-run also repairs rows written by an earlier backfill.
+    # Reconcile each touched session row to the SUM of its spans. The per-file
+    # upsert above now ADDS its own spans' totals rather than replacing the row
+    # (see session_totals_delta), so a run against a current DB finds nothing to
+    # change -- this is no longer the mechanism that makes multi-file sessions
+    # add up, it is the repair for the two things the write cannot cover:
+    #   * the stale-scheme purge just above DELETED rows, moving SUM(spans)
+    #     under a row nobody rewrote;
+    #   * a row written by an older build, whose replacing per-file upserts left
+    #     it holding only the last file's totals, is a wrong base for any later
+    #     accumulation.
+    # Idempotent, so it stays safe to run unconditionally.
     recompute = getattr(db, "recompute_session_totals_from_spans", None)
     if recompute is not None and result.seen_session_ids:
         recompute(sorted(result.seen_session_ids))
@@ -1003,7 +1174,8 @@ def _existing_span_ids(conn, span_ids: list[str]) -> set[str]:
 
 
 def _insert_session_idempotent(
-    db, parsed: ParsedSession, plan_tier: str = "unknown", reingest: bool = False
+    db, parsed: ParsedSession, plan_tier: str = "unknown", reingest: bool = False,
+    scan: DuplicateScan | None = None,
 ) -> tuple[int, int]:
     """
     Insert spans + session record; skip spans already present.
@@ -1043,18 +1215,26 @@ def _insert_session_idempotent(
     retagged = 0
     if conn is None:
         # Fall back to plain inserts when running against a backend that has no conn
+        written: list[NormalizedSpan] = []
         for span in parsed.spans:
             try:
                 db.insert_span(span)
+                written.append(span)
                 inserted += 1
             except Exception:
                 continue
-        db.upsert_session(session_record_from_parsed(parsed, plan_tier))
+        db.upsert_session(
+            session_totals_delta(parsed, plan_tier, written), accumulate_totals=True,
+        )
         return inserted, retagged
 
     span_ids = [s.span_id for s in parsed.spans]
     existing = _existing_span_ids(conn, span_ids)
-    new_spans = [s for s in parsed.spans if s.span_id not in existing]
+    new_spans = _drop_calls_another_source_recorded(
+        conn, parsed.session_id,
+        [s for s in parsed.spans if s.span_id not in existing],
+        scan,
+    )
     if new_spans:
         db.bulk_insert_spans(new_spans)
         inserted = len(new_spans)
@@ -1078,7 +1258,9 @@ def _insert_session_idempotent(
             )
             retagged += 1
 
-    db.upsert_session(session_record_from_parsed(parsed, plan_tier))
+    db.upsert_session(
+        session_totals_delta(parsed, plan_tier, new_spans), accumulate_totals=True,
+    )
     return inserted, retagged
 
 

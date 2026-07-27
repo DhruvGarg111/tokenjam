@@ -7492,7 +7492,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
     } else if (name === 'reuse') {
       body = (fd.clusters || []).length ? html`
-        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${fd.capture_mode === 'tool_sequence_only' ? ' (tool-sequence only: enable capture.prompts for finer clustering)' : ''}.</div>
+        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${fd.capture_mode === 'tool_sequence_only' ? ' (tool-sequence only: no prompt text was captured for these calls)' : ''}.</div>
+        ${fd.capture_mode === 'tool_sequence_only' && fd.hint ? html`<div class="opt-line dim">${fd.hint}</div>` : null}
         <table class="opt-table"><thead><tr><th>Repeats</th><th>Signature</th><th>Reuse</th><th>Script</th></tr></thead>
           <tbody>${fd.clusters.slice(0, 5).map(c => html`<tr><td>${c.repetitions}×</td><td class="mono">${(c.tool_signature || []).join(' → ').slice(0, 60)}</td><td>${fmtFramedSavings(c.cache_reuse_recoverable_usd, c.cache_reuse_recoverable_tokens, framing)}</td><td>${fmtFramedSavings(c.script_replacement_recoverable_usd, c.script_replacement_recoverable_tokens, framing)}</td></tr>`)}</tbody></table>
         ${fd.clusters[0].caveat ? html`<div class="opt-caveat">! ${fd.clusters[0].caveat}</div>` : null}`

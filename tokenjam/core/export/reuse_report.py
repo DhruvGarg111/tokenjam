@@ -300,10 +300,16 @@ def render_html(
 
     mode_hint = ""
     if finding.capture_mode == "tool_sequence_only":
+        # `capture_mode` is measured over the analyzed window, so this states
+        # the degrade; `hint` carries whichever remedy actually applies (the
+        # toggle is off, or it is on and nothing was captured anyway).
+        remedy = html.escape(finding.hint) if finding.hint else (
+            "Set <code>[capture] prompts = true</code> for narrower, more "
+            "accurate clusters."
+        )
         mode_hint = (
-            "<div class='hint'>Clustered on tool sequences only. Set "
-            "<code>[capture] prompts = true</code> for narrower, more accurate "
-            "clusters.</div>"
+            "<div class='hint'>Clustered on tool sequences only: no prompt "
+            f"text was captured for these calls. {remedy}</div>"
         )
 
     sections: list[str] = []

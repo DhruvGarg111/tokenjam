@@ -24,6 +24,20 @@ from tokenjam.sdk.integrations._request_capture import (
 logger = logging.getLogger(__name__)
 
 
+def _record_response_id(span, response: Any) -> None:
+    """Stamp the provider's own id for this response onto the span.
+
+    The id (`msg_...`) names the API CALL rather than this observation of it,
+    so a second observer of the same call — a transcript backfill, a sibling
+    exporter — can be recognised as a restatement instead of counted again.
+    See `core.optimize.accounting`. Best-effort: a response object without an
+    id just leaves the span unstamped, which is what every span carried before.
+    """
+    response_id = getattr(response, "id", None)
+    if isinstance(response_id, str) and response_id:
+        span.set_attribute(GenAIAttributes.RESPONSE_ID, response_id)
+
+
 class AnthropicIntegration:
     name = "anthropic"
     installed = False
@@ -80,6 +94,7 @@ class AnthropicIntegration:
                     span.set_attribute(GenAIAttributes.CONVERSATION_ID, conv_id)
             try:
                 response = integration._original_create(self_msg, *args, **kwargs)
+                _record_response_id(span, response)
                 if hasattr(response, "usage"):
                     span.set_attribute(
                         GenAIAttributes.INPUT_TOKENS,
@@ -194,6 +209,8 @@ class _StreamWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         result = self._stream.__exit__(exc_type, exc_val, exc_tb)
         final_message = getattr(self._stream, "get_final_message", lambda: None)()
+        if final_message is not None:
+            _record_response_id(self._span, final_message)
         if final_message and hasattr(final_message, "usage"):
             self._span.set_attribute(
                 GenAIAttributes.INPUT_TOKENS,
