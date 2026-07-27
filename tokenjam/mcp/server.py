@@ -445,18 +445,24 @@ def _tool_get_budget_headroom(conn, config, agent_id: str) -> dict:
         status_data = _http_get("/api/v1/status", {"agent_id": agent_id})
         agents = status_data.get("agents", [])
         today_cost = 0.0
+        today_tokens = 0
         session_cost = 0.0
+        session_tokens = 0
         if agents:
             a = agents[0]
             today_cost = float(a.get("cost_today", 0.0))
+            today_tokens = int(a.get("tokens_today", 0) or 0)
             session_cost = float(a.get("total_cost_usd", 0.0))
+            session_tokens = int(a.get("input_tokens", 0) or 0) + int(a.get("output_tokens", 0) or 0)
         return {
             "agent_id": agent_id,
             "daily_limit_usd": daily_limit,
             "daily_spent_usd": today_cost,
+            "daily_spent_tokens": today_tokens,
             "daily_remaining_usd": (daily_limit - today_cost) if daily_limit else None,
             "session_limit_usd": session_limit,
             "session_spent_usd": session_cost,
+            "session_spent_tokens": session_tokens,
             "session_remaining_usd": (session_limit - session_cost) if session_limit else None,
         }
 
@@ -464,26 +470,32 @@ def _tool_get_budget_headroom(conn, config, agent_id: str) -> dict:
 
     from tokenjam.utils.time_parse import utcnow
 
-    today_cost = float(conn.execute(
-        "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans "
-        "WHERE agent_id = $1 AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $2",
+    today_row = conn.execute(
+        "SELECT COALESCE(SUM(cost_usd), 0.0), "
+        "COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0) "
+        "FROM spans WHERE agent_id = $1 AND CAST(start_time AT TIME ZONE 'UTC' AS DATE) = $2",
         [agent_id, utcnow().date()],
-    ).fetchone()[0])
+    ).fetchone()
+    today_cost = float(today_row[0] or 0.0)
+    today_tokens = int(today_row[1] or 0)
 
     active_session = conn.execute(
-        "SELECT COALESCE(total_cost_usd, 0.0) FROM sessions "
-        "WHERE agent_id = $1 AND status = 'active' ORDER BY started_at DESC LIMIT 1",
+        "SELECT COALESCE(total_cost_usd, 0.0), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0) "
+        "FROM sessions WHERE agent_id = $1 AND status = 'active' ORDER BY started_at DESC LIMIT 1",
         [agent_id],
     ).fetchone()
     session_cost = float(active_session[0]) if active_session else 0.0
+    session_tokens = int(active_session[1] or 0) + int(active_session[2] or 0) if active_session else 0
 
     return {
         "agent_id": agent_id,
         "daily_limit_usd": budget.daily_usd,
         "daily_spent_usd": today_cost,
+        "daily_spent_tokens": today_tokens,
         "daily_remaining_usd": (budget.daily_usd - today_cost) if budget.daily_usd else None,
         "session_limit_usd": budget.session_usd,
         "session_spent_usd": session_cost,
+        "session_spent_tokens": session_tokens,
         "session_remaining_usd": (budget.session_usd - session_cost) if budget.session_usd else None,
     }
 
@@ -645,6 +657,8 @@ def _tool_list_traces(db, agent_id: str | None, since: str | None, limit: int) -
                 "start_time": t.start_time.isoformat() if t.start_time else None,
                 "duration_ms": t.duration_ms,
                 "cost_usd": t.cost_usd,
+                "input_tokens": t.input_tokens,
+                "output_tokens": t.output_tokens,
                 "status_code": t.status_code,
                 "span_count": t.span_count,
             }
