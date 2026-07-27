@@ -6412,8 +6412,13 @@ function BudgetView({ params }) {
   const [alerts, setAlerts] = useState([]);
   const [error, setError] = useState(null);
 
+  // The two /alerts reads already catch their own failures (a transient
+  // blip on either non-essential read must never take the page down with
+  // it), so only /budget itself -- the one essential read -- can still
+  // reach the outer .catch below. That catch names WHICH request failed and
+  // its status rather than surfacing api()'s bare `API <status>` message.
   const load = () => Promise.all([
-    api('/budget'),
+    api('/budget').catch(e => { throw new Error('/budget failed: ' + e.message); }),
     api('/alerts', { type: 'cost_budget_daily', since: '24h' })
       .then(d => d.alerts || [])
       .catch(() => []),
@@ -6423,6 +6428,7 @@ function BudgetView({ params }) {
   ]).then(([budget, daily, session]) => {
     setData(budget);
     setAlerts([...daily, ...session].sort((a, b) => b.fired_at.localeCompare(a.fired_at)));
+    setError(null);
   }).catch(e => setError(e.message));
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, []);
@@ -6473,7 +6479,12 @@ function BudgetView({ params }) {
     }
   };
 
-  if (error) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
+  // A failure blanks the WHOLE page only when there is no prior answer at
+  // all to fall back to. Once /budget has answered once, a later failed
+  // refresh (this view polls every 10s) must not throw away the last good
+  // data still on screen -- it renders as a scoped banner above the content
+  // instead, same pattern the Dashboard uses for its own /cost failures.
+  if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
   if (!data) return html`<div class="empty">Loading...</div>`;
 
   const agentEntries = Object.entries(data.agents || {});
@@ -6489,6 +6500,12 @@ function BudgetView({ params }) {
 
   return html`
     <div class="page-title">Budget</div>
+    ${error ? html`
+      <div class="band-msg err" style="margin-bottom:14px">
+        <b>Couldn't refresh budget data.</b>
+        <p>${error}</p>
+        <p>Showing the last data successfully loaded; everything below is unaffected.</p>
+      </div>` : null}
     ${provider ? html`<div class="filters"><button class="btn" onClick=${() => navigate('budget', {}, {})}>provider: ${provider} ✕</button></div>` : null}
 
     <div style="font-size:13px;font-weight:600;margin-bottom:8px">Per-agent budget caps</div>

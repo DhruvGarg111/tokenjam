@@ -308,6 +308,55 @@ def _dashboard_src(html: str) -> str:
     return html[start:html.index("// Two lenses, one router", start)]
 
 
+def _budget_src(html: str) -> str:
+    """Just BudgetView's own body."""
+    start = html.index("function BudgetView")
+    end = html.index("\nfunction ", start + 1)
+    return html[start:end]
+
+
+def test_budget_non_essential_alerts_reads_never_reach_the_outer_catch(html):
+    """Both /alerts reads already catch their own failures and resolve to []
+    -- the ONLY read that can still reach the outer .catch is /budget itself,
+    the essential one. A transient blip on either alerts read must never take
+    the whole page down with it."""
+    budget = _budget_src(html)
+    assert budget.count(".catch(() => [])") == 2
+    assert "api('/alerts', { type: 'cost_budget_daily', since: '24h' })\n      .then(d => d.alerts || [])\n      .catch(() => [])" in budget
+    assert "api('/alerts', { type: 'cost_budget_session', since: '24h' })\n      .then(d => d.alerts || [])\n      .catch(() => [])" in budget
+
+
+def test_budget_essential_read_failure_names_the_request(html):
+    """api() throws a bare `API <status>` (no context on which request it
+    was); that information used to be discarded on a /budget failure, which
+    surfaced as an unlabeled generic message. /budget's own .catch now names
+    the request before it reaches setError."""
+    budget = _budget_src(html)
+    assert "api('/budget').catch(e => { throw new Error('/budget failed: ' + e.message); })" in budget
+
+
+def test_budget_view_failure_does_not_blank_content_it_already_has(html):
+    """The error branch used to be a bare `if (error) return <blank page>`,
+    so ANY later failed refresh (this view polls every 10s) discarded the
+    last successfully loaded budget data and replaced the whole page with one
+    unlabeled red string. Now the full-page error only fires when there is no
+    prior answer at all (`error && !data`); once data has landed once, a
+    later failure renders as a scoped .band-msg.err banner ABOVE the still-
+    rendered tables, same pattern the Dashboard uses for its own /cost
+    failures, and setError(null) on a successful load clears a stale banner."""
+    budget = _budget_src(html)
+    assert "if (error && !data) return html`<div class=\"empty\" style=\"color:var(--error)\">${error}</div>`;" in budget
+    assert "if (error) return html`<div class=\"empty\"" not in budget
+    assert 'class="band-msg err"' in budget
+    assert "Couldn't refresh budget data." in budget
+    assert "setError(null);" in budget
+    # The per-agent and provider tables still render below the banner --
+    # the banner never replaces them.
+    banner_idx = budget.index('class="band-msg err"')
+    assert budget.index("Per-agent budget caps", banner_idx) > banner_idx
+    assert budget.index("Provider spend forecast", banner_idx) > banner_idx
+
+
 def test_overview_error_handling_is_asymmetric(html):
     # /cost is load-bearing: NO .catch, so its failure surfaces the error state.
     # The other panels still degrade individually so one failing panel never
