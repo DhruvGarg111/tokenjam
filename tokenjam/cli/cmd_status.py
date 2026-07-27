@@ -185,7 +185,7 @@ def _recoverable_teaser(db, config) -> str | None:
         if report.downgrade is not None:
             usd = report.downgrade.past_overspend_usd
             if usd is not None:
-                estimates.append((usd, report.downgrade.past_overspend_tokens or 0))
+                estimates.append((usd, getattr(report.downgrade, "past_overspend_tokens", None) or 0))
         for finding in (report.findings or {}).values():
             usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:

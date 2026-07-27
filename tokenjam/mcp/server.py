@@ -162,6 +162,8 @@ class _HttpDB:
                     start_time=datetime.fromisoformat(t["start_time"]) if t.get("start_time") else None,
                     duration_ms=t.get("duration_ms"),
                     cost_usd=t.get("cost_usd"),
+                    input_tokens=t.get("input_tokens", 0),
+                    output_tokens=t.get("output_tokens", 0),
                     status_code=t.get("status_code"),
                     span_count=t.get("span_count", 0),
                 ))
