@@ -152,18 +152,100 @@ def test_registered_clean_repo_offers_the_model_swap(tmp_path):
     assert "redeploy" in card.advise_text
 
 
-def test_unregistered_agent_falls_back_to_the_one_paste_fix(tmp_path):
+def test_unregistered_agent_asks_for_the_path_instead_of_giving_up(tmp_path):
+    """An unregistered agent used to be the weakest row the inbox had: a measured,
+    deterministic model swap reduced to a copy box and a "Mark applied" that only
+    recorded the user doing it by hand. Eleven live rows read that way, all for the
+    same reason — nobody had told tokenjam where those agents' source lives, and it
+    will not go looking (`config.AgentConfig.source_path` is opt-in, never
+    inferred). That is a QUESTION, so the row asks it.
+
+    `apply_kind` stays UNSET while the path is missing. That is not an oversight:
+    with no registered path there is no deterministic edit yet, so the row must not
+    route to the apply endpoint that assumes one.
+    """
     card = [
         p for p in cp.cost_proposals_from_report(
             _report(downgrade=_downsize_finding()), config=_cfg(tmp_path),
         )
         if p.analyzer == "downsize"
     ][0]
-    assert card.apply_capable is False
-    assert card.advise_only is True
-    assert "no local source path is registered" in card.apply_blocked_reason
+    assert card.needs_source_path is True
+    assert card.apply_capable is True
+    assert card.advise_only is False
+    assert card.apply_kind == ""
+    assert card.target_path == ""
+    assert card.source_path == ""
+    # The models the swap would substitute travel with it, so the row can name
+    # them before any path is known.
+    assert card.current_model == "claude-opus-4-8"
+    assert card.proposed_model == "claude-haiku-4-5"
+    # Nothing is BLOCKED, so nothing claims to be.
+    assert card.apply_blocked_reason == ""
+    # The copyable fix is still there for a reader who would rather do it by hand.
     assert card.one_paste_fix
     assert "claude-haiku-4-5" in card.one_paste_fix
+    # And the row asks, rather than announcing a target it does not have.
+    assert "point it at" in card.advise_text
+    assert "redeploy" in card.advise_text
+
+
+def test_an_apply_capable_swap_carries_its_quality_caveat_outside_the_prose(tmp_path):
+    """Critical Rule 14 under a one-click write. The token-cost delta IS measured;
+    quality equivalence is never claimed, and a button makes that distinction
+    easier to lose. So the sentence rides its own field, which the card renders
+    OUTSIDE the collapsed description — a caveat behind a "Read more" would not
+    have counted as visible.
+
+    One constant feeds both the field and the prose, so the sentence beside the
+    button and the sentence in the paragraph cannot drift into two different
+    strengths of claim.
+    """
+    unregistered = [
+        p for p in cp.cost_proposals_from_report(
+            _report(downgrade=_downsize_finding()), config=_cfg(tmp_path),
+        )
+        if p.analyzer == "downsize"
+    ][0]
+
+    repo = _git_repo(tmp_path)
+    (repo / "agent.py").write_text('M = "claude-opus-4-8"\n', encoding="utf-8")
+    _commit_all(repo)
+    registered = [
+        p for p in cp.cost_proposals_from_report(
+            _report(downgrade=_downsize_finding()),
+            config=_cfg(tmp_path, {"svc-a": AgentConfig(source_path=str(repo))}),
+        )
+        if p.analyzer == "downsize"
+    ][0]
+
+    for card in (unregistered, registered):
+        assert card.apply_caveat == cp.MODEL_SWAP_QUALITY_CAVEAT
+        assert "NOT measured here" in card.apply_caveat
+        # Same words in the prose, from the same constant.
+        assert cp.MODEL_SWAP_QUALITY_CAVEAT in card.advise_text
+
+
+def test_a_gate_the_reader_cannot_answer_stays_advise_only(tmp_path):
+    """The middle outcome must not swallow the third one. A registered path whose
+    repo fails a LATER gate names something no question can fix, so that row keeps
+    its one-paste artifact and says why — it does not get an Apply button that
+    would fail on the click.
+    """
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    (plain / "agent.py").write_text('M = "claude-opus-4-8"\n', encoding="utf-8")
+    card = [
+        p for p in cp.cost_proposals_from_report(
+            _report(downgrade=_downsize_finding()),
+            config=_cfg(tmp_path, {"svc-a": AgentConfig(source_path=str(plain))}),
+        )
+        if p.analyzer == "downsize"
+    ][0]
+    assert card.needs_source_path is False
+    assert card.apply_capable is False
+    assert card.apply_caveat == ""
+    assert "not a git repository" in card.apply_blocked_reason
 
 
 def test_dirty_repo_falls_back_and_says_why(tmp_path):

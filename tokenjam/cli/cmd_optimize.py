@@ -2057,8 +2057,13 @@ def _render_subagent(
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
-def _relearn_observed_cost(cluster, *, pricing_mode: str = "api") -> str:
+def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
     """What this cluster ALREADY COST, as a short display string.
+
+    Named for the field it reads. It was ``_relearn_observed_cost``, which named
+    a ``CostProposal`` field it never touched and which no longer exists at all;
+    a helper named after the wrong field is how the next reader concludes the
+    purge was incomplete.
 
     Reads ``past_overspend_*`` straight off the cluster and derives nothing:
     the figure is ungated on purpose (a cluster with no fix template in our
@@ -2177,7 +2182,7 @@ def _render_relearn(
     # our side is a gap in OUR fix library, never a finding that the failure
     # was free (CLAUDE.md anti-pattern 32b).
     for c in finding.clusters[:10]:
-        cost = _relearn_observed_cost(c, pricing_mode=pricing_mode)
+        cost = _relearn_past_overspend(c, pricing_mode=pricing_mode)
         console.print(
             f"       [bold]{c.signature}[/bold]  "
             f"{c.occurrences} occurrence{'s' if c.occurrences != 1 else ''} / "

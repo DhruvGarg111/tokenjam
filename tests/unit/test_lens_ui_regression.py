@@ -19,6 +19,26 @@ def html() -> str:
     return _UI.read_text(encoding="utf-8")
 
 
+def _no_comments(text: str) -> str:
+    """`text` with `//` line comments stripped, for absence assertions.
+
+    This file is heavily commented BY DESIGN: the UI records why each decision was
+    made, including the wording of strings that were deliberately removed. A plain
+    `assert "X" not in html` therefore matches the explanation and fails on correct
+    code. That trap bit seven separate assertions during the inbox redesign before
+    this helper existed, each time costing a debug cycle to rediscover.
+
+    Deliberately naive: it drops from `//` to end of line only when `//` is the
+    first non-whitespace on the line, so a `//` inside a URL or a regex literal is
+    left alone. Block comments and JSX-style `${/* ... */ ''}` interpolations are
+    NOT stripped, so keep using markup-shaped assertions where those are in play.
+    """
+    return "\n".join(
+        "" if line.lstrip().startswith("//") else line
+        for line in text.splitlines()
+    )
+
+
 def test_traces_window_select_exposes_longer_supported_windows(html):
     # Traces honors these URL/API windows already; keep the filter dropdown in sync
     # so #/traces?since=30d and #/traces?since=90d render selected options.
@@ -2329,7 +2349,15 @@ def test_cost_proposals_wired_into_review_inbox(html):
     assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
-    assert "Cost advisories" in html
+    # INVERTED (was `assert "Cost advisories" in html`). The inbox no longer
+    # splits its open rows by which analyzer produced them: the cost proposals
+    # and the relearn clusters are one list ranked by money, so a "Cost
+    # advisories" tab existing again would be the regression, not its absence.
+    assert "Cost advisories" not in html
+    assert "Recurring mistakes (" not in html
+    # The count is conditional now, because printing "(0)" before the page knows
+    # its own numbers reads as "you are all clear" on a non-empty inbox.
+    assert "Open ${openCountKnown ? html`(${shownItems.length})`" in html
 
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
@@ -2400,7 +2428,11 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "useState(prop.target_path || '')" in row
     # The guidance is gated on there being no resolved path, and names both exits.
     assert "!prop.target_path ? html`" in row
-    assert "paste the project's" in row
+    # Both exits are still named; the wording was unstacked from a numbered list to
+    # one sentence, because four stacked lines were the largest non-snippet
+    # contributor to row height.
+    assert "paste its <code>CLAUDE.md</code> below" in row
+    assert "register it once with" in row
     # The register-command is one-click copyable, not just prose.
     assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
     # Smarter UX: "no path yet" is not an error. The buttons are disabled until
@@ -2725,14 +2757,18 @@ def test_old_pending_relearn_stat_line_replaced_by_the_combined_stat_tiles(html)
 def test_select_all_checkbox_sits_beside_the_bulk_dismiss_button(html):
     # Inbox redesign: the Recurring-mistakes tab dropped its <table> for flat
     # rows (RecurringMistakeRow, matching the mockup's card-style layout), so
-    # the select-all box now sits in the tab's listhead beside "Dismiss
-    # checked" rather than inside a <thead><th>.
+    # the select-all box now sits in the listhead beside "Dismiss checked"
+    # rather than inside a <thead><th>.
     assert "function SelectAllCheckbox" in html
+    # It governs `bulkRelearn` (the rows tj can apply AND the review queue can
+    # drive), not every listed row: the single-list redesign put rows with no
+    # apply path on the same list, and a select-all spanning them would hand the
+    # bulk buttons a scope they cannot act on.
     assert (
-        "<${SelectAllCheckbox} total=${shownRelearn.length} "
+        "<${SelectAllCheckbox} total=${bulkRelearn.length} "
         "selected=${selectedCount} onToggle=${toggleAll} />"
     ) in html
-    # The per-row checkbox is still present, just inside a flat row now.
+    # The per-row checkbox is still present, just inside a card now.
     assert 'checked=${checked} onChange=${onToggle} />' in html
 
 
@@ -2755,22 +2791,25 @@ def test_select_all_toggles_off_when_everything_is_selected(html):
     fn = html[start:end]
     assert "if (all) next.delete(sig)" in fn
     assert "else next.add(sig)" in fn
-    # The component delegates to it over the RENDERED row set.
+    # The component delegates to it over the SELECTABLE row set.
     assert (
-        "nextSelectAllSelection(shownRelearn.map(c => c.signature), prev)"
+        "nextSelectAllSelection(bulkRelearn.map(c => c.signature), prev)"
     ) in html
 
 
 def test_select_all_applies_only_to_the_rendered_rows(html):
     # THE load-bearing one. The list filters out locally-dismissed rows and rows
     # already applied (in this session OR any earlier one), so select-all must
-    # iterate `visible`, never the unfiltered d.clusters, or it would dismiss
-    # rows the user never saw.
-    start = html.index("const selectedVisible =")
-    end = html.index("const modalCluster =", start)
+    # iterate the rendered set, never the unfiltered d.clusters, or it would
+    # dismiss rows the user never saw. On the single list that rendered set is
+    # narrowed once more, to the rows a bulk action can actually reach.
+    start = html.index("const bulkRelearn = shownItems.filter(")
+    end = html.index("const renderRow =", start)
     block = html[start:end]
-    assert "shownRelearn.filter(c => checked.has(c.signature))" in block
-    assert "shownRelearn.map(c => c.signature)" in block
+    assert "shownItems.filter(" in block
+    assert "inboxCanApply(i)" in block
+    assert "bulkRelearn.filter(c => checked.has(c.signature))" in block
+    assert "bulkRelearn.map(c => c.signature)" in block
     assert "d.clusters" not in block
     # The filter that makes `visible` a strict subset is still in place. This
     # previously pinned the `!appliedSigs.has(...)` form verbatim, which meant
@@ -2812,9 +2851,9 @@ def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
     # `checked` is not pruned when a row leaves the list, so dismissing the raw
     # set would sweep along a signature that is no longer on screen.
     start = html.index("const dismissChecked =")
-    end = html.index("const modalCluster =", start)
+    end = html.index("const renderRow =", start)
     fn = html[start:end]
-    assert "shownRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "bulkRelearn.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
     assert "...checked]" not in fn
 
 
@@ -2843,13 +2882,13 @@ def test_select_all_adds_no_bulk_approve(html):
     # writes anything. The invariant this pin defends is that no bulk control
     # can APPROVE; it is not a cap on the number of buttons, so a third
     # non-writing control may be added, but a writing one may not.
-    # Scoped to the whole Recurring-mistakes tab block, not just its listhead:
-    # the two bulk buttons now sit BELOW the scroll box (they used to be in the
-    # head, beside select-all), so a head-only slice would miss them entirely
-    # and pass vacuously.
+    # Scoped to the whole open-list tab block, not just its listhead: the two
+    # bulk buttons sit BELOW the list (they used to be in the head, beside
+    # select-all), so a head-only slice would miss them entirely and pass
+    # vacuously.
     view = html[html.index("function ReviewInboxView"):]
-    start = view.index("tab === 'mistakes' ? html`")
-    end = view.index("tab === 'advisories' ? html`", start)
+    start = view.index("tab === 'open' ? html`")
+    end = view.index("tab === 'applied' ? html`", start)
     head = view[start:end]
     assert "dismissChecked" in head
     assert "startReview(selectedVisible.map(c => c.signature))" in head
@@ -2879,28 +2918,539 @@ def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
 # item's headline still showed tokens, and a token count at billion scale
 # rendered as an ugly "11062.0M" instead of "11.3B".
 
-def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
-    # The old bug: ranking flipped to dollars the moment ANY item in the list
-    # had a dollar figure, leaving every other (tokens-only) item tied at
-    # rank 0 and rendered in whatever order the API happened to return them
-    # (adapter-insertion order) — a real observed bug. Tokens
-    # are the one figure every item carries, priced or not, so the fix ranks
-    # by tokens uniformly; dollars stay a per-item DISPLAY choice.
+# --- Single-list inbox: the mechanism axis --------------------------------- #
+def test_the_mechanism_axis_is_two_orthogonal_facts_not_one_enum(html):
+    # The open list is no longer split by which analyzer produced a row. The axis
+    # that replaced the tabs is what tj can DO about a row.
     #
-    # `sortByEstMonthly` was renamed to `sortByPastOverspend` when relearn's
-    # forward claim was retired: a relearn cluster's `past_overspend_tokens`
-    # is now on the SAME basis a cost proposal's is, so one ranking function
-    # serves both tabs — there is no more `estimated_monthly_tokens` fallback
-    # to rank by.
-    assert "function sortByEstMonthly" not in html
-    start = html.index("function sortByPastOverspend")
+    # It must NOT be an enum. `CostProposalCard` has always rendered
+    # `${prop.suggestion ? ...}` and `${prop.apply_capable ? ...}` as two
+    # INDEPENDENT conditionals, and deadweight's mcp_remove proposal is the
+    # overlap case: it shows a copyable snippet AND a confirm-target apply
+    # control together. An enum has to pick one of those to report, so it
+    # necessarily misreports that row. Two booleans cannot.
+    can_start = html.index("function inboxCanApply(item)")
+    snip_start = html.index("function inboxHasSnippet(item)")
+    tomb_start = html.index("// A `MechanismTags` component")
+    can_fn = html[can_start:snip_start]
+    snip_fn = html[snip_start:tomb_start]
+
+    # Each predicate reads exactly the flags its own fix block is gated on.
+    assert "!item.advise_only && item.write_offered !== false" in can_fn
+    assert "item.apply_capable" in can_fn
+    assert "item.advise_snippet_offered" in snip_fn
+    assert "item.suggestion" in snip_fn
+    # They must not consult each other: orthogonal means neither can suppress
+    # the other, which is what made the enum lie about the overlap row.
+    assert "inboxHasSnippet" not in can_fn
+    assert "inboxCanApply" not in snip_fn
+
+    # "Nothing actionable" is DERIVED from both being false where it is needed, never
+    # stored as a peer value. Both rows gate their no-action copy on it inline.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "!canApply && !hasSnippet" in row
+
+    # Neither the retired enum nor the retired BADGES may come back. The action
+    # button is the row's only promise now; a label restating it over-promised on
+    # every row that still needed a pasted path first.
+    for dead in ("MECH_WRITE", "MECH_SNIPPET", "MECH_NONE", "MechanismBadge",
+                 "inboxMechanism(", "MechanismTags", "MECHANISM_TAG_COPY",
+                 "inboxNothingActionable"):
+        assert dead not in _no_comments(html), f"must not be reintroduced: {dead}"
+    # The badge labels are gone from the CODE, though the tombstone comment still
+    # names them to record why. Checked against comment-stripped source.
+    code = _no_comments(html)
+    for label in ("TJ CAN APPLY", "COPY THE FIX", "NO FIX YET"):
+        assert label not in code, f"badge label must not be rendered again: {label}"
+    # One category badge per row, no mechanism tag beside it.
+    for comp, end in (("function RecurringMistakeRow", "function RelearnApplyModal"),
+                      ("function CostProposalCard", "function InboxStatTiles")):
+        block = html[html.index(comp):html.index(end)]
+        assert block.count('class="badge') == 1, "one category badge per row, no mechanism tag"
+
+    # Never keyed on analyzer identity: the day a downsize proposal becomes
+    # apply-capable its rows gain the apply control with no edit here.
+    for analyzer in ("'downsize'", "'deadweight'", "'resend'", "'subagent'"):
+        assert analyzer not in can_fn + snip_fn, f"must not be keyed on {analyzer}"
+
+
+def test_a_row_that_is_both_apply_capable_and_snippet_bearing_renders_both(html):
+    # deadweight's mcp_remove proposal is exactly this row: `apply_capable` AND a
+    # `suggestion`. The two facts are orthogonal, so BOTH affordances must render.
+    # This used to assert two BADGES; the badges are gone (the action button says
+    # what it does), so it now asserts the behaviour the badges only described.
+    tag_start = html.index("function inboxMechanismTag(item)")
+    tag_fn = html[tag_start:html.index("\n}", tag_start)]
+    assert "if (inboxCanApply(item)) parts.push('apply')" in tag_fn
+    assert "if (inboxHasSnippet(item)) parts.push('snippet')" in tag_fn
+    assert "parts.join(' ')" in tag_fn
+    # No early return that would make the two mutually exclusive.
+    assert "else" not in tag_fn
+
+    # The card's two blocks are independent conditionals, not a chain, which is what
+    # lets one row show a copy box AND a confirm-target apply control together.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "${prop.suggestion ? (canApply ? html`" in card
+    # Three apply shapes now, so the chain leads with the register-then-apply one.
+    assert "${canApply ? (needsSourcePath ? html`" in card
+    assert "hasApplyKind ? html`" in card
+    # The snippet block is gated on `prop.suggestion` ALONE — `canApply` only picks
+    # which of the two shapes it takes, so an apply control can never suppress it.
+    # Asserted structurally rather than on the outer conditional's exact text,
+    # because that text is what changed when the second shape was added.
+    snippet_block = card[card.index("${prop.suggestion ? (canApply"):card.index("${canApply ? (needsSourcePath")]
+    assert snippet_block.count("<${CopySnippetButton} text=${prop.suggestion} />") == 2
+    assert snippet_block.count('<div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>') == 2
+    # On a row that offers BOTH, the manual command is the secondary exit and sits
+    # in a collapsed disclosure: rendering both open made deadweight's row the
+    # tallest on the list while offering strictly less than its neighbours. Still
+    # present, still copyable, no longer competing for the row's height.
+    assert "<summary>Or copy the command and run it yourself</summary>" in snippet_block
+
+
+def test_snippet_rows_render_the_snippet_as_the_deliverable(html):
+    # THE failure this redesign exists to fix: a row whose fix is a copyable
+    # change must show that change, not a bare "Mark applied" with nothing above
+    # it. Both ledgers put the fix in a labelled copy box with a Copy button,
+    # gated on the snippet fact alone so an apply control never suppresses it.
+    row_start = html.index("function RecurringMistakeRow")
+    row_end = html.index("function RelearnApplyModal", row_start)
+    row = html[row_start:row_end]
+    assert "${hasSnippet ? html`" in row
+    assert "<${CopySnippetButton} text=${fixText} />" in row
+    assert '<div class="sz-copybox" style="margin-top:4px">${fixText}</div>' in row
+
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "${prop.suggestion} />" in card
+    assert "${prop.suggestion}</div>" in card
+    # The cost card's "Mark applied" is reachable only as the snippet follow-up.
+    # It used to be the catch-all `else`, which asked a reader with no fix on
+    # screen to confirm having applied one.
+    assert "` : hasSnippet ? html`" in card
+
+
+def test_relearn_rows_never_offer_mark_applied(html):
+    # There is no apply path for an advise-only cluster at all: the modal itself
+    # says "Nothing to approve". A Mark-applied button there is a false promise
+    # and would write a ledger entry for a fix that does not exist. This is 50 of
+    # 55 clusters, the common case rather than an edge case.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    # Asserted on the AFFORDANCE, not on the phrase: the row's comments explain
+    # at length why there is deliberately no marker button here, so a bare
+    # substring check on "Mark applied" matches the explanation and fails on
+    # correct code. What must be absent is a control that fires one.
+    assert ">Mark applied<" not in row
+    assert "'Mark applied'" not in row
+    assert "onMark" not in row
+    assert "/apply'" not in row and "cost-proposals/apply" not in row
+    # The modal's own gate, which the can-apply predicate mirrors, still stands.
+    assert "Nothing to approve: this recommendation is yours to apply." in html
+    # A non-applyable row states the budget's REAL reason, not a compressed label,
+    # so the reader learns what to do instead of just that a gate fired.
+    assert "cluster.advise_only_reason" in row
+    # It now lives in its own collapsed disclosure rather than an inline paragraph:
+    # it is a paragraph of write economics, and the mechanism tag already says the
+    # row has no writer.
+    assert "<summary>Why there is no permanent fix on offer</summary>" in row
+    assert "<p>${cannotApplyReason}</p>" in row
+    # The compressed one-liner is gone from the UI. Asserted on the DEFINITION
+    # and the string it produced, not on the bare name: a tombstone comment
+    # deliberately still names the removed helper and points at its surviving
+    # server-side field, which is documentation rather than a leftover.
+    assert "function writeGateNote" not in html
+    assert "'No permanent fix offered: '" not in html
+    # `write_blocked_short` itself is not dead: the CLI's dense relearn list
+    # still renders it, so the UI must not read it any more but the field stays.
+    assert "cluster.write_blocked_short" not in html
+
+
+def test_no_row_renders_a_dead_end(html):
+    # Where there genuinely is no fix, say so. An empty action area reads as a
+    # bug, and a marker button there asks the reader to confirm doing something
+    # the card never told them to do.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "${!canApply && !hasSnippet && !cannotApplyReason ? html`" in row
+    assert "There is nothing to apply here yet" in row
+    assert "See the example sessions" in row
+
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    # summarize keeps its own hop into the curate/diff/apply flow. That punt is
+    # deliberate and code-documented (`_summarize_to_proposals`: "Deliberately
+    # never `apply_capable`"), because an LLM call sits mid-pipeline between
+    # prepare() and a staged rewrite, so no single button can span it.
+    assert "Review in Summarize" in card
+    # Everything else with no apply path and no snippet points at the analyzer's
+    # own detail card, never the marker button. The generic sentence is a
+    # last-resort fallback, gated on the row carrying no reason AND no
+    # description, so it can never talk over the server's own wording.
+    assert "${!blockedReason && !description ? html`" in card
+    assert "optimizeFindingHref(prop.analyzer)" in card
+
+
+def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
+    # Founder feedback on the running page: a row's description stopped well short
+    # of the card edge, leaving a wide empty gutter with the amount stranded in the
+    # far corner. Cause was the global `.sz-note { max-width: 74ch }`.
+    #
+    # That cap must SURVIVE: `.sz-note` is the whole app's standalone-paragraph
+    # class (page intros, Optimize section notes) and 74ch is the right measure for
+    # reading. Only the inbox row overrides it, because there the text sits in a
+    # bordered card whose width the reader has already accepted.
+    assert ".sz-note { font-size: 13px; color: var(--text-dim); line-height: 1.55; max-width: 74ch; margin: 0; }" in html
+    assert ".inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }" in html
+    # Scoped by a class the row components set, NOT by lifting the cap or by
+    # overloading `data-mechanism` (which is a state/debug attribute, not a
+    # styling hook).
+    assert "[data-mechanism] .sz-note" not in html
+    # Both row components carry the class, so the collapsed tail and the
+    # below-the-fold group inherit it: they render through these same components.
+    assert 'class="opt-section inbox-row" data-mechanism=' in html
+    assert "'opt-section inbox-row' + (focused ? ' rev-focus' : '')" in html
+    # The relearn Approve MODAL renders outside the row and keeps its measure: it
+    # is a reading surface, not a dense card.
+    modal = html[html.index("function RelearnApplyModal"):html.index("function daysAgoLabel")]
+    assert "inbox-row" not in modal
+
+
+def test_a_recompute_never_blanks_rows_the_page_already_has(html):
+    # THE correctness bug. Both endpoints serve their CACHED result immediately and
+    # merely flag `status: "computing"` while a refresh runs, so the page had 55
+    # clusters and 16 proposals in hand while printing a bare "Loading…", omitting
+    # the avoided tile, and rendering the tab as "Open (0)". Zero is the most
+    # misleading value this page can print: it reads as "you are all clear".
+    view = html[html.index("function ReviewInboxView"):]
+
+    # "Has this page had an answer yet" is a DIFFERENT question from "is a scan
+    # running", and conflating them is what caused the bug.
+    assert "const firstLoad = d.loading || !costLoaded" in view
+    assert "const scanning = d.status === 'computing' || costStatus === 'computing'" in view
+    # `costStatus` cannot stand in for "loaded": it initialises to 'never_run',
+    # indistinguishable from a real fresh install.
+    assert "const [costLoaded, setCostLoaded] = useState(false)" in view
+    assert "finally { setCostLoaded(true); }" in view
+
+    # Rows render unconditionally; only the EMPTY branch is gated. So a recompute
+    # can never blank a list that has rows.
+    assert "${topOpen.map(renderRow)}" in view
+    assert "${openItems.length === 0 ? (" in view
+    # Skeletons are for the two states that genuinely have nothing: still
+    # fetching, or a real first scan in flight.
+    assert "const showSkeleton = openItems.length === 0 && (firstLoad || (scanning && d.status !== 'never_run'))" in view
+    assert "<${InboxSkeletonRow} key=${i} />" in view
+    assert "Loading…" not in view, "the bare loading string must be gone"
+
+
+def test_no_count_or_tile_is_rendered_before_the_page_knows_it(html):
+    # A count the page does not know is not printed as 0, and the tiles hold their
+    # final positions so nothing shifts when the numbers land.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "const openCountKnown = !firstLoad" in view
+    assert "const appliedCountKnown = appliedLoaded" in view
+    # A PARTIAL count is as wrong as a zero: it would be replaced a moment later,
+    # which is the layout jump this rule exists to prevent. So both ledgers must
+    # have answered, not just one.
+    assert "d.loading || !costLoaded" in view
+    # Shimmer chips reserve the digits' width in both tabs.
+    assert view.count('class="shimmer" style="display:inline-block;width:20px') == 2
+
+    tile = html[html.index("function InboxStatTiles"):html.index("function ReviewInboxView")]
+    assert "if (loading && openItems.length === 0 && appliedCount === 0 && !hasExcluded)" in tile
+    assert "loading=${firstLoad}" in view
+
+    # Reused the app's existing shimmer primitive rather than inventing a loader,
+    # and nothing fakes progress on a scan of unknown length. Asserted on MARKUP,
+    # not on words: the components' own comments name the things they avoid, so a
+    # bare substring ban matches the explanation and fails on correct code.
+    assert ".shimmer {" in html
+    skel = html[html.index("function InboxSkeletonRow"):html.index("function InboxLoadingNote")]
+    assert 'class="shimmer"' in skel
+    assert "animation" not in skel, "the skeleton must not roll its own animation"
+    assert "<progress" not in html
+    # One animation in the app, the pre-existing shimmer. A second @keyframes
+    # would mean a new loader was invented here.
+    assert html.count("@keyframes shimmer") == 1
+    # Motion is suppressed for a reader who asked for none.
+    assert "@media (prefers-reduced-motion: reduce)" in html
+    assert ".shimmer { animation: none; }" in html
+
+    # The state says what it is doing, from what the server actually reported, and
+    # never invents a number or a percentage.
+    note = html[html.index("function InboxLoadingNote"):html.index("// --- The row's description block")]
+    assert "sessionsScanned != null" in note
+    assert "A scan is running now" in note
+
+
+def test_every_row_clamps_its_prose_to_the_same_collapsed_height(html):
+    # Founder feedback: description lengths were wildly uneven (resend concatenated
+    # evidence + advise_text + caveat into ~15 lines while a downsize row had one),
+    # so the list was ragged and could not be scanned.
+    #
+    # Clamped on LINES, so the collapsed height does not depend on how the text
+    # happens to wrap at the current width.
+    assert "-webkit-line-clamp: 2" in html
+    assert ".inbox-desc.is-open" in html
+    assert "-webkit-line-clamp: unset" in html
+    # min-height matches the clamp, which is the half that stops the raggedness
+    # simply MOVING to the short rows: a row with little or no prose has to occupy
+    # the same space as one with a wall of it.
+    assert "min-height: calc(2 * 1.55 * 13px)" in html
+    assert ".inbox-desc.is-open" in html and "min-height: 0" in html
+
+    # The prose is trimmed TEXTUALLY at a sentence boundary, not merely clipped:
+    # a pure CSS clamp gave equal heights but cut mid-clause, and the founder asked
+    # for the collapsed state to read as a short complete thought.
+    split = html[html.index("function splitLead(text, budget"):]
+    split = split[:split.index("\n// The description block")]
+    # Boundary is punctuation FOLLOWED BY whitespace, which is what keeps
+    # "$1,842.56 of that cost" and "claude-4.7" from being treated as sentence ends.
+    assert "if (j + 1 >= full.length || /\\s/.test(full[j + 1])) ends.push(j + 1)" in split
+    # Never mid-word either: text with no sentence boundary at all (a raw error
+    # dump) falls back to a word-boundary cut.
+    assert "full.lastIndexOf(' ', budget)" in split
+    # THE lead must be a PREFIX of the text, sliced at a collected boundary offset.
+    # Accumulating `/[^.!?]+[.!?]+(?:\s+|$)/g` matches instead silently dropped
+    # everything before the first MATCHABLE sentence: a description opening
+    # "`posthog` MCP server (configured at .../.mcp.json) made 0 tool calls." has
+    # its only period followed by a letter, so `exec` found nothing at index 0,
+    # advanced, and the row rendered "json) made 0 tool calls" as its opening
+    # words. Two of eight live rows read that way. The banned construct is the
+    # assertion, because a prefix-slice implementation cannot reproduce the bug.
+    # Banned on the MECHANISM, not on the old regex literal: the source comment
+    # quotes that literal while explaining the bug, so a text ban on it would match
+    # the explanation. `exec` in a `g`-flagged scan is the part that skips.
+    assert "re.exec(full)" not in split, \
+        "a match-accumulating scan skips text before the first matchable sentence"
+    assert "full.slice(0, cut)" in split
+    # The expanded state renders the WHOLE text, never lead + rest concatenated,
+    # because the fallback lead carries a trailing ellipsis.
+    assert "return { lead, full, more: lead !== full }" in split
+
+    fn = html[html.index("function TrimmedDescription({ text })"):]
+    fn = fn[:fn.index("\n}")]
+    assert "${open ? full : lead}" in fn
+    assert "${more ? html`" in fn
+    # Per row, local, not persisted, not expanded by default.
+    assert "useState(false)" in fn
+    assert "localStorage" not in fn and "sessionStorage" not in fn
+    assert "'Read less' : 'Read more'" in fn
+
+    # The server's strings are split, never rewritten: a paraphrase in the UI would
+    # be a second drifting copy of the analyzer's claim.
+    assert "splitLead(text)" in fn
+
+    # Both row shapes wrap their prose in it, so the collapsed tail and the
+    # below-the-fold group inherit the rhythm through the same components.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "<${TrimmedDescription} text=${relearnDescription(cluster)} />" in row
+    assert "<${TrimmedDescription} text=${description} />" in card
+
+    # A relearn cluster has no analyzer prose, so its block leads with the facts it
+    # does have (requirement: give every row a first line worth reading).
+    assert "Recurred ${cluster.occurrences} time" in row
+    assert "across ${cluster.sessions} session" in row
+
+    # A DESCRIPTION has to be WORDS. One live cluster's captured snippet was the
+    # bare identifier `gen_ai.tool.call`, which answers "what is this" for nobody,
+    # and a non-empty check accepted it. Two words is the gate, and a snippet that
+    # fails it falls through to the derived fix rather than being dressed up.
+    prose = html[html.index("function isProse(s)"):html.index("\n}", html.index("function isProse(s)"))]
+    assert "split(/\\s+/).filter(Boolean).length >= 2" in prose
+    desc_fn = html[html.index("function relearnDescription(cluster)"):]
+    desc_fn = desc_fn[:desc_fn.index("\n}")]
+    assert "isProse(e.snippet)" in desc_fn
+    assert "candidates.find(isProse)" in desc_fn
+
+    # The operative facts stay OUTSIDE the clamp: a reader must not expand anything
+    # to learn why a row has no Apply button, and a <details> is already collapsed.
+    # Matched on the RENDERED markup, not the phrase: a comment above the
+    # component explains the same rule in prose and would match first, making the
+    # ordering check compare a comment against the clamp.
+    desc_at = card.index("<${TrimmedDescription} text=${description} />")
+    assert card.index(">tokenjam cannot apply this one: ${blockedReason}<") > desc_at, \
+        "the blocker reason must not be inside the trimmed description"
+    assert card.index("<summary>How this number was derived</summary>") > desc_at
+    # COVERAGE keeps its OWN disclosure rather than being folded into Read more: it
+    # answers what was NOT analysed, which is the whole point of it, and on resend it
+    # is a five-line block, the reason that row was four times its neighbours' height.
+    assert "<summary>What this figure does and does not cover</summary>" in card
+    assert card.index("<summary>What this figure does and does not cover</summary>") > desc_at
+
+
+def test_a_row_tj_cannot_apply_states_the_servers_own_blocker_reason(html):
+    # A row tokenjam cannot apply must say WHY, and must say it in the words the
+    # refusing adapter used. `apply_blocked_reason` carries e.g. "no local source
+    # path is registered for this agent, so there is nothing to edit. Register one
+    # with source_path under the agent in your tj config, or paste the change
+    # yourself" — which names the blocker AND the two exits. A paraphrase here
+    # would drift from both the CLI and the actual refusal.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    assert "prop.apply_blocked_reason" in card
+    assert "tokenjam cannot apply this one: ${blockedReason}" in card
+    # Shown exactly once. Some adapters already append the reason into
+    # `advise_text` server-side ("Applying it here is not on offer: ..."), others
+    # only set the field, so the guard checks the RENDERED description rather
+    # than guessing which adapter produced the row.
+    assert "!description.includes(blockedReason)" in card
+    assert "const showBlockedReason = !canApply" in card
+    # And the model-swap honesty caveat travels in `advise_text`/`caveat`, both of
+    # which the description paragraph renders unconditionally (Critical Rule 14).
+    assert "[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')" in card
+
+    # The relearn half has the same obligation and its own field for it.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert "cluster.advise_only_reason" in row
+
+
+def test_bulk_controls_vanish_when_nothing_is_apply_capable(html):
+    # For the SDK persona relearn offers no write at all
+    # (`write_offered = persona in {claude-code, mixed}`), so the selectable set
+    # can be empty. A select-all governing nothing is worse than no select-all:
+    # it implies the list is selectable when it is not. Both the checkbox and the
+    # bulk bar are gated on the set being non-empty.
+    view = html[html.index("function ReviewInboxView"):]
+    assert view.count("${bulkRelearn.length > 0 ? html`") == 2
+    # The per-row checkbox is gated on the same predicate, so a row that no bulk
+    # action can reach never shows one.
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    assert '${canApply ? html`<input type="checkbox"' in row
+    # The bulk button still names its count.
+    assert "${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}" in html
+    assert "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}" in html
+
+
+def test_bulk_mark_applied_can_never_post_a_relearn_row_to_the_cost_ledger(html):
+    # The collapsed tail is now mixed, and the bulk marker only speaks the cost
+    # ledger's endpoint. Filtered inside markManyApplied rather than at the call
+    # site, so a future caller cannot hand it a mixed list and quietly POST the
+    # wrong ledger.
+    start = html.index("const markManyApplied = async (props)")
+    end = html.index("const modalCluster =", start)
+    fn = html[start:end]
+    assert "props.filter(x => x.kind !== 'relearn' && !x.apply_capable)" in fn
+
+
+def test_the_per_row_amount_caption_is_gone(html):
+    # INVERTED (was test_every_row_discloses_the_span_its_figure_was_observed_over).
+    # The caption under each row's dollar figure ("avoidable over the last 30 days ·
+    # ~12.3B tok") was removed on founder instruction, which retires the per-row
+    # span disclosure with it. Its RETURN is the regression now.
+    assert "function inboxSpan" not in html
+    assert "spans=${spans}" not in html
+    assert "avoidable ' + span.text" not in html
+    assert "'already cost ' + span.text" not in html
+    # Both row shapes keep the figure itself and nothing under it.
+    for comp, end in (("function RecurringMistakeRow", "function RelearnApplyModal"),
+                      ("function CostProposalCard", "function InboxStatTiles")):
+        block = html[html.index(comp):html.index(end)]
+        assert 'class="po-amount"' in block
+        assert 'style="font-size:10px"' not in block, "the caption line must not come back"
+
+    # The asymmetry the caption used to disclose is real and did not go away, so the
+    # scan's own description of its corpus stays on the payload state for whoever
+    # states it next.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "windowDays: f.window_days" in view
+    assert "corpusBasis: f.corpus_basis" in view
+
+
+def test_the_headline_tile_caption_reads_one_population(html):
+    # The tile's caption used to read "was avoidable over the last 30 days · ~21.9B
+    # tok · 13 causes of $7,653.24 total cost — that is cost, not waste". The
+    # total-cost clause was FALSE as rendered: `observed_cost_usd` covers 2 of the
+    # 13 proposals (resend + relearn), so it attached a two-proposal denominator to
+    # "13 causes", and summarize alone contributes ~4,811 of avoidable from a
+    # proposal carrying no observed cost at all.
+    tile = html[html.index("function PastOverspendTile"):html.index("// A `writeGateNote")
+                if "// A `writeGateNote" in html else html.index("function PastOverspendTile") + 3000]
+    tile = html[html.index("function PastOverspendTile"):]
+    tile = tile[:tile.index("\nfunction ")]
+    # Survives: window, tokens and cause count, all summed over the same proposals.
+    assert "over ${win}" in tile
+    assert "fmtTokens(toks)" in tile
+    assert "causes + ' cause'" in tile
+    # Gone: the leading "was avoidable" wording and the whole total-cost clause.
+    assert "was avoidable over" not in tile
+    assert "total cost" not in tile
+    assert "block.observed_cost_usd" not in tile
+    assert "cost_disclosure" not in tile, "no orphaned disclosure for a removed figure"
+    # Not hardcoded. Scoped to the RETURNED markup: the surrounding comment quotes
+    # the real figures to explain why the old caption was false, and a whole-function
+    # literal check matches the explanation instead of the render.
+    markup = tile[tile.index("return html`"):]
+    for lit in ("21.9", "7,653", "6163", "13 cause"):
+        assert lit not in markup
+    # The figure and its OBSERVED treatment stay.
+    assert "po-observed-tag" in tile
+    assert "fmtUsd(usd)" in tile
+
+
+def test_the_ordering_key_cannot_reach_a_projection(html):
+    # Two bugs, one key. The FIRST was ranking flipping to dollars the moment
+    # any item had a dollar figure, leaving tokens-only items tied at rank 0 in
+    # adapter-insertion order. The SECOND, fixed by the single-list redesign, was
+    # the key's fallback: `past_overspend_tokens ?? estimated_monthly_tokens`
+    # let a forward 30-day PROJECTION compete for position against past
+    # OBSERVATIONS inside one sort. Latent (every real row carries the observed
+    # figure) but structural, and unfixable by inspection once shipped, because
+    # nothing on screen says which kind of number placed a row.
+    #
+    # The key now reads ONE field and has no fallback at all; a row without it
+    # cannot enter the ranked list.
+    start = html.index("function observedRankTokens")
     end = html.index("function splitTopAndTail", start)
     fn = html[start:end]
-    assert "i.past_overspend_tokens || 0" in fn
-    # The old dollars-if-any gate must not survive a regression re-adding it.
-    assert "anyUsd" not in fn
-    assert "estimated_monthly_usd" not in fn
+    assert "item.past_overspend_tokens" in fn
+    # No projection, no dollars, no second field of any kind may appear in the
+    # ranking block.
     assert "estimated_monthly_tokens" not in fn
+    assert "estimated_monthly_usd" not in fn
+    assert "estimated_recoverable" not in fn
+    assert "anyUsd" not in fn
+    # The unranked rows are PARTITIONED OUT rather than sorted to the bottom, so
+    # no comparator change can ever interleave them.
+    assert "function partitionByObservedOverspend" in fn
+    assert "ranked: items.filter(i => observedRankTokens(i) != null)" in fn
+    assert "unobserved: items.filter(i => observedRankTokens(i) == null)" in fn
+    # And the view splits before it sorts.
+    view = html[html.index("function ReviewInboxView"):]
+    assert "const { ranked, unobserved } = partitionByObservedOverspend(shownItems)" in view
+    assert "const sortedOpen = sortByPastOverspend(ranked)" in view
+    # The retired key must not come back under either retired name. Upstream
+    # renamed it to `sortByPastOverspend` when relearn's forward claim was
+    # retired; this branch had independently grown a `sortByObservedOverspend`
+    # computing the identical thing, and that duplicate is deleted in favour of
+    # upstream's name rather than kept in parallel.
+    assert "sortByEstMonthly" not in html
+    assert "sortByObservedOverspend" not in html
+    assert "function sortByPastOverspend" in html
+
+
+def test_ordering_key_rejects_a_projection_only_row(html):
+    # A behavioural contract for the guard above, reimplemented in Python from
+    # the pinned JS so a divergence fails loudly rather than only when the
+    # string changes. A row carrying ONLY a forward projection is unrankable;
+    # it must land in `unobserved`, never at the top of the ranked list.
+    def observed_rank_tokens(item):
+        t = item.get("past_overspend_tokens")
+        return t if isinstance(t, (int, float)) and not isinstance(t, bool) else None
+
+    def partition(items):
+        return (
+            [i for i in items if observed_rank_tokens(i) is not None],
+            [i for i in items if observed_rank_tokens(i) is None],
+        )
+
+    projection_only = {"title": "forward only", "estimated_monthly_tokens": 10**12}
+    observed_small = {"title": "small but real", "past_overspend_tokens": 5_000}
+    observed_big = {"title": "big and real", "past_overspend_tokens": 9_000_000}
+
+    ranked, unobserved = partition([projection_only, observed_small, observed_big])
+    assert unobserved == [projection_only]
+    ranked.sort(key=lambda i: i["past_overspend_tokens"], reverse=True)
+    assert [i["title"] for i in ranked] == ["big and real", "small but real"]
+    # The old fallback would have put the trillion-token projection first.
+    assert ranked[0] is not projection_only
 
 
 def test_collapsed_tail_combined_figure_is_stated_in_the_past_tense(html):
@@ -2960,7 +3510,7 @@ def test_fmt_tokens_billion_scale_matches_a_real_reported_figure():
 def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
     # A Python-side contract test pinning the SAME "rank by
     # estimated_monthly_tokens descending" algorithm the JS now implements
-    # (sortByEstMonthly, pinned above), run against real numbers from the bug
+    # (sortByPastOverspend, pinned above), run against real numbers from the bug
     # report — the exact dataset that exposed the original "adapter insertion
     # order" bug. Proves the fixed algorithm produces a genuinely monotonic
     # order for real, not synthetic, data.
@@ -2987,17 +3537,19 @@ def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
 def test_split_top_and_tail_slices_an_already_sorted_list(html):
     # The long-tail collapse (requirement #3) must absorb the BOTTOM of the
     # sorted list, not an arbitrary suffix of the unsorted API order — it
-    # slices whatever sortByPastOverspend already produced, never re-sorts or
-    # re-orders on its own.
+    # slices whatever the ranking already produced, never re-sorts or re-orders
+    # on its own.
     start = html.index("function splitTopAndTail")
     end = html.index("function relearnObservedFigure", start)
     fn = html[start:end]
     assert "sorted.slice(0, max)" in fn
     assert "sorted.slice(max)" in fn
     assert "sort(" not in fn   # no independent re-sort inside the split itself
+    # ONE call, over the one merged open list — there is no longer a per-tab
+    # collapse, because there is no longer a per-analyzer tab.
     view = html[html.index("function ReviewInboxView"):]
-    assert "splitTopAndTail(sortedRelearn)" in view
-    assert "splitTopAndTail(sortedCost)" in view
+    assert "splitTopAndTail(sortedOpen)" in view
+    assert view.count("splitTopAndTail(") == 1
 
 
 def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
@@ -3083,3 +3635,44 @@ def test_cost_view_tenants_panel_shares_refresh_and_poll_cadence(html):
     # callback that reaches BOTH load and loadTenants -- never `load` alone.
     assert "onClick=${load}>Refresh" not in fn
     assert "load(opts);" in fn and "loadTenants(opts);" in fn
+
+
+def test_a_model_swap_row_asks_for_the_path_instead_of_offering_mark_applied(html):
+    """The design bar: "Mark applied" is the exception, not the default.
+
+    Ten live `downsize` model-swap rows carried a measured, deterministic fix and
+    offered nothing but a copy box and a "Mark applied" that recorded the user
+    doing it by hand. The cause was a single missing input — where the agent's
+    source lives — which tokenjam will not infer (`config.AgentConfig.source_path`
+    is opt-in by design). A missing input is a question, so the row asks it.
+    """
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+
+    # Checked BEFORE `hasApplyKind`, because such a row deliberately carries no
+    # apply_kind yet: with no registered path there is no deterministic edit, so
+    # it must not reach the endpoint that assumes one.
+    assert "${canApply ? (needsSourcePath ? html`" in card
+    assert card.index("needsSourcePath ? html`") < card.index("hasApplyKind ? html`")
+    assert "const needsSourcePath = !!prop.needs_source_path;" in card
+
+    # It ASKS: an input, a preview that writes nothing, and an apply.
+    assert "/relearn/cost-proposals/register-source-path" in card
+    assert "registerSourcePath(false)" in card and "registerSourcePath(true)" in card
+    assert "Apply swap →" in card
+    # Never pre-filled: the whole premise is that nothing here knows the path, and
+    # a plausible default would be tokenjam inferring it by another name.
+    assert "useState('')" in card
+    assert "prop.needs_source_path ? prop.target_path" not in card
+
+    # A precheck failure AFTER the path is given is stated on the row, in the
+    # server's own words, rather than failing silently.
+    assert "setSpErr(e.message || String(e))" in card
+
+    # THE CAVEAT IS OUTSIDE THE COLLAPSED DESCRIPTION. A one-click write makes it
+    # easier to lose the distinction between "the cost delta is measured" and "the
+    # cheaper model is as good" (Critical Rule 14), and a caveat behind a
+    # "Read more" does not count as visible.
+    desc_at = card.index("<${TrimmedDescription} text=${description} />")
+    caveat_at = card.index("${prop.apply_caveat ? html`")
+    assert caveat_at > desc_at
+    assert '<div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>' in card
