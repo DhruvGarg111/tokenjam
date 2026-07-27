@@ -10721,9 +10721,15 @@ function DashboardView({ params }) {
   const costRead = useTriageRead(() => api('/cost', { since, group_by: 'day' }), [since]);
   const statusRead = useTriageRead(() => api('/status'), []);
   const alertsRead = useTriageRead(() => api('/alerts', { since, unread: 'true' }), [since]);
-  const driftRead = useTriageRead(() => api('/drift'), []);
+  // These two used to send no window and depend on nothing, so the selector
+  // above visibly governed three tiles and silently did nothing to the other
+  // two: the same clusters and the same drift count came back for 24h and 90d.
+  // A control that governs part of a page is worse than none, because a reader
+  // cannot tell which figures moved. Both endpoints report the window they
+  // actually applied.
+  const driftRead = useTriageRead(() => api('/drift', { since }), [since]);
   const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6 }), [since]);
-  const relearnRead = useTriageRead(() => api('/relearn/proposals'), []);
+  const relearnRead = useTriageRead(() => api('/relearn/proposals', { since }), [since]);
 
   // ---- The recoverable-waste read, on its own state machine ---------------- //
   // GET /optimize runs the analyzer sweep server-side. Measured against a real
