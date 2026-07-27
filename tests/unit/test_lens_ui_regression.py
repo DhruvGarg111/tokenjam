@@ -4876,3 +4876,67 @@ def test_analyzer_guide_makes_no_guaranteed_saving_claim(html):
         assert banned not in guide, f"guide copy must not contain {banned!r}"
     assert "estimates from your own history" in guide
     assert "review before you act on them" in guide
+
+
+def test_drift_zero_variance_row_is_neutral_not_a_drift_verdict(html):
+    """A baseline with no spread cannot judge anything.
+
+    `z_score()` in `core/drift.py` deliberately returns inf when stddev is 0 and
+    the value moved, and the UI used to mirror that literally: a metric whose
+    every sampled session had the same value (tool calls `0.0 +/- 0.0`) rendered
+    `inf` under a red `drift` badge. That is an absence of evidence, not a
+    regression. The row now reads as "cannot judge". The Python helper is
+    unchanged; this is a display decision only.
+    """
+    start = html.index("function DriftView({ params })")
+    end = html.index("// Budget View", start)
+    view = _no_comments(html[start:end])
+    assert "const noVariance =" in view
+    assert "'no baseline variance'" in view
+    assert "badge-neutral" in view
+    # The old inf-as-maximum-anomaly rendering is gone.
+    assert "zDisplay = 'inf'" not in view
+    assert "z = Infinity" not in view
+
+
+def test_drift_empty_state_explains_why_there_is_no_baseline(html):
+    """"None yet" is not an answer when two of the three reasons are permanent.
+
+    Interactive coding sessions are never baselined (the API applies the same
+    persona gate the detector does) and backfilled history never builds one, so
+    the empty state names both alongside the session-count requirement.
+    """
+    start = html.index("function DriftView({ params })")
+    end = html.index("// Budget View", start)
+    view = _no_comments(html[start:end])
+    assert "drift-empty-why" in view
+    assert "compares a service against its own past behavior" in view
+    assert "Interactive coding sessions are not baselined" in view
+    assert "Baselines build only from live sessions" in view
+    # No em dashes in user-facing copy.
+    why_start = view.index("drift-empty-why")
+    why_end = view.index("</div>\n    </div>", why_start)
+    assert "—" not in view[why_start:why_end]
+
+
+def test_alerts_view_wires_the_acknowledge_endpoint(html):
+    """`PATCH /alerts/{id}/acknowledge` existed with no control to reach it.
+
+    Rule 24 in `tokenjam/CLAUDE.md`: a capability is only real if a user has a
+    path to it. The Alerts table now carries a Status column with an
+    Acknowledge button, and reloads afterwards so the "Unread only" filter
+    stays honest.
+    """
+    start = html.index("function AlertsView({ params })")
+    end = html.index("// Drift View", start)
+    view = _no_comments(html[start:end])
+    assert "/acknowledge" in view
+    assert "apiPatch(" in view
+    assert "const acknowledge = useCallback" in view
+    # Acknowledged alerts read as acknowledged, and the detail row still spans
+    # the full width after the Status column was added.
+    assert "badge-neutral" in view
+    assert 'colspan="7"' in view
+    assert 'colspan="6"' not in view
+    # apiPatch is a real helper, not a call into nothing.
+    assert "async function apiPatch(path, body)" in html
