@@ -198,15 +198,20 @@ def test_list_omits_the_advise_only_footer_when_every_proposal_is_apply_capable(
 
 # --- pricing-mode honesty -------------------------------------------------------
 
-def test_subscription_plan_suppresses_the_raw_dollar_figure(tmp_path):
+def test_subscription_plan_shows_the_same_dollar_figure_as_api(tmp_path):
+    """Subscription users now see the same `$12.50` recoverable figure an API
+    user would (core/framing.render_savings, made unconditional by product
+    decision: dollars are always legitimate, so tj no longer differentiates
+    its rendering between subscription and API users). Previously this
+    figure was suppressed in favour of a bare token count for subscription
+    plans."""
     cfg = TjConfig(
         version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")),
         budgets={"anthropic": ProviderBudget(plan="max_5x")},
     )
     _store(cfg, _advise_only())
     result = _run(cfg, ["cost-proposals"])
-    assert "$12.50" not in result.output
-    assert "12.5" not in result.output.replace("12,500", "")  # no bare dollar amount leaks
+    assert "$12.50" in result.output
 
 
 # --- cost-apply: the workspace-write verb ---------------------------------------
