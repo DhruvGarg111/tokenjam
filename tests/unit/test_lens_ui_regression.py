@@ -2392,11 +2392,16 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "useState(prop.target_path || '')" in row
     # The guidance is gated on there being no resolved path, and names both exits.
     assert "!prop.target_path ? html`" in row
-    # Both exits are still named; the wording was unstacked from a numbered list to
-    # one sentence, because four stacked lines were the largest non-snippet
-    # contributor to row height.
-    assert "paste its <code>CLAUDE.md</code> below" in row
+    # Both exits are still named. The wording went from a numbered list, to one
+    # sentence, to a clause on the label line itself, each time because it was the
+    # largest non-snippet contributor to row height and each time keeping both
+    # exits. Asserted on the exits, not on the layout: the layout is what keeps
+    # changing and the exits are what must not be lost.
+    assert "<code>CLAUDE.md</code> you paste below" in row
     assert "register it once with" in row
+    # The reversibility fact rides the same line and is NOT trimmed with the rest:
+    # it is what makes a one-click write to the reader's own file acceptable.
+    assert "writes a reversible rung-1 note" in row
     # The register-command is one-click copyable, not just prose.
     assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
     # Smarter UX: "no path yet" is not an error. The buttons are disabled until
