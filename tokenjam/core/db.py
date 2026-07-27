@@ -86,6 +86,7 @@ class StorageBackend(Protocol):
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None: ...
     def close_sessions_by_instance(self, instance_id: str) -> int: ...
     def close_session_by_id(self, session_id: str) -> int: ...
+    def mark_sessions_completed(self, session_ids: list[str]) -> None: ...
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
@@ -1579,7 +1580,25 @@ class DuckDBBackend:
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                 ON CONFLICT (session_id) DO UPDATE SET
                     ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
-                    status = EXCLUDED.status,
+                    -- Refuse to downgrade a row the live path already marked
+                    -- 'active' when the incoming write's own last-activity is
+                    -- STALER than what's already stored -- e.g. a backfill/
+                    -- catch-up pass re-parsing a transcript whose on-disk
+                    -- snapshot lags spans the live OTLP path already recorded
+                    -- moments earlier. Only blocks the specific case of
+                    -- (stored='active', incoming!='active', incoming older);
+                    -- a genuinely newer completion always wins, and an
+                    -- explicit close never goes through this path at all
+                    -- (close_session_by_id / close_sessions_by_instance are
+                    -- direct UPDATEs, so they are never subject to this guard).
+                    status = CASE
+                        WHEN sessions.status = 'active'
+                         AND EXCLUDED.status != 'active'
+                         AND COALESCE(sessions.ended_at, sessions.started_at)
+                             > COALESCE(EXCLUDED.ended_at, EXCLUDED.started_at)
+                        THEN sessions.status
+                        ELSE EXCLUDED.status
+                    END,
                     total_cost_usd = EXCLUDED.total_cost_usd,
                     input_tokens = EXCLUDED.input_tokens,
                     output_tokens = EXCLUDED.output_tokens,
@@ -1847,6 +1866,32 @@ class DuckDBBackend:
                     [session_id, now],
                 )
         return count
+
+    def mark_sessions_completed(self, session_ids: list[str]) -> None:
+        """Correct raw `status='active'` rows to 'completed' for the given ids.
+
+        Used by the periodic zombie sweep (`transcript_sync.
+        sweep_stale_active_sessions`) to write back a terminal status for
+        sessions whose COMPUTED status (`SessionRecord.status_at` /
+        `status_with_transcript_mtime`) already reads as stale, so raw-column
+        consumers (MCP tools, `tj status`, the sessions route, relearn_apply)
+        stop overstating "active" indefinitely.
+
+        `AND status = 'active'` re-checks at write time (belt-and-braces
+        against a race with a concurrent explicit close or live span landing
+        between the sweep's read and this write) and never touches
+        `ended_at`, tokens, or cost -- status only. Idempotent: re-running
+        against ids already corrected (or since closed) is a no-op for them.
+        """
+        if not session_ids:
+            return
+        with self._write_lock:
+            placeholders = ", ".join(f"${i + 1}" for i in range(len(session_ids)))
+            self.conn.execute(
+                f"UPDATE sessions SET status = 'completed' "
+                f"WHERE session_id IN ({placeholders}) AND status = 'active'",
+                session_ids,
+            )
 
     def _trace_filter_where(self, filters: TraceFilters) -> tuple[str, list[object], int]:
         clauses: list[str] = []

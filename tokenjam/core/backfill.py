@@ -30,6 +30,7 @@ from tokenjam.core.cost import calculate_cost
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
 from tokenjam.core.models import (
+    SESSION_STALE_THRESHOLD,
     NormalizedSpan,
     SessionRecord,
     SpanKind,
@@ -140,6 +141,13 @@ class ParsedSession:
     total_cache_tokens: int
     total_cost_usd: float
     tool_call_count: int
+    # On-disk mtime of the transcript file this was parsed from (tz-aware UTC),
+    # or None when it couldn't be stat'd or the session was built directly (not
+    # parsed from a file, e.g. in tests). Lets `session_record_from_parsed`
+    # tell a transcript that is STILL being appended to apart from one that has
+    # gone quiet, without re-deriving a second definition of "stale" (backfill
+    # used to hardcode every session's status "completed" regardless).
+    transcript_mtime: datetime | None = None
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -297,6 +305,18 @@ def parse_claude_code_session(
     except OSError as exc:
         logger.warning("Could not read %s: %s", path, exc)
         return None
+
+    # Stat once, alongside the read above, so `session_record_from_parsed` can
+    # tell "still being appended to" apart from "gone quiet" without a second
+    # filesystem round-trip. None when the file can't be stat'd (rare: it just
+    # succeeded a read); a missing mtime degrades to the terminal ("completed")
+    # side of that decision rather than raising.
+    try:
+        transcript_mtime: datetime | None = datetime.fromtimestamp(
+            path.stat().st_mtime, tz=timezone.utc
+        )
+    except OSError:
+        transcript_mtime = None
 
     for line_no, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
@@ -512,6 +532,7 @@ def parse_claude_code_session(
         total_cache_tokens=total_cache,
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
+        transcript_mtime=transcript_mtime,
     )
 
 
@@ -613,6 +634,27 @@ def count_claude_code_sessions_in_scope(
     return min(total, max_sessions) if max_sessions is not None else total
 
 
+def _status_for_backfilled_session(transcript_mtime: datetime | None) -> str:
+    """Derive a backfilled Claude Code session's lifecycle status from its
+    transcript's on-disk mtime, instead of hardcoding "completed".
+
+    Reuses `SESSION_STALE_THRESHOLD` -- the SAME window
+    `SessionRecord.status_with_transcript_mtime` already uses to rescue a live
+    session from a misleadingly stale span signal -- so there is exactly one
+    definition of "is this transcript still being written to" in the codebase.
+    A transcript modified within the threshold is still being appended to by a
+    live terminal -> "active" (a non-terminal status; read-time
+    `SessionRecord.status_at` still degrades it to idle/stale as the gap since
+    `ended_at` grows, and the mtime-rescue path stays available on every later
+    read). A transcript that has gone quiet past the threshold (or one we
+    couldn't stat at all) has nothing left to rescue it here -> "completed".
+    """
+    from tokenjam.utils.time_parse import utcnow
+    if transcript_mtime is not None and utcnow() - transcript_mtime <= SESSION_STALE_THRESHOLD:
+        return "active"
+    return "completed"
+
+
 def session_record_from_parsed(
     parsed: ParsedSession, plan_tier: str = "unknown",
 ) -> SessionRecord:
@@ -622,7 +664,7 @@ def session_record_from_parsed(
         started_at=parsed.started_at,
         ended_at=parsed.ended_at,
         conversation_id=parsed.session_id,
-        status="completed",
+        status=_status_for_backfilled_session(parsed.transcript_mtime),
         total_cost_usd=parsed.total_cost_usd,
         input_tokens=parsed.total_input_tokens,
         output_tokens=parsed.total_output_tokens,

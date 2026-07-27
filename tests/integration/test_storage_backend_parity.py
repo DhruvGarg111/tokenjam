@@ -124,6 +124,7 @@ SHIM_NOT_IMPLEMENTED = {
     "insert_savings_entry",
     "insert_span",
     "insert_validation",
+    "mark_sessions_completed",
     "update_span_cost",
     "upsert_agent",
     "upsert_baseline",
