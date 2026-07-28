@@ -138,23 +138,12 @@ def cost_analyzers_for_persona(persona: str) -> tuple[str, ...]:
 # The skill note a `script` proposal writes: the observed tool-call
 # pattern is deterministic enough that a script could run it directly instead
 # of dispatching a full agent turn.
-_SCRIPT_SKILL_INTRO = (
-    "This tool-call pattern repeated across many sessions with the same "
-    "structural shape (same tools, same argument types, different values). "
-    "Consider replacing it with a deterministic script that runs these calls "
-    "directly, and reserve the agent turn for the parts that actually need a "
-    "model's judgment."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+_SCRIPT_SKILL_INTRO = fixes.fix_text("script.replace_agent_turn_with_script")
 
 # The CLAUDE.md rule a `reuse` proposal writes: the planning skeleton recurs.
-_REUSE_NOTE_INTRO = (
-    "This class of task shares a planning skeleton: the same tool sequence "
-    "follows the first planning call, session after session, with only the "
-    "argument values differing (dates, versions, paths). Consider templating "
-    "the plan for this shape instead of re-planning it from scratch each "
-    "time. Review before reusing: a skeleton match is a candidate, not proof "
-    "the plan is identical."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+_REUSE_NOTE_INTRO = fixes.fix_text("reuse.template_the_plan_skeleton")
 
 # The sizing-rubric rule a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
@@ -201,23 +190,18 @@ SUBAGENT_RUBRIC_INTRO = fixes.fix_text("subagent.sizing_rubric")
 #: It survives as explicitly-labelled immediate relief where a card has room
 #: for one (see the resend card's "Immediate relief" position); it is never a
 #: fix.
-_DOWNSIZE_CC_LEVER = (
-    "You can't switch your own interactive model mid-session, so this is not a "
-    "fix to paste into your own request the way an SDK caller would. The "
-    "actionable levers instead: `tj route export --target ccr` (or --target "
-    "litellm) to route future calls through a cheaper model, `tj optimize "
-    "subagent` to right-size subagent models and context, or a "
-    "CLAUDE.md/subagent directive telling this agent to dispatch cheaper "
-    "subagents for this shape of work."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+_DOWNSIZE_CC_LEVER = fixes.fix_text("downsize.claude_code_levers")
 
 # Appended (not substituted) for a "mixed" window: the swap text above already
 # applies to the sdk share, this just adds the claude-code share's own lever —
 # same "both, labeled" precedent as `_render_downgrade_cta`'s mixed branch.
-_DOWNSIZE_MIXED_CC_NOTE = (
-    " For the Claude Code sessions in this window: you can't switch your own "
-    "interactive model mid-session — use `tj route export`, `tj optimize "
-    "subagent`, or a CLAUDE.md directive instead."
+# ONE record, not a second shorter copy of the list above. This was a
+# separately-authored restatement of `_DOWNSIZE_CC_LEVER`, which is how the
+# same instruction comes to drift in two places; only the framing differs, so
+# only the framing is written here (as a catalogued lead-in).
+_DOWNSIZE_MIXED_CC_NOTE = " " + fixes.fix_text_for(
+    "downsize.claude_code_levers", "downsize.mixed_window",
 )
 
 
@@ -602,11 +586,14 @@ def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostP
         f"({swap_text or 'a cheaper same-family model'}) would have saved "
         f"${offload:,.2f} of re-reads plus ${tier:,.2f} of tier difference."
     )
+    # A FOURTH copy of the offload rule used to live here, abbreviated. The
+    # consolidation that gave the three analyzers one record reached the card's
+    # advise text and missed its one-paste block, so the user still received a
+    # separately-authored wording — in the artifact they actually paste into a
+    # CLAUDE.md, which is the worst place for it to drift.
     one_paste = (
         "# CLAUDE.md\n"
-        "Offload context-heavy sub-tasks (broad file reads, multi-file search, "
-        "long tool-output loops, exploratory investigation) to a subagent "
-        "instead of running them inline in the main thread.\n"
+        + fixes.fix_text("resend.offload_to_subagent") + "\n"
         + "\n".join(
             f"\n# .claude/agents/<name>.md\n---\nmodel: {substitutes[m]}\n---"
             for m in models[:1]
@@ -1185,12 +1172,32 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
 # claude-code share.
 # --------------------------------------------------------------------------- #
 
-CACHE_NO_LEVER_TEXT = (
-    "Prompt caching is controlled by cache_control fields on the raw "
-    "Anthropic API request. A Claude Code session doesn't construct that "
-    "request itself; the harness does. There's no code here for you to "
-    "edit, so no fix is shown for it."
-)
+# THE text lives in `core/fixes/registry.py`, where the lint can see that it
+# says no action is needed and that the record is marked advisory accordingly.
+CACHE_NO_LEVER_TEXT = fixes.fix_text("cache.no_claude_code_lever")
+
+
+def _cache_breakpoint_fix(model: str | Any = "") -> str:
+    """The caching instruction, once, named to the observed model when known.
+
+    FOUR call sites in this module each wrote their own wording of this — "Add
+    a stable cache prefix / enable prompt caching", "Add a cache_control
+    breakpoint on this agent's stable prefix", "right after this prefix", and
+    the resend card's own. They were one instruction, so they read from one
+    record now; what actually differed between them was WHICH model or prefix
+    was observed, and that is grounding, not a fifth wording.
+
+    Degrades to the generic sentence when the model was not observed. An empty
+    slot skips its substitution rather than rendering a plausible-looking
+    guess, which is the same rule every other grounded fix follows.
+    """
+    from tokenjam.core.fixes.grounding import Evidence, ground
+
+    record = fixes.fix_for("resend.sdk_cache_breakpoint")
+    if record is None:                       # pragma: no cover - import-time bug
+        return ""
+    name = str(model or "").strip()
+    return ground(record, Evidence(models=(name,)) if name else None)
 
 
 def _persona_gated_cache_fields(
@@ -1263,9 +1270,7 @@ def _cache_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProp
             estimate_basis=basis,
             **_persona_gated_cache_fields(
                 persona,
-                "Add a stable cache prefix / enable prompt caching for this model "
-                "so repeated context is served from cache instead of re-billed as "
-                "fresh input.",
+                _cache_breakpoint_fix(row.model),
             ),
         ))
     return proposals
@@ -1308,9 +1313,7 @@ def _cache_uncached_to_proposals(finding: Any, persona: str = "unknown") -> list
             agent_id=c.agent_id,
             **_persona_gated_cache_fields(
                 persona,
-                "Add a cache_control breakpoint on this agent's stable prefix "
-                "(system prompt / tool definitions) so repeated calls read "
-                "from cache instead of paying full input price every time.",
+                _cache_breakpoint_fix(getattr(c, "model", "")),
                 c.cache_control_snippet,
             ),
         ))
@@ -1514,9 +1517,7 @@ def _cache_recommend_to_proposals(
             estimate_basis=basis,
             **_persona_gated_cache_fields(
                 persona,
-                "Add a cache_control breakpoint right after this prefix so "
-                f"repeat calls on {c.model or 'this model'} read it from cache "
-                "instead of paying full input price again.",
+                _cache_breakpoint_fix(c.model),
                 c.cache_control_snippet,
             ),
         ))
@@ -1573,11 +1574,7 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
                 "prompt_chars": acc["prompt_chars"],
                 "estimated_token_reduction": acc["token_reduction"],
             },
-            advise_text=(
-                "Trim the low-significance regions from this step's prompt "
-                "template (boilerplate, repeated instructions, dead context) so "
-                "every call carries fewer input tokens."
-            ),
+            advise_text=fixes.fix_text("trim.drop_low_significance_regions"),
             past_overspend_usd=usd,
             past_overspend_tokens=acc["token_reduction"] or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
@@ -2555,11 +2552,7 @@ def _resend_to_proposals(
         from tokenjam.core.optimize.analyzers.context_resend import (
             RESEND_SDK_TRIM_FIX,
         )
-        advise = (
-            "Adopt a cache_control breakpoint at the call site (snippet "
-            "below) so this repeated context bills at the cache rate "
-            "instead of full price every turn."
-        ) if cache_snippet else RESEND_SDK_TRIM_FIX
+        advise = _cache_breakpoint_fix("") if cache_snippet else RESEND_SDK_TRIM_FIX
         write_fields = {
             "advise_only": True, "apply_capable": False,
             "delivery": "", "scope": "", "proposed_fix": "",

@@ -15,6 +15,7 @@ from tokenjam.core.fixes.catalog import (
     LEVER_MODEL,
     LEVER_OFFLOAD,
     LEVER_ROUTING,
+    PERSONA_ANY,
     PERSONA_CLAUDE_CODE,
     PERSONA_SDK,
     FixRecord,
@@ -218,19 +219,248 @@ OFFLOAD_RULE = register(FixRecord(
 #: The SDK counterpart of the same observation. A Claude Code user cannot
 #: paste this and an SDK caller cannot use the offload rule above; handing
 #: either the other's fix names an action they cannot take.
+#:
+#: FOUR analyzers' worth of call sites used to state this instruction in four
+#: separately-authored wordings — "Add a stable cache prefix / enable prompt
+#: caching", "Add a cache_control breakpoint on this agent's stable prefix",
+#: "Add a cache_control breakpoint right after this prefix", and this record.
+#: They are one instruction, so they are now one record, and the observed
+#: specifics (which model, which prefix) are grounding rather than a fifth
+#: wording.
+#:
+#: The trim half moved out to ``resend.sdk_trim_context``. It was a SECOND
+#: instruction living in this record's text, which is the shape that makes
+#: composition unsafe: the resend SDK card renders both, so a user was told to
+#: trim the request in the same block twice.
 SDK_CACHE_CONTROL = register(FixRecord(
     key="resend.sdk_cache_breakpoint",
     text=(
-        "Adopt a cache_control breakpoint at the call site so the repeated "
-        "prefix bills at the cache rate instead of full price on every turn, "
-        "and trim the request you build rather than relying on the harness to "
-        "do it — an SDK caller constructs the whole prompt, so the repeated "
-        "context is yours to bound."
+        "Adopt a cache_control breakpoint at the call site, on the stable "
+        "prefix the calls share (system prompt and tool definitions), so that "
+        "prefix bills at the cache rate instead of full input price on every "
+        "turn."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    # One record, every analyzer that hands out a caching instruction. The
+    # per-analyzer runtime gate is unchanged and still lives in
+    # ``cost_proposals._persona_gated_cache_fields``.
+    analyzers=frozenset({"resend", "cache"}),
+    answers="repeated prompt prefix billed at full input rate on every turn",
+    lever=LEVER_ROUTING,
+    grounding=(
+        Substitution(
+            find="on every turn",
+            template="on every {models} call",
+        ),
+    ),
+))
+
+#: The trim instruction, once. It was authored twice: as a clause inside
+#: ``resend.sdk_cache_breakpoint`` and as ``context_resend.RESEND_SDK_TRIM_FIX``,
+#: and both can be shown on the same card.
+#:
+#: Deliberately scoped to what an SDK caller controls DIRECTLY — the content it
+#: assembles into the next request. `/compact` is a Claude Code interactive
+#: command an SDK caller has no access to, which is why the compaction record
+#: below is a different record for a different persona rather than a branch in
+#: this one.
+SDK_TRIM_CONTEXT = register(FixRecord(
+    key="resend.sdk_trim_context",
+    text=(
+        "Trim or summarize the accumulated context before including it in the "
+        "next request instead of resending it unchanged turn over turn. An SDK "
+        "caller constructs the whole prompt, so the repeated volume this "
+        "finding measures is yours to bound; cutting it at the call site "
+        "reduces future prompt size independent of whether caching is enabled."
     ),
     delivery="claude_md_rule",
     personas=frozenset({PERSONA_SDK}),
     analyzers=frozenset({"resend"}),
-    answers="repeated prompt prefix billed at full input rate on every turn",
+    answers="accumulated context reassembled into every request unchanged",
+    lever=LEVER_ROUTING,
+))
+
+#: IMMEDIATE RELIEF, and labelled as such rather than as a fix. `/compact` is
+#: transient, persists nothing past the session, and never changes the pattern
+#: going forward — the record's own text says so, which is why it is not
+#: advisory_only: there IS an action, it is simply bounded.
+COMPACTION_RELIEF = register(FixRecord(
+    key="resend.compaction_relief",
+    text=(
+        "Run /compact (or start a fresh session) once accumulated context "
+        "crosses your working set. The repeated volume this finding measures "
+        "is the same content being re-sent turn over turn: trimming it "
+        "directly cuts future prompt size, regardless of whether caching is "
+        "on. This is a manual, per-session action, so it never fixes the "
+        "pattern going forward — treat it as immediate relief for an "
+        "already-full session, not the durable fix."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"resend"}),
+    answers="a single session already carrying more accumulated context than its working set",
+    lever=LEVER_AWARENESS,
+))
+
+#: An OBSERVATION for the Claude Code persona, not an offer. Prompt caching is
+#: controlled by fields on the raw API request, and a Claude Code session does
+#: not construct that request — the harness does. There is no code for this user
+#: to edit, so there is no action to sell, and the record says so.
+#:
+#: ``advisory_only`` is what makes that mechanical rather than a property of
+#: whoever last read the prose. What the behaviour already cost is untouched
+#: (Critical Rule 32); only the offer is withheld.
+CACHE_NO_CC_LEVER = register(FixRecord(
+    key="cache.no_claude_code_lever",
+    text=(
+        "Prompt caching is controlled by cache_control fields on the raw "
+        "Anthropic API request. A Claude Code session doesn't construct that "
+        "request itself; the harness does. There's no code here for you to "
+        "edit, so no fix is needed or shown for it."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"cache"}),
+    answers="repeated context re-billed as fresh input in a harness the user does not construct requests for",
+    lever=LEVER_AWARENESS,
+    advisory_only=True,
+))
+
+#: The Claude Code levers for a model-routing finding. A CC session cannot swap
+#: its own interactive model mid-turn, so the generic "route to a cheaper model"
+#: text an SDK caller gets names an action this persona cannot take.
+#:
+#: `/compact` IS NOT ON THIS LIST, deliberately: it is transient, persists
+#: nothing past the session, and users who feel a session filling already do it
+#: unprompted. Listing it beside three durable levers implies it is the same
+#: kind of thing, and pads a list whose length is itself a cost to adherence.
+#:
+#: The "mixed window" wording was a SECOND, shorter copy of this same list
+#: (``_DOWNSIZE_MIXED_CC_NOTE``). It is now this record plus a lead-in naming
+#: which share of the window it applies to — the framing differs, the
+#: instruction does not.
+DOWNSIZE_CC_LEVERS = register(FixRecord(
+    key="downsize.claude_code_levers",
+    text=(
+        "You can't switch your own interactive model mid-session, so this is "
+        "not a fix to paste into your own request the way an SDK caller would. "
+        "The actionable levers instead: `tj route export --target ccr` (or "
+        "--target litellm) to route future calls through a cheaper model, `tj "
+        "optimize subagent` to right-size subagent models and context, or a "
+        "CLAUDE.md/subagent directive telling this agent to dispatch cheaper "
+        "subagents for this shape of work."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"downsize"}),
+    answers="a premium model running work a cheaper same-family model fits, in a session that cannot swap its own model",
+    lever=LEVER_ROUTING,
+    lead_ins=((
+        "downsize.mixed_window",
+        "For the Claude Code sessions in this window:",
+    ),),
+))
+
+#: The `script` proposal's note. Behavioural, same class of surface as the
+#: subagent rubric: an orchestrator or the model itself reads it.
+SCRIPT_DETERMINISTIC = register(FixRecord(
+    key="script.replace_agent_turn_with_script",
+    text=(
+        "This tool-call pattern repeated across many sessions with the same "
+        "structural shape (same tools, same argument types, different values). "
+        "Consider replacing it with a deterministic script that runs these "
+        "calls directly, and reserve the agent turn for the parts that "
+        "actually need a model's judgment."
+    ),
+    delivery="skill",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"script"}),
+    answers="a deterministic tool-call sequence re-derived by a model turn every time it runs",
+    lever=LEVER_OFFLOAD,
+))
+
+#: The `reuse` proposal's note. Carries its own review caveat because a
+#: skeleton match is a candidate, not proof the plan is identical — that
+#: sentence is honesty about the SIGNAL, not an escape hatch on the
+#: instruction, and the two read alike but are not the same thing.
+REUSE_PLAN_SKELETON = register(FixRecord(
+    key="reuse.template_the_plan_skeleton",
+    text=(
+        "This class of task shares a planning skeleton: the same tool sequence "
+        "follows the first planning call, session after session, with only the "
+        "argument values differing (dates, versions, paths). Consider "
+        "templating the plan for this shape instead of re-planning it from "
+        "scratch each time. Review before reusing: a skeleton match is a "
+        "candidate, not proof the plan is identical."
+    ),
+    delivery="skill",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"reuse"}),
+    answers="the same planning skeleton re-derived from scratch across sessions",
+    lever=LEVER_OFFLOAD,
+))
+
+#: Framed more conservatively than its peers on purpose: a long answer is often
+#: the right one, so this is a candidate to review rather than a rule to
+#: enforce. Note what the hedge is and is not — it conditions the instruction on
+#: whether brevity COSTS something (completeness, correctness, clarity), which a
+#: reader of the output can check, not on the agent's own rating of how hard its
+#: task was. That distinction is the whole of the self-graded-hatch property.
+VERBOSITY_PREFER_SHORTER = register(FixRecord(
+    key="verbosity.prefer_shorter_when_it_serves",
+    text=(
+        "This shape of task ran noticeably longer, output-wise, than similar "
+        "sessions recently. Worth a look: if a shorter answer would serve this "
+        "shape of task just as well, prefer it — but only when brevity doesn't "
+        "cost completeness, correctness, or clarity. A longer answer is often "
+        "the right one; this is a candidate to review, not a rule to enforce."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"verbosity"}),
+    answers="output tokens running well above the median for the same task shape",
+    lever=LEVER_AWARENESS,
+))
+
+#: The residual bucket's placeholder. Not an instruction and not pretending to
+#: be one: a cluster that matched no known family has no fix to hand out, and
+#: this says so rather than inventing something plausible.
+#:
+#: It is catalogued anyway, for two reasons. It is text a user reads, so it
+#: belongs where the other text a user reads lives; and ``is_placeholder_fix``
+#: matches on its wording to block the write, so a wording drifting here while
+#: that matcher stays put would silently start OFFERING a placeholder as a rule.
+#: One home means the string and the matcher cannot drift apart.
+#:
+#: Distinct from ``relearn.edit_before_read``, which is marked advisory_only:
+#: "no template matched" and "none is needed" are different statements, and
+#: collapsing them would let a real do-nothing fix hide as an unmatched one.
+RELEARN_NO_TEMPLATE = register(FixRecord(
+    key="relearn.no_template_matched",
+    text="Review examples — no known fix template matched.",
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"relearn"}),
+    answers="a recurring failure cluster that matched no known family",
+    lever=LEVER_AWARENESS,
+))
+
+#: The prompt-template trim instruction. Distinct from
+#: ``resend.sdk_trim_context``, which is about context ACCUMULATED across turns:
+#: this one is about a static template that carries dead weight on every single
+#: call, and the two are fixed in different places.
+TRIM_PROMPT_TEMPLATE = register(FixRecord(
+    key="trim.drop_low_significance_regions",
+    text=(
+        "Trim the low-significance regions from this step's prompt template "
+        "(boilerplate, repeated instructions, dead context) so every call "
+        "carries fewer input tokens."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    analyzers=frozenset({"trim"}),
+    answers="a prompt template carrying regions that contribute nothing on every call",
     lever=LEVER_ROUTING,
 ))
 
@@ -496,11 +726,19 @@ RELEARN_WEBFETCH_DOMAIN_BLOCKED = register(FixRecord(
 
 
 __all__ = [
+    "CACHE_NO_CC_LEVER",
+    "COMPACTION_RELIEF",
+    "DOWNSIZE_CC_LEVERS",
     "EDIT_BEFORE_READ",
     "OFFLOAD_RULE",
     "RIGHTSIZE_TEMPLATE",
+    "REUSE_PLAN_SKELETON",
+    "SCRIPT_DETERMINISTIC",
     "SDK_CACHE_CONTROL",
+    "SDK_TRIM_CONTEXT",
     "SUBAGENT_DEFINE_BUILTIN",
     "SUBAGENT_EFFORT",
     "SUBAGENT_RUBRIC",
+    "TRIM_PROMPT_TEMPLATE",
+    "VERBOSITY_PREFER_SHORTER",
 ]

@@ -1777,7 +1777,9 @@ def build_proposals(
         # mechanism, so it gets the default one. That is a real default, not a
         # guess about the artifact: with no matcher there is no hook to write.
         delivery = family["delivery"] if family else DELIVERY_CLAUDE_MD_RULE
-        fix = family["fix"] if family else "Review examples — no known fix template matched."
+        fix = family["fix"] if family else _fixes.fix_text(
+            "relearn.no_template_matched",
+        )
 
         repos = sorted(cluster.repos)
         occurrences = len(cluster.failures)
