@@ -47,10 +47,20 @@ def get_rules(request: Request) -> dict[str, Any]:
     """
     from tokenjam.core.rulewrite import list_rule_writes
 
+    from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
+
     rules = [r.to_dict() for r in list_rule_writes(_config(request))]
     return {
         "rules": rules,
         "offered_count": sum(1 for r in rules if r["offered"]),
+        # The mechanisms this build can render, published so the UI labels a
+        # rule's delivery from the server's own registry rather than from a
+        # second copy of the list in JS — the same single-compute-path rule
+        # that keeps persona gating out of the client.
+        "delivery_kinds": {
+            name: {"label": k.label, "carries_prompt_text": k.carries_prompt_text}
+            for name, k in DELIVERY_KINDS.items()
+        },
     }
 
 

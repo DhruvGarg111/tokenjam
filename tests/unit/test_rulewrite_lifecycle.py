@@ -228,3 +228,103 @@ def test_the_undo_surface_explains_why_a_row_cannot_be_undone(config, tmp_path):
     row = store.list_backups(config)[0]
     assert row["undoable"] is False
     assert row["reason"] == "changed since apply — undo would lose newer edits"
+
+
+# --- delivery as a seam -----------------------------------------------------#
+#
+# Appending markdown to a CLAUDE.md is ONE way to get a rule in front of an
+# agent, not the only one, and for several of these analyzers not the best one:
+# a hook can deliver the same guidance at the moment of the decision rather
+# than at the top of a long context. These pin that the lifecycle is not welded
+# to markdown, so adding a mechanism is a new registration rather than a
+# rewrite of this surface.
+
+def test_a_rule_carries_and_persists_its_delivery_mechanism(config, tmp_path):
+    """The staged entry records the mechanism that rendered it, so apply
+    re-renders through the SAME one that produced the diff a reviewer approved
+    rather than through whatever the default happens to be by then."""
+    from tokenjam.core.rulewrite.delivery import DELIVERY_CLAUDE_MD_RULE
+
+    alpha = _project(tmp_path, "alpha")
+    staged = stage_rule(config, _rule(alpha))
+    assert staged[0].delivery == DELIVERY_CLAUDE_MD_RULE
+    # And it survives the store round trip, not just the in-memory object.
+    assert store.read_staged(
+        config, "cost:subagent", str(alpha),
+    ).delivery == DELIVERY_CLAUDE_MD_RULE
+    assert check_staged(config)[0]["delivery"] == DELIVERY_CLAUDE_MD_RULE
+
+
+def test_an_unknown_delivery_is_refused_rather_than_rendered_as_markdown(
+    config, tmp_path,
+):
+    """A staged entry naming a mechanism this build cannot render must not be
+    quietly written as a markdown block into whatever file it named. A wrong
+    write to a real file is the one failure this package exists to prevent, so
+    the unknown case refuses instead of falling back."""
+    alpha = _project(tmp_path, "alpha")
+    before = alpha.read_text(encoding="utf-8")
+    with pytest.raises(RuleWriteRefused) as exc:
+        stage_rule(config, _rule(alpha, delivery="prompt_injection_hook"))
+    assert "unknown delivery mechanism" in str(exc.value)
+    assert alpha.read_text(encoding="utf-8") == before
+
+
+def test_the_lifecycle_prices_through_the_mechanism_not_the_rung(config, tmp_path):
+    """The load-bearing half of the seam.
+
+    `write_budget`'s ladder charges rung 3+ ZERO because an EXECUTING hook is
+    never sent as prompt text. That is false for a context-INJECTING hook: a
+    `UserPromptSubmit` re-injection is prompt text on a different schedule, and
+    once injected it accretes into history and is re-sent every turn. So the
+    question "does this cost tokens" is asked of the MECHANISM, and a delivery
+    that carries prompt text pays whatever rung it occupies.
+    """
+    from dataclasses import replace as dc_replace
+
+    from tokenjam.core.rulewrite import delivery as dv
+
+    alpha = _project(tmp_path, "alpha")
+    markdown = dv.DELIVERY_KINDS[dv.DELIVERY_CLAUDE_MD_RULE]
+    assert markdown.carries_prompt_text is True
+
+    # A rung-3 mechanism that DOES put text in front of the model still pays —
+    # and it prices ITSELF rather than reusing the markdown kind's pricer, which
+    # routes through the rung ladder and would return zero here. That is the
+    # whole reason the pricer is per-mechanism: the ladder is the right answer
+    # for a file the harness reads, and the wrong one for an injected block.
+    injecting = dc_replace(
+        markdown, name="test_injecting_hook",
+        standing_tokens=lambda rule, rendered, existing: 250,
+    )
+    free = dc_replace(markdown, name="test_executing_hook", carries_prompt_text=False)
+    dv.DELIVERY_KINDS[injecting.name] = injecting
+    dv.DELIVERY_KINDS[free.name] = free
+    try:
+        priced = stage_rule(
+            config, _rule(alpha, rung=3, delivery=injecting.name),
+        )[0]
+        store.clear(config)
+        unpriced = stage_rule(config, _rule(alpha, rung=3, delivery=free.name))[0]
+    finally:
+        del dv.DELIVERY_KINDS[injecting.name]
+        del dv.DELIVERY_KINDS[free.name]
+
+    # Same rung, same text, opposite standing cost — decided by the mechanism.
+    assert priced.standing_tokens_per_session == 250
+    assert unpriced.standing_tokens_per_session == 0
+
+
+def test_adding_a_mechanism_does_not_require_touching_the_lifecycle():
+    """The seam's actual contract, asserted structurally: nothing in the
+    staging / apply / store / plan machinery names the markdown mechanism."""
+    from pathlib import Path as _Path
+
+    import tokenjam.core.rulewrite.apply as apply_mod
+    import tokenjam.core.rulewrite.plan as plan_mod
+    import tokenjam.core.rulewrite.store as store_mod
+
+    for module in (apply_mod, store_mod, plan_mod):
+        source = _Path(module.__file__).read_text(encoding="utf-8")
+        assert "render_note_content" not in source, module.__name__
+        assert "render_skill_content" not in source, module.__name__

@@ -13,10 +13,15 @@ reportable result, not an error. The alternative — all-or-nothing across files
 the user may not even own — would mean one drifted file blocks a fix for every
 other project.
 
-The rendering itself is ``relearn_apply``'s (``render_note_content`` /
-``render_skill_content``), which owns the marker format that makes a write
-idempotent and revertible. A second renderer here would produce blocks the
-existing Revert path cannot find.
+**Nothing in this module knows what a CLAUDE.md is.** How a rule reaches the
+agent is a DELIVERY MECHANISM, resolved through ``core/rulewrite/delivery``,
+because appending markdown is one way to put guidance in front of an agent and
+not the only one — a hook can deliver the same guidance at the moment of the
+decision instead of at the top of a long context. Staging, diffing, applying,
+undoing and pricing all go through that seam, so a second mechanism is a new
+registration plus its renderer, never a rewrite of this file. Today's one
+mechanism delegates to ``relearn_apply``'s renderers, which own the marker
+format that makes a write idempotent and revertible.
 """
 from __future__ import annotations
 
@@ -27,9 +32,8 @@ from pathlib import Path
 from tokenjam.core.atomic_write import AtomicWriteRefused, atomic_write
 from tokenjam.core.config import TjConfig
 from tokenjam.core.rulewrite import store
+from tokenjam.core.rulewrite.delivery import DEFAULT_DELIVERY, resolve_delivery
 from tokenjam.core.rulewrite.types import (
-    RUNG_NOTE,
-    RUNG_SKILL,
     RuleWrite,
     RuleWriteRefused,
     StagedRuleWrite,
@@ -40,31 +44,6 @@ def _owned_by_current_user(path: Path) -> bool:
     if not hasattr(os, "getuid"):     # non-POSIX — no ownership model to honour
         return True
     return path.stat().st_uid == os.getuid()
-
-
-def _render(rule: RuleWrite, existing: str) -> str:
-    """The full file content after this rule lands in it.
-
-    Delegates to ``relearn_apply``'s renderers so the marker comments — the
-    thing that makes a re-apply replace rather than duplicate, and makes Revert
-    able to find the block — are produced in exactly one place.
-    """
-    from tokenjam.core.optimize.relearn_apply import (
-        render_note_content,
-        render_skill_content,
-        slugify,
-    )
-
-    cluster = {
-        "title": rule.title or rule.signature,
-        "proposed_fix": rule.artifact_text,
-        "rung": rule.rung,
-        "sessions": sum(d.sessions for d in rule.destinations),
-        "repos": [d.path for d in rule.destinations],
-    }
-    if rule.rung == RUNG_SKILL:
-        return render_skill_content(cluster, rule.signature, slugify(rule.title))
-    return render_note_content(existing, cluster, rule.signature)
 
 
 def _diff(path: str, before: str, after: str) -> str:
@@ -95,6 +74,10 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
             "This happens when no session it was derived from recorded a "
             "working directory that still exists.",
         )
+    # Resolved ONCE for the whole rule and recorded on every staged entry, so
+    # apply re-renders through the same mechanism that produced the diff a
+    # reviewer approved rather than through whatever the default is by then.
+    kind = resolve_delivery(rule.delivery or DEFAULT_DELIVERY)
     staged: list[StagedRuleWrite] = []
     for destination in rule.destinations:
         target = Path(destination.path).expanduser()
@@ -104,7 +87,7 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
                 "it (that would replace the link, not the file).",
             )
         existing = target.read_text(encoding="utf-8") if target.is_file() else ""
-        rendered = _render(rule, existing)
+        rendered = kind.render(rule, existing)
         entry = StagedRuleWrite(
             signature=rule.signature,
             path=str(target),
@@ -112,32 +95,24 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
             rung=rule.rung,
             title=rule.title,
             analyzer=rule.analyzer,
+            delivery=kind.name,
             source_sha256=store.sha256(existing),
             rendered=rendered,
             diff=_diff(destination.path, existing, rendered),
-            standing_tokens_per_session=_standing_per_session(rule, rendered, existing),
+            # Priced by the MECHANISM, not by the rung. A mechanism that puts
+            # tokens in front of the model pays a standing cost whatever ladder
+            # rung it occupies; see `delivery.py` on why the rung-3-is-free rule
+            # cannot be trusted for a context-INJECTING hook.
+            standing_tokens_per_session=(
+                kind.standing_tokens(rule, rendered, existing)
+                if kind.carries_prompt_text else 0
+            ),
             sessions=destination.sessions,
             creates_file=not target.is_file(),
         )
         store.stage(config, entry)
         staged.append(entry)
     return staged
-
-
-def _standing_per_session(rule: RuleWrite, rendered: str, existing: str) -> int:
-    """What this write adds to every session that loads the file.
-
-    Priced on the DELTA the write introduces, through
-    ``write_budget.standing_tokens_per_session`` so the rung semantics (rung 2
-    charges frontmatter only, rung 3+ charges zero) are applied by the module
-    that owns them rather than restated here. A re-apply that replaces an
-    existing block adds nothing, and pricing it as if it added a whole block
-    would overstate the cost of keeping a rule current.
-    """
-    from tokenjam.core.optimize.write_budget import standing_tokens_per_session
-
-    added = max(0, len(rendered) - len(existing))
-    return standing_tokens_per_session(rule.rung, rendered[:added] if added else "")
 
 
 def check_staged(config: TjConfig) -> list[dict]:
@@ -154,6 +129,7 @@ def check_staged(config: TjConfig) -> list[dict]:
             "signature": entry.signature, "path": entry.path,
             "analyzer": entry.analyzer, "title": entry.title,
             "scope": entry.scope, "sessions": entry.sessions,
+            "delivery": entry.delivery or DEFAULT_DELIVERY,
             "creates_file": entry.creates_file,
             "applyable": applyable, "reason": reason,
         })
@@ -243,6 +219,7 @@ def apply_staged(
         applied.append({
             "path": entry.path, "signature": entry.signature,
             "analyzer": entry.analyzer, "scope": entry.scope,
+            "delivery": entry.delivery or DEFAULT_DELIVERY,
             "sessions": entry.sessions, "diff": entry.diff,
             "standing_tokens_per_session": entry.standing_tokens_per_session,
             "created_file": entry.creates_file,
@@ -299,9 +276,11 @@ def undo(
     }
 
 
+# Deliberately no rung constants here. They live on ``types`` (defined) and
+# ``delivery`` (used); re-exporting them from the apply path would suggest this
+# module reasons about the intervention ladder, which is exactly the coupling
+# the delivery seam removed.
 __all__ = [
-    "RUNG_NOTE",
-    "RUNG_SKILL",
     "apply_staged",
     "check_staged",
     "stage_rule",

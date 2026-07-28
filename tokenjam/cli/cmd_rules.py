@@ -29,6 +29,7 @@ from tokenjam.core.rulewrite import (
     undo,
 )
 from tokenjam.core.rulewrite import store
+from tokenjam.core.rulewrite.delivery import DEFAULT_DELIVERY, DELIVERY_KINDS
 from tokenjam.utils.formatting import console, format_tokens
 
 # Honesty discipline (Critical Rule 14). A rule is a candidate an agent will
@@ -84,6 +85,7 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("ANALYZER")
     table.add_column("RULE")
+    table.add_column("HOW")
     table.add_column("WHERE")
     table.add_column("PAST OVERSPEND", justify="right")
     for rule in rules:
@@ -100,9 +102,11 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
             "—" if rule.past_overspend_usd is None
             else f"${rule.past_overspend_usd:,.2f}"
         )
+        kind = DELIVERY_KINDS.get(rule.delivery or DEFAULT_DELIVERY)
         table.add_row(
             rule.analyzer,
             escape(rule.title or rule.signature),
+            escape(kind.label if kind else (rule.delivery or "unknown")),
             escape(where),
             figure,
         )
@@ -139,7 +143,11 @@ def cmd_rules_show(
         console.print_json(json.dumps(rule.to_dict()))
         return
     console.print(f"[heading]{escape(rule.title or rule.signature)}[/heading]")
-    console.print(f"[muted]{escape(rule.signature)} · rung {rule.rung}[/muted]")
+    kind = DELIVERY_KINDS.get(rule.delivery or DEFAULT_DELIVERY)
+    console.print(
+        f"[muted]{escape(rule.signature)} · rung {rule.rung} · "
+        f"{escape(kind.label if kind else (rule.delivery or 'unknown'))}[/muted]",
+    )
     console.print()
     console.print(escape(rule.artifact_text))
     console.print()

@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from tokenjam.core.config import TjConfig
+from tokenjam.core.rulewrite.delivery import DEFAULT_DELIVERY
 from tokenjam.core.rulewrite.types import RuleDestination, RuleWrite
 
 #: The analyzers whose fix is a permanent rule. Not a copy of a gating map —
@@ -69,6 +70,10 @@ def _rule_from_cost_proposal(raw: dict[str, Any]) -> RuleWrite | None:
         title=str(raw.get("title", "") or ""),
         rung=max(rung, 1),
         artifact_text=artifact,
+        # A stored proposal names no mechanism today, so it gets the default.
+        # Read from the payload rather than hardcoded, so an analyzer that
+        # starts proposing a different delivery needs no edit here.
+        delivery=str(raw.get("delivery", "") or DEFAULT_DELIVERY),
         destinations=_destinations_from_proposal(raw),
         offered=offered,
         blocked_reason=str(raw.get("write_blocked_reason", "") or ""),
@@ -105,6 +110,7 @@ def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
         title=str(raw.get("title", "") or ""),
         rung=max(int(raw.get("rung", 1) or 1), 1),
         artifact_text=artifact,
+        delivery=str(raw.get("delivery", "") or DEFAULT_DELIVERY),
         destinations=destinations,
         offered=bool(raw.get("write_offered", False)) and bool(target),
         blocked_reason=str(raw.get("write_blocked_reason", "") or ""),

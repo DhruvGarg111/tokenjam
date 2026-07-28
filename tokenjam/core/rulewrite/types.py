@@ -65,6 +65,13 @@ class RuleWrite:
     title: str
     rung: int
     artifact_text: str
+    #: HOW this rule reaches the agent — see ``core/rulewrite/delivery``.
+    #: A markdown block in a CLAUDE.md is one mechanism, not the only one, and
+    #: for several of these analyzers not the best one: guidance delivered at
+    #: the moment of the decision beats guidance at the top of a long context.
+    #: Empty means the default, which is what every rule written before this
+    #: was a field carries.
+    delivery: str = ""
     destinations: tuple[RuleDestination, ...] = ()
     #: Mirrors the proposal's own verdict. A rule the write budget did not
     #: offer is still LISTED — its text is copyable and its reason is stated —
@@ -88,6 +95,7 @@ class RuleWrite:
             "title": self.title,
             "rung": self.rung,
             "artifact_text": self.artifact_text,
+            "delivery": self.delivery,
             "destinations": [d.to_dict() for d in self.destinations],
             "offered": self.offered,
             "blocked_reason": self.blocked_reason,
@@ -107,6 +115,7 @@ class RuleWrite:
             title=str(raw.get("title", "")),
             rung=int(raw.get("rung", 0) or 0),
             artifact_text=str(raw.get("artifact_text", "")),
+            delivery=str(raw.get("delivery", "") or ""),
             destinations=tuple(
                 RuleDestination.from_dict(d) for d in (raw.get("destinations") or [])
             ),
@@ -136,6 +145,10 @@ class StagedRuleWrite:
     rung: int
     title: str
     analyzer: str
+    #: The mechanism this entry was rendered by. Persisted so apply re-resolves
+    #: the SAME one that produced the diff a reviewer approved, rather than
+    #: whatever the default happens to be by then.
+    delivery: str
     #: sha256 of the file as it stood when this was staged.
     source_sha256: str
     #: The full file content to write.
@@ -151,7 +164,7 @@ class StagedRuleWrite:
         return {
             "signature": self.signature, "path": self.path, "scope": self.scope,
             "rung": self.rung, "title": self.title, "analyzer": self.analyzer,
-            "source_sha256": self.source_sha256, "rendered": self.rendered,
+            "delivery": self.delivery, "source_sha256": self.source_sha256, "rendered": self.rendered,
             "diff": self.diff,
             "standing_tokens_per_session": self.standing_tokens_per_session,
             "sessions": self.sessions, "creates_file": self.creates_file,
@@ -167,6 +180,7 @@ class StagedRuleWrite:
             rung=int(raw.get("rung", 0) or 0),
             title=str(raw.get("title", "")),
             analyzer=str(raw.get("analyzer", "")),
+            delivery=str(raw.get("delivery", "") or ""),
             source_sha256=str(raw.get("source_sha256", "")),
             rendered=str(raw.get("rendered", "")),
             diff=str(raw.get("diff", "")),

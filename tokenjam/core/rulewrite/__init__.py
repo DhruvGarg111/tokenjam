@@ -17,6 +17,13 @@ per destination, dry-run by default.
 from __future__ import annotations
 
 from tokenjam.core.rulewrite.apply import apply_staged, check_staged, stage_rule, undo
+from tokenjam.core.rulewrite.delivery import (
+    DEFAULT_DELIVERY,
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_KINDS,
+    DeliveryKind,
+    resolve_delivery,
+)
 from tokenjam.core.rulewrite.plan import (
     RULE_WRITING_ANALYZERS,
     find_rule,
@@ -30,6 +37,10 @@ from tokenjam.core.rulewrite.types import (
 )
 
 __all__ = [
+    "DEFAULT_DELIVERY",
+    "DELIVERY_CLAUDE_MD_RULE",
+    "DELIVERY_KINDS",
+    "DeliveryKind",
     "RULE_WRITING_ANALYZERS",
     "RuleDestination",
     "RuleWrite",
@@ -39,6 +50,7 @@ __all__ = [
     "check_staged",
     "find_rule",
     "list_rule_writes",
+    "resolve_delivery",
     "stage_rule",
     "undo",
 ]

@@ -80,6 +80,28 @@ from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 #: So relearn's rung-3 hook families keep their full gross saving and only the
 #: rung-1/rung-2 prompt-text writes get netted down. That is the correct
 #: answer, not a loophole.
+#:
+#: **READ THIS BEFORE PRICING ANY NEW HOOK AS FREE — "rung 3 is zero" is a
+#: statement about EXECUTING hooks and is FALSE for context-INJECTING ones.**
+#: The zero above is earned by a hook that runs code: a formatter, a lint gate,
+#: a guard that blocks a command. Claude Code also has hooks whose entire
+#: purpose is to put text in front of the model — a ``UserPromptSubmit``
+#: re-injection, a ``PreToolUse`` ``additionalContext`` nudge. Those are prompt
+#: text. They differ from a CLAUDE.md rule only in SCHEDULE (delivered at a
+#: decision point rather than read at session start), which is precisely what
+#: can make them a better fix, and not at all in whether they cost tokens.
+#:
+#: Their cost is in fact worse-behaved than a rule's, not better: an injected
+#: block lands in the conversation and is re-sent with every subsequent turn,
+#: so it is not even bounded by the number of injections the way a one-shot
+#: read is bounded by the session count.
+#:
+#: The rung ladder cannot answer this, because it grades INTERVENTION STRENGTH,
+#: not delivery. The question "does this put tokens in front of the model" is a
+#: property of the MECHANISM, and it is asked as one:
+#: ``core/rulewrite/delivery.DeliveryKind.carries_prompt_text``, with each kind
+#: pricing itself. When a hook delivery arrives, route it through that flag —
+#: do not let it inherit this zero because of the rung it happens to occupy.
 RUNG_CLAUDE_MD = 1
 RUNG_SKILL = 2
 
@@ -297,8 +319,16 @@ def artifact_tokens(text: str) -> int:
 def standing_tokens_per_session(rung: int, text: str) -> int:
     """Tokens this artifact adds to EVERY future session, by rung.
 
-    See ``RUNG_CLAUDE_MD`` above for why rung 3 and up are zero: a hook or a
-    config edit is never sent to the model as prompt text.
+    See ``RUNG_CLAUDE_MD`` above for why rung 3 and up are zero: an EXECUTING
+    hook or a config edit is never sent to the model as prompt text.
+
+    **The rung is not the whole answer, and this function does not claim to be
+    one.** A context-injecting hook sits at rung 3 and is prompt text; pricing
+    it through this ladder alone would report it free. The rung ladder grades
+    intervention strength, not delivery, so a caller with a delivery mechanism
+    in hand asks THAT (``core/rulewrite/delivery``) and reaches this function
+    only for the mechanisms whose cost the ladder genuinely describes. The full
+    reasoning is in the ``RUNG_CLAUDE_MD`` block above; it is load-bearing.
     """
     tokens = artifact_tokens(text)
     if rung >= 3:

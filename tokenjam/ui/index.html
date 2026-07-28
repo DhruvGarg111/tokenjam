@@ -8296,6 +8296,11 @@ function diffBlocks(diffText) {
 // this component.
 function RulesView() {
   const [rules, setRules] = useState(null);       // null = not yet known
+  // The delivery-mechanism registry, read from the server. Appending markdown
+  // to a CLAUDE.md is one way to get a rule in front of the agent, not the
+  // only one, so the label comes from the endpoint rather than a second copy
+  // of the list in JS (single compute path).
+  const [deliveryKinds, setDeliveryKinds] = useState({});
   const [staged, setStaged] = useState(null);
   const [applied, setApplied] = useState(null);
   const [err, setErr] = useState(null);
@@ -8315,6 +8320,7 @@ function RulesView() {
         api('/rules'), api('/rules/staged'), api('/rules/applied'),
       ]);
       setRules(r.rules || []);
+      setDeliveryKinds(r.delivery_kinds || {});
       setStaged(s.staged || []);
       setApplied(a.applied || []);
       setErr(null);
@@ -8391,7 +8397,9 @@ function RulesView() {
                 return html`<div key=${r.signature} style="display:block;padding:12px 0;border-bottom:1px solid var(--border)">
                   <div style="display:flex;align-items:center;gap:10px">
                     <b>${r.title || r.signature}</b>
-                    <span class="dim" style="font-size:12px">${r.analyzer} · rung ${r.rung}</span>
+                    <span class="dim" style="font-size:12px">${r.analyzer} · rung ${r.rung}${
+                      (deliveryKinds[r.delivery] && deliveryKinds[r.delivery].label)
+                        ? ' · ' + deliveryKinds[r.delivery].label : ''}</span>
                     <span style="margin-left:auto">
                       ${r.past_overspend_usd == null
                         ? html`<span class="dim">—</span>`
