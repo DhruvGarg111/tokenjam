@@ -383,7 +383,12 @@ def test_quickstart_prints_pre_ingest_status_before_render(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Reading your last 90 days of Claude Code history" in result.output
-    assert "(most-recent 300 sessions)" in result.output
+    # The cap is disclosed WITHOUT a number: it is a file budget, and a file
+    # count is not a session count (every Task dispatch writes its own
+    # subagents/agent-*.jsonl sharing the parent's session_id, so the file
+    # count runs roughly double). One session count reaches this screen and
+    # the report is the one that makes it.
+    assert "(capped for a fast first run)" in result.output
     # It's the FIRST thing printed -- ahead of the report itself, not tacked
     # on after ingest already finished.
     assert result.output.index("Reading your last 90 days") < result.output.index(
@@ -402,7 +407,51 @@ def test_quickstart_pre_ingest_status_omits_cap_when_full(tmp_path):
     # Scoped to the status line: the report's own "Showing your most-recent N
     # sessions." is about the window, not the cap, and stands either way.
     status_line = result.output.split("\n")[0]
-    assert "most-recent" not in status_line
+    assert "capped" not in status_line
+
+
+def test_exactly_one_session_count_reaches_the_screen(tmp_path):
+    """The pre-ingest header and the report cannot disagree, because only one
+    of them states a session count at all.
+
+    The header used to announce a `.jsonl` FILE count labelled "sessions". A
+    Claude Code session is more than one file: every Task dispatch writes its
+    own `subagents/agent-*.jsonl` sharing the parent's `session_id`, so on a
+    real corpus the header read roughly double the report's number and the two
+    looked like two answers to one question. Filtering the pre-scan to
+    main-thread files lands on the report's number today, but the pre-scan
+    filters by FILE MTIME before parsing while the report filters by SPAN
+    TIMESTAMP after it, so agreement is not structural. A missing number is
+    fine; two numbers that disagree is the bug.
+    """
+    import re as _re_local
+
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    header, _, report = flat.partition("TokenJam reads your")
+    # Nothing before the report claims a session total.
+    assert "sessions" not in header
+    assert not _re_local.search(r"\d+\s*/\s*\d+", header), (
+        f"a total slipped back into the pre-ingest counter: {header!r}")
+    # And the report still states exactly one.
+    assert len(set(_re_local.findall(r"(\d+) sessions[.,]", report))) <= 1
+
+
+def test_the_progress_counter_never_calls_files_sessions(tmp_path):
+    """It counts `.jsonl` files walked, including subagent transcripts, so it
+    says "transcripts". Ingest coverage is unchanged: subagent transcripts are
+    still read, and must be."""
+    root = _large_fixture_root(tmp_path, n_sessions=120)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Backfilling" in result.output
+    for line in result.output.splitlines():
+        if "Backfilling" in line:
+            assert "sessions" not in line, f"file count labelled sessions: {line!r}"
 
 
 def test_quickstart_json_stdout_stays_pure(tmp_path):
@@ -431,8 +480,11 @@ def test_quickstart_advancing_counter_on_large_history(tmp_path):
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
     assert result.exit_code == 0, result.output
-    assert "Backfilling 100/250 sessions" in result.output
-    assert "Backfilling 200/250 sessions" in result.output
+    assert "Backfilling 100 transcripts" in result.output
+    assert "Backfilling 200 transcripts" in result.output
+    # No denominator: the only cheap pre-count is of FILES, and this screen
+    # states exactly one session count (the report's).
+    assert "/250" not in result.output
 
 
 def _large_fixture_root(tmp_path: Path, n_sessions: int) -> Path:
@@ -529,9 +581,9 @@ def test_quickstart_cli_discloses_truncation(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     flat = _flat(result.output)
-    # The cap itself is named by the pre-ingest status line, and the screen
-    # points at the full-history escape hatch.
-    assert "(most-recent 8 sessions)" in flat
+    # The cap is disclosed by the pre-ingest status line without a number, and
+    # the screen points at the full-history escape hatch.
+    assert "(capped for a fast first run)" in flat
     assert "to capture your full history." in flat
     # EXACTLY ONE session count reaches the screen, and both sentences that
     # state a population quote it. A figure summed over one population beside a
@@ -821,12 +873,13 @@ def test_avoidable_total_falls_back_to_the_ingest_count_only_without_one(monkeyp
 # ── The rendered screen ────────────────────────────────────────────────────
 
 
-def _stub_total(monkeypatch, usd, sessions=300):
+def _stub_total(monkeypatch, usd, sessions=300, contributors=("resend",)):
     from tokenjam.cli import cmd_quickstart as q
 
     monkeypatch.setattr(
         q, "_compute_avoidable_total",
-        lambda *a, **k: q.AvoidableTotal(usd=usd, sessions=sessions),
+        lambda *a, **k: q.AvoidableTotal(usd=usd, sessions=sessions,
+                                         contributors=contributors),
     )
 
 
@@ -914,6 +967,141 @@ def test_quickstart_degrades_cleanly_when_nothing_is_recoverable(tmp_path):
     flat = _flat(result.output)
     assert "TokenJam reads your ~/.claude/projects/*.jsonl session logs." in flat
     assert "to capture your full history." in flat
+
+
+# ── The explanatory sentence adapts to what actually contributed ───────────
+#
+# A bare dollar figure's likeliest misread is that it is what the sessions COST,
+# so one sentence under it says what "avoidable" means and gestures at the
+# mechanism. The gesture has to describe THIS run: a corpus whose figure is
+# dominated by an unused MCP server must not be explained by "oversized models".
+# That is the same defect class as printing a session count from a different
+# population than the dollars.
+
+
+def test_the_shape_clause_names_only_what_contributed(tmp_path, monkeypatch):
+    """A deadweight-dominated corpus is described by ITS cause, not the usual
+    model/context/failure trio."""
+    _stub_total(monkeypatch, 877.0, sessions=155, contributors=("deadweight",))
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "MCP servers connected but never used" in flat
+    # None of the shapes belonging to analyzers that contributed nothing.
+    for absent in ("oversized models", "context re-sent every turn",
+                   "mistakes that repeated without a fix",
+                   "always-loaded files longer than they need to be"):
+        assert absent not in flat, f"shape named without a contribution: {absent!r}"
+
+
+def test_no_shape_is_ever_named_for_a_zero_contributor(monkeypatch):
+    """Exhaustive over the shape map: for every analyzer, a run it did NOT
+    contribute to must not carry its phrase.
+
+    Asserted against the map itself rather than a hand-picked pair, so an
+    analyzer added later is covered without editing this test.
+    """
+    from tokenjam.cli.cmd_quickstart import _ANALYZER_SHAPES, _shape_clause
+
+    for analyzer, phrase in _ANALYZER_SHAPES.items():
+        others = tuple(a for a in _ANALYZER_SHAPES if _ANALYZER_SHAPES[a] != phrase)
+        clause = _shape_clause(others[:1])
+        assert phrase not in clause, (
+            f"{analyzer!r}'s shape appears with no contribution from it"
+        )
+
+
+def test_every_cost_analyzer_has_a_shape_phrase():
+    """A cost analyzer with no phrase does not silently vanish from the
+    sentence, but it does make the sentence vaguer than it needs to be. Keeping
+    the map complete against the live registry is the cheap half of that."""
+    from tokenjam.cli.cmd_quickstart import _ANALYZER_SHAPES
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    missing = [name for name in COST_ANALYZERS if name not in _ANALYZER_SHAPES]
+    assert not missing, f"cost analyzers with no plain-English shape: {missing}"
+
+
+def test_more_contributors_than_fit_does_not_imply_exhaustiveness(monkeypatch):
+    """Five contributors, three shapes shown. The sentence must read as a
+    sample, never as the complete set of causes."""
+    from tokenjam.cli.cmd_quickstart import _shape_clause
+
+    clause = _shape_clause(
+        ("resend", "summarize", "deadweight", "relearn", "verbosity"))
+
+    assert clause.startswith(
+        "That is the part a change to your setup would have removed, including ")
+    assert ": " not in clause          # the exhaustive form's colon is absent
+    assert clause.count(",") >= 3      # three shapes, comma-joined
+
+
+def test_an_unmapped_contributor_also_drops_the_exhaustive_form(monkeypatch):
+    """An analyzer this module has no phrase for degrades the sentence to the
+    vaguer but still TRUE form, rather than to a confident list that omits it."""
+    from tokenjam.cli.cmd_quickstart import _shape_clause
+
+    assert "including" in _shape_clause(("resend", "an-analyzer-added-later"))
+
+
+def test_the_shape_clause_collapses_duplicate_phrases(monkeypatch):
+    """`downsize` and `subagent` are different findings that read as one shape
+    to a user. The sentence says it once."""
+    from tokenjam.cli.cmd_quickstart import _shape_clause
+
+    clause = _shape_clause(("downsize", "subagent"))
+
+    assert clause.count("oversized models") == 1
+    assert "including" not in clause   # nothing was omitted, so it IS exhaustive
+
+
+def test_the_meaning_only_fallback_holds_for_any_mix(monkeypatch):
+    """When nothing maps, the sentence still does the more important of its two
+    jobs: correcting "this is what my sessions cost"."""
+    from tokenjam.cli.cmd_quickstart import _shape_clause
+
+    clause = _shape_clause(("something-unmapped",))
+
+    assert clause == ("That is the part a change to your setup would have "
+                      "removed, not what your sessions cost.")
+
+
+def test_no_explanation_when_the_figure_is_zero(tmp_path, monkeypatch):
+    _stub_total(monkeypatch, 0.0, sessions=42, contributors=())
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "would have removed" not in _flat(result.output)
+
+
+def test_no_explanation_when_the_figure_is_unknown(tmp_path, monkeypatch):
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "_compute_avoidable_total", lambda *a, **k: None)
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "would have removed" not in _flat(result.output)
+
+
+def test_contributors_come_from_the_rollup_breakdown_biggest_first(monkeypatch):
+    """The explanation and the figure are read off the SAME rollup, so they can
+    never describe different sets, and the order is by contribution."""
+    total = _compute(monkeypatch, [
+        _proposal(analyzer="subagent", signature="cost:subagent", usd=4.0),
+        _proposal(analyzer="resend", signature="cost:resend", usd=90.0),
+        _proposal(analyzer="deadweight", signature="cost:deadweight", usd=30.0),
+        # Token-only: explains a DOLLAR figure it contributed nothing to.
+        _proposal(analyzer="verbosity", signature="cost:verbosity",
+                  usd=None, tokens=5_000),
+    ])
+
+    assert total is not None
+    assert total.contributors == ("resend", "deadweight", "subagent")
 
 
 # ── Colour discipline: near-monochrome, one accent ─────────────────────────

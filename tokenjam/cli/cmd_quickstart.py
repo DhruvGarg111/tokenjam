@@ -50,11 +50,7 @@ from pathlib import Path
 import click
 
 from tokenjam.cli.backfill_progress import backfill_progress
-from tokenjam.core.backfill import (
-    CLAUDE_CODE_PROJECTS_ROOT,
-    count_claude_code_sessions_in_scope,
-    ingest_claude_code,
-)
+from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.utils.formatting import console, err_console, format_cost
 from tokenjam.utils.theme import ACCENT
@@ -113,16 +109,23 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     # never suppressed outright, so a human watching a scripted run still
     # sees it's alive.
     status_console = err_console if output_json else console
-    # Best-effort pre-scan: a stat()-only count taken before ingest starts, so
-    # the progress counter's "of N" denominator can drift if files under
-    # `root` change mid-run (a session file appears/disappears between this
-    # count and the actual walk). Cosmetic only — never affects what's
-    # ingested, since `ingest_claude_code` re-walks `root` itself.
-    total_in_scope = count_claude_code_sessions_in_scope(
-        root=root, since=since_dt, max_sessions=max_sessions,
-    )
+    # NO pre-ingest session total, deliberately. The only cheap pre-scan
+    # available is a stat()-only count of `.jsonl` FILES, and a Claude Code
+    # session is more than one file: every `Task` dispatch writes its own
+    # `subagents/agent-*.jsonl` sharing the parent's `session_id`. On a real
+    # corpus that made the header announce roughly twice the number the report
+    # then printed, which reads as two answers to one question.
+    #
+    # Filtering the pre-scan down to main-thread files was measured and lands
+    # on the report's number today (154 files, 154 sessions), but it cannot be
+    # relied on: the pre-scan filters by FILE MTIME before parsing while the
+    # report filters by SPAN TIMESTAMP after it, so a transcript touched inside
+    # the window whose turns all predate it counts in one and not the other. A
+    # missing number is fine; two numbers that disagree is the bug. The counter
+    # therefore runs without a denominator, and the report states the one
+    # session count this screen makes.
     status_console.print(f"[dim]{_pre_ingest_status(since, max_sessions)}[/dim]")
-    with backfill_progress(total_in_scope, console=status_console) as progress_cb:
+    with backfill_progress(None, console=status_console) as progress_cb:
         result = ingest_claude_code(db, root=root, since=since_dt,
                                     max_sessions=max_sessions, progress=progress_cb)
 
@@ -210,6 +213,86 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
 # assume API pricing.
 
 
+#: Plain-English shape phrases, one per cost analyzer, for the explanatory
+#: sentence under the figure. The reference for what each analyzer MEANS is the
+#: "what each analyzer sees" table in `.claude/product-state/positioning.md`;
+#: these are that table's left column said out loud, with no internal analyzer
+#: name reaching the screen.
+#:
+#: Two analyzers deliberately share one phrase: `downsize` (work that should
+#: have been delegated off an expensive main thread) and `subagent` (the worker
+#: it WAS delegated to was oversized) are different findings, but from the
+#: reader's side both are "a model bigger than the job needed", and the sentence
+#: is a gesture at the mechanism rather than an inventory. Duplicates collapse.
+#:
+#: A contributing analyzer with NO entry here does not silently vanish: it
+#: forces the non-exhaustive phrasing (see `_shape_clause`), so an analyzer
+#: added to `COST_ANALYZERS` without a phrase degrades to a vaguer but still
+#: TRUE sentence rather than to a confident list that omits it.
+_ANALYZER_SHAPES: dict[str, str] = {
+    "downsize":        "oversized models",
+    "subagent":        "oversized models",
+    "resend":          "context re-sent every turn",
+    "relearn":         "mistakes that repeated without a fix",
+    "deadweight":      "MCP servers connected but never used",
+    "summarize":       "always-loaded files longer than they need to be",
+    "trim":            "prompt text that carried no weight",
+    "cache":           "requests that never reused a cache",
+    "cache-recommend": "requests that never reused a cache",
+    "reuse":           "plans re-derived from scratch each time",
+    "script":          "tool sequences re-run by an agent instead of a script",
+    "verbosity":       "answers longer than the task needed",
+}
+
+#: How many shapes the sentence may name. Three is the founder-approved shape;
+#: past that the sentence stops being one plain line.
+_MAX_SHAPES = 3
+
+#: The half of the sentence that is true for ANY mix, used alone when the
+#: contributing analyzers map to no phrasing at all. It still does the more
+#: important of the sentence's two jobs: the likeliest misread of a bare dollar
+#: figure is that it is what the sessions COST.
+_MEANING_ONLY = (
+    "That is the part a change to your setup would have removed, not what "
+    "your sessions cost."
+)
+
+
+def _shape_clause(contributors: tuple[str, ...]) -> str:
+    """The explanatory sentence, derived from what ACTUALLY contributed.
+
+    `contributors` is the analyzers that put a non-zero dollar figure into this
+    run's rollup, biggest first. Naming a fixed list instead would describe a
+    `deadweight`-dominated corpus by causes that were not its own — the same
+    defect class as printing a session count from a different population than
+    the dollars.
+
+    The list is never presented as exhaustive unless it genuinely is: more
+    contributors than fit, or any contributor this module has no phrase for,
+    switches the sentence to "including".
+    """
+    shapes: list[str] = []
+    for name in contributors:
+        phrase = _ANALYZER_SHAPES.get(name)
+        if phrase and phrase not in shapes:
+            shapes.append(phrase)
+    if not shapes:
+        return _MEANING_ONLY
+
+    shown = shapes[:_MAX_SHAPES]
+    exhaustive = (
+        len(shown) == len(shapes)
+        and all(name in _ANALYZER_SHAPES for name in contributors)
+    )
+    joined = ", ".join(shown)
+    if exhaustive:
+        return f"That is the part a change to your setup would have removed: {joined}."
+    return (
+        f"That is the part a change to your setup would have removed, "
+        f"including {joined}."
+    )
+
+
 @dataclass(frozen=True)
 class AvoidableTotal:
     """The window's avoidable dollars, and the population they were summed over.
@@ -224,9 +307,14 @@ class AvoidableTotal:
     own window summary), carried on the same object so the render cannot pair
     this figure with a count from another population. The screen prints this one
     number in both places it states a population.
+
+    ``contributors`` is the analyzers that put a non-zero dollar figure into the
+    rollup, biggest first. It exists so the explanatory sentence can describe
+    THIS run's causes rather than a fixed list; see ``_shape_clause``.
     """
-    usd:      float
-    sessions: int
+    usd:          float
+    sessions:     int
+    contributors: tuple[str, ...] = ()
 
 
 # The ONE analyzer dropped from `COST_ANALYZERS` for this figure, and the
@@ -349,13 +437,28 @@ def _compute_avoidable_total(
         # load. `fallback_sessions` is a last resort for a report shape that
         # carries no count; it is never preferred over the real one.
         analyzed = int(getattr(getattr(report, "window", None), "sessions", 0) or 0)
+
+        # Who actually paid into the total, biggest first. Read off the rollup's
+        # own per-analyzer breakdown rather than re-walking the proposals, so
+        # the explanation and the figure can never describe different sets.
+        # Dollar-bearing entries only: `by_analyzer` also admits a row that
+        # contributed tokens alone, and the sentence explains a dollar figure.
+        contributors = tuple(
+            entry["analyzer"]
+            for entry in sorted(
+                (e for e in rollup.get("by_analyzer", []) if (e.get("usd") or 0) > 0),
+                key=lambda e: float(e.get("usd") or 0.0),
+                reverse=True,
+            )
+        )
     except Exception:
         # A first run must never die on the analyzers. Worst case no sentence
         # is rendered; the rest of the screen is unaffected.
         return None
 
     return AvoidableTotal(usd=max(usd, 0.0),
-                          sessions=analyzed or max(fallback_sessions, 0))
+                          sessions=analyzed or max(fallback_sessions, 0),
+                          contributors=contributors)
 
 
 # ───────────────────────────── rendering ──────────────────────────────────
@@ -384,9 +487,16 @@ def _pre_ingest_status(since: str, max_sessions: int | None) -> str:
     ~40s of dead cursor on a large history before any output. This line
     lands within ~1s of launch; `backfill_progress`'s streaming counter
     takes over immediately after.
+
+    It states the cap WITHOUT a number. The cap is a file budget
+    (`DEFAULT_MAX_SESSIONS` bounds a glob over `~/.claude/projects`), and a file
+    count is not a session count, so printing it here would put a second,
+    larger number on screen above the one the report makes. See the call site
+    for why the honest-looking fix (count main-thread files only) is not
+    reliable enough to print.
     """
     window = _describe_window(since)
-    scope = f" (most-recent {max_sessions} sessions)" if max_sessions is not None else ""
+    scope = " (capped for a fast first run)" if max_sessions is not None else ""
     return f"Reading your {window} of Claude Code history{scope}…"
 
 
@@ -498,6 +608,12 @@ def _render(avoidable: AvoidableTotal | None, *,
     if avoidable is not None:
         console.print()
         console.print(_avoidable_line(avoidable))
+        # The explanation attaches to a FIGURE, so it renders only when there is
+        # one. On an unknown or measured-empty window there is nothing to
+        # explain, and a sentence about what would have been removed would read
+        # as a finding the run never made.
+        if avoidable.usd > 0:
+            console.print(Text(_shape_clause(avoidable.contributors), style="muted"))
 
     console.print()
     full_history = Text()

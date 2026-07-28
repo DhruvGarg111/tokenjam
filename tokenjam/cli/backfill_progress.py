@@ -38,10 +38,20 @@ def backfill_progress(
 ) -> Iterator[ProgressCallback]:
     """Yield a `progress(parsed, result)` callback for `ingest_claude_code`.
 
-    `total` is the cheap pre-count of in-scope sessions
+    `total` is the cheap pre-count of in-scope transcript FILES
     (`count_claude_code_sessions_in_scope`), or `None` when unknown — the
     counter then shows a running count with no "/total". `quiet=True` yields a
     no-op callback (mirrors `tj backfill claude-code --quiet`).
+
+    The counter says "transcripts", not "sessions", and the distinction is the
+    point. Both the numerator (`BackfillResult.sessions_seen`) and the total
+    count `.jsonl` FILES walked, and a Claude Code session is more than one
+    file: every `Task` dispatch writes its own `subagents/agent-*.jsonl`
+    sharing the parent's `session_id`. On a real corpus roughly half the files
+    under the projects root are subagent transcripts, so a file count reads
+    about twice the session count, and calling it "sessions" put two different
+    answers to one question on the same screen. Nothing about what gets
+    ingested changed: subagent transcripts are still read, and they must be.
 
     `console` overrides where the counter renders (default: the shared stdout
     console) — `tj quickstart --json` passes the stderr console so the
@@ -59,7 +69,8 @@ def backfill_progress(
             f"{result.sessions_seen:,}/{total:,}" if total is not None
             else f"{result.sessions_seen:,}"
         )
-        return f"Backfilling {count} sessions · {format_tokens(tokens_seen)} tokens read"
+        return (f"Backfilling {count} transcripts · "
+                f"{format_tokens(tokens_seen)} tokens read")
 
     def _accumulate(parsed: ParsedSession) -> None:
         nonlocal tokens_seen
