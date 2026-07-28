@@ -247,10 +247,27 @@ BASIS_NOT_PRICEABLE = (
     "standing cost not netted: this finding carries no token estimate to net "
     "the permanent rule's own per-session cost against"
 )
+#: THE REMEDY THIS NAMES HAS TO BE ONE THAT WORKS. The first version said
+#: "compress them (see the summarize findings)". Measured on seven real
+#: instruction files across six repos, compression returned a 0.952 mean prose
+#: ratio — roughly 5%, of which 34-71% was pure whitespace reflow. So the
+#: product was gating its two largest cards on a remedy that returns almost
+#: nothing, and a gate the user cannot pass is not a gate, it is a dead end.
+#:
+#: It also named the wrong lever for the wrong reason. Files that hit this
+#: ceiling are long by ACCUMULATION — numbered incident lists, append-only
+#: logs — where what frees space is pruning what no longer applies, expiring
+#: what was time-bound, and moving what is file-specific into a path-scoped
+#: rule that loads only on a matching read. Compression works on prose; these
+#: files are not long because their prose is verbose.
 REASON_CEILING_REACHED = (
-    "Your agent files already carry more standing per-session context than the "
-    "budget allows to grow. Compress them (see the summarize findings) before "
-    "adding new permanent rules."
+    "Your instruction files already carry more standing per-session context "
+    "than the budget allows to grow. These files are usually long by "
+    "accumulation rather than by verbosity, so the levers that free real space "
+    "are pruning entries that no longer apply, expiring anything that was "
+    "time-bound, and moving file-specific guidance into a path-scoped rule "
+    "that loads only when a matching file is read. Compressing the prose "
+    "typically returns very little."
 )
 
 #: The same five verdicts as a SHORT label, for a dense list where the full
@@ -286,7 +303,7 @@ REASON_SHORT_BY_REASON.update({
     REASON_BUDGET_FULL: "deferred — this window's rule budget is spent",
     REASON_FAMILY_MERGED: "covered by another cluster's rule",
     REASON_ADVISORY_ONLY: "awareness only — nothing to change",
-    REASON_CEILING_REACHED: "blocked — agent files already too large to grow",
+    REASON_CEILING_REACHED: "blocked — instruction files already too large to grow",
     REASON_BELOW_VALUE_FLOOR: (
         f"returns under ${MIN_NET_WRITE_USD:.0f} — not worth a permanent rule"
     ),
@@ -476,6 +493,37 @@ class WriteBudget:
     #: every destination then falls back to ``budget_tokens``.
     existing_by_path: dict[str, int] = field(default_factory=dict)
 
+    def destination_blocked(self, path: str) -> bool:
+        """Whether THIS file is the one that is too large to grow.
+
+        The ceiling used to be a single verdict over the AGGREGATE footprint,
+        which made one pathological file block every write — including a write
+        into a different, nearly-empty project file that had ample headroom.
+        Once placement can put a rule somewhere else, an aggregate ceiling is
+        answering a question nobody asked: the file that cannot grow is the
+        file that cannot grow, not every file.
+
+        That mattered in practice, not in theory. The two largest cards this
+        product produces were both withheld under the aggregate ceiling while
+        their resolved destinations were project files with room, and the
+        remedy the message named returned ~5% on measurement — so the largest
+        fixes were gated behind something the user could not clear.
+
+        Falls back to the aggregate verdict for a file the scan never measured,
+        which is the conservative direction and preserves the old behaviour
+        wherever per-file sizes are unavailable.
+        """
+        if not path or not self.existing_by_path:
+            return self.ceiling_reached
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = path
+        existing = self.existing_by_path.get(key)
+        if existing is None:
+            return self.ceiling_reached
+        return existing >= AGENT_FILE_STANDING_CEILING_TOKENS
+
     def destination_budget(self, path: str) -> int:
         """How much new standing text ONE file may take on.
 
@@ -485,7 +533,7 @@ class WriteBudget:
         the corpus-wide footprint look roomy. Unmeasured files fall back to the
         lane budget, which is the historical single-destination behaviour.
         """
-        if self.ceiling_reached:
+        if self.destination_blocked(path):
             return 0
         if not path:
             return self.budget_tokens
@@ -859,8 +907,14 @@ def allocate_writes(
         # behaviour with no rule and a card claiming it was covered.
         targets = decision.destinations or ("",)
         per_file = decision.standing_tokens_per_session
+        # `max_writes` is zero under the aggregate ceiling, which would still
+        # withhold every write even when the chosen destinations have room. The
+        # count cap only binds where the ceiling genuinely applies to this
+        # write's own files.
+        blocked_here = any(budget.destination_blocked(path) for path in targets)
+        write_cap = budget.max_writes if not budget.ceiling_reached or not blocked_here else 0
         fits = (
-            offered_count < budget.max_writes
+            offered_count < max(write_cap, 0 if blocked_here else budget.max_writes)
             and spent_tokens + decision.footprint_tokens <= budget.budget_tokens
             and all(
                 spent_by_destination.get(path, 0) + per_file
@@ -877,7 +931,7 @@ def allocate_writes(
             continue
         decisions[rep.key] = WriteDecision(
             key=decision.key, offered=False,
-            reason=REASON_CEILING_REACHED if budget.ceiling_reached else REASON_BUDGET_FULL,
+            reason=REASON_CEILING_REACHED if blocked_here else REASON_BUDGET_FULL,
             standing_tokens_per_session=decision.standing_tokens_per_session,
             standing_tokens=decision.standing_tokens, standing_usd=decision.standing_usd,
             net_tokens=decision.net_tokens, net_usd=decision.net_usd,

@@ -2065,7 +2065,16 @@ def _apply_write_budget(
     basis = projection or build_projection_basis(0.0, 0, 0)
     candidates: list[wb.WriteCandidate] = []
     for p in proposals:
-        if p.advise_only or not p.suggested_target:
+        # An ADVISORY family never enters the budget. Its `write_offered` was
+        # already set False at construction, and letting it become a candidate
+        # here would have `decision.offered` overwrite that a few lines below —
+        # which is exactly how the withdrawal was reaching the unit test and
+        # NOT the live report. A flag set upstream of a pass that rewrites the
+        # same field is not a flag, it is a suggestion.
+        family = _FAMILY_BY_KEY.get(p.family_key or "")
+        if p.advise_only or not p.suggested_target or (
+            family is not None and family.get("advisory_only")
+        ):
             continue
         try:
             artifact = artifact_for_rung(asdict(p), p.signature, p.rung, slugify(p.title))

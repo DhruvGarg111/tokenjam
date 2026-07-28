@@ -407,13 +407,19 @@ def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
 
 def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
     """cwd_confusion is a rung-3 hook (no standing prompt cost, net == gross);
-    edit_before_read is a rung-1 CLAUDE.md note (netted down)."""
+    read_too_large is a rung-1 CLAUDE.md note (netted down).
+
+    The example used to be `edit_before_read`, which stopped being valid when
+    that family became advisory-only: an advisory family is never offered, so
+    it cannot demonstrate netting at all. The ASSERTION is unchanged — a
+    prompt-text write is netted, an executing hook is not — only the family
+    standing in for it."""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
         [
             _raw("cwd_confusion", "cwd_confusion", "cwd confusion", _episodes("c", 40)),
-            _raw("edit_before_read", "edit_before_read", "edit before read",
+            _raw("read_too_large", "read_too_large", "read too large",
                  _episodes("e", 40)),
         ],
         repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
@@ -421,7 +427,7 @@ def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
     )
     by_family = {p.family_key: p for p in proposals}
     hook = by_family["cwd_confusion"]
-    note = by_family["edit_before_read"]
+    note = by_family["read_too_large"]
 
     # The netting arithmetic itself (not a rendered forward field any more —
     # see `write_budget.py`) still distinguishes a zero-standing-cost hook

@@ -389,6 +389,12 @@ class CostProposal:
     # be a fourth name for a quantity the field contract allows one name.
     placement_scope:          str          = ""
     placement_paths:          list[str]    = field(default_factory=list)
+    #: Per-destination session counts, parallel to `placement_paths`. Carried
+    #: because per-destination exposure IS what placement computes — a payload
+    #: that serialized only the paths left every consumer reporting `sessions:
+    #: 0` for destinations the resolver had counted correctly, so the one
+    #: figure that justifies the whole mechanism was invisible downstream.
+    placement_sessions:       list[int]    = field(default_factory=list)
     placement_standing_tokens: int         = 0
     placement_alternative_standing_tokens: int = 0
     placement_footprint_tokens: int        = 0
@@ -3247,6 +3253,7 @@ def _apply_write_budget(
             updates.update(
                 placement_scope=choice.scope,
                 placement_paths=[d.path for d in choice.destinations],
+                placement_sessions=[d.sessions for d in choice.destinations],
                 placement_standing_tokens=choice.standing_tokens,
                 placement_alternative_standing_tokens=(
                     choice.alternative_standing_tokens

@@ -41,22 +41,32 @@ DISMISSED_REASON = (
 
 
 def _destinations_from_proposal(raw: dict[str, Any]) -> tuple[RuleDestination, ...]:
-    """The files this proposal's rule lands in.
+    """The files this proposal's rule lands in, with their session counts.
 
     A proposal computed before placement existed carries no ``placement_paths``;
-    it degrades to the historical single user-global destination rather than to
-    no destination at all, so an older cache still lists and still applies.
+    it degrades to no destinations rather than to a wrong one, so an older
+    cache still lists and simply cannot stage.
+
+    ``placement_sessions`` is read positionally alongside the paths. It was
+    absent at first, which left every destination reporting zero sessions —
+    and per-destination exposure is the entire justification for placing a
+    rule, so a zero there does not merely look wrong, it hides whether the
+    mechanism did anything. A short or missing list degrades to 0 for the
+    unmatched entries rather than raising: an older payload has no counts, and
+    "not recorded" is the honest reading of that.
     """
     paths = [str(p) for p in (raw.get("placement_paths") or []) if p]
+    sessions = [int(n or 0) for n in (raw.get("placement_sessions") or [])]
     scope = str(raw.get("placement_scope", "") or "user-global")
     if not paths:
         return ()
-    # The per-destination token/dollar split is not carried on the proposal —
-    # the payload holds the netted totals, and re-deriving a split here from a
-    # different input than the one the netting used is exactly how two surfaces
-    # come to disagree. Sessions and figures are therefore left at their
-    # not-measured defaults; what a destination is FOR is its path.
-    return tuple(RuleDestination(path=path, scope=scope) for path in paths)
+    return tuple(
+        RuleDestination(
+            path=path, scope=scope,
+            sessions=sessions[i] if i < len(sessions) else 0,
+        )
+        for i, path in enumerate(paths)
+    )
 
 
 def _rule_from_cost_proposal(raw: dict[str, Any]) -> RuleWrite | None:
