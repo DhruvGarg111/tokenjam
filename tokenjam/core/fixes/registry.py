@@ -1,0 +1,279 @@
+"""The catalogued fixes themselves.
+
+Split from ``catalog.py`` so the data sits apart from the machinery, and
+imported for its side effect the way ``core/optimize/analyzers`` is. Every
+entry names the observation it answers and the shapes it may not excuse, which
+is what lets ``lint.py`` check the property that matters: applying the fix must
+be able to ERASE the number its analyzer found.
+"""
+from __future__ import annotations
+
+from tokenjam.core.fixes.catalog import (
+    Substitution,
+    LEVER_AWARENESS,
+    LEVER_EFFORT,
+    LEVER_MODEL,
+    LEVER_OFFLOAD,
+    LEVER_ROUTING,
+    PERSONA_CLAUDE_CODE,
+    PERSONA_SDK,
+    FixRecord,
+    register,
+)
+
+#: The shapes the subagent/resend family must never give a pass to. These are
+#: exactly what the analyzer bills for: the `output_tokens < 2000` /
+#: `tool_calls <= 5` gate was DELETED from `subagent_rightsizing` because on a
+#: real Claude Code corpus it excluded the expensive dispatches, so a fix that
+#: re-imposes it in prose undoes the gate fix in the one place the user reads.
+_SIZING_RELICENSE = frozenset({
+    "little tool work",
+    "few tool calls",
+    "short result rarely needs",
+    "short conclusion rarely needs",
+    "rarely needs the premium tier",
+})
+
+SUBAGENT_RUBRIC = register(FixRecord(
+    key="subagent.sizing_rubric",
+    text=(
+        "Right-size Task-dispatched subagents: default every subagent to the "
+        "cheapest same-family model that fits its shape, and treat that "
+        "default as the answer unless the dispatch itself states one of these "
+        "conditions: the subtask IS the architecture or design decision this "
+        "session exists to make; it must reconcile sources that disagree into "
+        "one judgement a later step cannot re-derive; or a cheaper model "
+        "already attempted it in this session and its output was rejected. "
+        "How much tool work a subagent does and how long its result runs are "
+        "not on that list: a broad, tool-heavy, long-output dispatch is the "
+        "expensive one, not the hard one, and it is the one this rule exists "
+        "to route down."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"subagent"}),
+    answers="premium-tier models running Task dispatches that a cheaper same-family model fits",
+    lever=LEVER_MODEL,
+    must_not_relicense=_SIZING_RELICENSE,
+    grounding=(
+        Substitution(
+            find="Right-size Task-dispatched subagents",
+            template="Right-size the {agents} dispatches",
+        ),
+    ),
+))
+
+RIGHTSIZE_TEMPLATE = register(FixRecord(
+    key="resend.rightsize_worker",
+    text=(
+        "Then right-size what you offload to. Default the worker to the "
+        "cheapest same-family model that fits its shape, and pin both that "
+        "model and its reasoning effort in its own definition file so every "
+        "future dispatch inherits them instead of defaulting to whatever the "
+        "parent runs on. How much it reads and how long its conclusion runs "
+        "are not reasons to keep the premium tier; they are what makes the "
+        "dispatch expensive in the first place."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"resend"}),
+    answers="context-heavy work run inline on a premium model instead of in a right-sized worker",
+    lever=LEVER_MODEL,
+    must_not_relicense=_SIZING_RELICENSE,
+    grounding=(
+        Substitution(find="the worker", template="the {agents} workers"),
+    ),
+))
+
+#: The CREATE fix. A Claude Code dispatch is almost always a BUILT-IN
+#: (`general-purpose`, `Explore`, `Plan`, `fork`), which has no definition file
+#: — and the product used to read "no file" as "no fix", falling through to
+#: prose. The docs are explicit that a user or project subagent of the same
+#: name OVERRIDES the built-in and keeps its own `model` field, so the file can
+#: be created. The waste's origin belongs in the same breath: `model` defaults
+#: to `inherit`, so an opus-driven session dispatches opus workers unless
+#: pinned. Nobody decided that; it is an unset default.
+SUBAGENT_DEFINE_BUILTIN = register(FixRecord(
+    key="subagent.define_builtin_override",
+    text=(
+        "Pin the model for the built-in subagents this session dispatches. A "
+        "subagent's `model` defaults to `inherit`, so an Opus-driven session "
+        "hands every Task dispatch an Opus worker unless something says "
+        "otherwise — that is an unset default, not a decision. A user or "
+        "project subagent defined with the same name as a built-in overrides "
+        "it and keeps its own `model`, so creating the definition file is the "
+        "fix: give it the cheapest same-family model that fits the work it "
+        "actually does."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"subagent"}),
+    answers="built-in subagents inheriting the driver's premium model because no definition file pins one",
+    lever=LEVER_MODEL,
+    must_not_relicense=_SIZING_RELICENSE,
+))
+
+SUBAGENT_EFFORT = register(FixRecord(
+    key="subagent.pin_effort",
+    text=(
+        "Pin a subagent's effort alongside its model. They answer different "
+        "diagnoses and neither substitutes for the other: a worker that did "
+        "not know enough needs a larger model, a worker that did not try hard "
+        "enough needs more effort. Both are frontmatter fields on the "
+        "subagent's own definition file, so a dispatch inherits them instead "
+        "of taking the parent's."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"subagent"}),
+    answers="subagents inheriting the parent's effort setting rather than one sized to their task",
+    lever=LEVER_EFFORT,
+))
+
+#: THE offload instruction. Three analyzers used to write this into a
+#: CLAUDE.md in three separately-authored wordings — `resend`'s
+#: `SUBAGENT_OFFLOAD_FIX`, `downsize`'s driver-role advice, and `relearn`'s
+#: `context_overflow` family. They price genuinely different span populations
+#: (Critical Rule 27 is untouched), but they were all telling the agent the
+#: same thing, so three near-identical blocks could land in one file.
+#:
+#: That is not merely untidy: length and redundancy REDUCE adherence, so
+#: writing the rule three times makes it less likely to be followed than
+#: writing it once — the opposite of what each analyzer intended. It also
+#: reads as broken to anyone who opens the file.
+#:
+#: The text below is what the three wordings shared, stated once. Per-analyzer
+#: framing (why THIS card is showing it) belongs in the card's advise text,
+#: never in a second copy of the rule.
+#:
+#: **This record is about WHERE the work runs and nothing else.** Model pinning
+#: belongs to ``resend.rightsize_worker``, which owns "what it runs on", and
+#: keeping the two separate is not pedantry: the compound artifact renders both
+#: records back to back, so a pinning sentence here lands immediately before
+#: the one that owns it and the user reads the same instruction twice. Caught
+#: by rendering the composed artifact and reading it — the pairwise catalog
+#: lint scored the pair at 42%, under threshold, because each record is only
+#: partly redundant. One record, one instruction, is what makes composition
+#: safe.
+OFFLOAD_RULE = register(FixRecord(
+    key="resend.offload_to_subagent",
+    text=(
+        "Offload context-heavy sub-tasks (broad file reads, log sweeps, "
+        "multi-file search, long tool-output loops, exploratory "
+        "investigation) to a subagent instead of running them inline in the "
+        "main thread, and prefer a targeted search plus a bounded read over "
+        "reading a large file end to end. A subagent's own tool logs and "
+        "intermediate output stay in its own context; only its short "
+        "conclusion returns to the caller, so the material that would "
+        "otherwise be re-sent on every later turn never accumulates on the "
+        "main thread to begin with. This is not a request to downgrade the "
+        "session you are driving: the driver keeps the premium model and "
+        "keeps making the decisions. What changes is where the bulk context "
+        "lives."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    # One record, three analyzers. Each prices a different population and each
+    # references THIS text rather than authoring its own.
+    analyzers=frozenset({"resend", "downsize", "relearn"}),
+    answers="context-heavy work run inline on the main thread, re-sent on every later turn",
+    lever=LEVER_OFFLOAD,
+    # REPLACES the vague enumeration with the observed one; it does not append
+    # to it. "the `Read` and `Grep` sweeps you run in `optimize/`" is shorter
+    # than the parenthesised list it stands in for, which is the point — the
+    # guidance is specific AND concise, and a longer rule is a less-followed
+    # rule.
+    grounding=(
+        Substitution(
+            find=(
+                "context-heavy sub-tasks (broad file reads, log sweeps, "
+                "multi-file search, long tool-output loops, exploratory "
+                "investigation)"
+            ),
+            template="the {tools} sweeps you run in {repos}",
+        ),
+        # Falls back to naming just the directories when the tool mix was not
+        # observed — still concrete, still shorter than the generic span.
+        Substitution(
+            find=(
+                "context-heavy sub-tasks (broad file reads, log sweeps, "
+                "multi-file search, long tool-output loops, exploratory "
+                "investigation)"
+            ),
+            template="the context-heavy work you run in {repos}",
+        ),
+    ),
+))
+
+#: The SDK counterpart of the same observation. A Claude Code user cannot
+#: paste this and an SDK caller cannot use the offload rule above; handing
+#: either the other's fix names an action they cannot take.
+SDK_CACHE_CONTROL = register(FixRecord(
+    key="resend.sdk_cache_breakpoint",
+    text=(
+        "Adopt a cache_control breakpoint at the call site so the repeated "
+        "prefix bills at the cache rate instead of full price on every turn, "
+        "and trim the request you build rather than relying on the harness to "
+        "do it — an SDK caller constructs the whole prompt, so the repeated "
+        "context is yours to bound."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    analyzers=frozenset({"resend"}),
+    answers="repeated prompt prefix billed at full input rate on every turn",
+    lever=LEVER_ROUTING,
+))
+
+#: An OBSERVATION, not an offer. The harness already errors clearly and agents
+#: self-correct next turn, so there is no action to sell — but the recurrence
+#: genuinely cost something, and that figure stands (Critical Rule 32).
+EDIT_BEFORE_READ = register(FixRecord(
+    key="relearn.edit_before_read",
+    text=(
+        "The harness already blocks an Edit/Write before a Read with a clear "
+        "error and agents reliably self-correct by reading on the next turn, "
+        "so no rule or hook is needed here. This is reported as awareness "
+        "only: what the retries already cost is real and is shown, but there "
+        "is no change to make."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Edit/Write attempted before Read, retried after the harness error",
+    lever=LEVER_AWARENESS,
+    advisory_only=True,
+))
+
+#: An awareness fix that IS confined to identifiable files, so it can carry a
+#: glob and cost almost nothing. The observation names the file class directly:
+#: the mistake happens when editing a migration without reading it, which is a
+#: statement about a kind of file rather than about the shape of the next
+#: action. Contrast every model/effort/offload record above, which decide
+#: something BEFORE any file is read and so must stay always-resident.
+MIGRATION_READ_FIRST = register(FixRecord(
+    key="relearn.migration_read_before_edit",
+    text=(
+        "Read a migration file in full before editing it. Migrations are "
+        "append-only and ordered, so an edit written from a remembered shape "
+        "rather than the current contents lands in the wrong place or "
+        "duplicates an existing step, and the failure surfaces later as a "
+        "schema that does not match its own history."
+    ),
+    delivery="path_scoped_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="edits to migration files written without reading the file first",
+    lever=LEVER_AWARENESS,
+    path_globs=("**/migrations/**", "**/migrate/**"),
+))
+
+
+__all__ = [
+    "EDIT_BEFORE_READ",
+    "OFFLOAD_RULE",
+    "RIGHTSIZE_TEMPLATE",
+    "SDK_CACHE_CONTROL",
+    "SUBAGENT_DEFINE_BUILTIN",
+    "SUBAGENT_EFFORT",
+    "SUBAGENT_RUBRIC",
+]

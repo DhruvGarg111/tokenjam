@@ -30,6 +30,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_INJECTING_HOOK
+
 from tokenjam.core.data_span import DataSpan, available_data_span, data_span_from_days
 from tokenjam.core.optimize.analyzers.relearn import (
     GROUNDED_TOKENS_PER_OCCURRENCE,
@@ -301,7 +303,8 @@ def test_a_cache_written_before_windowing_loads_and_reads_unknown():
     old_cluster = {
         "signature": "cwd_confusion", "family_key": "cwd_confusion",
         "title": "cwd confusion", "sessions": 3, "occurrences": 9,
-        "repos": ["repo-a"], "rung": 3, "scope": "project",
+        "repos": ["repo-a"], "delivery": DELIVERY_INJECTING_HOOK,
+        "scope": "project",
         "proposed_fix": "hook", "past_overspend_tokens": 12345,
         "past_overspend_usd": 1.25,
     }

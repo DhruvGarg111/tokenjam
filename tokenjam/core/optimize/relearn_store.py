@@ -317,7 +317,7 @@ def recompute_now(
         # like the finding itself, not a window) — same functions
         # `runner.build_report` uses for `AnalyzerContext.persona`/
         # `OptimizeReport.persona`, so the daemon's relearn cache gates its
-        # rung-1/rung-2 write by the same rule the rest of the product does.
+        # workspace write by the same rule the rest of the product does.
         persona = "unknown"
         if conn is not None:
             try:

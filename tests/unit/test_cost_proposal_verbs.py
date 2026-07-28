@@ -15,6 +15,8 @@ import subprocess
 
 import click
 import pytest
+
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 from click.testing import CliRunner
 
 from tokenjam.cli.cost_proposal_verbs import register_cost_proposal_verbs
@@ -70,7 +72,7 @@ def _apply_capable(*, target_path: str, **overrides) -> CostProposal:
         past_overspend_tokens=20_000,
         estimate_basis="measured over the last 30d.",
         apply_capable=True,
-        rung=1,
+        delivery=DELIVERY_CLAUDE_MD_RULE,
         scope="project",
         proposed_fix="`bar` rarely needs deep reasoning -- size it to a smaller model.",
         target_path=target_path,
@@ -214,7 +216,7 @@ def test_headline_covers_relearn_rows_the_same_way_the_web_route_does(cfg):
     cluster = RelearnCluster(
         signature="cwd_confusion", family_key="cwd_confusion",
         title="cwd / relative-path confusion", sessions=12, occurrences=324,
-        repos=["demo"], rung=1, scope="project",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Verify an absolute cwd before a relative Read.",
         examples=[RelearnExample(session_id="s1", repo="demo", ts=None, snippet="no such file")],
         past_overspend_tokens=486_000, past_overspend_usd=40.0,
