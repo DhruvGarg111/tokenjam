@@ -210,10 +210,13 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     # The onboard CTA — see the two footer tests below for the ephemeral (`npx
     # tokenjam onboard`) vs installed (`tj onboard`) forms (#507).
     assert "onboard" in result.output
-    # The closing guidance sells the local dashboard exactly once, by name.
+    # The closing block describes what SETTING UP tokenjam gets you. It sells
+    # the local dashboard exactly once, by name, and does not restate the
+    # figure the screen has already made its point about.
     assert result.output.count("dashboard") == 1
     assert "Lens" in flat
-    assert "apply the fixes" in flat
+    assert "review and apply fixes" in flat
+    assert "Runs on your machine. No signup." in flat
 
 
 # ── The onboard CTA is the npx form, unconditionally ───────────────────────
@@ -262,7 +265,7 @@ def test_the_onboard_cta_does_not_branch_on_the_running_binary(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     flat = _flat(result.output)
-    assert "Run npx tokenjam onboard to capture your full history." in flat
+    assert "Run npx tokenjam onboard to set up TokenJam." in flat
     # Named once, inline. The standalone indented repeat below it was cut: the
     # screen said the same command twice.
     assert flat.count("npx tokenjam onboard") == 1
@@ -318,9 +321,11 @@ _DELETED_FROM_THE_FIRST_RUN = (
     "billed at a reduced rate",
     "cache writes",
     "not guaranteed savings",
-    # The old outro preamble.
+    # The old outro preamble. ("No signup" is NOT on this list: the cut string
+    # was the whole "Go deeper: live capture, Lens ... No signup:" preamble, and
+    # a plain "Runs on your machine. No signup." sentence is now the approved
+    # closing line.)
     "Go deeper",
-    "No signup",
     # Framing the founder cut outright.
     "quota",
     "wasted",
@@ -586,7 +591,7 @@ def test_quickstart_cli_discloses_truncation(tmp_path, monkeypatch):
     # The cap is disclosed by the pre-ingest status line without a number, and
     # the screen points at the full-history escape hatch.
     assert "(capped for a fast first run)" in flat
-    assert "to capture your full history." in flat
+    assert "to set up TokenJam." in flat
     # EXACTLY ONE session count reaches the screen, and both sentences that
     # state a population quote it. A figure summed over one population beside a
     # count from another is the defect this pairing exists to prevent.
@@ -944,7 +949,7 @@ def test_an_unknown_figure_renders_no_claim_in_either_direction(tmp_path, monkey
     assert "was avoidable" not in flat
     assert "$" not in result.output
     # The rest of the screen is unaffected: the reader still gets the pointer.
-    assert "to capture your full history." in flat
+    assert "to set up TokenJam." in flat
 
 
 def test_quickstart_degrades_cleanly_when_nothing_is_recoverable(tmp_path):
@@ -968,7 +973,87 @@ def test_quickstart_degrades_cleanly_when_nothing_is_recoverable(tmp_path):
     assert "$0.00" not in result.output
     flat = _flat(result.output)
     assert "TokenJam reads your ~/.claude/projects/*.jsonl session logs." in flat
-    assert "to capture your full history." in flat
+    assert "to set up TokenJam." in flat
+
+
+# ── The screen is not Claude-Code-only ─────────────────────────────────────
+#
+# Standing rule: entry copy never reads as Claude Code only. tokenjam also
+# ingests Codex CLI sessions and OTel spans from any SDK or API agent. Every
+# source named on screen is verified against the code below, because a source
+# that does not work is a worse defect than the framing it was added to fix.
+
+
+def test_the_closing_block_names_a_non_claude_code_source(tmp_path):
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "Codex" in flat
+    assert "OTel" in flat
+    assert "SDK or API agents send it" in flat
+
+
+def test_the_codex_source_named_on_screen_really_ingests():
+    """`tj backfill codex` and `tj onboard --codex` both reach a real parser."""
+    from tokenjam.cli.cmd_backfill import cmd_backfill
+    from tokenjam.core.ingest_adapters.codex import ingest_codex
+
+    assert callable(ingest_codex)
+    assert "codex" in cmd_backfill.commands
+
+
+def test_the_otel_source_named_on_screen_really_receives():
+    """The daemon mounts an OTLP receiver unconditionally, so an external
+    OTel-instrumented app can post to it with no extra opt-in."""
+    from tokenjam.api.routes.otlp import router
+
+    paths = {route.path for route in router.routes}
+    assert "/v1/traces" in paths
+    assert "/v1/logs" in paths
+
+
+def test_the_screen_does_not_claim_metrics_or_mcp_ingest(tmp_path):
+    """Two things the old copy got wrong, kept wrong-proof.
+
+    `POST /v1/metrics` is a stub that returns 200 and discards the body, so the
+    copy says "spans", never "metrics". And `mcp/server.py` exposes only
+    read/query and apply tools with no ingest tool, so the MCP server is not a
+    source: the copy this replaced claimed SDK traffic arrives "from OTel spans
+    or the tokenjam MCP server", and the second half was never true.
+    """
+    from tokenjam.cli.cmd_quickstart import _OTHER_SOURCES
+
+    assert "metrics" not in _OTHER_SOURCES.lower()
+    assert "mcp" not in _OTHER_SOURCES.lower()
+    # Nor an "any OTel app" claim: the receiver is OTLP/HTTP JSON only (no
+    # protobuf decoder, no gRPC listener), so a stock OTel SDK on its default
+    # http/protobuf exporter gets a 400. The copy describes an agent you point
+    # at tokenjam on purpose, which is exactly what works.
+    assert "any " not in _OTHER_SOURCES.lower()
+
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    flat = _flat(result.output).lower()
+    assert "mcp" not in flat
+    assert "metrics" not in flat
+
+
+def test_the_closing_block_stays_four_lines(tmp_path, monkeypatch):
+    """It describes what setting up tokenjam gets you. It must not grow into a
+    feature list, and it must not restate the figure."""
+    _stub_total(monkeypatch, 936.0, sessions=153)
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    block = result.output.split("Run npx tokenjam onboard")[1]
+    assert len([ln for ln in block.splitlines() if ln.strip()]) <= 5  # 4 + wrap
+    # No restatement of the figure or its population.
+    assert "$" not in block
+    assert "avoidable" not in block
+    assert "153" not in block
 
 
 # ── The explanatory sentence adapts to what actually contributed ───────────

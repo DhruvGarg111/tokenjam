@@ -63,6 +63,46 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # ~300 sessions keeps the slowest plausible session shapes comfortably in budget.
 DEFAULT_MAX_SESSIONS = 300
 
+#: The one sentence that keeps this screen from reading as Claude-Code-only.
+#: tokenjam is not: `tj onboard` configures a Codex flow too, and the daemon
+#: mounts an OTLP receiver any OTel-instrumented SDK or API agent can post to.
+#:
+#: EVERY source named here was verified against the code, because a source on
+#: screen that does not work is worse than the framing it was added to fix:
+#:   * Codex CLI sessions — `core/ingest_adapters/codex.py` parses
+#:     `~/.codex/sessions/**/rollout-*.jsonl`, reached by `tj backfill codex`
+#:     and by `tj onboard --codex`, with its own passing test suites.
+#:   * OTel spans — `api/routes/otlp.py` mounts `POST /v1/traces` and
+#:     `POST /v1/logs` unconditionally in the daemon app (`api/app.py`), and
+#:     `core/ingest_adapters/otlp.py` backs the offline import.
+#:
+#: The OTel half says "your SDK or API agents send it", NOT "any OTel app", and
+#: the distinction is load-bearing. `api/routes/_body.py` decodes the request
+#: with `json.loads`: the receiver is OTLP/HTTP **JSON only**, there is no
+#: protobuf decoder and no gRPC listener at all, so a stock OTel SDK left on its
+#: default `http/protobuf` exporter gets a 400. `api/middleware.py` also
+#: requires the Bearer ingest secret onboard writes. Both are fine for an agent
+#: you point at tokenjam on purpose, which is what the sentence describes;
+#: neither supports a drop-in "works with anything OTel" claim, so do not
+#: upgrade this wording without adding a protobuf decoder first.
+#:
+#: Two things are deliberately NOT named. **Metrics**: `POST /v1/metrics` is a
+#: stub that returns 200 and discards the body, so "OTel" here means spans and
+#: says so. **The MCP server**: `mcp/server.py` exposes only read/query and
+#: apply tools, with no ingest tool at all, so it is not a source. The copy this
+#: replaced claimed SDK traffic arrives "from OTel spans or the tokenjam MCP
+#: server", and the second half of that was never true.
+#:
+#: Langfuse and Helicone backfills also exist (`tj backfill langfuse` /
+#: `helicone`) and work. They are left off for length, not for doubt: they
+#: import from another tool you already run rather than describing a way
+#: tokenjam watches your own agents, and this block must not grow into a
+#: feature list.
+_OTHER_SOURCES = (
+    "It also reads Codex CLI sessions, and OTel spans your SDK or API agents "
+    "send it."
+)
+
 #: Held on screen while the analyzer pass runs. Present tense, the product's
 #: vocabulary, and deliberately claim-free: it says what is being looked for,
 #: never how much was found. See `transient_status` for the erase contract.
@@ -632,16 +672,18 @@ def _render(avoidable: AvoidableTotal | None, *,
             console.print(Text(_shape_clause(avoidable.contributors), style="muted"))
 
     console.print()
-    full_history = Text()
-    full_history.append("Run ", style="muted")
-    full_history.append(ONBOARD_COMMAND, style=ACCENT)
-    full_history.append(" to capture your full history.", style="muted")
-    console.print(full_history)
+    cta = Text()
+    cta.append("Run ", style="muted")
+    cta.append(ONBOARD_COMMAND, style=ACCENT)
+    cta.append(" to set up TokenJam.", style="muted")
+    console.print(cta)
     console.print(Text(
-        "Then open Lens, the local dashboard, to see your total avoidable "
-        "over the past 30 days and apply the fixes.",
+        "You get your full history, live capture as you work, and Lens: the "
+        "local dashboard where you review and apply fixes.",
         style="muted",
     ))
+    console.print(Text(_OTHER_SOURCES, style="muted"))
+    console.print(Text("Runs on your machine. No signup.", style="muted"))
     console.print()
 
 
