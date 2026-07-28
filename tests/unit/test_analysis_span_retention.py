@@ -353,3 +353,122 @@ def test_retention_can_never_delete_underneath_the_cost_window(store):
     window = cost_window_days_for(SimpleNamespace(storage=storage), store.conn)
     assert run.retention_days == 90
     assert window <= run.retention_days
+
+
+# --- the surfaces ------------------------------------------------------------
+
+
+def test_doctor_reports_the_span_what_it_keeps_and_the_last_delete(store):
+    """The ledger is a fact on disk; this makes it a fact somebody sees."""
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_doctor import _check_retention
+
+    storage = StorageConfig(analysis_span="90d")
+    _seed(store, days_ago=120, session_id="outside")
+    _seed(store, days_ago=2, session_id="inside")
+    run_retention_cleanup(store, storage)
+
+    check = _check_retention(SimpleNamespace(storage=storage), store)
+
+    assert check["level"] == "ok"
+    assert "90d" in check["message"]
+    assert "kept for 90 days" in check["message"]
+    assert "removed 1 span(s) and 1 session(s)" in check["message"]
+    assert "oldest surviving span" in check["message"]
+
+
+def test_doctor_says_when_deletion_is_disabled(store):
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_doctor import _check_retention
+
+    check = _check_retention(
+        SimpleNamespace(storage=StorageConfig(analysis_span="all")), store,
+    )
+    assert "all available" in check["message"]
+    assert "deletion is disabled" in check["message"]
+
+
+def test_doctor_says_when_the_clamp_fired(store):
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_doctor import _check_retention
+
+    check = _check_retention(
+        SimpleNamespace(storage=StorageConfig(analysis_span="90d", retention_days=7)),
+        store,
+    )
+    assert "raised to match" in check["message"]
+    # And it is never an error: retention doing its job is not a fault, and the
+    # state the clamp prevents cannot be reached.
+    assert check["level"] == "ok"
+
+
+def test_doctor_distinguishes_never_run_from_deleted_nothing(store):
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_doctor import _check_retention
+
+    config = SimpleNamespace(storage=StorageConfig(analysis_span="90d"))
+    assert "No retention run has been recorded" in _check_retention(config, store)["message"]
+
+    _seed(store, days_ago=2, session_id="inside")
+    run_retention_cleanup(store, StorageConfig(analysis_span="90d"))
+    after = _check_retention(config, store)["message"]
+    assert "No retention run has been recorded" not in after
+    assert "removed 0 span(s) and 0 session(s)" in after
+
+
+def test_onboarding_writes_the_span_and_reconciles_retention():
+    """The coupling is enforced where the config is written, not documented."""
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_onboard import _apply_analysis_span
+
+    config = SimpleNamespace(storage=StorageConfig(analysis_span=None, retention_days=7))
+    _apply_analysis_span(config, "90d")
+
+    assert config.storage.analysis_span == "90d"
+    assert config.storage.retention_days == 90
+    assert retention_days_for(config.storage) == 90
+
+
+def test_onboarding_adopts_a_pre_coupling_retention_as_the_span():
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_onboard import _apply_analysis_span
+
+    config = SimpleNamespace(storage=StorageConfig(analysis_span=None, retention_days=45))
+    _apply_analysis_span(config)
+
+    assert config.storage.analysis_span == "45d"
+    assert config.storage.retention_days == 45
+
+
+def test_onboarding_rejects_a_span_nobody_can_parse():
+    from types import SimpleNamespace
+
+    from tokenjam.cli.cmd_onboard import _apply_analysis_span
+
+    config = SimpleNamespace(storage=StorageConfig())
+    with pytest.raises(ValueError):
+        _apply_analysis_span(config, "banana")
+    # And nothing unparseable reached the config on the way out.
+    assert config.storage.analysis_span is None
+
+
+def test_onboarding_is_idempotent_so_a_two_leg_flow_asks_once(monkeypatch):
+    """The combination flow runs two onboarders over one config file."""
+    from types import SimpleNamespace
+
+    from tokenjam.cli import cmd_onboard
+
+    monkeypatch.setattr(cmd_onboard, "_is_interactive", lambda: True)
+    monkeypatch.setattr(
+        cmd_onboard, "_prompt_analysis_span",
+        lambda current=None: pytest.fail("asked twice"),
+    )
+    config = SimpleNamespace(storage=StorageConfig(analysis_span="30d"))
+    cmd_onboard._apply_analysis_span(config)
+    assert config.storage.analysis_span == "30d"

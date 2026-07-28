@@ -94,8 +94,11 @@ def _plan_tier_for_provider(config, provider: str) -> str:
 class ParsedCodexSession:
     session_id: str
     agent_id: str
-    started_at: datetime
-    ended_at: datetime
+    # Nullable: a session none of whose records carried a parseable timestamp is
+    # UNTIMED. Defaulting to `now` dated historical transcript work to whenever
+    # the backfill happened to run — see NormalizedSpan.start_time.
+    started_at: datetime | None
+    ended_at: datetime | None
     cwd: str | None
     spans: list[NormalizedSpan]
     total_input_tokens: int
@@ -247,7 +250,9 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
             turn_key = str(turn_index)
             span_id = _span_id_for_llm(sid, turn_key)
             trace_id = _trace_id_for(sid)
-            start_time = ts or datetime.now(tz=timezone.utc)
+            # Untimed rather than dated to the backfill run — see the same
+            # note in core/backfill.py.
+            start_time = ts
 
             # OpenAI automatic prompt caching: cached_input_tokens are read-hits
             # billed at the (lower) cache-read rate; there is no separate
@@ -300,7 +305,9 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
             )
             tool_span_id = _span_id_for_tool(sid, call_id)
             tool_name = payload.get("name") or "unknown"
-            start_time = ts or datetime.now(tz=timezone.utc)
+            # Untimed rather than dated to the backfill run — see the same
+            # note in core/backfill.py.
+            start_time = ts
             spans_by_id[tool_span_id] = NormalizedSpan(
                 span_id=tool_span_id,
                 trace_id=_trace_id_for(sid),
@@ -333,7 +340,8 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
         total_cache += s.cache_tokens or 0
         total_cost += s.cost_usd or 0.0
 
-    started_at = earliest or datetime.now(tz=timezone.utc)
+    # A session with no dated span at all is untimed, not "started now".
+    started_at = earliest
     ended_at = latest or started_at
 
     return ParsedCodexSession(
@@ -377,7 +385,11 @@ def iter_codex_sessions(
         parsed = parse_codex_rollout(jsonl_path)
         if parsed is None:
             continue
-        if since is not None and parsed.ended_at < since:
+        # An UNTIMED session is not known to be old, so a window may not drop
+        # it: the daemon's catch-up is windowed, so excluding it here would mean
+        # it is never ingested at all. Re-parsing it on every pass is cheap and
+        # idempotent (deterministic span ids), losing it is not.
+        if since is not None and parsed.ended_at is not None and parsed.ended_at < since:
             continue
         yield parsed
 

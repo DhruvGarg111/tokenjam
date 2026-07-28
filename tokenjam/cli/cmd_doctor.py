@@ -91,6 +91,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 18. Duplicate call ingest — one LLM call stored twice, once per observer
     checks.append(_check_duplicate_call_ingest(ctx.obj["db"]))
 
+    # 19. Retention — the analysis span, what it keeps, and what the last run
+    #     actually deleted. A delete of user history has to be readable after
+    #     the fact, not inferable by diffing two measurements days apart.
+    checks.append(_check_retention(config, ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -377,6 +382,69 @@ def _check_spans_indexes(db: object) -> dict:
     return {"name": "Spans index integrity", "level": "ok",
             "message": f"All {len(SPANS_INDEXES)} secondary indexes on spans "
                        f"agree with the table."}
+
+
+def _check_retention(config: object, db: object) -> dict:
+    """Report the analysis span, the retention derived from it, and the last delete.
+
+    A deletion of the user's own history that leaves no account of itself is
+    discoverable only by measuring the store twice, days apart, and diffing —
+    which is how eight weeks of the oldest history went missing unnoticed. The
+    ledger makes it a fact on disk; this makes it a fact somebody sees.
+
+    Never an error: retention doing its job is not a fault. What would be a
+    fault is a config whose retention undercuts its own span, and that cannot
+    happen — `core/analysis_span.retention_days_for` raises it — so this reports
+    when the clamp fired rather than warning about a state that no longer exists.
+    """
+    from tokenjam.core.analysis_span import (
+        retention_days_for,
+        retention_was_raised_to_span,
+        span_label,
+    )
+
+    storage = getattr(config, "storage", None)
+    if storage is None:
+        return {"name": "Retention", "level": "info",
+                "message": "Skipped — no storage config."}
+
+    span = span_label(storage)
+    kept = retention_days_for(storage)
+    kept_text = (
+        "deletion is disabled" if kept is None else f"history is kept for {kept} days"
+    )
+    clamp = ""
+    if retention_was_raised_to_span(storage):
+        clamp = (
+            " Storage retention is set shorter than the span and has been raised "
+            "to match — nothing tj analyzes can be deleted underneath it."
+        )
+
+    conn = getattr(db, "conn", None)
+    last = ""
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT ran_at, spans_deleted, sessions_deleted, oldest_kept "
+                "FROM retention_events ORDER BY ran_at DESC LIMIT 1"
+            ).fetchone()
+        except duckdb.Error:
+            row = None
+        if row is None:
+            last = " No retention run has been recorded yet."
+        else:
+            ran_at, spans_deleted, sessions_deleted, oldest_kept = row
+            last = (
+                f" Last run {ran_at:%Y-%m-%d %H:%M} UTC removed {spans_deleted} "
+                f"span(s) and {sessions_deleted} session(s)"
+            )
+            last += (
+                f"; oldest surviving span {oldest_kept:%Y-%m-%d}." if oldest_kept
+                else "; no dated spans remain."
+            )
+
+    return {"name": "Retention", "level": "ok",
+            "message": f"Analyzing {span}, so {kept_text}.{clamp}{last}"}
 
 
 def _check_schema_integrity(db: object) -> dict:

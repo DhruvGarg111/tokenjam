@@ -133,8 +133,11 @@ class BackfillResult:
 class ParsedSession:
     session_id: str
     agent_id: str
-    started_at: datetime
-    ended_at: datetime
+    # Nullable: a session none of whose records carried a parseable timestamp is
+    # UNTIMED. Defaulting to `now` dated historical transcript work to whenever
+    # the backfill happened to run — see NormalizedSpan.start_time.
+    started_at: datetime | None
+    ended_at: datetime | None
     cwd: str | None
     spans: list[NormalizedSpan]
     total_input_tokens: int
@@ -501,7 +504,11 @@ def parse_claude_code_session(
         # read+write. See models.py NormalizedSpan + Critical Rule on cache.
 
         agent_id = _agent_id_from_cwd(cwd)
-        start_time = ts or datetime.now(tz=timezone.utc)
+        # An unparseable record timestamp leaves the span UNTIMED. Substituting
+        # `now` dated historical transcript work to whenever the backfill
+        # happened to run, which reads as a real observation and quietly moved
+        # months-old spend into the present window.
+        start_time = ts
 
         # Per-message content (opt-in, gated by [capture]). Default-off leaves
         # llm_attrs carrying provenance only — the ingest source and the call
@@ -622,7 +629,8 @@ def parse_claude_code_session(
         total_cost += s.cost_usd or 0.0
 
     agent_id = _agent_id_from_cwd(cwd)
-    started_at = earliest or datetime.now(tz=timezone.utc)
+    # A session with no dated span at all is untimed, not "started now".
+    started_at = earliest
     ended_at = latest or started_at
 
     return ParsedSession(
@@ -699,7 +707,11 @@ def iter_claude_code_sessions(
         parsed = parse_claude_code_session(jsonl_path, capture=capture)
         if parsed is None:
             continue
-        if since is not None and parsed.ended_at < since:
+        # An UNTIMED session is not known to be old, so a window may not drop
+        # it: the daemon's catch-up is windowed, so excluding it here would mean
+        # it is never ingested at all. Re-parsing it on every pass is cheap and
+        # idempotent (deterministic span ids), losing it is not.
+        if since is not None and parsed.ended_at is not None and parsed.ended_at < since:
             continue
         yield parsed
         yielded += 1
@@ -1111,9 +1123,15 @@ def ingest_claude_code(
         # the full in-window total, not a new-only figure that reads as "barely
         # worked" on an idempotent re-run (#238).
         result.total_cost_usd += parsed.total_cost_usd
-        if result.earliest is None or parsed.started_at < result.earliest:
+        # An untimed session contributes to neither end of the reported span:
+        # it is evidence of work, not evidence of when.
+        if parsed.started_at is not None and (
+            result.earliest is None or parsed.started_at < result.earliest
+        ):
             result.earliest = parsed.started_at
-        if result.latest is None or parsed.ended_at > result.latest:
+        if parsed.ended_at is not None and (
+            result.latest is None or parsed.ended_at > result.latest
+        ):
             result.latest = parsed.ended_at
 
         if use_bulk:
