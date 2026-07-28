@@ -104,4 +104,38 @@ def backfill_progress(
     yield _tick_plain
 
 
-__all__ = ["backfill_progress", "ProgressCallback"]
+@contextmanager
+def transient_status(message: str, *, console: Console | None = None) -> Iterator[None]:
+    """Hold a single self-erasing status line for the duration of the block.
+
+    For a slow stretch that has no per-item tick to count. Built from the SAME
+    `Progress` construction as `backfill_progress` above (same spinner, same
+    `◆` prefix, same `transient=True`), so a command that runs one after the
+    other reads as one continuous process rather than two different UIs.
+
+    `transient=True` is the contract: Rich erases the line on exit, so whatever
+    renders next starts on a clean screen with no residue above it.
+
+    On a NON-terminal (piped output, CI, redirected logs) this prints nothing
+    at all, deliberately. Rich's live redraw cannot erase there, so the only
+    options are permanent residue above the output or silence, and residue in a
+    machine-read or scrolled-back log is the worse of the two. A caller whose
+    non-TTY runs need a sign of life has one already: `backfill_progress`
+    degrades to periodic plain lines rather than going quiet.
+    """
+    target_console = console if console is not None else _default_console
+    if not target_console.is_terminal:
+        yield
+        return
+
+    with Progress(
+        SpinnerColumn(style="cyan"),
+        TextColumn("[bold]◆[/bold] {task.description}"),
+        console=target_console,
+        transient=True,
+    ) as progress:
+        progress.add_task(message, total=None)
+        yield
+
+
+__all__ = ["backfill_progress", "transient_status", "ProgressCallback"]

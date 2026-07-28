@@ -263,7 +263,9 @@ def test_the_onboard_cta_does_not_branch_on_the_running_binary(tmp_path, monkeyp
     assert result.exit_code == 0, result.output
     flat = _flat(result.output)
     assert "Run npx tokenjam onboard to capture your full history." in flat
-    assert flat.count("npx tokenjam onboard") == 2   # the sentence + the typeable line
+    # Named once, inline. The standalone indented repeat below it was cut: the
+    # screen said the same command twice.
+    assert flat.count("npx tokenjam onboard") == 1
 
 
 def _heavy_reread_fixture_root(tmp_path: Path) -> Path:
@@ -1104,6 +1106,79 @@ def test_contributors_come_from_the_rollup_breakdown_biggest_first(monkeypatch):
     assert total.contributors == ("resend", "deadweight", "subagent")
 
 
+# ── The analyzer pass is not silent, and leaves nothing behind ─────────────
+#
+# Measured on a real corpus, ~14s elapses between the final backfill line and
+# the first line of the report while the analyzers run. That read as a hang.
+
+
+def test_the_analyzing_status_leaves_no_residue_on_the_screen(tmp_path):
+    """Nothing the status line said may survive into the rendered report."""
+    from tokenjam.cli.cmd_quickstart import _ANALYZING_STATUS
+
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert _ANALYZING_STATUS not in result.output
+    assert "Finding avoidable spend" not in result.output
+    # And no spinner/live escape codes reach captured output.
+    assert "\x1b[" not in result.output
+
+
+def test_the_analyzing_status_makes_no_claim_about_the_figure(tmp_path):
+    """It says what is being looked for, never how much was found. Unknown
+    stays unknown until it is known, which is the same rule the figure itself
+    already follows."""
+    from tokenjam.cli.cmd_quickstart import _ANALYZING_STATUS
+
+    lowered = _ANALYZING_STATUS.lower()
+    assert "$" not in _ANALYZING_STATUS
+    assert not any(ch.isdigit() for ch in _ANALYZING_STATUS)
+    for claim in ("no ", "nothing", "found ", "avoidable spend found",
+                  "saved", "wasted"):
+        assert claim not in lowered, f"status line claims a result: {claim!r}"
+    assert "—" not in _ANALYZING_STATUS
+
+
+def test_the_transient_status_erases_itself_before_the_next_output():
+    """The erase contract, asserted on real control codes: on a terminal the
+    line is written and then cleared, so whatever renders next starts clean."""
+    import io
+
+    from rich.console import Console
+
+    from tokenjam.cli.backfill_progress import transient_status
+
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, highlight=False, width=80)
+    with transient_status("Working on it…", console=console):
+        pass
+    console.print("NEXT")
+
+    out = buf.getvalue()
+    # Rich moves up and clears the line before the following output lands.
+    assert "\x1b[2K" in out
+    assert out.index("\x1b[2K") < out.index("NEXT")
+
+
+def test_the_transient_status_prints_nothing_on_a_non_terminal():
+    """Piped output, CI, redirected logs: Rich cannot erase there, so the only
+    choices are permanent residue or silence, and residue is worse. The
+    backfill counter is the sign of life on that path."""
+    import io
+
+    from rich.console import Console
+
+    from tokenjam.cli.backfill_progress import transient_status
+
+    buf = io.StringIO()
+    with transient_status("Working on it…", console=Console(file=buf, width=80)):
+        pass
+
+    assert buf.getvalue() == ""
+
+
 # ── Colour discipline: near-monochrome, one accent ─────────────────────────
 #
 # The design reference is the Claude CLI: grey-forward body text with a single
@@ -1148,8 +1223,8 @@ def test_the_screen_uses_the_accent_and_no_state_colour(monkeypatch):
 
     r, g, b = (int(ACCENT[i:i + 2], 16) for i in (1, 3, 5))
     accent_sgr = f"38;2;{r};{g};{b}"
-    # The accent is present, and on more than one run of text (the figure and
-    # the command).
+    # The accent is present, and on both the things that earn it: the dollar
+    # figure and the inline typeable command.
     assert ansi.count(accent_sgr) >= 2
     for code in _FORBIDDEN_SGR:
         assert code not in ansi, f"state colour on the first-run screen: {code!r}"
@@ -1163,8 +1238,8 @@ def test_the_empty_state_sentence_is_muted_not_accented(monkeypatch):
     ansi = _render_with_ansi(monkeypatch, 0.0)
 
     r, g, b = (int(ACCENT[i:i + 2], 16) for i in (1, 3, 5))
-    # Only the two command renderings carry it; the sentence does not.
-    assert ansi.count(f"38;2;{r};{g};{b}") == 2
+    # Only the inline command carries it; the empty-state sentence does not.
+    assert ansi.count(f"38;2;{r};{g};{b}") == 1
     assert "No avoidable spend found" in " ".join(ansi.split())
 
 

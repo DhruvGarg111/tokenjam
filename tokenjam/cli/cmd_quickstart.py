@@ -49,7 +49,7 @@ from pathlib import Path
 
 import click
 
-from tokenjam.cli.backfill_progress import backfill_progress
+from tokenjam.cli.backfill_progress import backfill_progress, transient_status
 from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.utils.formatting import console, err_console, format_cost
@@ -62,6 +62,11 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # of sessions) and disclose the cap; `--full` lifts it for the complete picture.
 # ~300 sessions keeps the slowest plausible session shapes comfortably in budget.
 DEFAULT_MAX_SESSIONS = 300
+
+#: Held on screen while the analyzer pass runs. Present tense, the product's
+#: vocabulary, and deliberately claim-free: it says what is being looked for,
+#: never how much was found. See `transient_status` for the erase contract.
+_ANALYZING_STATUS = "Finding avoidable spend across your sessions…"
 
 
 @click.command("quickstart")
@@ -170,11 +175,22 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     # ingest 300 files and analyze 143 sessions. Printing the ingest count beside
     # a figure summed over the analyzed one is exactly the mixed-population
     # defect this screen must not have.
-    avoidable = _compute_avoidable_total(
-        db, since_dt, until_dt,
-        fallback_sessions=result.sessions_ingested,
-        population_capped=max_sessions is not None and result.limit_reached,
-    )
+    #
+    # This is the last slow stretch, and it used to be silent: measured on a
+    # real corpus, ~14s elapses between the final backfill line and the first
+    # line of the report, long enough to read as a hang. `transient_status`
+    # holds one self-erasing line built from the SAME `Progress` construction
+    # the backfill counter above uses, so the two phases read as one process,
+    # and it erases before the report renders. The message names what is
+    # happening in the product's own terms and promises NO number: nothing on
+    # this screen may claim a figure, a count or an all-clear while the
+    # computation that would establish it is still running.
+    with transient_status(_ANALYZING_STATUS):
+        avoidable = _compute_avoidable_total(
+            db, since_dt, until_dt,
+            fallback_sessions=result.sessions_ingested,
+            population_capped=max_sessions is not None and result.limit_reached,
+        )
 
     _render(avoidable, fallback_sessions=result.sessions_ingested)
 
@@ -626,8 +642,6 @@ def _render(avoidable: AvoidableTotal | None, *,
         "over the past 30 days and apply the fixes.",
         style="muted",
     ))
-    console.print()
-    console.print(Text(f"  {ONBOARD_COMMAND}", style=ACCENT))
     console.print()
 
 
