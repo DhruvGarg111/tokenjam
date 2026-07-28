@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from tokenjam.core.analysis_span import retention_days_for
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding, compute_relearn_finding
 
 if TYPE_CHECKING:
@@ -349,7 +350,9 @@ def recompute_now(
             distill_cache_dir=_distill_cache_dir_for(config),
             # The archive lane's horizon: what tokenjam kept, not what Claude
             # Code left on disk. See `compute_relearn_finding`.
-            retention_days=getattr(getattr(config, "storage", None), "retention_days", None),
+            retention_days=retention_days_for(
+                getattr(config, "storage", None)
+            ) if getattr(config, "storage", None) is not None else None,
         )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to

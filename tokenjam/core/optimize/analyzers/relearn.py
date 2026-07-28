@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from tokenjam.core.analysis_span import retention_days_for, window_label_for
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
@@ -84,6 +85,7 @@ from tokenjam.core.optimize.relearn_window import (
     RelearnWindowTotal,
     sum_windowed,
     window_days,
+    window_labels_including,
 )
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -2598,7 +2600,13 @@ def run(ctx: AnalyzerContext) -> None:
         optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
     )
     storage_cfg = getattr(ctx.config, "storage", None)
-    retention_days = getattr(storage_cfg, "retention_days", None)
+    # Resolved, never read off the field: `storage.retention_days` is now
+    # derived from the chosen analysis span and is None on a default config,
+    # which a raw read would take to mean "unbounded" — the opposite of what a
+    # 90-day span promises. See core/analysis_span.py.
+    retention_days = (
+        retention_days_for(storage_cfg) if storage_cfg is not None else None
+    )
     # The write budget's headroom comes from the `summarize` analyzer's own
     # measurement of the agent files these proposals would append to. It runs
     # ahead of relearn in ANALYZER_ORDER, so its finding is already on the
@@ -2611,6 +2619,10 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
         retention_days=retention_days,
+        # So the inbox's one window label always has a bucket on this side too.
+        window_labels=window_labels_including(
+            window_label_for(storage_cfg, ctx.conn)
+        ),
         projects_root=scope.projects_root,
         claude_home=scope.claude_home,
         distill_cache_dir=_distill_cache_dir(ctx.config),
