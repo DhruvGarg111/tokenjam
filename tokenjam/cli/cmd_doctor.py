@@ -8,6 +8,7 @@ from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import load_config, resolve_config_path
+from tokenjam.core.db import SPANS_INDEXES
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -57,6 +58,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 9. DuckDB spans column-statistics corruption (issue #56)
     spans_stats_check = _check_spans_stats(ctx.obj["db"])
     checks.append(spans_stats_check)
+
+    # 9b. Secondary-index integrity on spans — a fault the statistics check
+    #     above cannot see, and one that makes the retention DELETE unreliable.
+    checks.append(_check_spans_indexes(ctx.obj["db"]))
 
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
@@ -331,6 +336,47 @@ def _check_spans_stats(db: object) -> dict:
         }
     return {"name": "Spans column statistics", "level": "ok",
             "message": "Column statistics are consistent."}
+
+
+def _check_spans_indexes(db: object) -> dict:
+    """Detect a missing or under-reporting secondary index on `spans`.
+
+    An ERROR, not a warning, and deliberately: the retention job's `DELETE FROM
+    spans WHERE start_time < ?` maintains every index inside its own
+    transaction, so a damaged one can abort the statement part-way and leave it
+    reporting fewer rows removed than it matched. A deletion of user history
+    whose extent nobody can state afterwards is not a degraded read path, it is
+    an unsafe write path, and the column-statistics check next door cannot see
+    it — that one asks only about `trace_id`'s row-group statistics and reports
+    OK on either fault below.
+    """
+    from tokenjam.core.db import check_spans_index_corruption
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults = check_spans_index_corruption(conn)
+    except duckdb.Error as e:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": f"Skipped — could not probe the indexes: {e}"}
+    if faults:
+        detail = "; ".join(f"{name} {reason}" for name, reason in faults)
+        return {
+            "name": "Spans index integrity",
+            "level": "error",
+            "message": f"Secondary index damage on the spans table — {detail}. "
+                       f"Queries served by these indexes return incomplete "
+                       f"results, and a DELETE (retention cleanup) can abort "
+                       f"part-way through. Run `tj doctor --repair` to rebuild "
+                       f"them from the table (no data is moved).",
+            "repair_action": "rebuild_spans_indexes",
+        }
+    return {"name": "Spans index integrity", "level": "ok",
+            "message": f"All {len(SPANS_INDEXES)} secondary indexes on spans "
+                       f"agree with the table."}
 
 
 def _check_schema_integrity(db: object) -> dict:
@@ -617,8 +663,10 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
         SESSION_COST_DRIFT_TOLERANCE_USD,
+        check_spans_index_corruption,
         ensure_expected_columns,
         ensure_expected_tables,
+        repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
     )
@@ -732,6 +780,43 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"{len(sessions)} session(s); their totals were "
                     f"reconciled.[/green]"
                 )
+            continue
+        if action == "rebuild_spans_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                repair_spans_indexes(conn)
+                remaining = check_spans_index_corruption(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Index rebuild failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if remaining:
+                    # Rebuilding from the table cannot leave an index disagreeing
+                    # with it, so anything still failing is a fault one layer
+                    # down — say so rather than reporting a repair that did not
+                    # take.
+                    console.print(
+                        f"  [red]Rebuilt, but {len(remaining)} index(es) still "
+                        f"disagree with the table — the damage is below the "
+                        f"index layer. Run `tj doctor --repair` again to rebuild "
+                        f"the table itself.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(SPANS_INDEXES)} secondary "
+                        f"index(es) on spans; no rows were moved.[/green]"
+                    )
             continue
         if action == "rebuild_spans":
             if conn is None:

@@ -170,14 +170,23 @@ CREATE TABLE IF NOT EXISTS spans (
 );
 """
 
-# Secondary indexes on spans. Single-sourced so migration 3 and the repair path
-# create the same set; keep in sync with the DROPs in migration 2.
-SPANS_INDEX_SQL = (
-    "CREATE INDEX IF NOT EXISTS idx_spans_trace_id    ON spans(trace_id);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_agent_id    ON spans(agent_id);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_start_time  ON spans(start_time);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
-    "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
+# Secondary indexes on spans, as (index name, indexed column). Single-sourced so
+# migration 3, the repair path, and the integrity check all speak about the same
+# set; keep in sync with the DROPs in migration 2. The index-corruption check
+# below probes each entry individually, so a name added here is checked without
+# any further edit — the point being that the check cannot fall behind the
+# schema the way a hand-kept second list would.
+SPANS_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_spans_trace_id",   "trace_id"),
+    ("idx_spans_agent_id",   "agent_id"),
+    ("idx_spans_start_time", "start_time"),
+    ("idx_spans_tool_name",  "tool_name"),
+    ("idx_spans_conv_id",    "conversation_id"),
+)
+
+SPANS_INDEX_SQL = ";\n".join(
+    f"CREATE INDEX IF NOT EXISTS {name} ON spans({column})"
+    for name, column in SPANS_INDEXES
 )
 
 # ---------------------------------------------------------------------------
@@ -1594,6 +1603,104 @@ def check_spans_stats_corruption(conn: duckdb.DuckDBPyConnection) -> bool:
         if eq == 0 and like > 0:
             return True
     return False
+
+
+def check_spans_index_corruption(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[tuple[str, str]]:
+    """The ``spans`` secondary indexes that are missing or disagree with the table.
+
+    Returns ``(index name, what is wrong)`` pairs; empty means all five are
+    sound. ``check_spans_stats_corruption`` above asks one question about one
+    column — is the row-group statistics fast-path lying about ``trace_id`` —
+    which is narrower than "can this table be read and DELETED from
+    predictably", and the gap between the two is where a secondary-index fault
+    lives. DuckDB maintains every index inside the deleting transaction, so a
+    damaged one can abort a ``DELETE`` part-way through and leave a statement
+    reporting that it removed fewer rows than it matched. Retention runs exactly
+    that ``DELETE``, which is what makes this load-bearing rather than cosmetic:
+    a deletion that cannot be relied on to complete is a deletion whose extent
+    nobody can state afterwards.
+
+    Two independent faults, because they have different causes and the same
+    remedy:
+
+    * **absent** — the index is not in the catalogue at all. A rebuild that
+      copies data without the DDL drops all five permanently (the ``CREATE
+      TABLE … AS SELECT`` trap ``repair_spans_stats`` documents), and migrations
+      are already recorded applied, so nothing puts them back.
+    * **inconsistent** — the index answers a point lookup with fewer rows than
+      the table holds. Probed the same way the stats check probes: take a value
+      known to be present, ask for it once in a form an index can serve and once
+      in a form it cannot (``CAST(col AS VARCHAR)`` is an expression over the
+      column, so no index applies — and unlike the stats check's ``LIKE`` trick
+      it works for ``start_time`` too).
+
+    An empty table, an unreadable column, or a column holding only NULLs
+    contributes nothing: this reports what it can demonstrate, never suspicion.
+    """
+    try:
+        # A pre-migration database has no spans table, so it has no indexes to
+        # be missing. Reporting five absent ones there would flag every fresh
+        # install as corrupt.
+        conn.execute("SELECT 1 FROM spans LIMIT 0").fetchall()
+        present = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'spans'"
+            ).fetchall()
+        }
+    except duckdb.Error:
+        return []
+
+    faults: list[tuple[str, str]] = []
+    for index_name, column in SPANS_INDEXES:
+        if index_name not in present:
+            faults.append((index_name, "absent from the catalogue"))
+            continue
+        try:
+            sample = conn.execute(
+                f"SELECT {column} FROM spans WHERE {column} IS NOT NULL LIMIT 3"
+            ).fetchall()
+        except duckdb.Error:
+            continue
+        for (value,) in sample:
+            try:
+                indexed_row = conn.execute(
+                    f"SELECT COUNT(*) FROM spans WHERE {column} = $1", [value]
+                ).fetchone()
+                scanned_row = conn.execute(
+                    f"SELECT COUNT(*) FROM spans "
+                    f"WHERE CAST({column} AS VARCHAR) = CAST($1 AS VARCHAR)",
+                    [value],
+                ).fetchone()
+            except duckdb.Error:
+                break
+            indexed = indexed_row[0] if indexed_row else 0
+            scanned = scanned_row[0] if scanned_row else 0
+            if indexed < scanned:
+                faults.append((
+                    index_name,
+                    f"returns {indexed} of {scanned} matching row(s)",
+                ))
+                break
+    return faults
+
+
+def repair_spans_indexes(conn: duckdb.DuckDBPyConnection) -> None:
+    """Drop and recreate every ``spans`` secondary index from the canonical DDL.
+
+    Cheaper than ``repair_spans_stats`` and sufficient for the index fault: the
+    table's rows are the source of truth and are never touched, so a rebuilt
+    index can only agree with them. Idempotent, and safe on a healthy database.
+    """
+    for index_name, _ in SPANS_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+    for statement in SPANS_INDEX_SQL.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
+    conn.execute("CHECKPOINT")
 
 
 def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
