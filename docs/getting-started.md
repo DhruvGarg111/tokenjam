@@ -2,7 +2,7 @@
 
 The fastest way onto TokenJam is to install it and run the onboarding wizard for your agent; that
 wires up everything (statusline, backfill, dashboard) in one step. This page walks every entry path
-by persona, most-common first; each rung ends with a way to verify it actually worked before you move
+by persona, most-common first; each step ends with a way to verify it actually worked before you move
 on.
 
 > **Just looking first?** `npx tokenjam` prints a 15-second read-only report over the Claude Code logs
@@ -10,7 +10,7 @@ on.
 > no daemon. You should see one line telling you how much of your recent sessions was avoidable (or
 > "No Claude Code logs found," which just means you haven't run Claude Code on this machine yet). See
 > [docs/installation.md](installation.md) for the `uv`/`pipx` runner requirements. When you're ready to
-> keep it, start at rung 1 below.
+> keep it, start at step 1 below.
 
 ## 1. Claude Code / Codex onboarding wizards
 
