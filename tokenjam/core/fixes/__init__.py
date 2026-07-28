@@ -22,6 +22,7 @@ from tokenjam.core.fixes.catalog import (
     FixRecord,
     fix_for,
     fix_text,
+    fix_text_for,
     fixes_for,
     register,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "FixRecord",
     "fix_for",
     "fix_text",
+    "fix_text_for",
     "fixes_for",
     "lint_catalog",
     "lint_fix",

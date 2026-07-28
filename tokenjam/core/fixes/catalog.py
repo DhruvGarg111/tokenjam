@@ -113,6 +113,19 @@ class FixRecord:
     #: scoped to files would load only after the decision it governs was made.
     #: A record opts IN by naming globs; nothing infers them from prose.
     path_globs: tuple[str, ...] = ()
+    #: Per-analyzer framing, keyed by analyzer name. One record can be handed
+    #: out by several analyzers, and each has a different reason for showing it
+    #: — "this session hit the context ceiling" versus "this driver ran premium
+    #: while reading broadly". That framing is NOT a second copy of the rule and
+    #: must never restate it; it names what THIS analyzer observed and then
+    #: quotes the one instruction.
+    #:
+    #: It lives on the record rather than in the analyzer for the same reason
+    #: the text does: a lead-in written beside the analyzer is prose the catalog
+    #: cannot see, and prose the catalog cannot see is how one instruction comes
+    #: to be stated two ways. Surfaces that have their own advise slot should
+    #: use it instead; this exists for the ones that carry a single fix field.
+    lead_ins: tuple[tuple[str, str], ...] = ()
     #: Vague spans this record allows to be REPLACED by observed ones at render
     #: time (``core/fixes/grounding``). Declared on the record so the catalog
     #: still holds exactly one entry per fix — grounding is a rendering
@@ -123,6 +136,13 @@ class FixRecord:
 
     def applies_to(self, persona: str) -> bool:
         return PERSONA_ANY in self.personas or persona in self.personas
+
+    def lead_in_for(self, analyzer: str) -> str:
+        """This analyzer's framing sentence, or ``""`` when it has none."""
+        for name, text in self.lead_ins:
+            if name == analyzer:
+                return text
+        return ""
 
 
 def _record(**kw: object) -> FixRecord:
@@ -177,6 +197,25 @@ def fix_text(key: str) -> str:
     return record.text
 
 
+def fix_text_for(key: str, analyzer: str) -> str:
+    """``key``'s text with ``analyzer``'s framing in front of it, if any.
+
+    The only sanctioned way to put an analyzer's own words next to a shared
+    rule. Concatenating a locally-written sentence onto :func:`fix_text` at the
+    call site is the same defect in a smaller costume: the sentence is prose
+    outside the catalog, so nothing checks it against the rule it introduces
+    and nothing stops it restating half of it.
+    """
+    record = FIX_CATALOG.get(key)
+    if record is None:
+        raise KeyError(
+            f"no catalogued fix {key!r} — known keys: "
+            f"{', '.join(sorted(FIX_CATALOG))}",
+        )
+    lead_in = record.lead_in_for(analyzer)
+    return f"{lead_in} {record.text}".strip() if lead_in else record.text
+
+
 def fixes_for(analyzer: str, persona: str = PERSONA_ANY) -> tuple[FixRecord, ...]:
     """Every catalogued fix ``analyzer`` hands out that ``persona`` can act on.
 
@@ -205,6 +244,7 @@ __all__ = [
     "Substitution",
     "fix_for",
     "fix_text",
+    "fix_text_for",
     "fixes_for",
     "register",
 ]

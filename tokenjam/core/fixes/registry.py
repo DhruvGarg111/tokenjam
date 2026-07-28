@@ -15,6 +15,7 @@ from tokenjam.core.fixes.catalog import (
     LEVER_MODEL,
     LEVER_OFFLOAD,
     LEVER_ROUTING,
+    PERSONA_ANY,
     PERSONA_CLAUDE_CODE,
     PERSONA_SDK,
     FixRecord,
@@ -178,6 +179,16 @@ OFFLOAD_RULE = register(FixRecord(
     analyzers=frozenset({"resend", "downsize", "relearn"}),
     answers="context-heavy work run inline on the main thread, re-sent on every later turn",
     lever=LEVER_OFFLOAD,
+    # `relearn`'s `context_overflow` family shows this record for a reason the
+    # other two do not have — the request was REJECTED, not merely expensive —
+    # and that sentence used to be written beside the family table. It names
+    # what was observed and stops; restating any part of the rule below is the
+    # defect this record exists to have already fixed.
+    lead_ins=((
+        "relearn",
+        "This session hit the model's context ceiling and the request was "
+        "rejected outright: the tokens were spent and no completion came back.",
+    ),),
     # REPLACES the vague enumeration with the observed one; it does not append
     # to it. "the `Read` and `Grep` sweeps you run in `optimize/`" is shorter
     # than the parenthesised list it stands in for, which is the point — the
@@ -208,19 +219,288 @@ OFFLOAD_RULE = register(FixRecord(
 #: The SDK counterpart of the same observation. A Claude Code user cannot
 #: paste this and an SDK caller cannot use the offload rule above; handing
 #: either the other's fix names an action they cannot take.
+#:
+#: FOUR analyzers' worth of call sites used to state this instruction in four
+#: separately-authored wordings — "Add a stable cache prefix / enable prompt
+#: caching", "Add a cache_control breakpoint on this agent's stable prefix",
+#: "Add a cache_control breakpoint right after this prefix", and this record.
+#: They are one instruction, so they are now one record, and the observed
+#: specifics (which model, which prefix) are grounding rather than a fifth
+#: wording.
+#:
+#: The trim half moved out to ``resend.sdk_trim_context``. It was a SECOND
+#: instruction living in this record's text, which is the shape that makes
+#: composition unsafe: the resend SDK card renders both, so a user was told to
+#: trim the request in the same block twice.
 SDK_CACHE_CONTROL = register(FixRecord(
     key="resend.sdk_cache_breakpoint",
     text=(
-        "Adopt a cache_control breakpoint at the call site so the repeated "
-        "prefix bills at the cache rate instead of full price on every turn, "
-        "and trim the request you build rather than relying on the harness to "
-        "do it — an SDK caller constructs the whole prompt, so the repeated "
-        "context is yours to bound."
+        "Adopt a cache_control breakpoint at the call site, on the stable "
+        "prefix the calls share (system prompt and tool definitions), so that "
+        "prefix bills at the cache rate instead of full input price on every "
+        "turn."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    # One record, every analyzer that hands out a caching instruction. The
+    # per-analyzer runtime gate is unchanged and still lives in
+    # ``cost_proposals._persona_gated_cache_fields``.
+    analyzers=frozenset({"resend", "cache"}),
+    answers="repeated prompt prefix billed at full input rate on every turn",
+    lever=LEVER_ROUTING,
+    grounding=(
+        Substitution(
+            find="on every turn",
+            template="on every {models} call",
+        ),
+    ),
+))
+
+#: The trim instruction, once. It was authored twice: as a clause inside
+#: ``resend.sdk_cache_breakpoint`` and as ``context_resend.RESEND_SDK_TRIM_FIX``,
+#: and both can be shown on the same card.
+#:
+#: Deliberately scoped to what an SDK caller controls DIRECTLY — the content it
+#: assembles into the next request. `/compact` is a Claude Code interactive
+#: command an SDK caller has no access to, which is why the compaction record
+#: below is a different record for a different persona rather than a branch in
+#: this one.
+SDK_TRIM_CONTEXT = register(FixRecord(
+    key="resend.sdk_trim_context",
+    text=(
+        "Trim or summarize the accumulated context before including it in the "
+        "next request instead of resending it unchanged turn over turn. An SDK "
+        "caller constructs the whole prompt, so the repeated volume this "
+        "finding measures is yours to bound; cutting it at the call site "
+        "reduces future prompt size independent of whether caching is enabled."
     ),
     delivery="claude_md_rule",
     personas=frozenset({PERSONA_SDK}),
     analyzers=frozenset({"resend"}),
-    answers="repeated prompt prefix billed at full input rate on every turn",
+    answers="accumulated context reassembled into every request unchanged",
+    lever=LEVER_ROUTING,
+    must_not_relicense=frozenset({
+        # The billed behaviour is resending the accumulated context unchanged.
+        "resend it unchanged",
+        "the harness will trim",
+    }),
+))
+
+#: IMMEDIATE RELIEF, and labelled as such rather than as a fix. `/compact` is
+#: transient, persists nothing past the session, and never changes the pattern
+#: going forward — the record's own text says so, which is why it is not
+#: advisory_only: there IS an action, it is simply bounded.
+COMPACTION_RELIEF = register(FixRecord(
+    key="resend.compaction_relief",
+    text=(
+        "Run /compact (or start a fresh session) once accumulated context "
+        "crosses your working set. The repeated volume this finding measures "
+        "is the same content being re-sent turn over turn: trimming it "
+        "directly cuts future prompt size, regardless of whether caching is "
+        "on. This is a manual, per-session action, so it never fixes the "
+        "pattern going forward — treat it as immediate relief for an "
+        "already-full session, not the durable fix."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"resend"}),
+    answers="a single session already carrying more accumulated context than its working set",
+    lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # This record is allowed to be transient — it says so — but it must not
+        # present itself as the durable fix, because the analyzer bills for the
+        # pattern continuing, not for one full session.
+        "this fixes the pattern",
+        "no further change is needed",
+    }),
+))
+
+#: An OBSERVATION for the Claude Code persona, not an offer. Prompt caching is
+#: controlled by fields on the raw API request, and a Claude Code session does
+#: not construct that request — the harness does. There is no code for this user
+#: to edit, so there is no action to sell, and the record says so.
+#:
+#: ``advisory_only`` is what makes that mechanical rather than a property of
+#: whoever last read the prose. What the behaviour already cost is untouched
+#: (Critical Rule 32); only the offer is withheld.
+CACHE_NO_CC_LEVER = register(FixRecord(
+    key="cache.no_claude_code_lever",
+    text=(
+        "Prompt caching is controlled by cache_control fields on the raw "
+        "Anthropic API request. A Claude Code session doesn't construct that "
+        "request itself; the harness does. There's no code here for you to "
+        "edit, so no fix is needed or shown for it."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"cache"}),
+    answers="repeated context re-billed as fresh input in a harness the user does not construct requests for",
+    lever=LEVER_AWARENESS,
+    advisory_only=True,
+))
+
+#: The Claude Code levers for a model-routing finding. A CC session cannot swap
+#: its own interactive model mid-turn, so the generic "route to a cheaper model"
+#: text an SDK caller gets names an action this persona cannot take.
+#:
+#: `/compact` IS NOT ON THIS LIST, deliberately: it is transient, persists
+#: nothing past the session, and users who feel a session filling already do it
+#: unprompted. Listing it beside three durable levers implies it is the same
+#: kind of thing, and pads a list whose length is itself a cost to adherence.
+#:
+#: The "mixed window" wording was a SECOND, shorter copy of this same list
+#: (``_DOWNSIZE_MIXED_CC_NOTE``). It is now this record plus a lead-in naming
+#: which share of the window it applies to — the framing differs, the
+#: instruction does not.
+DOWNSIZE_CC_LEVERS = register(FixRecord(
+    key="downsize.claude_code_levers",
+    text=(
+        "You can't switch your own interactive model mid-session, so this is "
+        "not a fix to paste into your own request the way an SDK caller would. "
+        "The actionable levers instead: `tj route export --target ccr` (or "
+        "--target litellm) to route future calls through a cheaper model, `tj "
+        "optimize subagent` to right-size subagent models and context, or a "
+        "CLAUDE.md/subagent directive telling this agent to dispatch cheaper "
+        "subagents for this shape of work."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"downsize"}),
+    answers="a premium model running work a cheaper same-family model fits, in a session that cannot swap its own model",
+    lever=LEVER_ROUTING,
+    lead_ins=((
+        "downsize.mixed_window",
+        "For the Claude Code sessions in this window:",
+    ),),
+))
+
+#: The `script` proposal's note. Behavioural, same class of surface as the
+#: subagent rubric: an orchestrator or the model itself reads it.
+SCRIPT_DETERMINISTIC = register(FixRecord(
+    key="script.replace_agent_turn_with_script",
+    text=(
+        "This tool-call pattern repeated across many sessions with the same "
+        "structural shape (same tools, same argument types, different values). "
+        "Consider replacing it with a deterministic script that runs these "
+        "calls directly, and reserve the agent turn for the parts that "
+        "actually need a model's judgment."
+    ),
+    delivery="skill",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"script"}),
+    answers="a deterministic tool-call sequence re-derived by a model turn every time it runs",
+    lever=LEVER_OFFLOAD,
+))
+
+#: The `reuse` proposal's note. Carries its own review caveat because a
+#: skeleton match is a candidate, not proof the plan is identical — that
+#: sentence is honesty about the SIGNAL, not an escape hatch on the
+#: instruction, and the two read alike but are not the same thing.
+REUSE_PLAN_SKELETON = register(FixRecord(
+    key="reuse.template_the_plan_skeleton",
+    text=(
+        "This class of task shares a planning skeleton: the same tool sequence "
+        "follows the first planning call, session after session, with only the "
+        "argument values differing (dates, versions, paths). Consider "
+        "templating the plan for this shape instead of re-planning it from "
+        "scratch each time. Review before reusing: a skeleton match is a "
+        "candidate, not proof the plan is identical."
+    ),
+    delivery="skill",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"reuse"}),
+    answers="the same planning skeleton re-derived from scratch across sessions",
+    lever=LEVER_OFFLOAD,
+))
+
+#: Framed more conservatively than its peers on purpose: a long answer is often
+#: the right one, so this is a candidate to review rather than a rule to
+#: enforce. Note what the hedge is and is not — it conditions the instruction on
+#: whether brevity COSTS something (completeness, correctness, clarity), which a
+#: reader of the output can check, not on the agent's own rating of how hard its
+#: task was. That distinction is the whole of the self-graded-hatch property.
+VERBOSITY_PREFER_SHORTER = register(FixRecord(
+    key="verbosity.prefer_shorter_when_it_serves",
+    text=(
+        "This shape of task ran noticeably longer, output-wise, than similar "
+        "sessions recently. Worth a look: if a shorter answer would serve this "
+        "shape of task just as well, prefer it — but only when brevity doesn't "
+        "cost completeness, correctness, or clarity. A longer answer is often "
+        "the right one; this is a candidate to review, not a rule to enforce."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"verbosity"}),
+    answers="output tokens running well above the median for the same task shape",
+    lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # The analyzer bills for output well above the cohort median. A fix that
+        # says long output is fine gives a pass to its entire population — and
+        # this record's honest hedge sits one clause away from exactly that, so
+        # it is the record most worth guarding mechanically.
+        "length is not a problem",
+        "longer output is always",
+        "ignore the length",
+    }),
+))
+
+#: The batch-placement instruction. Advise-only in practice — adoption is an
+#: architectural change rather than a configuration flip, and the card says so
+#: next to the number — but the instruction itself is one sentence and belongs
+#: here rather than inline in the one-paste block, which is precisely the slot
+#: whose text a user pastes without re-reading.
+BATCH_SUBMIT_ASYNC = register(FixRecord(
+    key="batch.submit_through_batch_api",
+    text=(
+        "Submit these workloads through the Batch API instead of the "
+        "synchronous endpoint: they are billed at the batch rate, and nothing "
+        "downstream of them is waiting on the response."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    analyzers=frozenset({"batch"}),
+    answers="non-interactive workloads billed at the synchronous rate",
+    lever=LEVER_ROUTING,
+))
+
+#: The residual bucket's placeholder. Not an instruction and not pretending to
+#: be one: a cluster that matched no known family has no fix to hand out, and
+#: this says so rather than inventing something plausible.
+#:
+#: It is catalogued anyway, for two reasons. It is text a user reads, so it
+#: belongs where the other text a user reads lives; and ``is_placeholder_fix``
+#: matches on its wording to block the write, so a wording drifting here while
+#: that matcher stays put would silently start OFFERING a placeholder as a rule.
+#: One home means the string and the matcher cannot drift apart.
+#:
+#: Distinct from ``relearn.edit_before_read``, which is marked advisory_only:
+#: "no template matched" and "none is needed" are different statements, and
+#: collapsing them would let a real do-nothing fix hide as an unmatched one.
+RELEARN_NO_TEMPLATE = register(FixRecord(
+    key="relearn.no_template_matched",
+    text="Review examples — no known fix template matched.",
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_ANY}),
+    analyzers=frozenset({"relearn"}),
+    answers="a recurring failure cluster that matched no known family",
+    lever=LEVER_AWARENESS,
+))
+
+#: The prompt-template trim instruction. Distinct from
+#: ``resend.sdk_trim_context``, which is about context ACCUMULATED across turns:
+#: this one is about a static template that carries dead weight on every single
+#: call, and the two are fixed in different places.
+TRIM_PROMPT_TEMPLATE = register(FixRecord(
+    key="trim.drop_low_significance_regions",
+    text=(
+        "Trim the low-significance regions from this step's prompt template "
+        "(boilerplate, repeated instructions, dead context) so every call "
+        "carries fewer input tokens."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    analyzers=frozenset({"trim"}),
+    answers="a prompt template carrying regions that contribute nothing on every call",
     lever=LEVER_ROUTING,
 ))
 
@@ -268,12 +548,259 @@ MIGRATION_READ_FIRST = register(FixRecord(
 ))
 
 
+# --- relearn: the known failure families -------------------------------------#
+#
+# One record per family, keyed ``relearn.<family_key>`` so the family table and
+# the catalog cannot drift apart on which text belongs to which matcher. These
+# were inline strings in ``analyzers/relearn.py``; nothing checked them, so the
+# properties the lint enforces held only by whoever last read the file.
+#
+# Their delivery is declared per family because the FAMILY is what knows:
+# `sleep_chain` blocks a command and injects nothing, while the PostToolUseFailure
+# families exist precisely to inject text. Those cost opposite amounts and no
+# property of the artifact tells them apart.
+
+RELEARN_CWD_CONFUSION = register(FixRecord(
+    key="relearn.cwd_confusion",
+    text=(
+        "PostToolUseFailure hook (Bash/Read): react only after a "
+        "'no such file or directory' failure by injecting the real cwd + "
+        "a short directory listing as additionalContext, so the agent "
+        "recovers in one shot instead of a PreToolUse guess-and-block on "
+        "every relative path (which would misfire on normal usage)."
+    ),
+    delivery="injecting_hook",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="tool calls failing on a relative path resolved against the wrong working directory",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_SLEEP_CHAIN = register(FixRecord(
+    key="relearn.sleep_chain",
+    text=(
+        "PreToolUse hook: block a `sleep N && <check>` Bash chain and point the "
+        "agent at the Monitor tool instead of a busy-wait."
+    ),
+    delivery="executing_hook",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="blocked sleep-chain Bash commands retried after the harness refused them",
+    lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # A busy-wait is the whole population. Suggesting a shorter sleep keeps
+        # the sleep.
+        "use a shorter sleep",
+        "sleep for less",
+    }),
+))
+
+#: ONE record for TWO families. `stale_read_race` ("modified since read") and
+#: `edit_string_not_found` ("string to replace not found") are different
+#: matchers over different failures, and they stay different families — the
+#: hook spec, the delivery and the evidence are all per-family. But the
+#: INSTRUCTION is identical in both: re-read the file before retrying the edit.
+#: They shipped as two separately-authored wordings and scored 94% against each
+#: other, which is the three-analyzers-one-rule case in miniature: both hooks
+#: can be applied by the same user, so the same sentence lands twice.
+#:
+#: Which failure prompted it is the FAMILY's job to say (each has its own title
+#: and evidence), not this text's. Naming the trigger here is what forked one
+#: instruction into two in the first place.
+RELEARN_REREAD_BEFORE_RETRYING_EDIT = register(FixRecord(
+    key="relearn.reread_before_retrying_edit",
+    text=(
+        "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after the "
+        "edit has already failed, by injecting a re-Read reminder as "
+        "additionalContext so the retry is written against the file's current "
+        "contents — never touches a successful edit."
+    ),
+    delivery="injecting_hook",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="edits retried against remembered file contents after the file moved underneath them",
+    lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # The billed behaviour IS the retry against remembered contents. A fix
+        # that says to retry, or to try a shorter string, re-licenses it.
+        "retry the same edit",
+        "try again with",
+        "retry without reading",
+    }),
+))
+
+#: The OPPOSITE failure to ``edit_string_not_found`` — too many matches, not
+#: zero — and it takes the opposite fix, which is why the two families must
+#: never share a bucket and why their records are separate here.
+RELEARN_EDIT_AMBIGUOUS_MATCH = register(FixRecord(
+    key="relearn.edit_ambiguous_match",
+    text=(
+        "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
+        "than once, include enough surrounding lines to make it unique "
+        "rather than retrying the same short string — or pass "
+        "`replace_all: true` when every occurrence really should change."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Edit calls rejected because old_string matched more than once",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_READ_TOO_LARGE = register(FixRecord(
+    key="relearn.read_too_large",
+    text=(
+        "CLAUDE.md/skill note: this file is too large to read whole. Grep "
+        "for the symbol first and Read only the region around the hit "
+        "(`offset`/`limit`), or delegate the sweep to a subagent so the "
+        "bulk never lands in this thread's context."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Read calls rejected for exceeding the tool's max-tokens ceiling",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_READ_DIRECTORY = register(FixRecord(
+    key="relearn.read_directory",
+    text=(
+        "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
+        "directory use Glob (or `ls` via Bash), then Read the file you "
+        "actually want."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Read calls pointed at a directory rather than a file",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_READ_OFFSET_MALFORMED = register(FixRecord(
+    key="relearn.read_offset_malformed",
+    text=(
+        "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not "
+        "arrays — pass a single number for each."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Read calls rejected for passing offset or limit as an array",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_DEFERRED_TOOL_COLD = register(FixRecord(
+    key="relearn.deferred_tool_cold",
+    text=(
+        "Skill/scoped note: deferred tools need a ToolSearch lookup for their "
+        "schema before the first call; optionally a PreToolUse intercept hook."
+    ),
+    delivery="skill",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="deferred tools called before their schema was fetched, so the call could not resolve",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_COMMAND_NOT_FOUND = register(FixRecord(
+    key="relearn.command_not_found",
+    text=(
+        "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
+        "PATH. Common causes here: using bare `python` instead of `python3`, "
+        "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
+        "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
+        "Prefer the portable/explicit form."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Bash calls failing on a binary or builtin this shell does not have",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_BASH_TIMEOUT = register(FixRecord(
+    key="relearn.bash_timeout",
+    text=(
+        "CLAUDE.md/skill note: this command outlived the tool's timeout "
+        "and was killed, so its work was lost and the tokens spent "
+        "waiting bought nothing. Run long jobs in the background "
+        "(`run_in_background`) and poll for completion, or raise the "
+        "call's own timeout when the wait is genuinely expected."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Bash commands held in the foreground until the harness killed them",
+    lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # The analyzer bills for the tokens spent WAITING on a call the harness
+        # then killed. A fix that says to wait longer, or to keep it in the
+        # foreground, leaves that number exactly where it found it.
+        "wait for it to finish",
+        "just wait",
+        "run it in the foreground",
+        "block until",
+    }),
+))
+
+RELEARN_BASH_CHAINED_APPROVAL = register(FixRecord(
+    key="relearn.bash_chained_approval",
+    text=(
+        "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
+        "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
+        "the entire chain. Issue the parts as separate Bash calls, and "
+        "prefer an absolute path over a leading `cd`."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="chained Bash commands tripping the approval prompt the parts alone would not",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_GIT_BRANCH_EXISTS = register(FixRecord(
+    key="relearn.git_branch_exists",
+    text=(
+        "CLAUDE.md/skill note: check out the existing branch "
+        "(`git checkout <name>`) instead of re-creating it, or pick a "
+        "fresh name — `git checkout -b` on an existing branch always "
+        "fails."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="`git checkout -b` retried against a branch name that already exists",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_WEBFETCH_DOMAIN_BLOCKED = register(FixRecord(
+    key="relearn.webfetch_domain_blocked",
+    text=(
+        "CLAUDE.md/skill note: this domain is blocked — use a search tool "
+        "or a different source instead of retrying the fetch."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="fetches retried against a domain the harness will not reach",
+    lever=LEVER_AWARENESS,
+))
+
+
 __all__ = [
+    "CACHE_NO_CC_LEVER",
+    "COMPACTION_RELIEF",
+    "DOWNSIZE_CC_LEVERS",
     "EDIT_BEFORE_READ",
     "OFFLOAD_RULE",
     "RIGHTSIZE_TEMPLATE",
+    "REUSE_PLAN_SKELETON",
+    "SCRIPT_DETERMINISTIC",
     "SDK_CACHE_CONTROL",
+    "SDK_TRIM_CONTEXT",
     "SUBAGENT_DEFINE_BUILTIN",
     "SUBAGENT_EFFORT",
     "SUBAGENT_RUBRIC",
+    "TRIM_PROMPT_TEMPLATE",
+    "VERBOSITY_PREFER_SHORTER",
 ]
