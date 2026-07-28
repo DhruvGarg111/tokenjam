@@ -76,6 +76,7 @@ from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recu
 from tokenjam.core.optimize.projection import build_projection_basis
 from tokenjam.core.optimize.analyzers.resend_tail import RELEARN_RESEND_BOUNDARY
 from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.relearn_window import (
     RELEARN_WINDOW_LABELS,
@@ -257,12 +258,15 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         # tracking missed (a session resume, a compaction, a subagent read).
         # Safer to note the pattern than to guess at its state.
         "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: the harness already blocks an Edit/Write "
-            "before a Read with a clear error ('has not been read yet') and "
-            "agents reliably self-correct by reading next turn — no hook "
-            "needed, this is advisory awareness only."
-        ),
+        # ADVISORY ONLY, and the flag is what makes that mechanical. This
+        # family's own fix text says there is nothing to do — the harness
+        # already errors clearly and agents self-correct next turn — so the
+        # card must not occupy an apply slot offering it. The recurrence still
+        # COST something and that figure stands untouched (Critical Rule 32):
+        # a gate on whether we have an action available never reaches back and
+        # edits what a behaviour already cost.
+        "advisory_only": True,
+        "fix": _fixes.fix_text("relearn.edit_before_read"),
     },
     {
         "key": "sleep_chain",
@@ -1791,6 +1795,7 @@ def build_proposals(
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
     from tokenjam.core.optimize.write_budget import (
+        REASON_ADVISORY_ONLY,
         REASON_PLACEHOLDER,
         is_placeholder_fix,
         short_reason,
@@ -1856,7 +1861,13 @@ def build_proposals(
         # a fix template is a gap in OUR library, not evidence the waste was
         # unavoidable; the observed cost is computed for every cluster below,
         # placeholder or not, and reported on the `past_overspend_*` fields.
-        has_real_fix = not is_placeholder_fix(fix)
+        # A family whose own fix text says no action is needed is never
+        # OFFERED, however well-formed that text is. `is_placeholder_fix` can't
+        # see this: the text is a real, specific, non-placeholder sentence — it
+        # just happens to say "there is nothing to do here", which is the one
+        # thing an offered write must not say.
+        advisory_only = bool(family.get("advisory_only")) if family else False
+        has_real_fix = not is_placeholder_fix(fix) and not advisory_only
 
         # Priced for EVERY cluster now, not only the ones with a fix: the tail
         # is part of what the recurrence actually cost, and a cluster that will
@@ -1977,9 +1988,15 @@ def build_proposals(
             past_reread_usd=past_reread_usd,
             past_overspend_windows=windows,
             write_offered=has_real_fix,
-            write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
+            write_blocked_reason=(
+                "" if has_real_fix
+                else (REASON_ADVISORY_ONLY if advisory_only else REASON_PLACEHOLDER)
+            ),
             write_blocked_short=(
-                "" if has_real_fix else short_reason(REASON_PLACEHOLDER)
+                "" if has_real_fix
+                else short_reason(
+                    REASON_ADVISORY_ONLY if advisory_only else REASON_PLACEHOLDER
+                )
             ),
         ))
 

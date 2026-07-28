@@ -215,6 +215,16 @@ REASON_BUDGET_FULL = (
     "snippet, and this becomes offerable once an earlier rule is applied or "
     "the agent files are compressed."
 )
+#: Not a suppression and not a deferral — a statement that there is no action.
+#: The observation is real and keeps its figure; what is withdrawn is only the
+#: offer, because the fix text itself says the harness already handles it and
+#: agents self-correct. A card whose fix says to do nothing must not occupy an
+#: apply slot; leaving it there sells a change the user cannot make.
+REASON_ADVISORY_ONLY = (
+    "Reported for awareness, not as a fix: the harness already handles this "
+    "and agents self-correct on the next turn, so there is no rule worth "
+    "writing. What the retries already cost is still reported in full."
+)
 REASON_FAMILY_MERGED = (
     "Covered by the single rule offered for this family: one block is written "
     "for the whole family rather than one per cluster."
@@ -275,6 +285,7 @@ REASON_SHORT_BY_REASON.update({
     REASON_NET_NEGATIVE: "a rule would cost more to keep than it returns",
     REASON_BUDGET_FULL: "deferred — this window's rule budget is spent",
     REASON_FAMILY_MERGED: "covered by another cluster's rule",
+    REASON_ADVISORY_ONLY: "awareness only — nothing to change",
     REASON_CEILING_REACHED: "blocked — agent files already too large to grow",
     REASON_BELOW_VALUE_FLOOR: (
         f"returns under ${MIN_NET_WRITE_USD:.0f} — not worth a permanent rule"

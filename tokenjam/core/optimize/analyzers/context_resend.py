@@ -105,6 +105,7 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
     resend_tail_tokens_per_turn,
     session_context_tokens,
 )
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
@@ -331,15 +332,12 @@ SUBAGENT_OFFLOAD_FIX = (
 #: creates, so pairing "offload the broad reads" with "broad reads are cheap"
 #: told the agent the resulting worker did not need right-sizing at all, and
 #: applying the fix would not have erased the number that motivated it.
-RIGHTSIZE_FIX_TEMPLATE = (
-    "Then right-size what you offload to. Default the worker to the cheapest "
-    "same-family model that fits its shape, and pin both that model and its "
-    "reasoning effort in its own definition file so every future dispatch "
-    "inherits them instead of defaulting to whatever the parent runs on. How "
-    "much it reads and how long its conclusion runs are not reasons to keep "
-    "the premium tier; they are what makes the dispatch expensive in the "
-    "first place."
-)
+# THE text lives in `core/fixes/registry.py`. This constant and the subagent
+# rubric in `cost_proposals` were two hand-maintained statements of one policy,
+# and they drifted: the identical "a short conclusion rarely needs the premium
+# tier" contradiction lived in both, in different words, so correcting the
+# reported one left this live. One definition, linted.
+RIGHTSIZE_FIX_TEMPLATE = _fixes.fix_text("resend.rightsize_worker")
 
 # Cap on evidence rows carried in the finding payload; aggregates are over ALL
 # sessions with measurable prompt volume, not just the capped examples.

@@ -1166,10 +1166,16 @@ def test_resend_suppresses_cache_control_snippet_for_claude_code():
     assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
     assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
     # The one-paste artifact is the SECOND half of the compound fix: the agent
-    # file's model + reasoning-effort pin. The offload rule is a WRITE, carried
-    # on `proposed_fix` and applied rather than pasted.
+    # file's model pin. The offload rule is a WRITE, carried on `proposed_fix`
+    # and applied rather than pasted.
     assert "model:" in prop.one_paste_fix
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23). This used to assert `reasoning_effort:` was
+    # PRESENT — a key Claude Code does not read at all, so the user pasted it,
+    # believed effort was pinned, and nothing changed. The suite was enforcing
+    # the defect. The real key is `effort`, and it is emitted only where the
+    # observation supports a value; a guessed effort in a frontmatter block is
+    # indistinguishable from a measured one to the reader.
+    assert "reasoning_effort" not in prop.one_paste_fix
 
 
 def test_resend_claude_code_offers_apply_capable_compound_write():
@@ -1271,7 +1277,11 @@ def test_resend_mixed_persona_offers_write_and_keeps_snippet():
     # the SDK share keeps its cache_control snippet on `suggestion`, while the
     # one-paste slot carries the claude-code share's right-sizing frontmatter
     # (the offload rule itself is a WRITE on `proposed_fix`, applied not pasted).
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23) — see the sibling test: `reasoning_effort` is
+    # not a key Claude Code reads, so asserting its presence pinned a
+    # silently-ignored line into the product.
+    assert "reasoning_effort" not in prop.one_paste_fix
+    assert "model:" in prop.one_paste_fix
     assert "cache_control" not in prop.one_paste_fix
 
 
@@ -1525,13 +1535,26 @@ def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
     props = _downsize_agent_proposals(_Finding(), config=None, persona="claude-code")
     assert len(props) == 1
     p = props[0]
-    assert "Applying it here is not on offer" in p.advise_text
     assert "switch your own interactive model" in p.advise_text
+    # INVERTED (Critical Rule 23). This used to assert the generic
+    # "Applying it here is not on offer:" wording, which arrived attached to a
+    # redeploy-shaped offer. On Claude Code `agent_id` is
+    # `claude-code-<cwd-basename>` — a PROJECT DIRECTORY with ephemeral
+    # sessions, no process and no model id written down — so there is nothing
+    # to redeploy or restart, and naming three things that do not exist reads
+    # as the product not understanding the user's setup.
+    assert "redeploy" not in p.advise_text.lower()
+    assert "restart the agent" not in p.advise_text.lower()
+    assert "project directory, not a deployed service" in p.advise_text
+    # The OBSERVATION is untouched by that gate (Critical Rule 32).
+    assert p.past_overspend_usd is not None and p.past_overspend_usd > 0
 
-    # sdk/unknown never get the CC lever appended.
+    # sdk/unknown never get the CC lever appended, and DO keep the redeploy
+    # instruction, which is correct for a real deployed service.
     for persona in ("sdk", "unknown"):
         p2 = _downsize_agent_proposals(_Finding(), config=None, persona=persona)[0]
         assert "switch your own interactive model" not in p2.advise_text
+        assert "redeploy" in p2.one_paste_fix.lower()
 
 
 # --- Persona gating: placement (batch) ---------------------------------------

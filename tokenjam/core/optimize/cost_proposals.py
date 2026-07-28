@@ -48,6 +48,8 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from tokenjam.core import fixes
+
 # House-style label strings. Kept verbatim on every cost proposal so no channel
 # can surface a savings figure without the honesty framing (Rule 14).
 COST_ESTIMATE_CONFIDENCE = "estimated"
@@ -175,18 +177,11 @@ _REUSE_NOTE_INTRO = (
 # below are stated as things that are either written into the dispatch or not,
 # so a reader of the transcript can decide whether the exception applied
 # without re-running anyone's judgement.
-SUBAGENT_RUBRIC_INTRO = (
-    "Right-size Task-dispatched subagents: default every subagent to the "
-    "cheapest same-family model that fits its shape, and treat that default as "
-    "the answer unless the dispatch itself states one of these conditions: the "
-    "subtask IS the architecture or design decision this session exists to "
-    "make; it must reconcile sources that disagree into one judgement a later "
-    "step cannot re-derive; or a cheaper model already attempted it in this "
-    "session and its output was rejected. How much tool work a subagent does "
-    "and how long its result runs are not on that list: a broad, tool-heavy, "
-    "long-output dispatch is the expensive one, not the hard one, and it is "
-    "the one this rule exists to route down."
-)
+# THE text lives in `core/fixes/registry.py`, not here. It used to be a
+# constant in this module and an all-but-identical one in `context_resend`,
+# which is exactly how the same sizing contradiction shipped twice in different
+# words and was fixed in only one of them. One definition, linted.
+SUBAGENT_RUBRIC_INTRO = fixes.fix_text("subagent.sizing_rubric")
 
 # The downsize card's claude-code CTA. Mirrors `cmd_optimize._render_downgrade_
 # cta`'s claude-code branch: an interactive CC session can't pass `--original`/
@@ -780,16 +775,54 @@ def _downsize_agent_proposals(
                 "no tj config was available to look up a registered source path."
             ),
         }
-        one_paste = (
-            f"{row.model} -> {row.alt_model}\n"
-            f"# Set this agent's model id to {row.alt_model} where it is "
-            f"configured, then redeploy or restart the agent."
-        )
+        # THERE IS NOTHING TO REDEPLOY ON CLAUDE CODE, so this lane must not
+        # word its offer that way. On Claude Code `agent_id` is
+        # `claude-code-<cwd-basename>` (`core/backfill._agent_id_from_cwd`): it
+        # names a PROJECT DIRECTORY whose sessions are ephemeral, not a service
+        # with a process behind it. "Set the model id where it is configured,
+        # then redeploy or restart the agent" names three things that do not
+        # exist for that user, which reads as the product not understanding
+        # their setup.
+        #
+        # The gate is a PERSONA check at the point of production, not a dollar
+        # threshold (Critical Rule 26(c)): the observation is just as real for
+        # a Claude Code window, so it keeps its figure and its card and is
+        # handed the levers that persona actually has. Only the redeploy-shaped
+        # OFFER is withheld — the same observation-stands / offer-withdrawn
+        # split the applied-detection layer uses.
+        redeployable = persona not in {"claude-code"}
+        if redeployable:
+            one_paste = (
+                f"{row.model} -> {row.alt_model}\n"
+                f"# Set this agent's model id to {row.alt_model} where it is "
+                f"configured, then redeploy or restart the agent."
+            )
+        else:
+            one_paste = _DOWNSIZE_CC_LEVER
         advise = (
             f"Route {row.agent_id}'s flagged structural-shaped work from "
             f"{row.model} to {row.alt_model}. " + MODEL_SWAP_QUALITY_CAVEAT
         )
-        if plumbing.get("needs_source_path"):
+        if not redeployable:
+            advise += (
+                f" {row.agent_id} is a Claude Code project directory, not a "
+                f"deployed service: there is no process to restart and no "
+                f"model id written down anywhere to change. What this window "
+                f"already cost on {row.model} is reported above; the levers "
+                f"that exist for this setup are below."
+            )
+        if not redeployable:
+            # Levers this persona actually has. Stated once, from the shared
+            # constant, so the CC action surface is described in one place.
+            advise += " " + _DOWNSIZE_CC_LEVER
+            plumbing = {
+                "apply_capable": False,
+                "apply_blocked_reason": (
+                    "this agent id names a project directory, not a deployed "
+                    "service, so there is no model id for tokenjam to rewrite."
+                ),
+            }
+        elif plumbing.get("needs_source_path"):
             # Asks, rather than announcing a target it does not have. The
             # honesty caveat above is untouched: nothing here claims the cheaper
             # model answers as well, only that the substitution can be made.
@@ -1526,7 +1559,14 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
 #: when it is a plain lowercase slug. Built-in dispatch types that carry no
 #: definition file (``Explore``, ``Plan``) fail this on their capital letter,
 #: which is correct — there is nothing on disk to edit for those.
-_AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+#: CASE-INSENSITIVE ON PURPOSE. Claude Code's own built-in dispatch types
+#: include capitalised names (`Explore`, `Plan`), and those are precisely the
+#: ones the define-an-override fix targets — a user subagent named `Explore`
+#: overrides the built-in and keeps its own `model`. A lowercase-only shape
+#: check silently rejected them, so the fix that needs them most could never
+#: reach its own branch. The dispatch-id guard below is what keeps this from
+#: matching a per-dispatch id; the case rule was never doing that work.
+_AGENT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*$")
 
 #: A Claude Code DISPATCH id — ``a`` + an optional caller-chosen instance label
 #: + a hex suffix (``af8b26e872b7184a7``, ``aw-ratehistory-7e1dd2a1642d7c29``).
@@ -1637,6 +1677,8 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
     scope = _scope_for(repos)
     repo_cwd = next(iter(cwds.values()), "") if len(repos) == 1 else ""
 
+    # An EXISTING definition file is the strongest case: its `model:` key is a
+    # value already written down, so the fix is a deterministic rewrite.
     for row in named:
         proposed = lookup_downgrade(str(row.provider), str(row.model))
         if not proposed:
@@ -1652,6 +1694,45 @@ def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any
             "scope": scope,
             "current_model": str(row.model),
             "proposed_model": proposed,
+            "over_provisioned": "over_provisioned" in (getattr(row, "flags", None) or []),
+            "creates_file": False,
+        }
+
+    # NO FILE IS NOT NO FIX. Every dispatch type Claude Code actually uses is a
+    # BUILT-IN (`general-purpose`, `Explore`, `Plan`, `fork`), and a built-in
+    # has no `.claude/agents/<name>.md` — so requiring the file to exist made
+    # this branch unreachable on the dominant corpus and pushed the whole claim
+    # down to a prose rubric. That read as "we cannot fix this", which is not
+    # what the absence means.
+    #
+    # A user or project subagent defined with the SAME NAME as a built-in
+    # overrides it and keeps its own `model` field, so the file can simply be
+    # created. The product was not failing to find a file; it was declining to
+    # create one. See `core/fixes/registry.SUBAGENT_DEFINE_BUILTIN` for the
+    # user-facing statement, including the bit that explains the waste's origin:
+    # `model` defaults to `inherit`, so an Opus-driven session hands every Task
+    # dispatch an Opus worker unless something pins otherwise. Nobody decided
+    # that — it is an unset default, which is why it goes unnoticed.
+    for row in named:
+        proposed = lookup_downgrade(str(row.provider), str(row.model))
+        if not proposed:
+            continue
+        name = str(row.sub_agent_type)
+        path = default_agent_file_path(scope, repo_cwd, name)
+        if not path:
+            continue
+        return {
+            "apply_kind": APPLY_KIND_AGENT_MODEL,
+            "agent_name": name,
+            "target_path": path,
+            "scope": scope,
+            "current_model": str(row.model),
+            "proposed_model": proposed,
+            "over_provisioned": "over_provisioned" in (getattr(row, "flags", None) or []),
+            # The caller words the card differently for a create: "set its
+            # model key" is wrong when the file does not exist yet, and a user
+            # told to edit a file they do not have reads it as a bug.
+            "creates_file": True,
         }
     return {}
 
@@ -1704,18 +1785,41 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
     except Exception:
         agent_apply = {}
     if agent_apply:
-        advise_extra = (
-            f" {agent_apply['agent_name']} has its own definition file, so "
-            f"tokenjam can set its model key to "
-            f"{agent_apply['proposed_model']} directly. The change is committed "
-            f"where the file is in a repo and reverts in one call. Its next "
-            f"dispatch runs on the new model, which is where measurement starts."
-        )
+        creates = bool(agent_apply.get("creates_file"))
+        if creates:
+            # A built-in dispatch type has no definition file, and that is not
+            # a dead end: a user or project subagent of the same name overrides
+            # the built-in and keeps its own `model`. The card has to SAY that,
+            # because "set its model key" reads as a bug to someone who does
+            # not have the file.
+            advise_extra = (
+                f" {agent_apply['agent_name']} is a built-in, so it has no "
+                f"definition file and inherits whatever model this session "
+                f"runs on — `model` defaults to `inherit`, so an Opus-driven "
+                f"session hands it an Opus worker unless something pins "
+                f"otherwise. That is an unset default, not a decision. "
+                f"Defining a subagent with the same name overrides the "
+                f"built-in and keeps its own model, so tokenjam can create "
+                f"{agent_apply['target_path']} pinned to "
+                f"{agent_apply['proposed_model']}. Its next dispatch runs on "
+                f"the new model, which is where measurement starts."
+            )
+        else:
+            advise_extra = (
+                f" {agent_apply['agent_name']} has its own definition file, so "
+                f"tokenjam can set its model key to "
+                f"{agent_apply['proposed_model']} directly. The change is committed "
+                f"where the file is in a repo and reverts in one call. Its next "
+                f"dispatch runs on the new model, which is where measurement starts."
+            )
         return [CostProposal(
             kind="cost",
             analyzer="subagent",
             signature=f"cost:subagent:{agent_apply['agent_name']}",
             title=(
+                f"Built-in subagent {agent_apply['agent_name']} inherits this "
+                f"session's model (pin {agent_apply['proposed_model']})"
+                if creates else
                 f"Over-powered subagent {agent_apply['agent_name']} "
                 f"({agent_apply['current_model']} to {agent_apply['proposed_model']})"
             ),
@@ -1732,6 +1836,7 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
                 "agent_name": agent_apply["agent_name"],
                 "current_model": agent_apply["current_model"],
                 "proposed_model": agent_apply["proposed_model"],
+                "creates_file": creates,
             },
             advise_text=(
                 "Lower the model tier for the flagged Task dispatches. "
@@ -1739,8 +1844,16 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
             ).strip(),
             suggestion=f"model: {agent_apply['proposed_model']}",
             one_paste_fix=(
-                f"# In {agent_apply['target_path']}, frontmatter:\n"
-                f"model: {agent_apply['proposed_model']}"
+                (
+                    f"# Create {agent_apply['target_path']}\n"
+                    f"---\n"
+                    f"name: {agent_apply['agent_name']}\n"
+                    f"model: {agent_apply['proposed_model']}\n"
+                    f"---"
+                ) if creates else (
+                    f"# In {agent_apply['target_path']}, frontmatter:\n"
+                    f"model: {agent_apply['proposed_model']}"
+                )
             ),
             past_overspend_usd=getattr(finding, "past_overspend_usd", None),
             past_overspend_tokens=getattr(finding, "past_overspend_tokens", None),
@@ -2254,21 +2367,54 @@ def _compound_offload_fix(rightsize: dict[str, Any], fix_offload: str, fix_right
     return "\n\n".join(p for p in parts if p)
 
 
+#: The effort levels Claude Code's subagent frontmatter accepts. The KEY is
+#: ``effort``. This snippet used to emit ``reasoning_effort``, which is not a
+#: field Claude Code reads at all — so the user pasted it, believed effort was
+#: pinned, and nothing changed. A silently-ignored key is worse than no line:
+#: it converts an unfixed problem into one the user believes is fixed.
+AGENT_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _derived_effort(rightsize: dict[str, Any]) -> str | None:
+    """The effort to pin, or ``None`` when the observation does not say.
+
+    The old snippet hardcoded ``low`` for every dispatch. That is a guess, and
+    on this analyzer's population it is usually the WRONG guess: the flagged
+    rows are the large, tool-heavy, long-output dispatches (the `output_tokens`
+    / `tool_calls` gate was deleted precisely because it excluded them), and
+    telling a user to pin those to low effort recommends making the expensive
+    work worse rather than cheaper.
+
+    So effort is emitted only where the observation actually supports it — an
+    ``over_provisioned`` dispatch, which by construction was handed a large
+    context and produced little output — and omitted otherwise. Omitting a line
+    we cannot derive is the honest default; a plausible-looking guess in a
+    frontmatter block is indistinguishable from a measurement to the reader.
+    """
+    if not rightsize.get("over_provisioned"):
+        return None
+    return "low"
+
+
 def _rightsize_frontmatter_snippet(rightsize: dict[str, Any]) -> str:
     """The copyable agent-file frontmatter for the right-sizing half.
 
     Both keys live in the same ``.claude/agents/<name>.md`` frontmatter block,
-    so the second half of the compound fix is one paste, not two.
+    so the second half of the compound fix is one paste, not two — but the
+    effort line appears only when the observation supports a value for it (see
+    :func:`_derived_effort`).
     """
     name = rightsize.get("agent_name") or "<subagent-name>"
     model = rightsize.get("proposed_model") or "<cheaper-same-family-model>"
     path = rightsize.get("target_path") or f".claude/agents/{name}.md"
+    effort = _derived_effort(rightsize)
+    effort_line = f"effort: {effort}\n" if effort else ""
     return (
         f"# {path} — frontmatter\n"
         f"---\n"
         f"name: {name}\n"
         f"model: {model}\n"
-        f"reasoning_effort: low\n"
+        f"{effort_line}"
         f"---"
     )
 
