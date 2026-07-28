@@ -216,32 +216,54 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     assert "apply the fixes" in flat
 
 
-# ── "Go deeper" footer CTA is context-aware (#507) ─────────────────────────
+# ── The onboard CTA is the npx form, unconditionally ───────────────────────
 #
-# Bare `npx tokenjam` / `uvx --from tokenjam tj` runs quickstart from a
-# throwaway uvx/pipx-run cache → the CTA is the zero-install `npx tokenjam
-# onboard`. But when quickstart runs from an already-installed `tj` binary the
-# user obviously has it installed → the CTA drops the `npx tokenjam` prefix and
-# points straight at `tj onboard`. `_go_deeper_command()` picks based on
-# `cmd_onboard._is_ephemeral_runner()`.
+# This screen is reachable from exactly ONE place: `cli/main.py`'s no-subcommand
+# branch, gated on `TJ_NPX_ZERO_INSTALL_REPORT`, which only the npm wrapper
+# (`npm-wrapper/bin/tj.js`) sets, and only on a bare `npx tokenjam`. An installed
+# user running bare `tj` gets the home screen and never lands here. So every
+# reader of this screen arrived through `npx`, and a bare `tj ...` instruction
+# would name a binary they may not have.
 
 
-def test_go_deeper_footer_ephemeral_runner_shows_npx_cta():
-    import unittest.mock as mock
+def test_the_screen_only_names_commands_a_bare_npx_user_can_run(tmp_path):
+    """No instruction on this screen may require a `tj` on PATH.
 
-    from tokenjam.cli.cmd_quickstart import _go_deeper_command
+    Asserted structurally rather than as a single string match: any `tj `
+    occurrence that is not part of `npx tokenjam ...` is the regression, whether
+    it arrives as a CTA, a cross-reference (`tj context`, `tj optimize`) or a
+    typeable line.
+    """
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
-    with mock.patch("tokenjam.cli.cmd_onboard._is_ephemeral_runner", return_value=True):
-        assert _go_deeper_command() == "npx tokenjam onboard"
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "npx tokenjam onboard" in flat
+    # Strip every legitimate `npx tokenjam ...` form, then no bare `tj ` may
+    # survive anywhere on the screen.
+    residual = flat.replace("npx tokenjam ", "")
+    assert "tj " not in residual, f"bare `tj` instruction on the npx screen: {residual!r}"
 
 
-def test_go_deeper_footer_installed_binary_shows_tj_cta():
-    import unittest.mock as mock
+def test_the_onboard_cta_does_not_branch_on_the_running_binary(tmp_path, monkeypatch):
+    """The CTA used to drop the prefix whenever the process was NOT running from
+    a throwaway uvx/pipx cache. That probe answers "was this launched from a
+    persistent install", which is a different question from "does this user have
+    `tj` on PATH" — the wrapper's third runner IS an already-installed `tj`, so
+    a real npx user could be handed an instruction that is not how they invoked
+    the tool. The CTA must be the same either way.
+    """
+    import tokenjam.cli.cmd_onboard as onboard
 
-    from tokenjam.cli.cmd_quickstart import _go_deeper_command
+    monkeypatch.setattr(onboard, "_is_ephemeral_runner", lambda: False)
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
-    with mock.patch("tokenjam.cli.cmd_onboard._is_ephemeral_runner", return_value=False):
-        assert _go_deeper_command() == "tj onboard"
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "Run npx tokenjam onboard to capture your full history." in flat
+    assert flat.count("npx tokenjam onboard") == 2   # the sentence + the typeable line
 
 
 def _heavy_reread_fixture_root(tmp_path: Path) -> Path:

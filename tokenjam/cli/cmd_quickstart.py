@@ -20,10 +20,11 @@ Design (what makes it "zero-setup"):
 
 **The screen is deliberately minimal, and its shape is a founder decision.** It
 is three things and nothing else: what tj read, one avoidable-dollars sentence,
-and the pointer to ``tj onboard``. It carries no quota composition (no re-read
-share, no net-new share, no ``/compact`` counting), no statusline preview, no
-per-analyzer titles / evidence / fixes, and no boxes. A first run is a hook, not
-a report; the per-finding detail lives in the Review inbox behind ``tj onboard``.
+and the pointer to ``npx tokenjam onboard``. It carries no quota composition (no
+re-read share, no net-new share, no ``/compact`` counting), no statusline
+preview, no per-analyzer titles / evidence / fixes, and no boxes. A first run is
+a hook, not a report; the per-finding detail lives in the Review inbox behind
+onboarding.
 If you are about to add a panel here, that is the decision you are reversing.
 
 Copy rules: no em dashes in user-facing strings; "avoidable", never "wasted" or
@@ -85,8 +86,8 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     Reads the same ~/.claude/projects/*.jsonl files ccusage does: no pip env,
     no daemon, no onboarding. On a large history the first run caps at the
     most-recent sessions for speed (use `--full` for everything). Run
-    `tj onboard` afterwards to go deeper (live capture, the dashboard, and the
-    zero-token statusline).
+    `npx tokenjam onboard` afterwards to go deeper (live capture, the dashboard,
+    and the zero-token statusline).
     """
     root = Path(root_path).expanduser() if root_path else CLAUDE_CODE_PROJECTS_ROOT
     if not root.exists():
@@ -459,7 +460,7 @@ def _render(avoidable: AvoidableTotal | None, *,
     """The whole first-run screen.
 
     Deliberately three beats and nothing else: what tj read, one avoidable
-    sentence, and the pointer to `tj onboard`. No panels, no borders, no
+    sentence, and the pointer to `npx tokenjam onboard`. No panels, no borders, no
     per-analyzer detail, no quota composition, no statusline preview. See the
     module docstring — the shape is a founder decision, not an accident of
     what was easy to render.
@@ -468,6 +469,10 @@ def _render(avoidable: AvoidableTotal | None, *,
     figure was summed over. The scoping line and the finding sentence quote the
     same number by construction, because two counts on one screen invite a
     reader to pair the money with the wrong one.
+
+    Every command named here is the `npx` form: this screen is only ever reached
+    through the npm wrapper, so a bare `tj ...` would be an instruction the
+    reader may have no binary for. See `ONBOARD_COMMAND`.
 
     Colour discipline: everything is `muted` except the dollar figure and the
     typeable command, which carry the single accent. Nothing here is red,
@@ -484,7 +489,7 @@ def _render(avoidable: AvoidableTotal | None, *,
 
     # Scope, stated before the figure. "most-recent" is the honest word whether
     # or not the first-run cap bit: this is a recent slice of a history that
-    # keeps going, which is what the `tj onboard` pointer below is for. The
+    # keeps going, which is what the onboard pointer below is for. The
     # pre-ingest status line already names the cap itself.
     scoped = avoidable.sessions if avoidable is not None else max(fallback_sessions, 0)
     console.print(Text(
@@ -494,11 +499,10 @@ def _render(avoidable: AvoidableTotal | None, *,
         console.print()
         console.print(_avoidable_line(avoidable))
 
-    command = _go_deeper_command()
     console.print()
     full_history = Text()
     full_history.append("Run ", style="muted")
-    full_history.append(command, style=ACCENT)
+    full_history.append(ONBOARD_COMMAND, style=ACCENT)
     full_history.append(" to capture your full history.", style="muted")
     console.print(full_history)
     console.print(Text(
@@ -507,20 +511,27 @@ def _render(avoidable: AvoidableTotal | None, *,
         style="muted",
     ))
     console.print()
-    console.print(Text(f"  {command}", style=ACCENT))
+    console.print(Text(f"  {ONBOARD_COMMAND}", style=ACCENT))
     console.print()
 
 
-def _go_deeper_command() -> str:
-    """The onboard CTA, context-aware about how quickstart was reached.
-
-    Bare ``npx tokenjam`` / ``uvx --from tokenjam tj`` runs quickstart from a
-    throwaway uvx/pipx-run cache (no persistent install), so the CTA is the
-    zero-install one (``npx tokenjam onboard``) — the user re-enters through the
-    same door. But when quickstart runs from an already-installed ``tj`` binary
-    the user obviously has it installed, so drop the ``npx tokenjam`` prefix and
-    point straight at ``tj onboard`` (issue #507).
-    """
-    from tokenjam.cli.cmd_onboard import _is_ephemeral_runner
-
-    return "npx tokenjam onboard" if _is_ephemeral_runner() else "tj onboard"
+#: The onboard CTA. Unconditionally the zero-install form, and that is a
+#: correctness constraint rather than a style choice.
+#:
+#: This screen is reachable from exactly ONE place: `cli/main.py`'s
+#: no-subcommand branch, gated on `TJ_NPX_ZERO_INSTALL_REPORT`, which only the
+#: npm wrapper (`npm-wrapper/bin/tj.js`) sets, and only on a bare `npx tokenjam`
+#: with no passthrough args. An installed user running bare `tj` gets the home
+#: screen instead and never lands here. So the reader arrived through `npx` and
+#: `npx tokenjam onboard` is the door they can re-enter by.
+#:
+#: What was here before branched on `cmd_onboard._is_ephemeral_runner()` and
+#: dropped the prefix to a bare `tj onboard` whenever the process was NOT
+#: running from a throwaway uvx/pipx cache. That probe answers "was this
+#: launched from a persistent install", which is a different question from "does
+#: this user have `tj` on PATH": the wrapper's third runner is an
+#: already-installed `tj`, so a real npx user could be printed an instruction
+#: whose binary they may not have, and which is not how they invoked the tool
+#: either way. `npx tokenjam onboard` is correct for every reader of this
+#: screen; there is no case here that needs a second form.
+ONBOARD_COMMAND = "npx tokenjam onboard"
