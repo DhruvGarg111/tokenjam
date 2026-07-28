@@ -177,13 +177,19 @@ def available_data_span(
     """
     if conn is None:
         return data_span_from_days([], max_gap_days=max_gap_days)
+    # `AT TIME ZONE 'UTC'` before the cast is load-bearing, not decoration
+    # (Critical Rule 1): DuckDB resolves a bare `CAST(TIMESTAMPTZ AS DATE)`
+    # through the session timezone, so on a machine running ahead of UTC the
+    # newest rows come back stamped with TOMORROW's date — and `_plausible_days`
+    # then drops them as future. The whole of today would vanish from the span
+    # for the hours the local date leads, and reappear at local midnight.
     days = _distinct_days(
         conn,
-        "SELECT DISTINCT CAST(start_time AS DATE) FROM spans "
+        "SELECT DISTINCT CAST(start_time AT TIME ZONE 'UTC' AS DATE) FROM spans "
         "WHERE start_time IS NOT NULL",
     ) + _distinct_days(
         conn,
-        "SELECT DISTINCT CAST(started_at AS DATE) FROM sessions "
+        "SELECT DISTINCT CAST(started_at AT TIME ZONE 'UTC' AS DATE) FROM sessions "
         "WHERE started_at IS NOT NULL",
     )
     return data_span_from_days(days, max_gap_days=max_gap_days)
