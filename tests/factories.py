@@ -12,13 +12,21 @@ from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.utils.ids import new_uuid, new_trace_id, new_span_id
 from tokenjam.utils.time_parse import utcnow
 
+#: Distinguishes "caller said nothing about the time" (default to now, what
+#: every existing test means) from "this span is UNTIMED" (`start_time=None`,
+#: what ingest writes when a source carries no usable timestamp). A bare `None`
+#: default cannot express the second, and the second is exactly the case a test
+#: for the sentinel fix has to construct — through this factory, per Critical
+#: Rule 8, never by building a NormalizedSpan by hand.
+_UNSET = object()
+
 
 def make_invoke_agent_span(
     agent_id: str = "test-agent",
     session_id: str | None = None,
     conversation_id: str | None = None,
     duration_ms: float = 0.0,
-    start_time=None,
+    start_time=_UNSET,
     trace_id: str | None = None,
     service_namespace: str | None = None,
 ) -> NormalizedSpan:
@@ -33,8 +41,8 @@ def make_invoke_agent_span(
     ``@watch()`` path emits to bracket a whole agent run. This DOES complete the
     session.
     """
-    now = start_time or utcnow()
-    end = now + timedelta(milliseconds=duration_ms)
+    now = utcnow() if start_time is _UNSET else start_time
+    end = now + timedelta(milliseconds=duration_ms) if now else None
     return NormalizedSpan(
         span_id=new_span_id(),
         trace_id=trace_id or new_trace_id(),
@@ -63,7 +71,7 @@ def make_llm_span(
     tool_name: str | None = None,
     status: str = "ok",
     duration_ms: float = 800.0,
-    start_time=None,
+    start_time=_UNSET,
     conversation_id: str | None = None,
     trace_id: str | None = None,
     span_id: str | None = None,
@@ -100,8 +108,8 @@ def make_llm_span(
     unaffected. Tests exercising the multi-tenant cost breakdown should pass
     them explicitly.
     """
-    now = start_time or utcnow()
-    end = now + timedelta(milliseconds=duration_ms)
+    now = utcnow() if start_time is _UNSET else start_time
+    end = now + timedelta(milliseconds=duration_ms) if now else None
     attrs = extra_attributes.copy() if extra_attributes else {}
 
     return NormalizedSpan(
@@ -153,7 +161,7 @@ def make_tool_span(
     tool_input: dict | str | None = None,
     name: str = "gen_ai.tool.call",
     session_id: str | None = None,
-    start_time=None,
+    start_time=_UNSET,
     sub_agent_id: str | None = None,
 ) -> NormalizedSpan:
     """Create a NormalizedSpan representing a single tool call.
@@ -169,8 +177,8 @@ def make_tool_span(
     """
     import json as _json
 
-    now = start_time or utcnow()
-    end = now + timedelta(milliseconds=duration_ms)
+    now = utcnow() if start_time is _UNSET else start_time
+    end = now + timedelta(milliseconds=duration_ms) if now else None
     attrs: dict = {}
     if tool_input is not None:
         attrs[GenAIAttributes.TOOL_INPUT] = (
