@@ -60,6 +60,25 @@ class DataSpan:
     oldest_in_block:           str | None
     ignored_days_before_block: int
     basis:                     str
+    #: The OLDEST PLAUSIBLE day carrying data, ISO, ``None`` when nothing dated
+    #: was found. Behind a gap, and so deliberately NOT ``oldest_in_block``.
+    #:
+    #: This is the far edge of the measure the module docstring calls wrong for
+    #: "how far back can I ask", and it is the right one for a different
+    #: question: "how far back must an analyzer look to see everything it is
+    #: entitled to". Bounding a query by ``available_days`` would discard
+    #: everything behind a gap — a fortnight away would silently delete the
+    #: quarter before it from a past-tense figure — whereas widening a query
+    #: past the data costs nothing, since rows that are not there return nothing
+    #: either way. So the two are not interchangeable and neither replaces the
+    #: other: clamp a SELECTOR against ``available_days``, size a LOOKBACK
+    #: against this.
+    #:
+    #: Only safe to expose because ingest no longer writes epoch sentinels: one
+    #: 1970 row used to move this by decades, which is what the contiguous-block
+    #: measure was introduced to survive. The plausible-year floor below remains
+    #: the backstop for rows written before that changed.
+    oldest:                    str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +88,7 @@ class DataSpan:
             "oldest_in_block": self.oldest_in_block,
             "ignored_days_before_block": self.ignored_days_before_block,
             "basis": self.basis,
+            "oldest": self.oldest,
         }
 
 
@@ -125,7 +145,7 @@ def data_span_from_days(
         return DataSpan(
             available_days=None, days_with_data=0, newest=None,
             oldest_in_block=None, ignored_days_before_block=0,
-            basis=_UNKNOWN_BASIS,
+            basis=_UNKNOWN_BASIS, oldest=None,
         )
 
     newest = plausible[-1]
@@ -153,6 +173,7 @@ def data_span_from_days(
             f"gap here. days_with_data counts every distinct day instead, which "
             f"one outlier can move by at most one"
         ),
+        oldest=plausible[0].isoformat(),
     )
 
 

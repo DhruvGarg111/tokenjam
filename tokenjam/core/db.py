@@ -10,6 +10,7 @@ import logging
 import os
 import tempfile
 import threading
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast, runtime_checkable
@@ -17,6 +18,7 @@ from typing import Any, Protocol, Sequence, cast, runtime_checkable
 import duckdb
 
 from tokenjam.core.config import StorageConfig
+from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
 from tokenjam.core.models import (
     AgentRecord,
     Alert,
@@ -126,7 +128,7 @@ class StorageBackend(Protocol):
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
     ) -> list[dict]: ...
-    def delete_spans_before(self, cutoff: datetime) -> int: ...
+    def delete_spans_before(self, cutoff: datetime) -> tuple[int, int]: ...
     def close(self) -> None: ...
 
 
@@ -149,7 +151,13 @@ CREATE TABLE IF NOT EXISTS spans (
     kind                TEXT NOT NULL,
     status_code         TEXT NOT NULL,
     status_message      TEXT,
-    start_time          TIMESTAMPTZ NOT NULL,
+    -- NULLABLE, deliberately (migration 21). A source timestamp that is missing
+    -- or unparseable writes NULL here, never an epoch sentinel: the row is kept
+    -- and can be counted, but it can never TIME anything, and every ordering,
+    -- range and day-union query excludes it for free under SQL NULL semantics.
+    -- A 1970 sentinel does the opposite — it participates in MIN() and drags a
+    -- span measure back by decades.
+    start_time          TIMESTAMPTZ,
     end_time            TIMESTAMPTZ,
     duration_ms         DOUBLE,
     attributes          JSON NOT NULL DEFAULT '{}',
@@ -182,6 +190,20 @@ SPANS_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_spans_start_time", "start_time"),
     ("idx_spans_tool_name",  "tool_name"),
     ("idx_spans_conv_id",    "conversation_id"),
+)
+
+# Secondary indexes on sessions. Single-sourced for the same reason as the spans
+# set above: DuckDB refuses to ALTER a column on a table carrying ART indexes, so
+# migration 21 has to drop and re-issue these, and a second copy of the DDL there
+# would be free to drift from the one the initial schema creates.
+SESSIONS_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_sessions_agent_id", "agent_id"),
+    ("idx_sessions_conv_id",  "conversation_id"),
+)
+
+SESSIONS_INDEX_SQL = ";\n".join(
+    f"CREATE INDEX IF NOT EXISTS {name} ON sessions({column})"
+    for name, column in SESSIONS_INDEXES
 )
 
 SPANS_INDEX_SQL = ";\n".join(
@@ -341,7 +363,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
     agent_id            TEXT NOT NULL,
     conversation_id     TEXT,
-    started_at          TIMESTAMPTZ NOT NULL,
+    -- Nullable for the same reason as spans.start_time above (migration 21).
+    started_at          TIMESTAMPTZ,
     ended_at            TIMESTAMPTZ,
     status              TEXT NOT NULL DEFAULT 'active',
     total_cost_usd      DOUBLE,
@@ -398,12 +421,27 @@ CREATE TABLE IF NOT EXISTS schema_validations (
     errors          JSON DEFAULT '[]'
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_agent_id  ON sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_conv_id   ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_agent_id    ON alerts(agent_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_fired_at    ON alerts(fired_at);
 """
+    + SESSIONS_INDEX_SQL
 )
+
+# The retention ledger's DDL, single-sourced so migration 20 and the
+# `EXPECTED_TABLES` self-heal below create the same table.
+RETENTION_EVENTS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS retention_events (\n"
+    "    event_id            TEXT PRIMARY KEY,\n"
+    "    ran_at              TIMESTAMPTZ NOT NULL,\n"
+    "    cutoff              TIMESTAMPTZ NOT NULL,\n"
+    "    retention_days      INTEGER,\n"
+    "    analysis_span_days  INTEGER,\n"
+    "    spans_deleted       BIGINT NOT NULL DEFAULT 0,\n"
+    "    sessions_deleted    BIGINT NOT NULL DEFAULT 0,\n"
+    "    oldest_kept         TIMESTAMPTZ\n"
+    ")"
+)
+
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -666,6 +704,51 @@ MIGRATIONS: list[tuple[int, str]] = [
     # Populated by the backfill parser from the `agent-<id>.meta.json` sidecar;
     # `tj backfill --reingest` re-tags pre-column history.
     (19, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_type TEXT"),
+    # Migration 20: the retention ledger. Deleting a user's own history and
+    # leaving no account of it is the fault this closes — the only way to learn
+    # that eight weeks of the oldest history had gone was to measure the store
+    # twice, days apart, and diff the two answers. One row per run of the
+    # retention job, written in the same transaction as the delete, so a
+    # deletion that happened always has a record and a record that exists always
+    # describes a deletion. `tj doctor` reads it; nothing else writes it.
+    (20, RETENTION_EVENTS_TABLE_SQL),
+    # Migration 21: unknown timestamps become NULL rather than a 1970 sentinel.
+    #
+    # Ingest stamped a zero epoch whenever a source carried no usable time —
+    # Claude Code's own OTel log exporter sends `timeUnixNano=0` on some
+    # records, and Codex's ISO fallback can fail to parse. A sentinel is not a
+    # neutral placeholder: it participates in `MIN()`, in `ORDER BY`, and in any
+    # day union, so ONE such row made a two-month corpus report a span in the
+    # thousands of days. `core/data_span.py` had to defend against it at READ
+    # time, which fixes the surfaces that remember to and no others.
+    #
+    # NULL is the honest representation and it defends itself: every comparison,
+    # range filter and aggregate excludes it under ordinary SQL semantics, with
+    # no per-query guard to forget. The rows are kept — they still carry tokens,
+    # cost and an agent — they simply cannot time anything.
+    #
+    # The existing sentinels are DELETED rather than migrated to NULL. A row
+    # whose only recorded fact was a false timestamp has nothing left to
+    # attribute once that is removed, and keeping it would leave a row that is
+    # counted by every COUNT(*) and placed by nothing.
+    #
+    # The index choreography is not optional: DuckDB refuses to ALTER a column
+    # on a table carrying ART indexes, so both index sets come off and go
+    # straight back on from the same constants the initial schema uses.
+    (21, (
+        "".join(
+            f"DROP INDEX IF EXISTS {name};\n"
+            for name, _ in SPANS_INDEXES + SESSIONS_INDEXES
+        )
+        + "ALTER TABLE spans ALTER COLUMN start_time DROP NOT NULL;\n"
+        + "ALTER TABLE sessions ALTER COLUMN started_at DROP NOT NULL;\n"
+        + f"DELETE FROM spans WHERE EXTRACT(year FROM start_time) "
+          f"< {MIN_PLAUSIBLE_YEAR};\n"
+        + f"DELETE FROM sessions WHERE EXTRACT(year FROM started_at) "
+          f"< {MIN_PLAUSIBLE_YEAR};\n"
+        + SPANS_INDEX_SQL + ";\n"
+        + SESSIONS_INDEX_SQL
+    )),
 ]
 
 
@@ -799,6 +882,8 @@ EXPECTED_TABLES: dict[str, str] = {
         "    created_at     TIMESTAMPTZ NOT NULL\n"
         ")"
     ),
+    # migration 20
+    "retention_events": RETENTION_EVENTS_TABLE_SQL,
 }
 
 
@@ -2979,14 +3064,78 @@ class DuckDBBackend:
             for r in rows
         ]
 
-    def delete_spans_before(self, cutoff: datetime) -> int:
-        result = self.conn.execute(
+    def delete_spans_before(self, cutoff: datetime) -> tuple[int, int]:
+        """Delete aged-out spans AND the session rows they leave behind.
+
+        Returns ``(spans deleted, sessions deleted)``.
+
+        Deleting only from ``spans`` used to leave the parent ``sessions`` rows
+        in place forever, and those rows are not inert: ``data_span`` unions
+        ``sessions.started_at`` into the day set it measures the available span
+        from, so every orphan went on asserting that a day carried data after
+        the data for that day had been destroyed. The deletion actively skewed
+        the measure of what survived it.
+
+        A session is removed only once it has NO spans left at all, which is
+        strictly narrower than "started before the cutoff": a long session
+        straddling the boundary keeps every span the cutoff spared, so deleting
+        it would discard live rows' parent. A pre-cutoff session that never had
+        spans goes too — it is aged-out history like any other, and leaving it
+        would let it keep asserting a day beyond the retention horizon.
+
+        Both statements and the ledger row run under one write lock so a reader
+        cannot observe spans gone with their sessions still present.
+        """
+        span_row = self.conn.execute(
             "SELECT COUNT(*) FROM spans WHERE start_time < $1", [cutoff]
         ).fetchone()
-        count = result[0] if result else 0
+        spans_deleted = int(span_row[0]) if span_row else 0
         with self._write_lock:
             self.conn.execute("DELETE FROM spans WHERE start_time < $1", [cutoff])
-        return count
+            orphan_row = self.conn.execute(
+                "SELECT COUNT(*) FROM sessions s WHERE s.started_at < $1 "
+                "AND NOT EXISTS (SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
+                [cutoff],
+            ).fetchone()
+            sessions_deleted = int(orphan_row[0]) if orphan_row else 0
+            self.conn.execute(
+                "DELETE FROM sessions s WHERE s.started_at < $1 "
+                "AND NOT EXISTS (SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
+                [cutoff],
+            )
+        return spans_deleted, sessions_deleted
+
+    def record_retention_event(
+        self,
+        *,
+        cutoff: datetime,
+        retention_days: int | None,
+        analysis_span_days: int | None,
+        spans_deleted: int,
+        sessions_deleted: int,
+    ) -> None:
+        """Append one row to the retention ledger.
+
+        The ledger exists because a deletion of the user's own history that
+        leaves no account of itself is only discoverable by measuring the store
+        twice, days apart, and diffing — which is how eight weeks of the oldest
+        history went missing unnoticed. `oldest_kept` is read AFTER the delete so
+        the row states what survived, not what was intended to.
+        """
+        oldest_row = self.conn.execute(
+            "SELECT MIN(start_time) FROM spans WHERE start_time IS NOT NULL"
+        ).fetchone()
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO retention_events (event_id, ran_at, cutoff, "
+                "retention_days, analysis_span_days, spans_deleted, "
+                "sessions_deleted, oldest_kept) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                [
+                    str(uuid.uuid4()), utcnow(), cutoff, retention_days,
+                    analysis_span_days, spans_deleted, sessions_deleted,
+                    oldest_row[0] if oldest_row else None,
+                ],
+            )
 
     def close(self) -> None:
         # Closing the root connection tears down the database and all cursors.

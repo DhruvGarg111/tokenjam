@@ -104,9 +104,16 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
     # Parse timestamps (OTLP uses nanoseconds as strings)
     start_ns = int(raw.get("startTimeUnixNano", 0))
     end_ns = int(raw.get("endTimeUnixNano", 0))
+    # A span with no start timestamp is UNTIMED, and both plausible-looking
+    # substitutes are worse than saying so. `datetime.now()` — what this used
+    # to do — dates the row to when tj happened to receive it, which reads as a
+    # real observation and silently puts historical work in the present; a zero
+    # epoch dates it to 1970 and drags every MIN() and day union back with it.
+    # NULL is excluded by ordinary SQL semantics, so the span is still ingested
+    # and still counted, it just cannot time anything.
     start_time = (
         datetime.fromtimestamp(start_ns / 1e9, tz=timezone.utc)
-        if start_ns else datetime.now(tz=timezone.utc)
+        if start_ns else None
     )
     end_time = (
         datetime.fromtimestamp(end_ns / 1e9, tz=timezone.utc)

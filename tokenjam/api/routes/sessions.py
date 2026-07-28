@@ -1075,7 +1075,10 @@ def _run_card(
         for s in members
     ]
     starts = [s.started_at for s in members if s.started_at]
-    ends = [s.ended_at or s.started_at for s in members if (s.ended_at or s.started_at)]
+    # Both timestamps are nullable (a span whose source carried no usable
+    # time writes NULL rather than a 1970 sentinel), so filter through a
+    # generator the type checker can narrow rather than repeating the `or`.
+    ends = [e for e in (s.ended_at or s.started_at for s in members) if e is not None]
     return {
         "run_id": run_id,
         "source": source,

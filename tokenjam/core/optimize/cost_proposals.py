@@ -48,6 +48,9 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
+from tokenjam.core.analysis_span import FALLBACK_WINDOW_DAYS as _FALLBACK_WINDOW_DAYS
+from tokenjam.core.analysis_span import window_days_for
+
 # House-style label strings. Kept verbatim on every cost proposal so no channel
 # can surface a savings figure without the honesty framing (Rule 14).
 COST_ESTIMATE_CONFIDENCE = "estimated"
@@ -2385,9 +2388,37 @@ def _resend_to_proposals(
     )]
 
 
-#: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
-#: monthly framing the cost analyzers project against.
-DEFAULT_COST_WINDOW_DAYS = 30
+#: LAST RESORT ONLY — the look-back to use when neither the config nor the
+#: store can be consulted. It is not a default in the sense of "what a normal
+#: run uses"; ``cost_window_days_for`` below is that, and every production
+#: caller goes through it.
+#:
+#: A fixed 30 days was the whole look-back for as long as this was the default,
+#: and a rolling month is not history: a dead MCP server injected into hundreds
+#: of sessions with zero invocations did not begin costing money 30 days ago,
+#: and pricing it as though it did understates a past-tense figure by however
+#: long the behaviour actually ran. The basis is now the span the user chose at
+#: onboarding, bounded by what the store actually holds — the same span
+#: retention is derived from, so the figure can never claim a window whose data
+#: has been deleted.
+FALLBACK_COST_WINDOW_DAYS = _FALLBACK_WINDOW_DAYS
+
+
+def cost_window_days_for(config: Any, conn: Any) -> int:
+    """The span past-overspend may accumulate over.
+
+    Two independent bounds, and the honest answer is the smaller: the span the
+    user asked for (``storage.analysis_span``) and how far back this store's
+    oldest dated row actually sits. A 90-day choice over a store that has been
+    running a week is answerable for a week, and an "all available" choice is
+    exactly the measured history.
+
+    The arithmetic itself lives in ``core/analysis_span`` so relearn's
+    precomputed window vocabulary resolves the SAME number — the Review inbox
+    publishes one window label across both feeds, and two derivations of it
+    would be free to disagree.
+    """
+    return window_days_for(getattr(config, "storage", None), conn)
 
 
 #: Mirrors ``relearn_store``'s own ``_LOCK``/``_COMPUTING`` pair, kept local to
@@ -2418,7 +2449,7 @@ def recompute_cost_proposals(
     db: Any,
     config: Any,
     *,
-    window_days: int = DEFAULT_COST_WINDOW_DAYS,
+    window_days: int | None = None,
     agent_id: str | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
@@ -2459,7 +2490,13 @@ def recompute_cost_proposals(
     _COST_COMPUTING.set()
     try:
         try:
-            effective_window_days = max(1, window_days)
+            # None means "derive it" — the normal path. An explicit value is
+            # a caller that already knows its own window (`tj optimize --since`),
+            # and is honoured as given.
+            effective_window_days = (
+                max(1, window_days) if window_days is not None
+                else cost_window_days_for(config, getattr(db, "conn", None))
+            )
             until = utcnow()
             since = until - timedelta(days=effective_window_days)
             conn = getattr(db, "conn", None)
@@ -2517,7 +2554,7 @@ def trigger_background_cost_recompute(
     backend_factory: Callable[[], Any],
     *,
     config: Any | None = None,
-    window_days: int = DEFAULT_COST_WINDOW_DAYS,
+    window_days: int | None = None,
 ) -> bool:
     """Fire-and-forget a cost-proposals recompute on a daemon thread — the
     Cost-advisories-tab equivalent of ``relearn_store.
@@ -2623,8 +2660,8 @@ def cost_proposals_from_report(
     (that helper's conservative default runs the other way — see its own
     docstring) — neither ever assumes ``"claude-code"``.
 
-    ``window_days`` (default 30 — ``DEFAULT_COST_WINDOW_DAYS``, matching the
-    daemon's own default look-back) is used for exactly ONE thing: sizing the
+    ``window_days`` (the resolved analysis span — see ``cost_window_days_for``)
+    is used for exactly ONE thing: sizing the
     write budget's per-month standing-cost comparison
     (``_write_budget_basis``). It never rescales a proposal's figure. Every
     card's ``past_overspend_usd``/``_tokens`` is its analyzer's own
@@ -2939,7 +2976,7 @@ def backfill_legacy_past_overspend_fields(proposal: dict[str, Any]) -> dict[str,
 def past_overspend_rollup(
     proposals: list[Any],
     *,
-    window_days: int = DEFAULT_COST_WINDOW_DAYS,
+    window_days: int = FALLBACK_COST_WINDOW_DAYS,
     excluded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Sum ``past_overspend_usd``/``past_overspend_tokens`` across

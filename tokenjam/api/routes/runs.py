@@ -227,7 +227,10 @@ async def get_run_detail(request: Request, run_id: str):
     total_spans = sum(s["span_count"] for s in summaries)
 
     starts = [s.started_at for s in sessions if s.started_at]
-    ends = [s.ended_at or s.started_at for s in sessions if (s.ended_at or s.started_at)]
+    # Both timestamps are nullable (a span whose source carried no usable
+    # time writes NULL rather than a 1970 sentinel), so filter through a
+    # generator the type checker can narrow rather than repeating the `or`.
+    ends = [e for e in (s.ended_at or s.started_at for s in sessions) if e is not None]
     started_at = min(starts) if starts else None
     last_activity = max(ends) if ends else None
     time_span_seconds = (

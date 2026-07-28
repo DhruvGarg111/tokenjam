@@ -63,7 +63,13 @@ class NormalizedSpan:
     name:           str
     kind:           SpanKind
     status_code:    SpanStatus
-    start_time:     datetime
+    # None when the source carried no usable timestamp. NOT an epoch sentinel:
+    # a 1970 stamp participates in MIN(), ORDER BY and every day union, so one
+    # such row can stretch a two-month corpus's measured span by decades, while
+    # a NULL is excluded by ordinary SQL semantics with no per-query guard to
+    # forget. The row is kept and can be counted; it simply cannot time
+    # anything. Ingest paths must pass None rather than substituting a default.
+    start_time:     datetime | None
     parent_span_id: str | None     = None
     session_id:     str | None     = None
     agent_id:       str | None     = None
@@ -167,7 +173,9 @@ class NormalizedSpan:
 class SessionRecord:
     session_id:      str
     agent_id:        str
-    started_at:      datetime
+    # None when the first span attributed to this session carried no usable
+    # timestamp — same rule and same reason as NormalizedSpan.start_time above.
+    started_at:      datetime | None
     conversation_id: str | None   = None
     ended_at:        datetime | None = None
     status:          str          = "active"

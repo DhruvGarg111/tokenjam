@@ -69,7 +69,20 @@ def _parse_attrs(raw_attrs: list[dict]) -> dict[str, Any]:
     return attrs
 
 
-def _ts_to_datetime(timestamp_ns: int) -> datetime:
+def _ts_to_datetime(timestamp_ns: int) -> datetime | None:
+    """None when the record carried no usable time, never a zero epoch.
+
+    Claude Code's own OTel log exporter sends `timeUnixNano=0` on some records
+    and Codex's ISO-8601 fallback can fail to parse, so this is a live path, not
+    a defensive one. Returning `datetime.fromtimestamp(0)` wrote a 1970 stamp
+    that then participated in every MIN(), ORDER BY and day union downstream —
+    one such row was enough to make a two-month corpus report a span in the
+    thousands of days. NULL is excluded by ordinary SQL semantics instead, with
+    no per-query guard to forget; the span is still ingested and still counted,
+    it just cannot time anything.
+    """
+    if timestamp_ns <= 0:
+        return None
     return datetime.fromtimestamp(timestamp_ns / 1e9, tz=timezone.utc)
 
 
@@ -82,7 +95,7 @@ def _api_request_to_span(
     prompt_id = attrs.get(ClaudeCodeEvents.PROMPT_ID)
     duration_ms = float(attrs[ClaudeCodeEvents.DURATION_MS])
     start_time = _ts_to_datetime(timestamp_ns)
-    end_time = start_time + timedelta(milliseconds=duration_ms)
+    end_time = start_time + timedelta(milliseconds=duration_ms) if start_time else None
 
     # CACHE_CREATION_TOKENS used to land in extra_attrs as a JSON blob only.
     # It's now threaded through to cache_write_tokens (issue #93) so cache-
@@ -129,7 +142,7 @@ def _tool_result_to_span(
     prompt_id = attrs.get(ClaudeCodeEvents.PROMPT_ID)
     duration_ms = float(attrs[ClaudeCodeEvents.DURATION_MS])
     start_time = _ts_to_datetime(timestamp_ns)
-    end_time = start_time + timedelta(milliseconds=duration_ms)
+    end_time = start_time + timedelta(milliseconds=duration_ms) if start_time else None
 
     success_val = attrs.get(ClaudeCodeEvents.SUCCESS)
     # Claude Code sends success as a boolean or the string "true"
@@ -180,7 +193,7 @@ def _api_error_to_span(
     prompt_id = attrs.get(ClaudeCodeEvents.PROMPT_ID)
     duration_ms = float(attrs[ClaudeCodeEvents.DURATION_MS])
     start_time = _ts_to_datetime(timestamp_ns)
-    end_time = start_time + timedelta(milliseconds=duration_ms)
+    end_time = start_time + timedelta(milliseconds=duration_ms) if start_time else None
 
     extra_attrs: dict[str, Any] = {}
     for key in (
@@ -296,7 +309,7 @@ def _codex_api_request_to_span(
     conversation_id = str(attrs.get(CodexEvents.CONVERSATION_ID, "unknown"))
     duration_ms = float(attrs.get(CodexEvents.DURATION_MS, 0))
     start_time = _ts_to_datetime(timestamp_ns)
-    end_time = start_time + timedelta(milliseconds=duration_ms)
+    end_time = start_time + timedelta(milliseconds=duration_ms) if start_time else None
 
     extra_attrs: dict[str, Any] = {}
     for key in (CodexEvents.HTTP_STATUS, CodexEvents.ATTEMPT):
@@ -340,7 +353,7 @@ def _codex_sse_event_to_span(
     conversation_id = str(attrs.get(CodexEvents.CONVERSATION_ID, "unknown"))
     duration_ms = float(attrs.get(CodexEvents.DURATION_MS, 0))
     start_time = _ts_to_datetime(timestamp_ns)
-    end_time = start_time + timedelta(milliseconds=duration_ms)
+    end_time = start_time + timedelta(milliseconds=duration_ms) if start_time else None
 
     extra_attrs: dict[str, Any] = {}
     for key in (CodexEvents.REASONING_TOKEN_COUNT, CodexEvents.TOOL_TOKEN_COUNT):
@@ -443,7 +456,7 @@ def _codex_tool_result_to_span(
     conversation_id = str(attrs.get(CodexEvents.CONVERSATION_ID, "unknown"))
     duration_ms = float(attrs.get(CodexEvents.DURATION_MS, 0))
     start_time = _ts_to_datetime(timestamp_ns)
-    end_time = start_time + timedelta(milliseconds=duration_ms)
+    end_time = start_time + timedelta(milliseconds=duration_ms) if start_time else None
 
     success_val = attrs.get(CodexEvents.SUCCESS)
     if isinstance(success_val, bool):
