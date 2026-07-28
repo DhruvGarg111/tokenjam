@@ -225,11 +225,20 @@ def lint_duplicates() -> dict[str, list[str]]:
 #: question is identical, only the unit of comparison changes.
 COMPOSED_SENTENCE_OVERLAP = 0.6
 
-#: Below this a sentence carries too little to compare. A short clause shares
-#: most of its handful of content words with anything in the same domain, so
-#: comparing it produces noise rather than findings — and a false positive here
-#: teaches the next author to reach for an exception instead of fixing the text.
-MIN_COMPARABLE_WORDS = 5
+#: Below this a sentence carries too little to compare. Containment divides by
+#: the SHORTER text, which is what makes it the right metric for two rules of
+#: different lengths — and also what makes it unstable when one side is tiny: a
+#: six-word clause needs only four words in common with a long paragraph to
+#: score 67%. Measured on the real catalog, the floor is what separates signal
+#: from noise: "this file is too large to read whole" scored 60% against the
+#: offload rule on the words `file`, `read` and `context` alone, while every
+#: genuine duplicate found here runs to eighteen content words or more.
+#:
+#: Erring high is the right direction. A false positive teaches the next author
+#: to reach for an exception rather than to fix the text, and an exception in
+#: this lint is permanent; a missed short clause is caught by the pairwise
+#: whole-record check, which has no such floor.
+MIN_COMPARABLE_WORDS = 8
 
 #: Verbs that make a sentence an INSTRUCTION rather than an explanation. Only
 #: instruction sentences are compared: two records may freely restate the same
@@ -244,6 +253,28 @@ _DIRECTIVE = re.compile(
 )
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n{2,}")
+
+#: The delivery label many fix texts open with — "CLAUDE.md/skill note:",
+#: "PostToolUseFailure hook (Edit/MultiEdit):". It names the MECHANISM, which is
+#: already a structured field on the record, so leaving it in the comparison
+#: makes every record of one delivery kind look partly like every other.
+#:
+#: That is not a hypothetical tidy-up: without this, two unrelated Read rules
+#: ("Read takes a file path" / "this file is too large to read whole") scored
+#: 71% purely on their shared prefix. A false positive here is worse than a gap,
+#: because it teaches the next author to reach for an exception rather than to
+#: fix the text — so the label comes off before anything is measured, and what
+#: remains is compared on its own merits.
+_DELIVERY_LABEL = re.compile(
+    r"^\s*(?:CLAUDE\.md(?:/skill)?\s+note|Skill/scoped\s+note|"
+    r"\w*Hook|PostToolUseFailure\s+hook|PreToolUse\s+hook)"
+    r"(?:\s*\([^)]*\))?\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_delivery_label(sentence: str) -> str:
+    return _DELIVERY_LABEL.sub("", sentence, count=1)
 
 
 def _sentences(text: str) -> list[str]:
@@ -280,17 +311,18 @@ def lint_composed_text(artifact: str, parts: Sequence[tuple[str, str]]) -> list[
     """
     problems: list[str] = []
     indexed = [
-        (label, sentence)
+        (label, sentence, bare)
         for label, text in parts
         for sentence in _sentences(text)
-        if _is_instruction(sentence)
-        and len(_content_words(sentence)) >= MIN_COMPARABLE_WORDS
+        for bare in (_strip_delivery_label(sentence),)
+        if _is_instruction(bare)
+        and len(_content_words(bare)) >= MIN_COMPARABLE_WORDS
     ]
-    for i, (left_label, left) in enumerate(indexed):
-        for right_label, right in indexed[i + 1:]:
+    for i, (left_label, left, left_bare) in enumerate(indexed):
+        for right_label, right, right_bare in indexed[i + 1:]:
             if left_label == right_label:
                 continue
-            score = _overlap(left, right)
+            score = _overlap(left_bare, right_bare)
             if score < COMPOSED_SENTENCE_OVERLAP:
                 continue
             problems.append(

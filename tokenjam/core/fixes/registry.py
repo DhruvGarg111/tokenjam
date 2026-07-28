@@ -178,6 +178,16 @@ OFFLOAD_RULE = register(FixRecord(
     analyzers=frozenset({"resend", "downsize", "relearn"}),
     answers="context-heavy work run inline on the main thread, re-sent on every later turn",
     lever=LEVER_OFFLOAD,
+    # `relearn`'s `context_overflow` family shows this record for a reason the
+    # other two do not have — the request was REJECTED, not merely expensive —
+    # and that sentence used to be written beside the family table. It names
+    # what was observed and stops; restating any part of the rule below is the
+    # defect this record exists to have already fixed.
+    lead_ins=((
+        "relearn",
+        "This session hit the model's context ceiling and the request was "
+        "rejected outright: the tokens were spent and no completion came back.",
+    ),),
     # REPLACES the vague enumeration with the observed one; it does not append
     # to it. "the `Read` and `Grep` sweeps you run in `optimize/`" is shorter
     # than the parenthesised list it stands in for, which is the point — the
@@ -265,6 +275,223 @@ MIGRATION_READ_FIRST = register(FixRecord(
     answers="edits to migration files written without reading the file first",
     lever=LEVER_AWARENESS,
     path_globs=("**/migrations/**", "**/migrate/**"),
+))
+
+
+# --- relearn: the known failure families -------------------------------------#
+#
+# One record per family, keyed ``relearn.<family_key>`` so the family table and
+# the catalog cannot drift apart on which text belongs to which matcher. These
+# were inline strings in ``analyzers/relearn.py``; nothing checked them, so the
+# properties the lint enforces held only by whoever last read the file.
+#
+# Their delivery is declared per family because the FAMILY is what knows:
+# `sleep_chain` blocks a command and injects nothing, while the PostToolUseFailure
+# families exist precisely to inject text. Those cost opposite amounts and no
+# property of the artifact tells them apart.
+
+RELEARN_CWD_CONFUSION = register(FixRecord(
+    key="relearn.cwd_confusion",
+    text=(
+        "PostToolUseFailure hook (Bash/Read): react only after a "
+        "'no such file or directory' failure by injecting the real cwd + "
+        "a short directory listing as additionalContext, so the agent "
+        "recovers in one shot instead of a PreToolUse guess-and-block on "
+        "every relative path (which would misfire on normal usage)."
+    ),
+    delivery="injecting_hook",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="tool calls failing on a relative path resolved against the wrong working directory",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_SLEEP_CHAIN = register(FixRecord(
+    key="relearn.sleep_chain",
+    text=(
+        "PreToolUse hook: block a `sleep N && <check>` Bash chain and point the "
+        "agent at the Monitor tool instead of a busy-wait."
+    ),
+    delivery="executing_hook",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="blocked sleep-chain Bash commands retried after the harness refused them",
+    lever=LEVER_AWARENESS,
+))
+
+#: ONE record for TWO families. `stale_read_race` ("modified since read") and
+#: `edit_string_not_found` ("string to replace not found") are different
+#: matchers over different failures, and they stay different families — the
+#: hook spec, the delivery and the evidence are all per-family. But the
+#: INSTRUCTION is identical in both: re-read the file before retrying the edit.
+#: They shipped as two separately-authored wordings and scored 94% against each
+#: other, which is the three-analyzers-one-rule case in miniature: both hooks
+#: can be applied by the same user, so the same sentence lands twice.
+#:
+#: Which failure prompted it is the FAMILY's job to say (each has its own title
+#: and evidence), not this text's. Naming the trigger here is what forked one
+#: instruction into two in the first place.
+RELEARN_REREAD_BEFORE_RETRYING_EDIT = register(FixRecord(
+    key="relearn.reread_before_retrying_edit",
+    text=(
+        "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after the "
+        "edit has already failed, by injecting a re-Read reminder as "
+        "additionalContext so the retry is written against the file's current "
+        "contents — never touches a successful edit."
+    ),
+    delivery="injecting_hook",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="edits retried against remembered file contents after the file moved underneath them",
+    lever=LEVER_AWARENESS,
+))
+
+#: The OPPOSITE failure to ``edit_string_not_found`` — too many matches, not
+#: zero — and it takes the opposite fix, which is why the two families must
+#: never share a bucket and why their records are separate here.
+RELEARN_EDIT_AMBIGUOUS_MATCH = register(FixRecord(
+    key="relearn.edit_ambiguous_match",
+    text=(
+        "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
+        "than once, include enough surrounding lines to make it unique "
+        "rather than retrying the same short string — or pass "
+        "`replace_all: true` when every occurrence really should change."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Edit calls rejected because old_string matched more than once",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_READ_TOO_LARGE = register(FixRecord(
+    key="relearn.read_too_large",
+    text=(
+        "CLAUDE.md/skill note: this file is too large to read whole. Grep "
+        "for the symbol first and Read only the region around the hit "
+        "(`offset`/`limit`), or delegate the sweep to a subagent so the "
+        "bulk never lands in this thread's context."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Read calls rejected for exceeding the tool's max-tokens ceiling",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_READ_DIRECTORY = register(FixRecord(
+    key="relearn.read_directory",
+    text=(
+        "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
+        "directory use Glob (or `ls` via Bash), then Read the file you "
+        "actually want."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Read calls pointed at a directory rather than a file",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_READ_OFFSET_MALFORMED = register(FixRecord(
+    key="relearn.read_offset_malformed",
+    text=(
+        "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not "
+        "arrays — pass a single number for each."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Read calls rejected for passing offset or limit as an array",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_DEFERRED_TOOL_COLD = register(FixRecord(
+    key="relearn.deferred_tool_cold",
+    text=(
+        "Skill/scoped note: deferred tools need a ToolSearch lookup for their "
+        "schema before the first call; optionally a PreToolUse intercept hook."
+    ),
+    delivery="skill",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="deferred tools called before their schema was fetched, so the call could not resolve",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_COMMAND_NOT_FOUND = register(FixRecord(
+    key="relearn.command_not_found",
+    text=(
+        "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
+        "PATH. Common causes here: using bare `python` instead of `python3`, "
+        "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
+        "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
+        "Prefer the portable/explicit form."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Bash calls failing on a binary or builtin this shell does not have",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_BASH_TIMEOUT = register(FixRecord(
+    key="relearn.bash_timeout",
+    text=(
+        "CLAUDE.md/skill note: this command outlived the tool's timeout "
+        "and was killed, so its work was lost and the tokens spent "
+        "waiting bought nothing. Run long jobs in the background "
+        "(`run_in_background`) and poll for completion, or raise the "
+        "call's own timeout when the wait is genuinely expected."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="Bash commands held in the foreground until the harness killed them",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_BASH_CHAINED_APPROVAL = register(FixRecord(
+    key="relearn.bash_chained_approval",
+    text=(
+        "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
+        "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
+        "the entire chain. Issue the parts as separate Bash calls, and "
+        "prefer an absolute path over a leading `cd`."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="chained Bash commands tripping the approval prompt the parts alone would not",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_GIT_BRANCH_EXISTS = register(FixRecord(
+    key="relearn.git_branch_exists",
+    text=(
+        "CLAUDE.md/skill note: check out the existing branch "
+        "(`git checkout <name>`) instead of re-creating it, or pick a "
+        "fresh name — `git checkout -b` on an existing branch always "
+        "fails."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="`git checkout -b` retried against a branch name that already exists",
+    lever=LEVER_AWARENESS,
+))
+
+RELEARN_WEBFETCH_DOMAIN_BLOCKED = register(FixRecord(
+    key="relearn.webfetch_domain_blocked",
+    text=(
+        "CLAUDE.md/skill note: this domain is blocked — use a search tool "
+        "or a different source instead of retrying the fetch."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="fetches retried against a domain the harness will not reach",
+    lever=LEVER_AWARENESS,
 ))
 
 
