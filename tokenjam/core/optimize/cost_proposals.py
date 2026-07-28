@@ -3015,6 +3015,40 @@ def _placement_weights(analyzer: str, report: Any) -> dict[str, int]:
     return {}
 
 
+def _evidence_for(proposal: CostProposal, report: Any, plan: Any) -> Any:
+    """What this proposal observed, in the terms its rule can be written in.
+
+    Assembled from what the analyzers ALREADY computed — the repos placement
+    resolved, the models and dispatch types the finding flagged. Nothing here
+    is a new measurement and nothing is inferred: an unobserved field stays
+    empty, and the substitution that needs it is skipped so the generic wording
+    survives (see ``core/fixes/grounding``).
+    """
+    from pathlib import Path as _Path
+
+    from tokenjam.core.fixes.grounding import Evidence
+
+    findings = getattr(report, "findings", {}) or {}
+    repos = tuple(
+        _Path(d.root).name for d in getattr(plan, "destinations", ()) if d.root
+    )
+    agents: tuple[str, ...] = ()
+    models: tuple[str, ...] = ()
+    subagent = findings.get("subagent")
+    if subagent is not None and proposal.analyzer in {"subagent", "resend"}:
+        flagged = [
+            r for r in (getattr(subagent, "flagged", None) or [])
+            if "over_powered" in (getattr(r, "flags", None) or [])
+        ]
+        agents = tuple(dict.fromkeys(
+            str(getattr(r, "sub_agent_type", "") or "") for r in flagged
+        ).keys() - {""})
+        models = tuple(dict.fromkeys(
+            str(getattr(r, "model", "") or "") for r in flagged
+        ).keys() - {""})
+    return Evidence(repos=repos, agents=tuple(sorted(agents)), models=tuple(sorted(models)))
+
+
 def _placement_for(
     proposal: CostProposal, report: Any, config: Any,
 ) -> Any | None:

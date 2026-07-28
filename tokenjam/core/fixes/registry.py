@@ -9,6 +9,7 @@ be able to ERASE the number its analyzer found.
 from __future__ import annotations
 
 from tokenjam.core.fixes.catalog import (
+    Substitution,
     LEVER_AWARENESS,
     LEVER_EFFORT,
     LEVER_MODEL,
@@ -54,6 +55,12 @@ SUBAGENT_RUBRIC = register(FixRecord(
     answers="premium-tier models running Task dispatches that a cheaper same-family model fits",
     lever=LEVER_MODEL,
     must_not_relicense=_SIZING_RELICENSE,
+    grounding=(
+        Substitution(
+            find="Right-size Task-dispatched subagents",
+            template="Right-size the {agents} dispatches",
+        ),
+    ),
 ))
 
 RIGHTSIZE_TEMPLATE = register(FixRecord(
@@ -73,6 +80,9 @@ RIGHTSIZE_TEMPLATE = register(FixRecord(
     answers="context-heavy work run inline on a premium model instead of in a right-sized worker",
     lever=LEVER_MODEL,
     must_not_relicense=_SIZING_RELICENSE,
+    grounding=(
+        Substitution(find="the worker", template="the {agents} workers"),
+    ),
 ))
 
 #: The CREATE fix. A Claude Code dispatch is almost always a BUILT-IN
@@ -168,6 +178,31 @@ OFFLOAD_RULE = register(FixRecord(
     analyzers=frozenset({"resend", "downsize", "relearn"}),
     answers="context-heavy work run inline on the main thread, re-sent on every later turn",
     lever=LEVER_OFFLOAD,
+    # REPLACES the vague enumeration with the observed one; it does not append
+    # to it. "the `Read` and `Grep` sweeps you run in `optimize/`" is shorter
+    # than the parenthesised list it stands in for, which is the point — the
+    # guidance is specific AND concise, and a longer rule is a less-followed
+    # rule.
+    grounding=(
+        Substitution(
+            find=(
+                "context-heavy sub-tasks (broad file reads, log sweeps, "
+                "multi-file search, long tool-output loops, exploratory "
+                "investigation)"
+            ),
+            template="the {tools} sweeps you run in {repos}",
+        ),
+        # Falls back to naming just the directories when the tool mix was not
+        # observed — still concrete, still shorter than the generic span.
+        Substitution(
+            find=(
+                "context-heavy sub-tasks (broad file reads, log sweeps, "
+                "multi-file search, long tool-output loops, exploratory "
+                "investigation)"
+            ),
+            template="the context-heavy work you run in {repos}",
+        ),
+    ),
 ))
 
 #: The SDK counterpart of the same observation. A Claude Code user cannot
