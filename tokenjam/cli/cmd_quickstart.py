@@ -1,9 +1,10 @@
 """The zero-install, zero-config first run (issue #6).
 
-The 15-second time-to-first-value path that lets a brand-new user — reached via
-``npx tokenjam`` / ``uvx tj`` with **no** pip env, **no** daemon, **no** onboarding —
-see where their Claude Code quota actually goes, straight from the JSONL files
-ccusage already reads (``~/.claude/projects/*.jsonl``).
+The 15-second time-to-first-value path that lets a brand-new user, reached via
+``npx tokenjam`` / ``uvx tj`` with **no** pip env, **no** daemon and **no**
+onboarding, see how much of their recent Claude Code spend was avoidable,
+straight from the JSONL files ccusage already reads
+(``~/.claude/projects/*.jsonl``).
 
 Design (what makes it "zero-setup"):
 
@@ -12,31 +13,33 @@ Design (what makes it "zero-setup"):
     contacted. Each run re-reads the JSONL fresh.
   * It backfills the on-disk Claude Code sessions into that transient DB via the
     existing :func:`tokenjam.core.backfill.ingest_claude_code` parser, then runs
-    the same two read-only views the paid-deeper path exposes:
-      - quota composition (re-reading vs. net-new work) from
-        :mod:`tokenjam.core.context_diagnostic` (issue #4's engine, reused);
-      - a session timeline from :mod:`tokenjam.core.session_timeline`
-        (the `--json` payload and the statusline preview's session pick;
-        the human render shows totals, not a per-session table);
-      - the largest single past-overspend finding plus its fix, from the
-        same ``build_report`` / ``COST_ANALYZERS`` path the Review inbox
-        and ``tj status`` use.
-  * The output **leads with reads-your-local-logs + added-value framing** —
-    "reads your ~/.claude session logs; here's where your quota actually goes" —
-    then ends on the opt-in "go deeper" pointer to ``tj onboard`` (daemon /
-    statusline / live capture).
+    the same ``build_report`` / ``COST_ANALYZERS`` / ``past_overspend_rollup``
+    path the Review inbox and the dashboard use, and reports ONE number: the
+    avoidable dollars summed across every analyzer this window's persona can
+    actually act on.
+
+**The screen is deliberately minimal, and its shape is a founder decision.** It
+is three things and nothing else: what tj read, one avoidable-dollars sentence,
+and the pointer to ``tj onboard``. It carries no quota composition (no re-read
+share, no net-new share, no ``/compact`` counting), no statusline preview, no
+per-analyzer titles / evidence / fixes, and no boxes. A first run is a hook, not
+a report; the per-finding detail lives in the Review inbox behind ``tj onboard``.
+If you are about to add a panel here, that is the decision you are reversing.
+
+Copy rules: no em dashes in user-facing strings; "avoidable", never "wasted" or
+"saved"; near-monochrome, with the single ``accent`` reserved for the dollar
+figure and the typeable command (see :mod:`tokenjam.utils.theme`).
 
 This has no public/typeable command name — ``cli/main.py``'s no-subcommand
 branch invokes ``cmd_quickstart`` directly (via ``ctx.invoke``) when the npm
 wrapper's ``TJ_NPX_ZERO_INSTALL_REPORT`` env var is set, so it never opens the
 on-disk DB or trips the daemon's write lock either way.
 
-Honesty discipline (CLAUDE.md Rule 14): every figure here is a *measured* token
-share re-derived from the JSONL, never a projected saving.
+Honesty discipline (CLAUDE.md Rule 14): the figure is a *measured*, already-
+incurred avoidable total over the ingested window, never a projected saving.
 """
 from __future__ import annotations
 
-import glob as _glob
 import json as _json
 import re as _re
 from dataclasses import dataclass
@@ -46,22 +49,14 @@ from pathlib import Path
 import click
 
 from tokenjam.cli.backfill_progress import backfill_progress
-from tokenjam.cli.cmd_statusline import REREAD_WARN, format_status_line
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
     count_claude_code_sessions_in_scope,
     ingest_claude_code,
 )
-from tokenjam.core.context_diagnostic import compute_context_diagnostic
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.session_timeline import (
-    SessionTimeline,
-    TimelineSession,
-    compute_session_timeline,
-    timeline_to_dict,
-)
-from tokenjam.core.usage import AssistantUsage, iter_cumulative_usage
-from tokenjam.utils.formatting import console, err_console, format_cost, format_tokens
+from tokenjam.utils.formatting import console, err_console, format_cost
+from tokenjam.utils.theme import ACCENT
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 # First-run cap (#13): on a large ~/.claude history a full backfill into the
@@ -70,19 +65,6 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # of sessions) and disclose the cap; `--full` lifts it for the complete picture.
 # ~300 sessions keeps the slowest plausible session shapes comfortably in budget.
 DEFAULT_MAX_SESSIONS = 300
-
-# "Substantial" floor for the statusline live-preview (#120-adjacent): the
-# most-recent session is only worth previewing the nudge on if it actually ran
-# long enough to feel like a real session, not a two-turn smoke test. Below
-# this we fall back to the largest recent session that crossed the threshold.
-PREVIEW_MIN_TURNS = 20
-
-# Floor for the past-overspend callout's dollar figure. Mirrors
-# `cmd_status._TEASER_MIN_USD`: below a dollar the figure reads as noise and
-# invites the reader to dismiss the whole report, so we degrade to the token
-# figure (with the reason stated) rather than print a near-zero headline.
-# A `$0.00` is never printed: `None` means "not measured", never zero.
-OVERSPEND_MIN_USD = 1.0
 
 
 @click.command("quickstart")
@@ -98,7 +80,7 @@ OVERSPEND_MIN_USD = 1.0
 @click.pass_context
 def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
                    full: bool, output_json: bool) -> None:
-    """Zero-setup first run: where your Claude Code quota actually goes.
+    """Zero-setup first run: how much of your recent spend was avoidable.
 
     Reads the same ~/.claude/projects/*.jsonl files ccusage does: no pip env,
     no daemon, no onboarding. On a large history the first run caps at the
@@ -106,8 +88,6 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     `tj onboard` afterwards to go deeper (live capture, the dashboard, and the
     zero-token statusline).
     """
-    from pathlib import Path
-
     root = Path(root_path).expanduser() if root_path else CLAUDE_CODE_PROJECTS_ROOT
     if not root.exists():
         _render_no_logs(root, output_json)
@@ -149,14 +129,20 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
         _render_no_sessions(result, since, output_json)
         return
 
-    diag = compute_context_diagnostic(db.conn, since_dt, until_dt)
-    timeline = compute_session_timeline(db.conn)
-
     if output_json:
-        from tokenjam.core.context_diagnostic import diagnostic_to_dict
+        from tokenjam.core.context_diagnostic import (
+            compute_context_diagnostic,
+            diagnostic_to_dict,
+        )
+        from tokenjam.core.session_timeline import (
+            compute_session_timeline,
+            timeline_to_dict,
+        )
         payload = {
-            "quota_composition": diagnostic_to_dict(diag),
-            "session_timeline": timeline_to_dict(timeline),
+            "quota_composition": diagnostic_to_dict(
+                compute_context_diagnostic(db.conn, since_dt, until_dt)),
+            "session_timeline": timeline_to_dict(
+                compute_session_timeline(db.conn)),
             "backfill": {
                 "sessions_ingested": result.sessions_ingested,
                 "spans_ingested": result.spans_ingested,
@@ -171,85 +157,78 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
 
     # Computed only on the human path: `--json` must stay byte-clean AND fast,
     # and the analyzers are the one materially expensive step after ingest.
-    overspend = _compute_past_overspend(
+    #
+    # `fallback_sessions` is only that: the analyzed population comes off the
+    # report's own window, and `sessions_ingested` stands in ONLY when the
+    # computation could not run (there is then no figure to mispair it with).
+    # The two genuinely differ: the ingest picks the most-recent N session FILES
+    # by mtime, while the report filters by span timestamp, so a real corpus can
+    # ingest 300 files and analyze 143 sessions. Printing the ingest count beside
+    # a figure summed over the analyzed one is exactly the mixed-population
+    # defect this screen must not have.
+    avoidable = _compute_avoidable_total(
         db, since_dt, until_dt,
+        fallback_sessions=result.sessions_ingested,
         population_capped=max_sessions is not None and result.limit_reached,
     )
 
-    _render(diag, timeline, since=since,
-            limit_reached=result.limit_reached, max_sessions=max_sessions,
-            root=root, overspend=overspend)
+    _render(avoidable, fallback_sessions=result.sessions_ingested)
 
 
-# ────────────────────────── past overspend ────────────────────────────────
+# ────────────────────────── avoidable total ────────────────────────────────
 #
-# The single largest ALREADY-INCURRED, avoidable finding over the ingested
-# window, with the concrete fix it ends in. Quickstart is a report, so this is
-# the one place it tells a first-run user what their history already cost them
-# in a unit they reason in.
+# ONE number: the ALREADY-INCURRED avoidable dollars over the ingested window,
+# summed across every analyzer this window's persona can act on. Quickstart is
+# a hook, not a report, so it names no analyzer, shows no evidence and hands
+# out no fix; that detail lives in the Review inbox behind `tj onboard`.
 #
 # Contract (repo CLAUDE.md, "THE per-analyzer dollar-field contract"):
 #   * `past_overspend_usd` is the canonical figure, observed over the analyzed
 #     window, past tense. It is NEVER paced, projected, or multiplied by a
 #     30-day ratio, and `observed_cost_usd` is never summed into it.
-#   * `None` means "not measured", never `$0`.
-#   * The SINGLE LARGEST proposal is shown, never a sum: the analyzers price
-#     overlapping angles on the same spans, so summing double-counts (same
-#     rationale as `cmd_status._recoverable_teaser` and
-#     `api/routes/cost._recoverable_overlap_note`).
+#   * `None` means "not measured", never `$0`. A `None` return here renders no
+#     sentence at all, NOT an empty state: "we could not compute it" and "we
+#     computed it and it is zero" are different claims and must read that way.
+#   * The sum goes through `cost_proposals.past_overspend_rollup` — THE one
+#     aggregate every other surface reads (Review inbox, dashboard, CLI). It
+#     dedupes by proposal `signature`, so this screen can never disagree with
+#     the number the user sees after onboarding. Do not hand-roll a second sum
+#     here; the module docstring records what happened last time there were two.
 #
 # Analyzer selection is NOT re-implemented here, and there is no second
 # persona filter. `build_report` is handed `COST_ANALYZERS` and does the
 # persona gating itself (`PERSONA_DISABLED_ANALYZERS`, a TRUE skip before
 # dispatch), so a Claude-Code-dominant window never spends query time on a
-# finding that persona could not act on. The one deviation is a runtime bound
-# for this zero-install path, documented at `_OVERSPEND_SKIP_ANALYZERS`.
+# finding that persona could not act on, and the enabled set is derived from
+# the live registry rather than transcribed here. The one deviation is a
+# runtime bound for this zero-install path, at `_OVERSPEND_SKIP_ANALYZERS`.
 #
 # Pricing: quickstart reads no config, so a plan tier is never declared and
 # `pricing_mode_for(dominant_plan(...))` would be `"unknown"`. `cmd_status`'s
 # stricter api-only gate is deliberately NOT reused: the product stance is to
-# assume API pricing, and this same render already prints an "implied API
-# value" total from the very same window.
+# assume API pricing.
 
 
 @dataclass(frozen=True)
-class PastOverspendCallout:
-    """One finding's already-incurred avoidable spend, plus its fix.
+class AvoidableTotal:
+    """The window's avoidable dollars, and the population they were summed over.
 
-    Exactly one of `usd` / `tokens` drives the headline: `usd` when the
-    finding priced a figure at or above `OVERSPEND_MIN_USD`, otherwise
-    `tokens` with `tokens_only_reason` stating why no dollar figure is shown.
-    A callout with neither is never constructed (the caller omits the block).
+    Constructed only when the rollup actually ran. ``usd`` may legitimately be
+    ``0.0`` — that is the honest "nothing avoidable found" state, and it renders
+    as a sentence saying so, never as a ``$0.00`` styled like a finding. When
+    the computation could not run at all the caller gets ``None`` instead, and
+    no sentence is rendered.
+
+    ``sessions`` is the count the analyzers actually reasoned over (the report's
+    own window summary), carried on the same object so the render cannot pair
+    this figure with a count from another population. The screen prints this one
+    number in both places it states a population.
     """
-    title:      str
-    evidence:   str
-    advise_text: str
-    caveat:     str = ""
-    usd:        float | None = None
-    tokens:     int | None = None
-    tokens_only_reason: str = ""
+    usd:      float
+    sessions: int
 
 
-# Shown instead of `advise_text` when the proposal carries no usable fix text
-# (blank, or the persona-gated "there is no lever here" substitution).
-_OVERSPEND_FALLBACK_ADVICE = "Run `tj optimize` for this finding and its fix."
-
-
-# Several cost-proposal titles end in their own money clause ("Review 17
-# oversized files, $187.55") because the Review inbox renders the title on a
-# row with no figure beside it. This callout LEADS with the figure, so the
-# suffix would print two differently-rounded dollar amounts in one sentence.
-_TITLE_MONEY_SUFFIX = _re.compile(
-    r",\s*(?:~?\$[\d,]+(?:\.\d+)?[kKmMbB]?|~?[\d,]+\s*tok)\s*$"
-)
-
-
-def _strip_money_suffix(title: str) -> str:
-    """`title` without a trailing ", $12.34" / ", ~1,234 tok" clause."""
-    return _TITLE_MONEY_SUFFIX.sub("", title).strip()
-
-
-# The ONE analyzer dropped from `COST_ANALYZERS` for this callout, and the
+# The ONE analyzer dropped from `COST_ANALYZERS` for this figure, and the
 # only one: `relearn`.
 #
 # This is a runtime bound, not a second persona filter — persona gating stays
@@ -278,7 +257,10 @@ _OVERSPEND_SKIP_ANALYZERS = frozenset({"relearn"})
 #: (`result.limit_reached`), a disk-scan analyzer's figure covers strictly
 #: MORE sessions than the ones ingested into the DB and rendered on screen —
 #: a population mismatch the existing magnitude ceiling (`_over_ceiling`)
-#: cannot catch, since a SMALLER out-of-population figure still clears it.
+#: cannot catch, since a SMALLER out-of-population figure still clears it,
+#: and which matters more now that the screen SUMS the analyzers rather than
+#: picking one: an out-of-population figure would be added to, not compared
+#: against, the in-population ones.
 #: Excluded outright rather than rescaled: there is no honest way to shrink
 #: an unbounded-population figure down to the capped one without inventing a
 #: number nothing measured.
@@ -295,29 +277,17 @@ def _overspend_analyzers(names: tuple[str, ...], *, population_capped: bool = Fa
     return [n for n in names if n not in skip]
 
 
-def _usable_advice(text: str | None) -> str:
-    """`text` if it actually tells the reader what to change, else the pointer.
+def _compute_avoidable_total(
+    db, since: datetime, until: datetime, *,
+    fallback_sessions: int = 0, population_capped: bool = False,
+) -> AvoidableTotal | None:
+    """Avoidable dollars over the ingested window, summed across the analyzers.
 
-    The persona gate substitutes a "no fix is shown for it" string for cache
-    findings a Claude Code user cannot act on (`cost_proposals.
-    CACHE_NO_LEVER_TEXT`); surfacing that as "the fix" would be worse than
-    pointing at the full report.
-    """
-    cleaned = (text or "").strip()
-    if not cleaned or "no fix is shown" in cleaned:
-        return _OVERSPEND_FALLBACK_ADVICE
-    return cleaned
-
-
-def _compute_past_overspend(
-    db, since: datetime, until: datetime, *, population_capped: bool = False,
-) -> PastOverspendCallout | None:
-    """The largest single `past_overspend_usd` finding over the ingested window.
-
-    Returns None when there is nothing honest to say: the analyzers found no
-    priced or token-bearing finding, or anything at all raised. Never raises
-    and never fabricates a figure, so a corpus with nothing to report simply
-    renders no callout.
+    Returns ``None`` — meaning "not measured" — only when the computation could
+    not run (anything raised). A window the analyzers examined and found nothing
+    in returns ``AvoidableTotal(usd=0.0, ...)``, which is a DIFFERENT state and
+    renders differently: unknown prints no sentence, known-and-empty prints one
+    saying so. Never raises and never fabricates a figure.
 
     `population_capped` is True only when the ingest itself truncated at the
     session cap (`result.limit_reached`) — see `_POPULATION_UNBOUNDED_ANALYZERS`
@@ -333,6 +303,7 @@ def _compute_past_overspend(
         from tokenjam.core.optimize.cost_proposals import (
             COST_ANALYZERS,
             cost_proposals_from_report,
+            past_overspend_rollup,
         )
 
         # In-memory defaults only. Matches what `load_config` synthesises when
@@ -346,62 +317,44 @@ def _compute_past_overspend(
         proposals = cost_proposals_from_report(
             report, config, window_days=window_days,
         )
+
+        # Defensibility ceiling. An avoidable figure LARGER than what the whole
+        # window cost is self-refuting no matter how the analyzer derived it,
+        # and a reader can disprove it from their own billing. (It happens: some
+        # analyzers count a population wider than what quickstart ingested, e.g.
+        # a per-session tax summed over every transcript on disk while the
+        # transient DB holds the capped, most-recent subset.) Matrix rule: show
+        # the LARGEST number the derivation can legitimately support. Such a
+        # proposal is DROPPED, never rescaled: rescaling would invent a number
+        # nothing measured.
+        window_cost = float(getattr(getattr(report, "window", None),
+                                    "total_cost_usd", 0.0) or 0.0)
+        eligible = [
+            p for p in proposals
+            if not (p.past_overspend_usd is not None
+                    and window_cost > 0.0
+                    and p.past_overspend_usd > window_cost)
+        ]
+
+        # THE rollup, not a local sum: same function, same dedup-by-signature,
+        # same canonical field as the Review inbox and the dashboard, so this
+        # screen and the one the user lands on after `tj onboard` cannot
+        # disagree. `window_days` is only a label on the basis string here.
+        rollup = past_overspend_rollup(eligible, window_days=int(window_days))
+        usd = float(rollup.get("past_overspend_usd") or 0.0)
+
+        # The population comes off the REPORT's own window summary, which is
+        # the set the analyzers queried, not the set the ingest happened to
+        # load. `fallback_sessions` is a last resort for a report shape that
+        # carries no count; it is never preferred over the real one.
+        analyzed = int(getattr(getattr(report, "window", None), "sessions", 0) or 0)
     except Exception:
-        # A first run must never die on the analyzers. Worst case the callout
-        # is absent; the rest of the report is unaffected.
+        # A first run must never die on the analyzers. Worst case no sentence
+        # is rendered; the rest of the screen is unaffected.
         return None
 
-    def _build(proposal, **kwargs) -> PastOverspendCallout:
-        return PastOverspendCallout(
-            title=_strip_money_suffix(str(getattr(proposal, "title", "") or "")),
-            evidence=str(getattr(proposal, "evidence", "") or "").strip(),
-            advise_text=_usable_advice(getattr(proposal, "advise_text", "")),
-            caveat=str(getattr(proposal, "caveat", "") or "").strip(),
-            **kwargs,
-        )
-
-    # Defensibility ceiling. This render prints the window's own "implied API
-    # value" a few lines below the callout, so an avoidable figure LARGER than
-    # what the window cost in total is self-refuting on the same screen, no
-    # matter how the analyzer derived it. (It happens: some analyzers count a
-    # population wider than what quickstart ingested, e.g. a per-session tax
-    # summed over every transcript on disk while the transient DB holds the
-    # capped, most-recent subset.) Matrix rule: show the LARGEST number the
-    # derivation can legitimately support. A figure a reader can disprove by
-    # looking one line down is not one of them, so it is dropped rather than
-    # rescaled: rescaling would invent a number nothing measured.
-    window_cost = float(getattr(getattr(report, "window", None),
-                                "total_cost_usd", 0.0) or 0.0)
-
-    def _over_ceiling(p) -> bool:
-        usd = p.past_overspend_usd
-        return usd is not None and window_cost > 0.0 and usd > window_cost
-
-    eligible = [p for p in proposals if not _over_ceiling(p)]
-
-    priced = [
-        p for p in eligible
-        if p.past_overspend_usd is not None
-        and p.past_overspend_usd >= OVERSPEND_MIN_USD
-    ]
-    if priced:
-        best = max(priced, key=lambda p: p.past_overspend_usd or 0.0)
-        return _build(best, usd=best.past_overspend_usd,
-                      tokens=best.past_overspend_tokens)
-
-    # No figure clears the floor. Degrade to the token figure and say why,
-    # rather than print a number that reads as nothing.
-    tokened = [p for p in eligible if (p.past_overspend_tokens or 0) > 0]
-    if not tokened:
-        return None
-    best = max(tokened, key=lambda p: p.past_overspend_tokens or 0)
-    reason = (
-        "under $1 at API list rates over this window"
-        if best.past_overspend_usd is not None
-        else "this finding carries no priced figure"
-    )
-    return _build(best, tokens=best.past_overspend_tokens,
-                  tokens_only_reason=reason)
+    return AvoidableTotal(usd=max(usd, 0.0),
+                          sessions=analyzed or max(fallback_sessions, 0))
 
 
 # ───────────────────────────── rendering ──────────────────────────────────
@@ -436,10 +389,6 @@ def _pre_ingest_status(since: str, max_sessions: int | None) -> str:
     return f"Reading your {window} of Claude Code history{scope}…"
 
 
-def _pct(value: float) -> str:
-    return f"{value * 100:.1f}%"
-
-
 def _render_no_logs(root, output_json: bool) -> None:
     if output_json:
         click.echo(_json.dumps({"error": "no_claude_code_logs", "root": str(root)}))
@@ -465,208 +414,105 @@ def _render_no_sessions(result, since: str, output_json: bool) -> None:
     )
 
 
-def _render(diag, timeline, *, since: str,
-            limit_reached: bool = False, max_sessions: int | None = None,
-            root: Path | None = None,
-            overspend: PastOverspendCallout | None = None) -> None:
-    from rich.console import Group
-    from rich.panel import Panel
-    from rich.text import Text
-
-    # ── Lead: reads-your-local-logs + added-value framing. ──
-    console.print()
-    lead = Text()
-    lead.append("TokenJam reads your ", style="dim")
-    lead.append("~/.claude/projects/*.jsonl", style="bold")
-    lead.append(" session logs and shows you ", style="dim")
-    lead.append("where your quota actually goes", style="bold")
-    lead.append(".", style="dim")
-    console.print(lead)
-
-    # Honest disclosure when the first-run cap truncated the history (#13). This
-    # must read as scoping, NOT as "this is your whole history" — so we say so up
-    # front and point at the full-picture escape hatches.
-    if limit_reached and max_sessions is not None:
-        note = Text()
-        note.append("Showing your most-recent ", style="yellow")
-        note.append(f"{max_sessions} sessions", style="bold yellow")
-        note.append(" for a fast first run. Run ", style="yellow")
-        note.append("npx tokenjam onboard", style="bold")
-        note.append(", then ", style="yellow")
-        note.append("tj context", style="bold")
-        note.append(" for your full history.", style="yellow")
-        console.print(note)
-
-    # ── Quota composition (reuses the issue-#4 diagnostic engine). ──
-    sections: list = []
-    head = Text()
-    head.append("Quota composition", style="bold")
-    scope = "most-recent " if limit_reached else "last "
-    head.append(f"  ·  {diag.sessions} sessions, {diag.turns} turns "
-                f"({scope}{since if not limit_reached else f'{max_sessions}'})",
-                style="dim")
-    sections.append(head)
-    sections.append(Text(""))
-
-    # Quota-weighted, not raw tokens (#119): cache reads are discounted well
-    # below a base input token in both API pricing and Anthropic's subscription
-    # rate-limit weighting, so a raw token share overstates re-reading's actual
-    # quota cost. diag.quota_weighted_reread_share applies that discount (and
-    # output's premium) — see context_diagnostic.py's CACHE_READ_QUOTA_WEIGHT.
-    reread = Text()
-    reread.append(f"{_pct(diag.quota_weighted_reread_share)} ", style="bold red")
-    reread.append("of your quota went to ", style="")
-    reread.append("re-reading context", style="bold")
-    reread.append(" (history, CLAUDE.md, tool output)", style="dim")
-    sections.append(reread)
-
-    work = Text()
-    work.append(f"{_pct(diag.quota_weighted_work_share)} ", style="bold green")
-    work.append("went to ", style="")
-    work.append("net-new work", style="bold")
-    work.append(" (uncached input + output)", style="dim")
-    sections.append(work)
-
-    detail = Text()
-    detail.append("\nRe-read:   ", style="dim")
-    detail.append(f"{format_tokens(diag.total_reread_tokens)} tokens", style="bold")
-    detail.append("  (cache reads)", style="dim")
-    detail.append("\nNew work:  ", style="dim")
-    detail.append(f"{format_tokens(diag.total_work_tokens)} tokens", style="bold")
-    sections.append(detail)
-
-    # Aggregate only — never named past sessions (#119). A user has thousands
-    # of sessions and never returns to one closed days ago, so a per-session
-    # retrospective callout is unactionable noise; the only place a burn signal
-    # is actionable is the LIVE session, which the statusline already nudges.
-    if diag.compact_candidates:
-        sections.append(Text(""))
-        candidate_reread = sum(c.reread_tokens for c in diag.compact_candidates)
-        share_of_reread = (
-            candidate_reread / diag.total_reread_tokens
-            if diag.total_reread_tokens else 0.0
-        )
-        agg = Text()
-        agg.append(
-            f"{len(diag.compact_candidates)} of your {diag.sessions} sessions",
-            style="bold",
-        )
-        agg.append(" ran context-heavy enough to warrant a mid-session ")
-        agg.append("/compact", style="bold")
-        agg.append(f": {_pct(share_of_reread)} of this window's re-read tokens.",
-                    style="dim")
-        sections.append(agg)
-        sections.append(Text(
-            "The statusline flags this live, before a session ends; "
-            "a closed session can't be reclaimed.",
-            style="green",
-        ))
-
-    console.print(Panel(
-        Group(*sections),
-        title="[bold]Where your quota goes[/bold]",
-        title_align="left",
-        border_style="dim",
-        padding=(1, 2),
-    ))
-
-    # ── Statusline live preview (self-contained; omits silently if no
-    # candidate session ever crosses the nudge threshold). ──
-    _render_statusline_preview(timeline, root)
-
-    # ── Who this is for: BOTH telemetry ingest paths, in one line. Claude
-    # Code arrives out of band (these session logs, or the statusline / OTel);
-    # the MCP server is an SDK/API path, never the Claude Code one. ──
-    console.print()
-    both = Text()
-    both.append("TokenJam ingests both sides of your spend: ", style="dim")
-    both.append("Claude Code", style="bold")
-    both.append(" from these local session logs, and ", style="dim")
-    both.append("Anthropic SDK / API", style="bold")
-    both.append(" traffic from OTel spans or the tokenjam MCP server.", style="dim")
-    console.print(both)
-
-    # ── Past overspend: the largest single actionable finding. ──
-    _render_past_overspend(overspend)
-
-    summary = Text()
-    summary.append("Totals: ", style="dim")
-    summary.append(f"{timeline.total_sessions} sessions", style="bold")
-    summary.append(f" across {timeline.project_count} project"
-                   f"{'s' if timeline.project_count != 1 else ''}, ", style="dim")
-    summary.append(f"{format_tokens(timeline.total_tokens)} tokens", style="bold")
-    if timeline.total_cost_usd > 0:
-        summary.append(f"  ·  implied API value {format_cost(timeline.total_cost_usd)}",
-                       style="dim")
-    console.print(summary)
-
-    # ── Honesty caveat + opt-in "go deeper" pointer. ──
-    console.print(f"  [dim]{diag.caveat}[/dim]")
-    console.print()
-    deeper = Text()
-    deeper.append("Go deeper", style="bold")
-    deeper.append(": live capture, Lens (the local dashboard), and the "
-                  "zero-token statusline. No signup:", style="dim")
-    console.print(deeper)
-    console.print()
-    console.print(Text(f"  {_go_deeper_command()}", style="bold cyan"))
-    console.print()
+def _sessions_phrase(n: int) -> str:
+    """`"1 session"` / `"42 sessions"` — pluralised, never "1 sessions"."""
+    return f"{n} session" if n == 1 else f"{n} sessions"
 
 
-def _render_past_overspend(callout: PastOverspendCallout | None) -> None:
-    """The past-overspend callout: what already went to waste, and the fix.
+def _population_phrase(n: int) -> str:
+    """The finding sentence's population clause: `"your last 42 sessions"`.
 
-    Silent-degrades (prints nothing) when there is no qualifying finding, so a
-    corpus with nothing to report never sees a fabricated or `$0.00` figure.
+    Drops the count entirely at n == 1, because "your last 1 session" reads as
+    a bug even though it is arithmetically right.
     """
-    if callout is None:
-        return
+    return "your last session" if n == 1 else f"your last {n} sessions"
 
-    from rich.console import Group
-    from rich.panel import Panel
+
+def _avoidable_line(total: AvoidableTotal):
+    """The ONE finding sentence: avoidable dollars over the sessions analyzed.
+
+    Three states, three different sentences, and the caller never reaches this
+    function in the fourth (`None`, "not measured") — an unknown figure prints
+    nothing at all rather than an empty state, because "we have not computed it"
+    and "we computed it and found nothing" are different claims.
+
+    `total.sessions` is the population `total.usd` was summed over, carried on
+    the same object precisely so the two cannot drift apart.
+    """
     from rich.text import Text
 
-    headline = Text()
-    if callout.usd is not None:
-        headline.append(format_cost(callout.usd), style="bold red")
-    else:
-        headline.append(f"{format_tokens(callout.tokens or 0)} tokens",
-                        style="bold red")
-    headline.append(" of that was avoidable", style="")
-    if callout.title:
-        headline.append(f": {callout.title}", style="bold")
-    else:
-        headline.append(".", style="")
+    line = Text()
+    if total.usd <= 0:
+        # Known, and genuinely empty. Never a `$0.00` styled like a finding.
+        line.append(
+            f"No avoidable spend found in {_population_phrase(total.sessions)}.",
+            style="muted",
+        )
+        return line
+    line.append(format_cost(total.usd), style=f"bold {ACCENT}")
+    line.append(f" in {_population_phrase(total.sessions)} was avoidable.")
+    return line
 
-    body: list = [headline]
-    if callout.usd is None and callout.tokens_only_reason:
-        body.append(Text(f"No dollar figure: {callout.tokens_only_reason}.",
-                         style="dim"))
-    if callout.evidence:
-        body.append(Text(callout.evidence, style="dim"))
 
-    body.append(Text(""))
-    fix = Text()
-    fix.append("Fix: ", style="bold green")
-    fix.append(callout.advise_text)
-    body.append(fix)
-    if callout.caveat:
-        body.append(Text(""))
-        body.append(Text(callout.caveat, style="dim"))
+def _render(avoidable: AvoidableTotal | None, *,
+            fallback_sessions: int = 0) -> None:
+    """The whole first-run screen.
+
+    Deliberately three beats and nothing else: what tj read, one avoidable
+    sentence, and the pointer to `tj onboard`. No panels, no borders, no
+    per-analyzer detail, no quota composition, no statusline preview. See the
+    module docstring — the shape is a founder decision, not an accident of
+    what was easy to render.
+
+    ONE session count appears on this screen, and it is the population the
+    figure was summed over. The scoping line and the finding sentence quote the
+    same number by construction, because two counts on one screen invite a
+    reader to pair the money with the wrong one.
+
+    Colour discipline: everything is `muted` except the dollar figure and the
+    typeable command, which carry the single accent. Nothing here is red,
+    green, yellow or cyan; there is no genuine state on this screen for a
+    state colour to mean.
+    """
+    from rich.text import Text
 
     console.print()
-    console.print(Panel(
-        Group(*body),
-        title="[bold]What that already cost you[/bold]",
-        title_align="left",
-        border_style="dim",
-        padding=(1, 2),
+    console.print(Text(
+        "TokenJam reads your ~/.claude/projects/*.jsonl session logs.",
+        style="muted",
     ))
+
+    # Scope, stated before the figure. "most-recent" is the honest word whether
+    # or not the first-run cap bit: this is a recent slice of a history that
+    # keeps going, which is what the `tj onboard` pointer below is for. The
+    # pre-ingest status line already names the cap itself.
+    scoped = avoidable.sessions if avoidable is not None else max(fallback_sessions, 0)
+    console.print(Text(
+        f"Showing your most-recent {_sessions_phrase(scoped)}.", style="muted"))
+
+    if avoidable is not None:
+        console.print()
+        console.print(_avoidable_line(avoidable))
+
+    command = _go_deeper_command()
+    console.print()
+    full_history = Text()
+    full_history.append("Run ", style="muted")
+    full_history.append(command, style=ACCENT)
+    full_history.append(" to capture your full history.", style="muted")
+    console.print(full_history)
+    console.print(Text(
+        "Then open Lens, the local dashboard, to see your total avoidable "
+        "over the past 30 days and apply the fixes.",
+        style="muted",
+    ))
+    console.print()
+    console.print(Text(f"  {command}", style=ACCENT))
     console.print()
 
 
 def _go_deeper_command() -> str:
-    """The "go deeper" footer CTA, context-aware about how quickstart was reached.
+    """The onboard CTA, context-aware about how quickstart was reached.
 
     Bare ``npx tokenjam`` / ``uvx --from tokenjam tj`` runs quickstart from a
     throwaway uvx/pipx-run cache (no persistent install), so the CTA is the
@@ -678,162 +524,3 @@ def _go_deeper_command() -> str:
     from tokenjam.cli.cmd_onboard import _is_ephemeral_runner
 
     return "npx tokenjam onboard" if _is_ephemeral_runner() else "tj onboard"
-
-
-# ─────────────────────── statusline live preview ───────────────────────────
-#
-# `tj quickstart` is a read-only, one-shot report; `tj statusline` is the live
-# product it upsells (a zero-token Claude Code statusline, updated every turn).
-# This section renders — using the SAME `format_status_line` formatter the
-# live statusline calls — the line the user's own most-recent substantial
-# session would have shown at the exact turn its re-read share crossed the
-# nudge threshold. Forward-looking framing only: it previews the LIVE
-# experience, it is not advice about the (already-ended) session shown.
-
-
-def _display_model_name(raw: str | None) -> str:
-    """Best-effort human display name for a raw transcript `model` id.
-
-    The live statusline gets a ready-made `display_name` from Claude Code's
-    hook payload (see `cmd_statusline._model_name`); this preview only has the
-    raw JSONL `message.model` string (e.g. `claude-opus-4-8-20260115`), so it
-    reconstructs the same "Family X.Y" shape. Falls back to the raw string for
-    shapes it doesn't recognize (e.g. `<synthetic>`).
-    """
-    if not raw:
-        return "?"
-    stripped = _re.sub(r"-\d{8}$", "", raw)  # trailing -YYYYMMDD build stamp
-    m = _re.match(r"^claude-([a-z]+)-([\d-]+)$", stripped)
-    if m:
-        family, version = m.groups()
-        return f"{family.capitalize()} {version.replace('-', '.')}"
-    m = _re.match(r"^claude-([a-z]+)$", stripped)
-    if m:
-        return m.group(1).capitalize()
-    if _re.match(r"^[a-z]+$", stripped):
-        return stripped.capitalize()
-    return raw
-
-
-def _transcript_path_for(session_id: str, root: Path) -> str | None:
-    """Resolve a session id to its on-disk transcript path under `root`.
-
-    Same glob shape as the live statusline's `find_transcript` fallback, but
-    honors quickstart's own `--root` override instead of hardcoding
-    `~/.claude/projects` — quickstart already ingested from `root`, so the
-    preview must look in the same place.
-    """
-    pattern = str(root / "**" / f"{session_id}.jsonl")
-    hits = _glob.glob(pattern, recursive=True)
-    return hits[0] if hits else None
-
-
-class _PreviewCandidate:
-    """One timeline session's preview-selection scoring (see `_select_preview_session`)."""
-
-    __slots__ = ("session", "turns", "crossing")
-
-    def __init__(self, session: TimelineSession, turns: int,
-                 crossing: tuple[int, str | None, AssistantUsage] | None) -> None:
-        self.session = session
-        self.turns = turns
-        self.crossing = crossing
-
-
-def _walk_for_preview(path: str) -> tuple[int, tuple[int, str | None, AssistantUsage] | None]:
-    """Walk one transcript once: return `(total_turns, first_threshold_crossing)`.
-
-    `first_threshold_crossing` is `(turn_index, model, cumulative_usage)` for
-    the first turn whose cumulative re-read %% reaches the live statusline's
-    nudge threshold (`REREAD_WARN`), or None if the session never crosses it.
-    Reuses `core.usage.iter_cumulative_usage` — the exact cumulative walk the
-    live statusline's own numbers are built from — so this can't show a figure
-    the real statusline wouldn't have shown at that point. Never raises: an
-    unreadable transcript degrades to "no candidate" (0, None).
-    """
-    turns = 0
-    crossing: tuple[int, str | None, AssistantUsage] | None = None
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for turn_index, model, usage in iter_cumulative_usage(fh):
-                turns = turn_index
-                if crossing is None:
-                    total = usage.total
-                    reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
-                    if reread_pct >= REREAD_WARN:
-                        crossing = (turn_index, model, usage)
-    except Exception:
-        return 0, None
-    return turns, crossing
-
-
-def _select_preview_session(
-    timeline: SessionTimeline, root: Path,
-) -> _PreviewCandidate | None:
-    """Pick the session to preview: the most-recent substantial session that
-    crossed the nudge threshold; if none is substantial enough, the largest
-    (by turns) that still crossed it; if none ever crossed it, None.
-    """
-    candidates: list[_PreviewCandidate] = []
-    for session in timeline.sessions:  # already most-recent-first
-        path = _transcript_path_for(session.session_id, root)
-        if not path:
-            continue
-        turns, crossing = _walk_for_preview(path)
-        if crossing is None:
-            continue
-        candidate = _PreviewCandidate(session, turns, crossing)
-        if turns >= PREVIEW_MIN_TURNS:
-            # Sessions are walked most-recent-first, so the first substantial
-            # crossing candidate IS the winner — stop here rather than
-            # re-reading the rest of a possibly-large (up to `--full`) history.
-            # The largest-by-turns fallback below only matters when NO
-            # candidate is substantial, a case this early return never hides.
-            return candidate
-        candidates.append(candidate)
-
-    if not candidates:
-        return None
-    return max(candidates, key=lambda c: c.turns)
-
-
-def _render_statusline_preview(
-    timeline: SessionTimeline, root: Path | None,
-) -> _PreviewCandidate | None:
-    """"What you'd see live" preview section — self-contained; prints nothing
-    when there is no session to preview (no history, no readable transcript,
-    or no session ever crossed the nudge threshold).
-
-    Returns the selected ``_PreviewCandidate`` (or ``None``) so a caller can
-    tell whether anything was previewed without re-walking transcripts."""
-    if root is None or not timeline.sessions:
-        return None
-
-    from rich.text import Text
-
-    picked = _select_preview_session(timeline, root)
-    if picked is None:
-        return None
-    assert picked.crossing is not None  # invariant: only crossing candidates are ever selected
-
-    turn_index, model_raw, usage = picked.crossing
-    total = usage.total
-    reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
-    line = format_status_line(_display_model_name(model_raw), total, reread_pct)
-
-    console.print()
-    intro = Text()
-    intro.append("With the statusline installed, ", style="dim")
-    intro.append(f"session {picked.session.session_id[:12]}", style="bold")
-    intro.append(f" would have shown this at turn {turn_index}:", style="dim")
-    console.print(intro)
-    console.print()
-    console.print(Text(f"  {line}", style="bold"))
-    console.print()
-    outro = Text()
-    outro.append("That's live, every turn, for zero model tokens. ", style="dim")
-    outro.append("tj onboard", style="bold cyan")
-    outro.append(" sets it up.", style="dim")
-    console.print(outro)
-    console.print()
-    return picked
