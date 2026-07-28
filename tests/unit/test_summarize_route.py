@@ -94,7 +94,7 @@ def test_the_quality_tax_is_stated_and_only_tokens_are_claimed():
 def test_a_rule_that_already_declares_paths_is_not_told_to_path_scope_itself():
     scoped = '---\npaths:\n  - "src/**/*.ts"\n---\n\n' + RULE_HEAVY
 
-    assert load_semantics.is_path_scoped(scoped) is True
+    assert load_semantics.has_paths_scope(scoped) is True
     advice = route.recommend_route(text=scoped, load_class=load_semantics.ALWAYS)
 
     assert advice.already_path_scoped is True
@@ -104,8 +104,8 @@ def test_a_rule_that_already_declares_paths_is_not_told_to_path_scope_itself():
 
 
 def test_paths_named_only_in_the_body_is_not_frontmatter():
-    assert load_semantics.is_path_scoped("# Rules\n\npaths: are discussed below\n") is False
-    assert load_semantics.is_path_scoped(RULE_HEAVY) is False
+    assert load_semantics.has_paths_scope("# Rules\n\npaths: are discussed below\n") is False
+    assert load_semantics.has_paths_scope(RULE_HEAVY) is False
 
 
 def test_an_on_demand_file_keeps_compression_and_says_the_target_is_ours():

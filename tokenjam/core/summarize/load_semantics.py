@@ -173,28 +173,6 @@ def invocation_key(path: str, load_class: str | None = None) -> str:
     return p.stem
 
 
-#: A `paths:` key at the top level of a rule's YAML frontmatter. Matched
-#: line-anchored inside the frontmatter block only, so a `paths:` mentioned in
-#: the body prose is not mistaken for the real field.
-_PATHS_FRONTMATTER_RE = re.compile(r"^paths[ \t]*:", re.MULTILINE)
-
-
-def is_path_scoped(text: str) -> bool:
-    """True if this file already declares `paths:` frontmatter.
-
-    A rule with `paths:` loads only when the model touches a matching file, so
-    it is NOT unconditionally resident — and advising its owner to "use
-    path-scoped rules" would be telling them to do the thing they have already
-    done. Used for ADVICE only; it deliberately does not change how the file is
-    priced, which would be a separate claim needing its own evidence.
-    """
-    body = text or ""
-    match = _FRONTMATTER_RE.match(body)
-    if match is None:
-        return False
-    return bool(_PATHS_FRONTMATTER_RE.search(body[: match.end()]))
-
-
 def split_always_resident(text: str, load_class: str) -> tuple[str, str]:
     """Split ``text`` into ``(always_resident, on_demand)`` for its load class.
 

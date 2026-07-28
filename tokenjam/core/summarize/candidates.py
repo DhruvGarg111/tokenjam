@@ -278,7 +278,7 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
     # two halves of the real text rather than apportioned by a ratio: only the
     # always-resident half is worth (sessions x calls), the on-demand half is
     # worth (invocations). See core/summarize/load_semantics.
-    load_class = load_semantics.classify(str(path))
+    load_class = load_semantics.classify(str(path), text)
     resident_text, on_demand_text = load_semantics.split_always_resident(text, load_class)
     # Why this file is long, and therefore which route to a smaller one it
     # wants. Compression is only one of four, and the only one that costs

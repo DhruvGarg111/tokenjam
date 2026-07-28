@@ -368,7 +368,7 @@ def prepare(
             lines_before=lines.total_lines,
         )
     wrapped, _saved, _order, plan = wrap.protect(content, hide_if_chars)
-    load_class = load_semantics.classify(path)
+    load_class = load_semantics.classify(path, content)
     ratio_target = max(8, int(ratio * n_prose))
     line_budget = line_target_prose_words(
         text=content, load_class=load_class, prose_words=n_prose,

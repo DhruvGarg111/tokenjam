@@ -242,7 +242,7 @@ def recommend_route(*, text: str, load_class: str) -> RouteAdvice:
         return RouteAdvice(route=ROUTE_NOT_INSTRUCTION, advice=_NOT_INSTRUCTION)
 
     shape = prose_shape(text)
-    scoped = load_semantics.is_path_scoped(text)
+    scoped = load_semantics.has_paths_scope(text)
     head = _TARGET_STATEMENT.format(
         lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
         memory=MEMORY_SOURCE,
