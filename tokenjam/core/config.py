@@ -84,7 +84,17 @@ class DefaultsConfig:
 @dataclass
 class StorageConfig:
     path:           str = "~/.tj/telemetry.duckdb"
-    retention_days: int = 90
+    # THE user-chosen analysis span — "30d" / "90d" / "all" — written by
+    # `tj onboard`. Retention is derived from it, never chosen independently,
+    # so deletion cannot remove history the product is offering to analyze. See
+    # `core/analysis_span.py` for the derivation and the one-directional clamp;
+    # read the span through that module, never off this field, so the
+    # back-compat path below is applied everywhere.
+    analysis_span:  str | None = None
+    # None means "derive from analysis_span". A config that sets this and
+    # nothing else — every config written before the coupling existed — has its
+    # value read AS the span, so nothing about that setup changes.
+    retention_days: int | None = None
     # Runtime provenance, never read from or written to TOML: True when `path`
     # came from an explicit `--db` rather than config discovery. The
     # filesystem-reading analyzers scope themselves off it (see
@@ -679,7 +689,12 @@ def _parse(raw: dict) -> TjConfig:
     storage_raw = raw.get("storage", {})
     storage = StorageConfig(
         path=storage_raw.get("path", StorageConfig.path),
-        retention_days=storage_raw.get("retention_days", StorageConfig.retention_days),
+        # Absence is meaningful for both of these and must survive the load:
+        # `analysis_span` absent + `retention_days` present is the pre-coupling
+        # config whose kept history IS its span. Defaulting either one here
+        # would erase that distinction.
+        analysis_span=storage_raw.get("analysis_span"),
+        retention_days=storage_raw.get("retention_days"),
     )
 
     export_raw = raw.get("export", {})

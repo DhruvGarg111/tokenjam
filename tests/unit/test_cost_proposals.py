@@ -186,7 +186,7 @@ def test_relearn_recompute_preserves_cost_window_and_excluded(tmp_path):
     """A relearn detector recompute must not silently forget a non-default
     cost window or the excluded block a prior cost-proposals recompute wrote.
 
-    Both routes fall back to the same `DEFAULT_COST_WINDOW_DAYS` today, so a
+    Both routes fall back to the same `FALLBACK_COST_WINDOW_DAYS` today, so a
     dropped `cost_window_days` was invisible on live data -- but the moment a
     caller stores a non-default window, `write_cache` (the relearn job's own
     write into the shared cache file) must round-trip it rather than reset
