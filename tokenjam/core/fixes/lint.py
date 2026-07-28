@@ -23,6 +23,7 @@ names the shapes it must not excuse, and this checks the text against them.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from tokenjam.core.fixes.catalog import FIX_CATALOG, FixRecord
 
@@ -219,6 +220,124 @@ def lint_duplicates() -> dict[str, list[str]]:
     return out
 
 
+#: Two SENTENCES this similar, in one artifact, are one instruction written
+#: twice. Deliberately the same threshold as the record-level check: the
+#: question is identical, only the unit of comparison changes.
+COMPOSED_SENTENCE_OVERLAP = 0.6
+
+#: Below this a sentence carries too little to compare. A short clause shares
+#: most of its handful of content words with anything in the same domain, so
+#: comparing it produces noise rather than findings — and a false positive here
+#: teaches the next author to reach for an exception instead of fixing the text.
+MIN_COMPARABLE_WORDS = 5
+
+#: Verbs that make a sentence an INSTRUCTION rather than an explanation. Only
+#: instruction sentences are compared: two records may freely restate the same
+#: REASON (the cost mechanism, the caveat) — that is context, and it is what
+#: makes each record readable alone. What must never appear twice is the thing
+#: the user is being asked to do.
+_DIRECTIVE = re.compile(
+    r"\b(?:pin|set|add|use|prefer|route|offload|delegate|dispatch|create|"
+    r"define|write|run|replace|trim|adopt|read|right-size|default|check|"
+    r"issue|pass|include|reserve|template|consider|block|point)\b",
+    re.IGNORECASE,
+)
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n{2,}")
+
+
+def _sentences(text: str) -> list[str]:
+    return [s.strip() for s in _SENTENCE_SPLIT.split(text or "") if s.strip()]
+
+
+def _is_instruction(sentence: str) -> bool:
+    return bool(_DIRECTIVE.search(sentence))
+
+
+def lint_composed_text(artifact: str, parts: Sequence[tuple[str, str]]) -> list[str]:
+    """Instructions that appear twice once ``parts`` are composed into one block.
+
+    THE check :func:`lint_duplicates` structurally cannot make. That one is
+    PAIRWISE OVER WHOLE RECORDS, so it can only see redundancy that exists
+    between two records taken entire — and this defect class does not have that
+    shape. It already shipped in the smaller form: consolidating three duplicate
+    wordings folded a model-pinning sentence into the offload rule, and the
+    compound card renders offload and right-sizing back to back, so the pinning
+    instruction appeared twice inside one written block. Whole-record
+    containment scored the pair at 42%, under threshold, because each record was
+    only PARTLY redundant. It was found by rendering the artifact and reading
+    it, which is not a check.
+
+    Comparing at sentence level asks the question the reader actually asks: is
+    any single thing I am being told to do stated here more than once? Only
+    sentences carrying a directive are compared — two records restating the same
+    REASON is fine and often necessary, since each has to read sensibly alone.
+
+    ``parts`` is ``(label, text)`` per composed piece; labels appear in the
+    violation so the author knows which two to collapse. Comparison is ACROSS
+    parts only: repetition inside one record is that record's own problem and
+    :func:`lint_fix` owns it.
+    """
+    problems: list[str] = []
+    indexed = [
+        (label, sentence)
+        for label, text in parts
+        for sentence in _sentences(text)
+        if _is_instruction(sentence)
+        and len(_content_words(sentence)) >= MIN_COMPARABLE_WORDS
+    ]
+    for i, (left_label, left) in enumerate(indexed):
+        for right_label, right in indexed[i + 1:]:
+            if left_label == right_label:
+                continue
+            score = _overlap(left, right)
+            if score < COMPOSED_SENTENCE_OVERLAP:
+                continue
+            problems.append(
+                f"{artifact!r} states one instruction twice ({score:.0%} "
+                f"containment): {left_label} says {left!r} and {right_label} "
+                f"says {right!r}. A user reading the composed block is told the "
+                "same thing in two places, and length plus redundancy REDUCE "
+                "adherence — so give the instruction one owner and let the "
+                "other record stop at its own job.",
+            )
+    return problems
+
+
+def composable_groups() -> dict[str, tuple[FixRecord, ...]]:
+    """Record sets the product can compose into ONE artifact.
+
+    Derived rather than hand-listed, so a record added tomorrow is covered
+    without anyone remembering to extend a list — the hand-listed version is
+    how the pairwise check came to have a blind spot in the first place.
+
+    Two records can land in the same written block when they share a delivery
+    kind (they go in the same KIND of file), a persona (the same user is shown
+    both) and an analyzer (the same finding hands both out). That is exactly the
+    "per delivery kind, per analyzer, per destination" surface.
+    """
+    groups: dict[str, list[FixRecord]] = {}
+    for record in sorted(FIX_CATALOG.values(), key=lambda r: r.key):
+        for analyzer in sorted(record.analyzers):
+            for persona in sorted(record.personas):
+                groups.setdefault(
+                    f"{analyzer}/{persona}/{record.delivery}", [],
+                ).append(record)
+    return {k: tuple(v) for k, v in groups.items() if len(v) > 1}
+
+
+def lint_composed() -> dict[str, list[str]]:
+    """Every composable artifact's duplicated instructions, keyed by artifact."""
+    out: dict[str, list[str]] = {}
+    for name, records in composable_groups().items():
+        problems = lint_composed_text(
+            name, [(r.key, r.text) for r in records],
+        )
+        if problems:
+            out[name] = problems
+    return out
+
+
 def lint_catalog() -> dict[str, list[str]]:
     """Every catalogued fix's violations, keyed by fix key. Empty dict = clean.
 
@@ -232,14 +351,24 @@ def lint_catalog() -> dict[str, list[str]]:
             out[key] = problems
     for key, problems in lint_duplicates().items():
         out.setdefault(key, []).extend(problems)
+    # Kept alongside the pairwise check rather than replacing it: the pairwise
+    # one is cheap and catches the simpler shape (two records that are wholly
+    # one instruction), while this catches the shape it cannot see.
+    for name, problems in lint_composed().items():
+        out.setdefault(f"composed:{name}", []).extend(problems)
     return out
 
 
 __all__ = [
+    "COMPOSED_SENTENCE_OVERLAP",
     "MAX_FIX_LINES",
+    "MIN_COMPARABLE_WORDS",
     "MIN_FIX_CHARS",
     "NEAR_DUPLICATE_OVERLAP",
+    "composable_groups",
     "lint_catalog",
+    "lint_composed",
+    "lint_composed_text",
     "lint_duplicates",
     "lint_fix",
 ]
