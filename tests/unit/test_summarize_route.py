@@ -156,3 +156,40 @@ def test_shape_ignores_protected_structure():
 
     assert with_code.directive_units == bare.directive_units
     assert with_code.prose_words == bare.prose_words
+
+
+def test_an_append_only_dated_log_wants_expiry_not_compression():
+    """A `learnings.md` is long because entries accumulated over time. Its own
+    stated remedy is expiry — promote what proved durable, delete what went
+    stale — and compressing it rewrites history while keeping every stale entry."""
+    log = "\n\n".join(
+        f"## 2026-0{i % 9 + 1}-14 — something we learned\n\nA paragraph about what "
+        f"happened and what it implied for the next session, number {i}."
+        for i in range(12))
+
+    advice = route.recommend_route(text=log, load_class=load_semantics.ALWAYS)
+
+    assert advice.route == route.ROUTE_EXPIRE
+    assert "append-only LOG" in advice.advice
+    assert "promote what proved durable and delete what went stale" in advice.advice \
+        or "promote\nwhat proved durable" in advice.advice or "expiry" in advice.advice
+    assert "close to useless here" in advice.advice
+
+
+def test_expiry_is_decided_before_the_directive_share_can_mislabel_it():
+    """A dated log is a log whether its entries are bullets or paragraphs, so
+    the directive share cannot answer this one."""
+    bulleted_log = "\n\n".join(
+        f"- 2026-07-{i + 10} learned something specific about the deploy path today"
+        for i in range(12))
+
+    shape = detect.prose_shape(bulleted_log)
+    assert shape.directive_share > 0.6                 # would read as rule-heavy
+    advice = route.recommend_route(text=bulleted_log, load_class=load_semantics.ALWAYS)
+    assert advice.route == route.ROUTE_EXPIRE          # ...but it is a log
+
+
+def test_an_instruction_file_with_no_dates_is_never_called_a_log():
+    advice = route.recommend_route(text=RULE_HEAVY, load_class=load_semantics.ALWAYS)
+    assert advice.route == route.ROUTE_PRUNE
+    assert detect.prose_shape(RULE_HEAVY).dated_units == 0

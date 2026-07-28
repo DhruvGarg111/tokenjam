@@ -912,18 +912,30 @@ def test_nested_roots_stack_but_parallel_checkouts_collapse(db, monkeypatch):
     assert f.duplicate_copies_collapsed == 1
 
 
-def test_basis_calls_the_target_ratio_an_ask_not_a_measurement(db, monkeypatch):
-    """Critical Rule 14: nothing enforces the target the rewriter is asked for —
-    there is no retry and no gate on hitting it — so with no verified sample the
-    basis must say the reduction is an upper bound, not an expectation."""
+def test_basis_says_the_unmeasured_figure_uses_a_prior_from_other_machines(db, monkeypatch):
+    """Critical Rule 14 + 30(c). With no verified sample here, the figure rests
+    on tokenjam's own measurement of OTHER people's files, so the basis must say
+    that, disclose the sample size and spread, and say plainly that it is not
+    the target the rewriter is asked for. (Inverted from an earlier version that
+    asserted the basis called the number a TARGET — estimating at the ask was
+    the defect, and the guard now defends the corrected state.)"""
     from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.estimate import (
+        UNMEASURED_PRIOR_RANGE,
+        UNMEASURED_PRIOR_SAMPLES,
+    )
     from tokenjam.core.summarize.invocations import InvocationCounts
 
     basis = _estimate_basis(InvocationCounts(observed=True))
 
-    assert "TARGET" in basis
-    assert "NOT a measured outcome" in basis
-    assert "upper bound" in basis
+    assert "No verified rewrite exists on THIS machine yet" in basis
+    assert "not your files" in basis or "not yours" in basis or "were not your files" in basis
+    assert f"{UNMEASURED_PRIOR_SAMPLES:,} rewrites" in basis      # sample size
+    assert f"{UNMEASURED_PRIOR_RANGE[0]:.0%}" in basis            # ...and spread
+    assert f"{UNMEASURED_PRIOR_RANGE[1]:.0%}" in basis
+    assert "deliberately NOT the 50% target" in basis
+    assert "overstated this figure by roughly an order of magnitude" in basis
+    assert "tj summarize calibrate" in basis
     assert "Symlinked files are excluded" in basis
 
 

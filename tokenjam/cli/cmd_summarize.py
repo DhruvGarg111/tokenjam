@@ -31,7 +31,13 @@ from tokenjam.core.summarize.calibrate import (
 )
 from tokenjam.core.summarize.candidates import list_candidates
 from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
-from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
+from tokenjam.core.summarize.estimate import (
+    DEFAULT_TARGET_RATIO,
+    UNMEASURED_PRIOR_RANGE,
+    UNMEASURED_PRIOR_RATIO,
+    UNMEASURED_PRIOR_SAMPLES,
+    observed_prose_ratio,
+)
 from tokenjam.core.summarize.session import CheckVerdict, SummarizeRefused, check, prepare
 from tokenjam.utils.formatting import console, format_tokens
 
@@ -50,7 +56,7 @@ def _print_verdict(verdict: CheckVerdict) -> None:
     never surfaced to the user here.)"""
     if verdict.structure_ok:
         console.print(f"[green]✓[/green] {escape(verdict.path)} — structure preserved, "
-                      f"~{format_tokens(verdict.est_tokens_saved)} prompt tok/call "
+                      f"~{format_tokens(verdict.est_tokens_saved or 0)} prompt tok/call "
                       f"({verdict.words_before}→{verdict.words_after} words)")
     else:
         console.print(f"[red]✗[/red] {escape(verdict.path)} — {escape(verdict.reason)} (not staged)")
@@ -128,14 +134,33 @@ def cmd_summarize_list(
     kwargs: dict = {}
     if min_prose is not None:
         kwargs["min_prose_words"] = min_prose
+    # Forecast on what rewrites have ACTUALLY delivered here when that is known,
+    # and on the measured prior otherwise — never on the target the rewriter is
+    # merely asked for. `list` forecasting at the ask is what let a file
+    # advertised at 286 tokens deliver 81.
+    measured_ratio, ratio_samples = observed_prose_ratio(config)
     result = list_candidates(
         path, config=config, recursive=recursive, repo=repo,
-        include_global=not no_global, extra_exts=extra_exts, **kwargs,
+        include_global=not no_global, extra_exts=extra_exts,
+        ratio=measured_ratio if measured_ratio is not None else UNMEASURED_PRIOR_RATIO,
+        **kwargs,
+    )
+    ratio_note = (
+        f"Reduction assumes prose compresses to {(measured_ratio or 0) * 100:.0f}% "
+        f"of its words, measured across {ratio_samples:,} verified rewrite(s) here."
+        if measured_ratio is not None else
+        f"Reduction assumes prose compresses to {UNMEASURED_PRIOR_RATIO * 100:.0f}% of "
+        f"its words — tokenjam's measurement on other machines, not yours "
+        f"({UNMEASURED_PRIOR_SAMPLES:,} rewrites spanning "
+        f"{UNMEASURED_PRIOR_RANGE[0]:.0%}-{UNMEASURED_PRIOR_RANGE[1]:.0%}). "
+        f"Run `tj summarize calibrate --via claude-p --go` to measure your own."
     )
 
     if output_json:
         payload = result.to_dict()
         payload["note"] = result.note or CANDIDATE_NOTE
+        payload["ratio_basis"] = ratio_note
+        payload["prose_ratio_observed"] = measured_ratio is not None
         click.echo(json.dumps(payload, indent=2))
         return
 
@@ -188,6 +213,7 @@ def cmd_summarize_list(
         console.print(t)
     console.print()
     console.print(f"[dim]{escape(CANDIDATE_NOTE)}[/dim]")
+    console.print(f"[dim]{escape(ratio_note)}[/dim]")
 
 
 @cmd_summarize.command("prep")

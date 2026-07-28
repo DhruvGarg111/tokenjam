@@ -83,6 +83,11 @@ SPECIFICITY_QUOTE = (
 ROUTE_COMPRESS = "compress"
 ROUTE_PRUNE = "prune"
 ROUTE_MIXED = "mixed"
+#: An append-only dated log (a `learnings.md`, a dated changelog). Long because
+#: entries ACCUMULATED over time, and the remedy is expiry: promote what proved
+#: durable, delete what went stale. Compressing a log rewrites history and still
+#: keeps every stale entry, so it is close to useless here.
+ROUTE_EXPIRE = "expire"
 #: Diagnosis withheld — too little prose to read a shape from. Never guessed.
 ROUTE_UNDIAGNOSED = "undiagnosed"
 #: Not an always-resident instruction file, so the instruction-file argument
@@ -97,6 +102,10 @@ _PROSE_HEAVY_SHARE = 0.30
 #: Below this many prose units there is no shape to read, so no diagnosis is
 #: offered. Guessing here would put a confident wrong recommendation on a card.
 _MIN_UNITS_FOR_DIAGNOSIS = 8
+#: Share of units opening with a date, above which the file reads as an
+#: append-only log rather than an instruction set. Entries are dated headings
+#: and their bodies are not, so this is deliberately well below half.
+_DATED_LOG_SHARE = 0.15
 
 _QUALITY_TAX = (
     "Compression is the only one of these routes that trades adherence for "
@@ -137,6 +146,14 @@ _SHAPE_MIXED = (
     "This file's prose is mixed: {directive_units:,} discrete directives hold "
     "{share:.0f}% of its words and {paragraph_units:,} running paragraphs hold "
     "the rest. Compress the explanation, prune or scope the rules. "
+)
+_SHAPE_EXPIRE = (
+    "{dated:,} of this file's {units:,} prose units open with a date, so it "
+    "reads as an append-only LOG rather than an instruction set. A log is long "
+    "because entries accumulated over time, and its remedy is expiry: promote "
+    "what proved durable into the instructions and delete what went stale. "
+    "Compressing it rewrites the history and still keeps every stale entry, so "
+    "it is close to useless here. "
 )
 _SHAPE_UNDIAGNOSED = (
     "This file has too little prose ({units:,} unit(s)) to tell accumulated "
@@ -241,6 +258,13 @@ def recommend_route(*, text: str, load_class: str) -> RouteAdvice:
     if shape.units < _MIN_UNITS_FOR_DIAGNOSIS or shape.prose_words <= 0:
         return _advice(
             ROUTE_UNDIAGNOSED, _SHAPE_UNDIAGNOSED.format(units=shape.units))
+
+    # Expiry is checked FIRST: a dated log is a log whether its entries happen
+    # to be written as bullets or as paragraphs, so the directive share cannot
+    # answer this one and would mislabel it either way.
+    if shape.dated_share >= _DATED_LOG_SHARE:
+        return _advice(ROUTE_EXPIRE, _SHAPE_EXPIRE.format(
+            dated=shape.dated_units, units=shape.units) + _SHAPE_DISCLAIMER)
 
     share = shape.directive_share
     if share >= _RULE_HEAVY_SHARE:

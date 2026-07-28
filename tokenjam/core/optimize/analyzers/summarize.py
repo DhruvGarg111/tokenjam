@@ -113,11 +113,14 @@ from tokenjam.core.summarize.estimate import (
     PUBLISHED_LINE_TARGET,
     PUBLISHED_LINE_TARGET_QUOTE,
     PUBLISHED_LINE_TARGET_SOURCE,
+    UNMEASURED_PRIOR_RANGE,
+    UNMEASURED_PRIOR_RATIO,
+    UNMEASURED_PRIOR_SAMPLES,
     gate_failed_attempts,
     observed_prose_ratio,
 )
-from tokenjam.core.summarize.route import BEST_PRACTICES_SOURCE, PRUNE_TEST_QUOTE
 from tokenjam.core.summarize.invocations import InvocationCounts
+from tokenjam.core.summarize.route import BEST_PRACTICES_SOURCE, PRUNE_TEST_QUOTE
 from tokenjam.core.summarize.repo_roots import ResolvedRoots, resolve_roots
 
 logger = logging.getLogger(__name__)
@@ -170,14 +173,18 @@ SUMMARIZE_ESTIMATE_BASIS = (
 #: whether any rewrite has actually been verified on this machine.
 _RATIO_TARGET = (
     "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
-    "a saving offered on one could never be realized. The per-file reduction "
-    "assumes prose compresses to {pct:.0f}% of its words, which is the TARGET the "
-    "rewriter is asked for — NOT a measured outcome. Nothing enforces it: there "
-    "is no retry and no gate on hitting the target. No verified rewrite sample "
-    "exists here yet ({samples:,} usable so far, {needed:,} needed), so this "
-    "figure is an upper bound on the reduction half and should be read as one. "
-    "Run `tj summarize calibrate --via claude-p --go` to measure what a rewrite "
-    "actually delivers on your files; it replaces this target automatically."
+    "a saving offered on one could never be realized. No verified rewrite exists "
+    "on THIS machine yet ({samples:,} usable so far, {needed:,} needed), so the "
+    "per-file reduction assumes prose compresses to {pct:.0f}% of its words — "
+    "which is tokenjam's own measurement across {prior_n:,} rewrites of real "
+    "instruction files on other machines, achieved ratios spanning {lo:.0%} to "
+    "{hi:.0%}. That spread is wide and those were not your files, so treat it as "
+    "a prior rather than a property of your corpus. It is deliberately NOT the "
+    "{target:.0%} target the rewriter is asked for: nothing enforces that target "
+    "(there is no retry and no gate on hitting it) and measured rewrites came "
+    "nowhere near it, so estimating at the ask overstated this figure by roughly "
+    "an order of magnitude. Run `tj summarize calibrate --via claude-p --go` to "
+    "replace the prior with what rewrites actually deliver on your own files."
 )
 _RATIO_OBSERVED = (
     "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
@@ -245,6 +252,8 @@ def _ratio_basis(ratio: float, observed: bool, samples: int, gate_failures: int 
     else:
         head = _RATIO_TARGET.format(
             pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+            prior_n=UNMEASURED_PRIOR_SAMPLES, lo=UNMEASURED_PRIOR_RANGE[0],
+            hi=UNMEASURED_PRIOR_RANGE[1], target=DEFAULT_TARGET_RATIO,
         )
     if gate_failures > 0:
         head += _RATIO_GATE_FAILURES.format(failures=gate_failures)
@@ -326,7 +335,7 @@ def _estimate_basis(
     invocations: "InvocationCounts | None",
     roots: "ResolvedRoots | None" = None,
     roots_scanned: int = 0,
-    ratio: float = DEFAULT_TARGET_RATIO,
+    ratio: float = UNMEASURED_PRIOR_RATIO,
     ratio_observed: bool = False,
     ratio_samples: int = 0,
     ratio_gate_failures: int = 0,
@@ -363,7 +372,12 @@ SUMMARIZE_HONESTY_CAVEAT = (
     "Structure is guaranteed; meaning may change — nothing automatic checks it. "
     "The structure gate verifies that code blocks, tables and tags came back "
     "verbatim; it does not read the prose. Review each rewrite's diff before "
-    "applying."
+    "applying, and look specifically at MODIFIERS: across verified rewrites of "
+    "real instruction files, no instruction was dropped and nothing was "
+    "invented, but qualifiers eroded — an 'only' deleted from a constraint, a "
+    "'can go stale' hardened into 'goes stale', a 'the rule exists to prevent' "
+    "flattened to 'the rule prevents'. Each is small, changes what the rule "
+    "actually says, and is invisible to a structural check."
 )
 
 
@@ -493,7 +507,7 @@ class SummarizeFinding:
     #: than an expectation. That framing stays internal — the user-facing basis
     #: says the target is unverified without asserting anything about rewrites
     #: on THEIR machine, where by construction none have happened yet.
-    prose_ratio: float = DEFAULT_TARGET_RATIO
+    prose_ratio: float = UNMEASURED_PRIOR_RATIO
     prose_ratio_observed: bool = False
     #: Structure-checked rewrites the ratio was derived from (0 when assumed).
     prose_ratio_samples: int = 0
@@ -1016,8 +1030,14 @@ def run(ctx: AnalyzerContext) -> None:
     # what the rewriter is ASKED for and nothing enforces it, so a measured
     # ratio from verified rewrites on this machine supersedes it whenever one
     # exists; the basis says which is in force either way (Critical Rule 14).
+    # The FALLBACK is the measured prior, not the target: the target is what the
+    # rewriter is ASKED for, and estimating at an ask nothing enforces is the
+    # defect this analyzer's basis exists to disclose. Two independent runs on
+    # real instruction files put the delivered ratio ~10x (in savings terms)
+    # away from the ask, so the ask is not a conservative default, it is a
+    # flattering one.
     measured_ratio, ratio_samples = observed_prose_ratio(ctx.config)
-    ratio = measured_ratio if measured_ratio is not None else DEFAULT_TARGET_RATIO
+    ratio = measured_ratio if measured_ratio is not None else UNMEASURED_PRIOR_RATIO
     ratio_gate_failures = gate_failed_attempts(ctx.config)
 
     try:

@@ -204,8 +204,48 @@ def test_line_target_never_changes_what_is_claimed():
 
     implied_ratio = budget / breakdown.prose_words
     assert implied_ratio < 0.5                             # ...and is more aggressive
-    # The claim is unmoved by it: only `ratio` is a lever on the estimate.
+    # The claim is unmoved by it: only `ratio` is a lever on the estimate, and
+    # the estimate's default is the measured PRIOR, never the ask. (Inverted
+    # from an earlier version that pinned default == DEFAULT_TARGET_RATIO —
+    # estimating at the ask is the defect, so the guard now defends against it.)
     assert estimate.tokens_saved(breakdown) == estimate.tokens_saved(
+        breakdown, ratio=estimate.UNMEASURED_PRIOR_RATIO)
+    assert estimate.tokens_saved(breakdown) < estimate.tokens_saved(
         breakdown, ratio=estimate.DEFAULT_TARGET_RATIO)
-    assert estimate.tokens_saved(breakdown) > estimate.tokens_saved(
-        breakdown, ratio=0.9)
+
+
+def test_the_estimate_default_is_the_prior_not_the_ask():
+    """Estimating at the ratio the rewriter is merely ASKED for overstated the
+    figure by roughly an order of magnitude. The two constants must stay
+    distinct, and the conservative one must be what estimates use."""
+    assert estimate.UNMEASURED_PRIOR_RATIO != estimate.DEFAULT_TARGET_RATIO
+    assert estimate.UNMEASURED_PRIOR_RATIO > estimate.DEFAULT_TARGET_RATIO   # less flattering
+    lo, hi = estimate.UNMEASURED_PRIOR_RANGE
+    assert lo < estimate.UNMEASURED_PRIOR_RATIO <= hi     # the prior sits inside its sample
+    assert estimate.UNMEASURED_PRIOR_SAMPLES >= estimate.MIN_OBSERVED_SAMPLES
+
+
+# --------------------------------------------------------------------------- #
+# Reflow is not compression. A raw character delta booked un-hard-wrapping a
+# file as a saving; on real instruction files that artifact was the majority of
+# the claimed reduction.
+# --------------------------------------------------------------------------- #
+
+def test_reflowing_a_hard_wrapped_file_is_never_a_saving():
+    hard_wrapped = "\n".join("word " * 8 for _ in range(60))
+    reflowed = " ".join(["word"] * 480)
+
+    # A raw length delta calls this a saving. It is not one: same words.
+    assert len(hard_wrapped) > len(reflowed)
+    assert detect.content_chars(hard_wrapped) == detect.content_chars(reflowed)
+
+
+def test_tokens_saved_is_measured_on_content_not_raw_characters():
+    """Two files with identical content and different wrapping must estimate
+    identically, or the wrapping itself is being sold as compressible."""
+    wrapped = detect.analyze("\n".join("word " * 8 for _ in range(60)))
+    flowed = detect.analyze(" ".join(["word"] * 480))
+
+    assert wrapped.total_chars != flowed.total_chars       # they differ on disk
+    assert estimate.tokens_saved(wrapped, ratio=0.5) == estimate.tokens_saved(
+        flowed, ratio=0.5)

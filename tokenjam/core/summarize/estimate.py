@@ -17,16 +17,25 @@ and rewrites observed while building this delivered materially less than the
 target asks for. Using the ask as the estimate therefore overstates, so this
 module separates the two:
 
-* :data:`DEFAULT_TARGET_RATIO` — what the rewriter is asked for.
+* :data:`DEFAULT_TARGET_RATIO` — what the rewriter is asked for. Used ONLY to
+  build the rewriter's prompt. Never to estimate.
 * :func:`observed_prose_ratio` — what rewrites on THIS machine have actually
   delivered, derived from staged results (`session.CheckVerdict`), or ``None``
   when there is no credible sample.
+* :data:`UNMEASURED_PRIOR_RATIO` — what to estimate with until that exists.
 
 A caller that wants a defensible number asks for the observed ratio first and
-falls back to the target only while saying so (see the summarize analyzer's
-`estimate_basis`). Nothing here invents a middle number: a ratio that is neither
-the documented ask nor a measured outcome would be the least defensible of the
-three.
+falls back to the PRIOR — not the ask — while saying so (see the summarize
+analyzer's `estimate_basis`). Estimating at the ask is what made the figure
+overstate by roughly an order of magnitude: measured rewrites came nowhere near
+the target, and an unmeasured default should be conservative rather than
+flattering.
+
+**Every token count here is whitespace-normalized** (`detect.content_chars`).
+A raw character delta books REFLOW as compression — un-hard-wrapping a file the
+author wrapped on purpose deletes a newline per line and changes nothing a
+tokenizer bills. On real instruction files that artifact was the majority of the
+claimed reduction, so normalizing is what makes the number measure what it says.
 
 **Waiting for evidence is not the same as having none.** The observed ratio used
 to appear only if a user happened to rewrite files on their own; `tj summarize
@@ -86,6 +95,28 @@ PATH_SCOPED_RULES_QUOTE = (
 #: results exist.
 DEFAULT_TARGET_RATIO = 0.5
 
+#: What the ESTIMATE assumes while no rewrite has been verified on this machine.
+#: Deliberately NOT :data:`DEFAULT_TARGET_RATIO` — that is the ask, and using an
+#: ask as a prediction is the defect this module exists to prevent. Two
+#: independent runs against real instruction files (11 rewrites, achieved ratios
+#: spanning roughly 0.72 to 0.99) put the delivered ratio an order of magnitude
+#: in savings terms away from the 0.5 ask, so continuing to estimate at the ask
+#: overstates by ~10x.
+#:
+#: This is a PRIOR, not a new hardcoded guess, and three things keep it honest:
+#: it is a measurement rather than an invention; it is measured on OTHER
+#: people's files, so every surface that uses it says so along with the sample
+#: size and spread (Critical Rule 30(c) — a behavioural sample generalised onto
+#: a different population must disclose both, every time it is shown); and it is
+#: superseded by :func:`observed_prose_ratio` the moment the user has three
+#: verified rewrites of their own, which `tj summarize calibrate` exists to
+#: produce. An unmeasured default should be conservative rather than flattering.
+UNMEASURED_PRIOR_RATIO = 0.95
+#: Sample behind the prior, carried so no surface has to restate it from memory
+#: and so it can be corrected in exactly one place when re-measured.
+UNMEASURED_PRIOR_SAMPLES = 11
+UNMEASURED_PRIOR_RANGE = (0.72, 0.99)
+
 #: Minimum evidence before an observed ratio may replace the target. Both gates
 #: must pass: too few files, or too little prose, and one unusual rewrite would
 #: set the number for every file the user owns.
@@ -93,7 +124,7 @@ MIN_OBSERVED_SAMPLES = 3
 MIN_OBSERVED_PROSE_WORDS = 500
 
 
-def tokens_saved(breakdown: StructureBreakdown, ratio: float = DEFAULT_TARGET_RATIO) -> int:
+def tokens_saved(breakdown: StructureBreakdown, ratio: float = UNMEASURED_PRIOR_RATIO) -> int:
     """Estimated tokens removed per call by summarizing the prose to ``ratio``.
 
     Protected structure (fenced code/JSON, tables, tags, inline code, templates) is preserved
@@ -101,7 +132,10 @@ def tokens_saved(breakdown: StructureBreakdown, ratio: float = DEFAULT_TARGET_RA
     """
     if ratio >= 1.0:
         return 0
-    prose_tokens = breakdown.prose_chars / CHARS_PER_TOKEN
+    # Whitespace-normalized, never raw `prose_chars`: a raw count makes reflow
+    # look like compression, and on hard-wrapped instruction files that artifact
+    # was the majority of the claimed saving. See `detect.content_chars`.
+    prose_tokens = breakdown.prose_content_chars / CHARS_PER_TOKEN
     return max(0, int(prose_tokens * (1.0 - ratio)))
 
 

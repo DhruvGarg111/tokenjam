@@ -239,6 +239,12 @@ def test_a_gate_failure_is_recorded_as_an_attempt_not_dropped(cfg, tmp_path):
     verdict = check(cfg, path, "Short careful prose, every marker dropped.", res.source_sha256)
 
     assert not verdict.structure_ok and not verdict.staged
+    # A figure derived from output the gate REFUSED is fabricated, not
+    # conservative. Observed in the wild: a CLAUDE.md the rewriter answered as a
+    # live prompt (returning a chat greeting, dropping all 583 blocks) was
+    # refused and still credited with a five-figure token saving.
+    assert verdict.est_tokens_saved is None
+    assert verdict.to_dict()["est_tokens_saved"] is None
     assert list_staged(cfg) == []                 # nothing applyable, correctly
     attempts = list_attempts(cfg)
     assert len(attempts) == 1

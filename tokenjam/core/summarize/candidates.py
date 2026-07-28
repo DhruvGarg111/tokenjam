@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
-from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO, tokens_saved
+from tokenjam.core.summarize.estimate import UNMEASURED_PRIOR_RATIO, tokens_saved
 from tokenjam.core.summarize.route import recommend_route
 
 if TYPE_CHECKING:
@@ -415,7 +415,7 @@ def list_candidates(
     repo: bool = False,
     include_global: bool = True,
     min_prose_words: int = MIN_PROSE_WORDS,
-    ratio: float = DEFAULT_TARGET_RATIO,
+    ratio: float = UNMEASURED_PRIOR_RATIO,
     extra_exts: Iterable[str] = (),
     home: "Path | None" = None,
     project_root: "Path | None" = None,

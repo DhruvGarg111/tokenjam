@@ -139,15 +139,45 @@ def line_breakdown(text: str) -> LineBreakdown:
     )
 
 
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+def content_chars(text: str) -> int:
+    """Characters of ACTUAL CONTENT: whitespace runs collapsed to one space.
+
+    Every token estimate in this package must be built on this rather than on
+    ``len(text)``, because a raw character count books **reflow as compression**.
+    Un-hard-wrapping a deliberately hard-wrapped file deletes one newline per
+    line and changes nothing a tokenizer bills, yet a `len()` delta reports it
+    as a saving. Measured on real instruction files, that artifact was the
+    majority of the claimed reduction — 71% and 68% on the two worst — and it
+    is worst precisely on the files whose authors wrapped them ON PURPOSE, so
+    the product was selling the destruction of a formatting convention as a
+    saving. Collapsing whitespace first makes that reduction structurally
+    unclaimable: reflow moves this number by zero.
+    """
+    return len(_WS_RUN_RE.sub(" ", text or "").strip())
+
+
 @dataclass(frozen=True)
 class StructureBreakdown:
-    """Prose-vs-structure measurement of a single prompt."""
+    """Prose-vs-structure measurement of a single prompt.
+
+    ``*_chars`` are RAW character counts, kept because they describe the file
+    as it sits on disk. Every token estimate uses the ``*_content_chars``
+    counterparts instead — see :func:`content_chars` for why the difference is
+    load-bearing rather than cosmetic.
+    """
 
     total_chars: int
     prose_chars: int
     protected_chars: int
     prose_words: int
     protected_blocks: int
+    #: Whitespace-normalized counterparts. Defaulted so any existing
+    #: construction of this dataclass keeps working; `analyze` always sets them.
+    total_content_chars: int = 0
+    prose_content_chars: int = 0
 
 
 def analyze(text: str) -> StructureBreakdown:
@@ -161,6 +191,8 @@ def analyze(text: str) -> StructureBreakdown:
         protected_chars=protected_chars,
         prose_words=len(_WORD_RE.findall(prose)),
         protected_blocks=len(spans),
+        total_content_chars=content_chars(text),
+        prose_content_chars=content_chars(prose),
     )
 
 
@@ -168,6 +200,13 @@ def analyze(text: str) -> StructureBreakdown:
 #: item, or a heading. Deliberately narrow — these are the three shapes a rule
 #: is actually written in; anything else is treated as running prose.
 _DIRECTIVE_OPENER_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)]|#{1,6})[ \t]+\S")
+
+#: A unit that OPENS with a date. An append-only log (a `learnings.md`, a
+#: dated changelog) is long because entries accumulated over time, and its own
+#: remedy is expiry — promote what proved durable, delete what went stale —
+#: not compression. Deliberately narrow: an ISO date or a `YYYY-MM` prefix near
+#: the start of the unit, which is how a dated entry is actually written.
+_DATED_UNIT_RE = re.compile(r"^[^\n]{0,40}?\b(20\d{2})-(0[1-9]|1[0-2])(-\d{2})?\b")
 
 
 @dataclass(frozen=True)
@@ -195,6 +234,13 @@ class ProseShape:
     prose_words: int
     directive_words: int
     paragraph_words: int
+    #: Units whose text opens with a date — the signature of an append-only log,
+    #: whose remedy is expiry rather than compression.
+    dated_units: int = 0
+
+    @property
+    def dated_share(self) -> float:
+        return self.dated_units / self.units if self.units else 0.0
 
     @property
     def directive_share(self) -> float:
@@ -209,7 +255,7 @@ class ProseShape:
 def prose_shape(text: str) -> ProseShape:
     """Measure how ``text``'s prose divides into directives vs running prose."""
     prose = prose_text(text)
-    units: list[tuple[bool, int]] = []          # (is_directive, words)
+    units: list[tuple[bool, int, bool]] = []    # (is_directive, words, is_dated)
     start_new = True
     for line in prose.splitlines():
         words = len(_WORD_RE.findall(line))
@@ -218,17 +264,18 @@ def prose_shape(text: str) -> ProseShape:
             continue
         opens = bool(_DIRECTIVE_OPENER_RE.match(line))
         if opens or start_new or not units:
-            units.append((opens, words))
+            units.append((opens, words, bool(_DATED_UNIT_RE.match(line.strip()))))
         else:
-            is_dir, had = units[-1]
-            units[-1] = (is_dir, had + words)   # continuation of a wrapped unit
+            is_dir, had, dated = units[-1]
+            units[-1] = (is_dir, had + words, dated)   # continuation of a wrapped unit
         start_new = False
-    d_units = [w for is_dir, w in units if is_dir]
-    p_units = [w for is_dir, w in units if not is_dir]
+    d_units = [w for is_dir, w, _ in units if is_dir]
+    p_units = [w for is_dir, w, _ in units if not is_dir]
     return ProseShape(
         units=len(units), directive_units=len(d_units), paragraph_units=len(p_units),
-        prose_words=sum(w for _, w in units),
+        prose_words=sum(w for _, w, _ in units),
         directive_words=sum(d_units), paragraph_words=sum(p_units),
+        dated_units=sum(1 for _, _, dated in units if dated),
     )
 
 

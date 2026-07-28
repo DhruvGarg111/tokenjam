@@ -119,7 +119,11 @@ class CheckVerdict:
     integrity: dict
     words_before: int
     words_after: int
-    est_tokens_saved: int
+    #: Content tokens this rewrite removed, whitespace-normalized so reflow
+    #: cannot be booked as compression. ``None`` when ``structure_ok`` is False:
+    #: a rewrite the gate refused produced no usable output, so it has no
+    #: saving — never a number computed off the refused text.
+    est_tokens_saved: int | None
     must_keep_removed: list[str]
     must_keep_added: list[str]
     diff: str
@@ -435,7 +439,21 @@ def check(config: TjConfig, path: str, summary: str, source_hash: str,
     ok = wrap.is_structure_ok(integ)
     removed, added = wrap.crit_delta(current, restored)
     wb, wa = wrap.word_count(current), wrap.word_count(restored)
-    est_saved = max(0, (len(current) - len(restored)) // detect.CHARS_PER_TOKEN)
+    # Measured on whitespace-normalized CONTENT, never raw length: a `len()`
+    # delta books reflow as compression, and on a hard-wrapped file that
+    # artifact was the majority of the reported saving (see
+    # `detect.content_chars`). And `None` — not a number — when the structure
+    # gate refused the rewrite: a figure derived from output that failed the
+    # gate is not a conservative estimate, it is a fabricated one. Observed in
+    # the wild: a CLAUDE.md whose prose the rewriter answered as a live prompt
+    # instead of summarizing, returning a chat greeting that dropped all 583
+    # protected blocks — refused by the gate, yet still credited with a
+    # five-figure token saving off the wreckage.
+    est_saved: int | None = (
+        max(0, (detect.content_chars(current) - detect.content_chars(restored))
+            // detect.CHARS_PER_TOKEN)
+        if ok else None
+    )
     diff = "".join(difflib.unified_diff(
         current.splitlines(keepends=True), restored.splitlines(keepends=True),
         fromfile="original", tofile="summarized", n=2))
