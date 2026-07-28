@@ -33,7 +33,8 @@ Pipeline (validated 2026-07-12 against the full local corpus):
      dropped — the already-documented check.
   5. PROPOSE  — surviving, recurring (>=3 distinct sessions) clusters get a
      conservative token estimate (occurrences x grounded per-turn cost, never
-     the inflated afflicted-session footprint), a target rung (§6 of the
+     the inflated afflicted-session footprint), a delivery mechanism (see
+     ``core/rulewrite/delivery``,
      intervention ladder) and a scope (project vs user-global, by how many
      distinct repos the cluster's sessions span).
 
@@ -89,6 +90,12 @@ from tokenjam.core.optimize.relearn_window import (
     window_labels_including,
 )
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+)
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
 
 # --- Tunables ----------------------------------------------------------------
@@ -184,9 +191,13 @@ HONESTY_CAVEAT = (
 
 # --- Known, validated relearn families ----------------------------------------
 # Each entry: (family key, human title, tool-name filter (None = any),
-# regex over the raw error text, default rung, default proposed fix).
-# Rungs follow the intervention ladder (SPEC §6): 1 CLAUDE.md note,
-# 2 skill/scoped doc, 3 hook, 4 wrapper/script, 5 config/env.
+# regex over the raw error text, DELIVERY MECHANISM, default proposed fix).
+#
+# The delivery is declared per family, in words, because it is the family that
+# knows: `sleep_chain` blocks a command and injects nothing, while the three
+# PostToolUseFailure families exist precisely to inject text. Those two cost
+# opposite amounts, and no property of the artifact tells them apart — only the
+# family's own matcher does. See `core/rulewrite/delivery`.
 _KNOWN_FAMILIES: list[dict[str, Any]] = [
     {
         "key": "cwd_confusion",
@@ -197,7 +208,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"file does not exist\.\s*note:\s*your current working directory",
             re.IGNORECASE,
         ),
-        "rung": 3,
+        "delivery": DELIVERY_INJECTING_HOOK,
         "fix": (
             "PostToolUseFailure hook (Bash/Read): react only after a "
             "'no such file or directory' failure by injecting the real cwd + "
@@ -231,7 +242,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"exceeds? the (?:maximum )?context (?:window|length|limit)",
             re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         # Lead-in names what THIS family observed; the durable instruction is
         # the shared catalog record, not a third wording of it (see that
         # record's note on why three copies is worse than one).
@@ -247,7 +258,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "Edit/Write before Read",
         "tools": {"Edit", "Write", "MultiEdit", "NotebookEdit"},
         "pattern": re.compile(r"has not been read yet", re.IGNORECASE),
-        # Downgraded from rung 3 (Phase 2.5): the harness already errors
+        # Downgraded from a hook (Phase 2.5): the harness already errors
         # clearly on this ("has not been read yet") and the agent virtually
         # always self-corrects on the very next turn by reading the file —
         # there's no failure-recovery gap for a reactive hook to close. A
@@ -258,7 +269,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         # false block on a file the harness knows was read but our own
         # tracking missed (a session resume, a compaction, a subagent read).
         # Safer to note the pattern than to guess at its state.
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         # ADVISORY ONLY, and the flag is what makes that mechanical. This
         # family's own fix text says there is nothing to do — the harness
         # already errors clearly and agents self-correct next turn — so the
@@ -285,7 +296,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "label_pattern": re.compile(r"^\s*sleep\b", re.IGNORECASE),
-        "rung": 3,
+        "delivery": DELIVERY_EXECUTING_HOOK,
         "fix": (
             "PreToolUse hook: block a `sleep N && <check>` Bash chain and point the "
             "agent at the Monitor tool instead of a busy-wait."
@@ -296,7 +307,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "file modified since read (linter/hook race)",
         "tools": {"Edit", "Write", "MultiEdit"},
         "pattern": re.compile(r"modified since (it was last read|read)", re.IGNORECASE),
-        "rung": 3,
+        "delivery": DELIVERY_INJECTING_HOOK,
         "fix": (
             "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after "
             "a 'modified since read' failure by injecting a re-Read reminder "
@@ -311,7 +322,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"string to replace not found|old_string not found|not found in file",
             re.IGNORECASE,
         ),
-        "rung": 3,
+        "delivery": DELIVERY_INJECTING_HOOK,
         "fix": (
             "PostToolUseFailure hook (Edit/MultiEdit): react only after a "
             "string-not-found failure by injecting a re-Read reminder as "
@@ -331,7 +342,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"replace_all is false",
             re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
             "than once, include enough surrounding lines to make it unique "
@@ -348,7 +359,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"file content \(\d+ tokens\) exceeds",
             re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: this file is too large to read whole. Grep "
             "for the symbol first and Read only the region around the hit "
@@ -363,7 +374,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"eisdir|illegal operation on a directory", re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
             "directory use Glob (or `ls` via Bash), then Read the file you "
@@ -389,7 +400,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "Read malformed offset (array, not scalar)",
         "tools": {"Read"},
         "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
     },
     {
@@ -404,19 +415,19 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"no such tool available|is not enabled in this context",
             re.IGNORECASE,
         ),
-        "rung": 2,
+        "delivery": DELIVERY_SKILL,
         "fix": (
             "Skill/scoped note: deferred tools need a ToolSearch lookup for their "
             "schema before the first call; optionally a PreToolUse intercept hook."
         ),
     },
     {
-        # Downgraded from rung 5 (Phase 2.5, 2026-07-14): rung 5 promises a
-        # "config/env fix", but there is no safe automatic config/env writer
-        # in this codebase -- Apply used to render an inert stub hook for
-        # this family (`_render_stub_hook`, never wired to block/inject
-        # anything), advertising a fix that did nothing. A rung-1 CLAUDE.md
-        # note is honest about what's actually deliverable and still useful.
+        # Downgraded from a config/env fix (Phase 2.5, 2026-07-14): there is
+        # no safe automatic config/env writer in this codebase -- Apply used to
+        # render an inert stub hook for this family (`_render_stub_hook`, never
+        # wired to block/inject anything), advertising a fix that did nothing.
+        # A CLAUDE.md rule is honest about what's actually deliverable and
+        # still useful.
         "key": "command_not_found",
         "title": "command not found (bashisms under zsh, bare interpreter)",
         "tools": {"Bash"},
@@ -431,7 +442,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"command not found|^\s*[\w.\-/]+:? not found\s*$",
             re.IGNORECASE | re.MULTILINE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
             "PATH. Common causes here: using bare `python` instead of `python3`, "
@@ -454,7 +465,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"exit code 143\b.{0,80}tim(?:ed )?out",
             re.IGNORECASE | re.DOTALL,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: this command outlived the tool's timeout "
             "and was killed, so its work was lost and the tokens spent "
@@ -474,7 +485,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"bash command contains multiple operations", re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
             "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
@@ -491,7 +502,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"already exists and is not a valid branch name",
             re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": (
             "CLAUDE.md/skill note: check out the existing branch "
             "(`git checkout <name>`) instead of re-creating it, or pick a "
@@ -517,7 +528,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"following domains are not accessible",
             re.IGNORECASE,
         ),
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "fix": "CLAUDE.md/skill note: this domain is blocked — use a search tool or a different source instead.",
     },
 ]
@@ -1139,7 +1150,8 @@ def apply_distill_to_residual(
             # can look it up like a known family (keeps one code path).
             _FAMILY_BY_KEY.setdefault(family_key, {
                 "key": family_key, "title": result["title"], "tools": None,
-                "pattern": None, "rung": 1, "fix": result.get("fix") or "",
+                "pattern": None, "delivery": DELIVERY_CLAUDE_MD_RULE,
+                "fix": result.get("fix") or "",
             })
         target.failures.extend(cluster.failures)
 
@@ -1249,14 +1261,17 @@ class RelearnCluster:
     sessions:                  int
     occurrences:                int
     repos:                      list[str]
-    rung:                       int             # 1-5, SPEC §6 intervention ladder
+    #: HOW this fix reaches the agent, and therefore what gets written and
+    #: where (``core/rulewrite/kinds``). Declared by the family, never derived
+    #: from the artifact's shape.
+    delivery:                   str
     scope:                      str              # "project" | "user-global"
     proposed_fix:                str
     examples:                    list[RelearnExample] = field(default_factory=list)
     confidence:                   str = "heuristic"
     novel:                        bool = True
     # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
-    # scoped) repo, and a suggested rung-1 write target derived from it. Both
+    # scoped) repo, and a suggested write target derived from it. Both
     # are just a DEFAULT for the Review inbox card's scope/target override
     # (§7's "repo-identity is noisy" — never applied blindly); "" when
     # unknown (multi-repo / user-global / no cwd could be resolved).
@@ -1278,13 +1293,13 @@ class RelearnCluster:
     tail_calls_median:            int = 0
     tail_multiplier:              float = 1.0
     # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). This
-    # decides whether a PERMANENT artifact is worth writing at all: a rung-1
-    # CLAUDE.md rule is re-sent on every future session forever, so its
-    # standing cost is priced against the same session pace and compared
-    # against what the cluster cost (`past_overspend_tokens` below — there is
-    # no separate pre-net figure any more; the observation IS the netting
-    # input). Rung 3+ (hook / wrapper / config) is never sent to the model as
-    # prompt text, so its standing cost is a genuine zero.
+    # decides whether a PERMANENT artifact is worth writing at all: a CLAUDE.md
+    # rule is re-sent on every future session forever, so its standing cost is
+    # priced against the same session pace and compared against what the
+    # cluster cost (`past_overspend_tokens` below — there is no separate pre-net
+    # figure any more; the observation IS the netting input). An EXECUTING hook
+    # is never sent to the model as prompt text, so its standing cost is a
+    # genuine zero; an INJECTING one is prompt text and is charged for it.
     standing_cost_tokens_per_session: int = 0
     standing_cost_tokens:             int = 0
     standing_cost_basis:              str = ""
@@ -1776,7 +1791,7 @@ def build_proposals(
     all in that set is marked ``advise_only`` and gets NO suggested target: there
     is nothing to apply into, so the card must not imply an apply path exists.
 
-    ``persona`` gates the rung-1/rung-2 CLAUDE.md/skill write exactly like
+    ``persona`` gates the CLAUDE.md/skill write exactly like
     ``cost_proposals._persona_gated_write_fields`` gates the script/reuse/
     resend cards it shares that same write surface with (``verbosity`` is NOT
     a peer here — it no longer routes through that helper and is
@@ -1815,7 +1830,10 @@ def build_proposals(
             continue
 
         family = _FAMILY_BY_KEY.get(cluster.family_key or "")
-        rung = family["rung"] if family else 1
+        # A cluster that matched no known family has no family to declare a
+        # mechanism, so it gets the default one. That is a real default, not a
+        # guess about the artifact: with no matcher there is no hook to write.
+        delivery = family["delivery"] if family else DELIVERY_CLAUDE_MD_RULE
         fix = family["fix"] if family else "Review examples — no known fix template matched."
 
         repos = sorted(cluster.repos)
@@ -1847,7 +1865,7 @@ def build_proposals(
         else:
             try:
                 suggested_target = default_target_path(
-                    rung, scope, repo_cwd, slugify(cluster.title),
+                    delivery, scope, repo_cwd, slugify(cluster.title),
                     claude_home=claude_home,
                 )
             except Exception:
@@ -1968,7 +1986,7 @@ def build_proposals(
             sessions=len(sessions),
             occurrences=occurrences,
             repos=repos,
-            rung=rung,
+            delivery=delivery,
             scope=scope,
             proposed_fix=fix,
             examples=examples,
@@ -2060,7 +2078,7 @@ def _apply_write_budget(
 
     from tokenjam.core.optimize import write_budget as wb
     from tokenjam.core.optimize.projection import build_projection_basis
-    from tokenjam.core.optimize.relearn_apply import artifact_for_rung, slugify
+    from tokenjam.core.optimize.relearn_apply import artifact_for_delivery, slugify
 
     basis = projection or build_projection_basis(0.0, 0, 0)
     candidates: list[wb.WriteCandidate] = []
@@ -2077,7 +2095,9 @@ def _apply_write_budget(
         ):
             continue
         try:
-            artifact = artifact_for_rung(asdict(p), p.signature, p.rung, slugify(p.title))
+            artifact = artifact_for_delivery(
+                asdict(p), p.signature, p.delivery, slugify(p.title),
+            )
         except Exception:
             artifact = p.proposed_fix     # never let a render hiccup sink a proposal
         candidates.append(wb.WriteCandidate(
@@ -2086,7 +2106,7 @@ def _apply_write_budget(
             # their own signature keeps each a family of one rather than
             # collapsing every unrelated residual into a single bucket.
             family=p.family_key or f"signature:{p.signature}",
-            rung=p.rung,
+            delivery=p.delivery,
             artifact_text=artifact or p.proposed_fix,
             # `past_overspend_tokens` IS the pre-net observation — there is no
             # separate gross field any more; the past-tense figure doubles as
@@ -2179,7 +2199,7 @@ def analyze_relearns(
     ``conn`` (optional DuckDB connection) is forwarded to ``build_proposals``
     for the per-cluster blended-dollar-rate lookup (Review inbox monthly-$
     basis) — ``None`` keeps every cluster tokens-only, same as today.
-    ``persona`` is forwarded to ``build_proposals`` to gate the rung-1/rung-2
+    ``persona`` is forwarded to ``build_proposals`` to gate the
     write — see its docstring.
 
     ``window_labels`` additionally computes each cluster's observed cost BOUNDED
@@ -2451,7 +2471,7 @@ def compute_relearn_finding(
     see below), which is the only thing a filesystem-only scan can offer.
 
     ``persona`` (default ``"unknown"``, the conservative no-write default —
-    see ``build_proposals``) is forwarded to gate the rung-1/rung-2 write.
+    see ``build_proposals``) is forwarded to gate the CLAUDE.md/skill write.
     ``run(ctx)`` below passes the report's own ``ctx.persona`` rather than
     re-deriving it here, so a report never carries two different persona
     classifications for the same window.

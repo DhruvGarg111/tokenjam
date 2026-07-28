@@ -22,8 +22,8 @@ NOT optional here:
     minority (``subagent``, the per-agent slice of ``downsize``, ``script``,
     ``reuse``) DO have a workspace surface an orchestrating agent reads
     before acting (a CLAUDE.md rubric, a model-id key, a new skill note) and
-    route through the same rung-gated ``relearn_apply.apply_relearn_fix``
-    machinery the relearn lane uses (``apply_capable=True``, ``rung``,
+    route through the same ``relearn_apply.apply_relearn_fix`` machinery the
+    relearn lane uses (``apply_capable=True``, ``delivery``,
     ``scope``, ``proposed_fix``). ``verbosity`` shares that same class of
     surface in principle but is deliberately kept advise-only for every
     persona (see ``_verbosity_to_proposals``) — the finding is cohort-scoped
@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tokenjam.core import fixes
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_SKILL
 from tokenjam.core.analysis_span import FALLBACK_WINDOW_DAYS as _FALLBACK_WINDOW_DAYS
 from tokenjam.core.analysis_span import window_days_for
 
@@ -127,14 +128,14 @@ def cost_analyzers_for_persona(persona: str) -> tuple[str, ...]:
     disabled = _disabled_analyzers(persona)
     return tuple(name for name in COST_ANALYZERS if name not in disabled)
 
-# The rung-1/rung-2 apply notes below all route through the SAME workspace-note
-# machinery `subagent` already uses (`relearn_apply.apply_relearn_fix`, rung 1
-# = CLAUDE.md note, rung 2 = a new .claude/skills/<slug>/SKILL.md). None of
+# The apply notes below all route through the SAME workspace-note machinery
+# `subagent` already uses (`relearn_apply.apply_relearn_fix`: a CLAUDE.md rule,
+# or a skill at a new .claude/skills/<slug>/SKILL.md). None of
 # these three analyzers has a workspace file it can edit outright the way a
 # model-routing swap does — the fix is behavioral (an orchestrator or the model
 # itself reading guidance), same class of surface as the subagent rubric.
 
-# The rung-2 skill note a `script` proposal writes: the observed tool-call
+# The skill note a `script` proposal writes: the observed tool-call
 # pattern is deterministic enough that a script could run it directly instead
 # of dispatching a full agent turn.
 _SCRIPT_SKILL_INTRO = (
@@ -145,7 +146,7 @@ _SCRIPT_SKILL_INTRO = (
     "model's judgment."
 )
 
-# The rung-1 note a `reuse` proposal writes: the planning skeleton recurs.
+# The CLAUDE.md rule a `reuse` proposal writes: the planning skeleton recurs.
 _REUSE_NOTE_INTRO = (
     "This class of task shares a planning skeleton: the same tool sequence "
     "follows the first planning call, session after session, with only the "
@@ -155,7 +156,7 @@ _REUSE_NOTE_INTRO = (
     "the plan is identical."
 )
 
-# The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
+# The sizing-rubric rule a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
 # edit — it names the observed oversized dispatches and states the routing rule.
 #
@@ -310,14 +311,17 @@ class CostProposal:
     agent_id:             str = ""
     # Workspace-apply plumbing (subagent right-sizing only). Unlike the three
     # advise-only analyzers, a CC-origin subagent finding HAS a writable surface
-    # — a rung-1 sizing rubric note in the workspace's CLAUDE.md — so its card
+    # — a sizing rubric rule in the workspace's CLAUDE.md — so its card
     # can route an actual, reversible, human-gated write through the existing
     # relearn apply path (``relearn_apply.apply_relearn_fix``). The adapter (not
     # the analyzer) supplies these; ``apply_capable`` gates the apply action, and
     # a proposal with no clean workspace surface degrades to advise-only like the
     # other three (``apply_capable=False``, ``advise_only=True``).
     apply_capable:        bool = False
-    rung:                 int  = 0
+    #: HOW this proposal's fix reaches the agent, and therefore what gets
+    #: written (``core/rulewrite/kinds``). Empty means no write is offered —
+    #: the persona gate cleared it, or this proposal was never write-bearing.
+    delivery:             str  = ""
     scope:                str  = ""
     proposed_fix:         str  = ""
     # Model-routing apply kinds (``core.optimize.model_apply``). Set only where
@@ -352,8 +356,8 @@ class CostProposal:
     # in. Every advise-only card carries one.
     one_paste_fix:        str  = ""
     # Net-of-standing-cost accounting (`core/optimize/write_budget.py`), filled
-    # for every card whose fix is a PERMANENT artifact the user keeps: a rung-1
-    # CLAUDE.md rule or a rung-2 skill note. Those are re-sent on every future
+    # for every card whose fix is a PERMANENT artifact the user keeps: a
+    # CLAUDE.md rule or a skill note. Those are re-sent on every future
     # session, so the four `estimated_*` fields above are reported NET of that
     # standing cost and the pre-net figures are parked here, inspectable. A
     # card with no write to offer (every advise-only cost card) writes nothing,
@@ -1769,7 +1773,7 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
 
     Unlike the three advise-only analyzers, this one is workspace-appliable for
     the common (CC-origin) case: the fan-out model choice is made by the
-    orchestrating agent, which reads the workspace's CLAUDE.md — so a rung-1
+    orchestrating agent, which reads the workspace's CLAUDE.md — so a
     sizing rubric note IS a legitimate, reversible workspace fix. The subagent
     analyzer runs only over Claude Code data (``sub_agent_id`` is populated by
     the CC backfill; other runtimes carry NULL and are ignored), so a finding
@@ -1918,7 +1922,7 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         advise_only=not apply_capable,
         apply_capable=apply_capable,
-        rung=1 if apply_capable else 0,
+        delivery=DELIVERY_CLAUDE_MD_RULE if apply_capable else "",
         scope="project" if apply_capable else "",
         proposed_fix=proposed_fix if apply_capable else "",
     )]
@@ -2096,8 +2100,8 @@ def _cluster_hash(value: Any) -> str:
 # cohort-scoped flag would become a global CLAUDE.md rule if written, which
 # fails the no-quality-tax gate outright regardless of who reads it.)
 #
-# Both write the SAME class of artifact when apply-capable: a rung-1
-# CLAUDE.md note or rung-2 `.claude/skills/<slug>/SKILL.md` file (see
+# Both write the SAME class of artifact when apply-capable: a CLAUDE.md rule
+# or a `.claude/skills/<slug>/SKILL.md` skill file (see
 # `relearn_apply.default_target_path`). Nothing in an SDK-only service's
 # request path ever reads a CLAUDE.md or a `.claude/skills/` note — those are
 # read by an interactive coding-agent harness. Offering that write to an SDK
@@ -2111,10 +2115,10 @@ def _cluster_hash(value: Any) -> str:
 # --------------------------------------------------------------------------- #
 
 def _persona_gated_write_fields(
-    persona: str, proposed_fix: str, rung: int, scope: str,
+    persona: str, proposed_fix: str, delivery: str, scope: str,
 ) -> dict[str, Any]:
-    """Decide, from the window's dominant persona, whether the rung-1/rung-2
-    workspace write is offered — and fill in the ``CostProposal`` fields that
+    """Decide, from the window's dominant persona, whether the workspace write
+    is offered — and fill in the ``CostProposal`` fields that
     follow from that decision.
 
     * ``"claude-code"`` — unchanged: the write is genuinely actionable, so it
@@ -2138,7 +2142,7 @@ def _persona_gated_write_fields(
     fields: dict[str, Any] = {
         "advise_only": not write_offered,
         "apply_capable": write_offered,
-        "rung": rung if write_offered else 0,
+        "delivery": delivery if write_offered else "",
         "scope": scope if write_offered else "",
         "proposed_fix": proposed_fix if write_offered else "",
     }
@@ -2153,7 +2157,7 @@ def _persona_gated_write_fields(
 def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One proposal per flagged deterministic-tool-call cluster.
 
-    Apply-capable at rung 2: a skill note naming the repeated call pattern and
+    Apply-capable as a skill: a note naming the repeated call pattern and
     recommending a script in its place. No agent-file/model-swap surface
     exists here (this isn't a model-routing finding), so unlike ``subagent``
     there is only the one apply shape. The skill's slug is derived from the
@@ -2220,7 +2224,9 @@ def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
             past_overspend_usd=cluster.total_cost_usd or None,
             past_overspend_tokens=cluster.total_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-            **_persona_gated_write_fields(persona, advise, rung=2, scope="project"),
+            **_persona_gated_write_fields(
+                persona, advise, delivery=DELIVERY_SKILL, scope="project",
+            ),
         ))
     return proposals
 
@@ -2228,7 +2234,7 @@ def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
 def _reuse_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One proposal per repeated planning-skeleton cluster.
 
-    Apply-capable at rung 1: a CLAUDE.md note naming the recurring skeleton.
+    Apply-capable as a CLAUDE.md rule naming the recurring skeleton.
     Uses the finding's conservative ``cache_reuse_recoverable_*`` figure (you
     already paid for the plan once), not the ``script_replacement_*`` upper
     bound, matching ``ReuseFinding``'s own aggregate.
@@ -2282,7 +2288,9 @@ def _reuse_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProp
             past_overspend_usd=cluster.cache_reuse_recoverable_usd or None,
             past_overspend_tokens=cluster.cache_reuse_recoverable_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-            **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
+            **_persona_gated_write_fields(
+                persona, advise, delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
+            ),
         ))
     return proposals
 
@@ -2291,7 +2299,7 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     """One proposal for the whole verbosity finding (unlike ``script``/
     ``reuse``, this is a single window-wide signal, not per-cluster).
 
-    ALWAYS advise-only, regardless of ``persona`` — no rung-1 CLAUDE.md write
+    ALWAYS advise-only, regardless of ``persona`` — no CLAUDE.md write
     is ever offered here, unlike ``script``/``reuse`` which share the same
     write machinery. A cohort-scoped flag (this task shape ran long vs its
     OWN like-shaped peers) written as a global CLAUDE.md note would apply
@@ -2375,7 +2383,7 @@ def _rightsize_target(subagent_finding: Any, config: Any) -> dict[str, Any]:
 
 
 def compound_offload_fix(rightsize: dict[str, Any], fix_offload: str, fix_rightsize: str) -> str:
-    """The single rung-1 rule that carries BOTH halves of the compound lever.
+    """The single CLAUDE.md rule that carries BOTH halves of the compound lever.
 
     PUBLIC because the CLI renders the same finding and must lead with the same
     fix. It used to lead with `/compact` while the inbox card led with this —
@@ -2461,13 +2469,13 @@ def _resend_to_proposals(
     This card is COMPOUND by design: it consolidates what resend and subagent
     right-sizing would otherwise say on separate cards, because the two are one
     behavioural change (offload context-heavy work to a subagent, and size that
-    subagent to the work) applied through one rung-1 rule. Consolidating rather
+    subagent to the work) applied through one CLAUDE.md rule. Consolidating rather
     than adding is deliberate — the Review inbox does not grow.
 
     Persona-gated like every other lever-bearing adapter. Three levers exist
     and they are NOT interchangeable:
 
-    * a rung-1 CLAUDE.md rule instructing offload of context-heavy sub-tasks
+    * a CLAUDE.md rule instructing offload of context-heavy sub-tasks
       to subagents (``fix_subagent_offload``) is the DURABLE claude-code
       lever: it persists across sessions and stops the repeated volume from
       accumulating on the main thread in the first place. Apply-capable via
@@ -2526,7 +2534,8 @@ def _resend_to_proposals(
         if fix_compaction:
             advise = advise + " Immediate relief in an already-full session: " + fix_compaction
         write_fields = _persona_gated_write_fields(
-            persona, compound_fix, rung=1, scope=rightsize.get("scope") or "project",
+            persona, compound_fix, delivery=DELIVERY_CLAUDE_MD_RULE,
+            scope=rightsize.get("scope") or "project",
         )
         # resend's `suggestion` slot is reserved for the SDK cache_control
         # snippet above, not the write-fallback text the helper would add
@@ -2534,7 +2543,7 @@ def _resend_to_proposals(
         write_fields.pop("suggestion", None)
         # The second half of the compound fix: the agent-file frontmatter that
         # pins model AND reasoning effort. Carried as the one-paste artifact
-        # because the rung-1 write lands in CLAUDE.md, and the apply machinery
+        # because the write lands in CLAUDE.md, and the apply machinery
         # writes exactly one target per apply.
         one_paste_fix = _rightsize_frontmatter_snippet(rightsize)
     elif persona == "sdk":
@@ -2553,14 +2562,14 @@ def _resend_to_proposals(
         ) if cache_snippet else RESEND_SDK_TRIM_FIX
         write_fields = {
             "advise_only": True, "apply_capable": False,
-            "rung": 0, "scope": "", "proposed_fix": "",
+            "delivery": "", "scope": "", "proposed_fix": "",
         }
         one_paste_fix = cache_snippet or RESEND_SDK_TRIM_FIX
     else:
         advise = fix_compaction
         write_fields = {
             "advise_only": True, "apply_capable": False,
-            "rung": 0, "scope": "", "proposed_fix": "",
+            "delivery": "", "scope": "", "proposed_fix": "",
         }
         one_paste_fix = cache_snippet or fix_compaction
 
@@ -2865,7 +2874,7 @@ def cost_proposals_from_report(
 
     ``script`` / ``reuse`` read ``report.persona`` (set once by ``runner.
     build_report`` — see ``AnalyzerContext.persona``) to decide whether their
-    rung-1/rung-2 workspace write is offered at all — see
+    workspace write is offered at all — see
     ``_persona_gated_write_fields``. ``verbosity`` reads the same finding
     shape but never offers a write for ANY persona (see ``_verbosity_to_
     proposals``) — a cohort-scoped flag written as a global CLAUDE.md rule
@@ -3136,11 +3145,11 @@ def _apply_write_budget(
     bound how many permanent rules the window may offer.
 
     Only cards that actually write something enter the budget: ``apply_capable``
-    with a rung-1/rung-2 ``proposed_fix``. Everything else (the advise-only
+    with a write-bearing ``proposed_fix``. Everything else (the advise-only
     majority, the model-id swaps, the MCP-server removals) writes no standing
     prompt text and passes through with its figures untouched.
 
-    Candidates are grouped by ``(analyzer, rung)`` because that is genuinely one
+    Candidates are grouped by ``(analyzer, delivery)`` because that is genuinely one
     block: every ``reuse`` cluster writes the same skeleton note, every
     ``script`` cluster the same script note. Nine clusters used to mean nine
     identical appended blocks; now the family's largest carries the write and
@@ -3176,7 +3185,7 @@ def _apply_write_budget(
     )
 
     writers = [
-        p for p in proposals if p.apply_capable and p.rung >= 1 and p.proposed_fix
+        p for p in proposals if p.apply_capable and p.delivery and p.proposed_fix
     ]
     if not writers:
         return proposals
@@ -3199,7 +3208,7 @@ def _apply_write_budget(
         choice = rule_placement.choose_placement(
             plan,
             standing_tokens_per_session=wb.standing_tokens_per_session(
-                p.rung, p.proposed_fix,
+                p.delivery, p.proposed_fix,
             ),
             total_sessions=int(getattr(getattr(report, "window", None), "sessions", 0) or 0),
         )
@@ -3208,8 +3217,8 @@ def _apply_write_budget(
     candidates = [
         wb.WriteCandidate(
             key=p.signature,
-            family=f"{p.analyzer}:rung{p.rung}",
-            rung=p.rung,
+            family=f"{p.analyzer}:{p.delivery}",
+            delivery=p.delivery,
             artifact_text=p.proposed_fix,
             gross_tokens=int(p.past_overspend_tokens or 0),
             gross_usd=p.past_overspend_usd,
@@ -3228,7 +3237,7 @@ def _apply_write_budget(
     out: list[CostProposal] = []
     for p in proposals:
         decision = decisions.get(p.signature)
-        if decision is None or not (p.apply_capable and p.rung >= 1 and p.proposed_fix):
+        if decision is None or not (p.apply_capable and p.delivery and p.proposed_fix):
             out.append(p)
             continue
         updates: dict[str, Any] = {
@@ -3270,7 +3279,7 @@ def _apply_write_budget(
             )
         if not decision.offered:
             updates.update(
-                apply_capable=False, advise_only=True, rung=0, scope="",
+                apply_capable=False, advise_only=True, delivery="", scope="",
                 proposed_fix="", suggestion=p.suggestion or p.proposed_fix,
                 apply_blocked_reason=decision.reason,
             )

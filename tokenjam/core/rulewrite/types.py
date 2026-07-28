@@ -10,11 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-#: Rungs this lifecycle writes. Rung 3+ (hooks, config) is executed rather than
-#: sent as prompt text, so it is not a "rule" in this sense and is not handled
-#: here — ``relearn_apply`` keeps owning those.
-RUNG_NOTE = 1
-RUNG_SKILL = 2
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 
 
 @dataclass(frozen=True)
@@ -63,14 +59,13 @@ class RuleWrite:
     signature: str
     analyzer: str
     title: str
-    rung: int
     artifact_text: str
-    #: HOW this rule reaches the agent — see ``core/rulewrite/delivery``.
-    #: A markdown block in a CLAUDE.md is one mechanism, not the only one, and
-    #: for several of these analyzers not the best one: guidance delivered at
-    #: the moment of the decision beats guidance at the top of a long context.
-    #: Empty means the default, which is what every rule written before this
-    #: was a field carries.
+    #: HOW this rule reaches the agent, and therefore WHAT gets written — see
+    #: ``core/rulewrite/delivery``. A markdown block in a CLAUDE.md is one
+    #: mechanism, not the only one, and for several of these analyzers not the
+    #: best one: guidance delivered at the moment of the decision beats guidance
+    #: at the top of a long context. Empty means the default, which is what
+    #: every rule written before this was a field carries.
     delivery: str = ""
     #: Path globs this rule is confined to, when its observation is confined to
     #: identifiable paths. Non-empty is what makes a path-scoped delivery
@@ -128,7 +123,6 @@ class RuleWrite:
             "signature": self.signature,
             "analyzer": self.analyzer,
             "title": self.title,
-            "rung": self.rung,
             "artifact_text": self.artifact_text,
             "delivery": self.delivery,
             "paths": list(self.paths),
@@ -151,9 +145,13 @@ class RuleWrite:
             signature=str(raw.get("signature", "")),
             analyzer=str(raw.get("analyzer", "")),
             title=str(raw.get("title", "")),
-            rung=int(raw.get("rung", 0) or 0),
             artifact_text=str(raw.get("artifact_text", "")),
-            delivery=str(raw.get("delivery", "") or ""),
+            # A record cached by a build that named the artifact with a ladder
+            # NUMBER instead of a mechanism is mapped on read. Where the number
+            # does not establish which mechanism it was, this resolves to a
+            # sentinel no renderer answers to, so the record is refused rather
+            # than guessed at. Never written back — see ``rulewrite/legacy``.
+            delivery=delivery_from_legacy_record(raw),
             paths=tuple(str(x) for x in (raw.get("paths") or []) if x),
             destinations=tuple(
                 RuleDestination.from_dict(d) for d in (raw.get("destinations") or [])
@@ -183,7 +181,6 @@ class StagedRuleWrite:
     signature: str
     path: str
     scope: str
-    rung: int
     title: str
     analyzer: str
     #: The mechanism this entry was rendered by. Persisted so apply re-resolves
@@ -204,7 +201,7 @@ class StagedRuleWrite:
     def to_dict(self) -> dict[str, Any]:
         return {
             "signature": self.signature, "path": self.path, "scope": self.scope,
-            "rung": self.rung, "title": self.title, "analyzer": self.analyzer,
+            "title": self.title, "analyzer": self.analyzer,
             "delivery": self.delivery, "source_sha256": self.source_sha256, "rendered": self.rendered,
             "diff": self.diff,
             "standing_tokens_per_session": self.standing_tokens_per_session,
@@ -218,10 +215,15 @@ class StagedRuleWrite:
             signature=str(raw.get("signature", "")),
             path=str(raw.get("path", "")),
             scope=str(raw.get("scope", "")),
-            rung=int(raw.get("rung", 0) or 0),
             title=str(raw.get("title", "")),
             analyzer=str(raw.get("analyzer", "")),
-            delivery=str(raw.get("delivery", "") or ""),
+            # An entry staged by a pre-delivery build carries a ladder number
+            # rather than a mechanism; resolved on read, never rewritten. An
+            # entry that cannot be resolved carries the unresolved sentinel and
+            # is REFUSED at apply time by ``resolve_delivery`` rather than
+            # rendered as a guess — this is the path that writes a real file to
+            # a real location on a user's machine.
+            delivery=delivery_from_legacy_record(raw),
             source_sha256=str(raw.get("source_sha256", "")),
             rendered=str(raw.get("rendered", "")),
             diff=str(raw.get("diff", "")),

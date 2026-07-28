@@ -23,7 +23,7 @@ read yet" episode, which clusters as ``edit_before_read``. That family is now
 ADVISORY-ONLY — its own fix text says the harness already blocks the mistake
 and no rule is needed — so it never enters the write budget and cannot
 demonstrate any budget behaviour at all. The seed is now a ``read_too_large``
-episode, a non-advisory rung-1 family. Every assertion below is unchanged; only
+episode, a non-advisory CLAUDE.md-rule family. Every assertion below is unchanged; only
 the family standing in for them (Critical Rule 23 in spirit: the vehicle became
 invalid, the property being pinned did not).
 """
@@ -32,6 +32,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.relearn import (
@@ -207,7 +209,7 @@ def test_no_fix_template_cluster_still_carries_its_observed_cost(db):
 
 
 def test_net_negative_write_budget_does_not_zero_the_past_cost(db):
-    """A rung-1 rule that costs more to keep than it saves is correctly not
+    """A CLAUDE.md rule that costs more to keep than it saves is correctly not
     offered, and correctly claims nothing. It must NOT retroactively make the
     failures it describes free."""
     failures = []
@@ -487,7 +489,8 @@ def test_offered_cluster_has_no_gate_line(db):
 
     offered = RelearnCluster(
         signature="ok", title="ok", family_key="fam", sessions=3, occurrences=3,
-        repos=["demo"], rung=1, scope="project", proposed_fix="do the thing",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
+        proposed_fix="do the thing",
         write_offered=True, write_blocked_reason="",
     )
     assert _relearn_write_gate_line(offered) == ""

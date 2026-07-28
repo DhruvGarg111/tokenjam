@@ -31,6 +31,7 @@ from tokenjam.core.optimize import (
     report_from_dict,
     report_to_dict,
 )
+from tokenjam.core.rulewrite.delivery import delivery_label
 from tokenjam.utils.formatting import (
     console,
     format_cost,
@@ -2201,8 +2202,8 @@ def _relearn_write_gate_line(cluster) -> str:
     (``core/optimize/write_budget.py`` owns the wording so the CLI, the API
     payload and the Review inbox row cannot drift into three explanations of
     one flag). The payback arithmetic is appended only where the budget
-    actually computed one: a rung-3 hook is never sent as prompt text, so it
-    has no standing cost and no ratio at all.
+    actually computed one: an executing hook is never sent as prompt text, so
+    it has no standing cost and no ratio at all.
     """
     if getattr(cluster, "write_offered", True):
         return ""
@@ -2296,7 +2297,7 @@ def _render_relearn(
             f"       [bold]{c.signature}[/bold]  "
             f"{c.occurrences} occurrence{'s' if c.occurrences != 1 else ''} / "
             f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
-            f"[dim](rung {c.rung})[/dim]"
+            f"[dim]({delivery_label(getattr(c, 'delivery', ''))})[/dim]"
             + (f"  [bold]{cost}[/bold] [dim]already spent[/dim]" if cost else "")
         )
         gate = _relearn_write_gate_line(c)

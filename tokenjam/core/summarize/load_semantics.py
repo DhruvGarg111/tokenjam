@@ -28,7 +28,7 @@ Two load classes, both real:
     measured here rather than bounded by a constant.
 
 This is the read-side statement of the rule ``core/optimize/write_budget.py``
-already applies on the write side (``standing_tokens_per_session``: a rung-2
+already applies on the write side (``standing_tokens_per_session``: a
 skill write is charged only its always-loaded frontmatter). Both sides now
 resolve the split through this module so the product cannot answer the same
 question two ways.

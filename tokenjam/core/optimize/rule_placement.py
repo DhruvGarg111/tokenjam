@@ -58,6 +58,7 @@ degrades silently, so the degradation has to be stated rather than inferred.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -175,16 +176,16 @@ def _claude_md_for(root: Path) -> str:
     function. Imported lazily: ``relearn_apply`` reaches back into the optimize
     package, and a module-level import would cycle.
     """
-    from tokenjam.core.optimize.relearn_apply import RUNG_NOTE, default_target_path
+    from tokenjam.core.optimize.relearn_apply import default_target_path
 
-    return default_target_path(RUNG_NOTE, SCOPE_PROJECT, str(root), "")
+    return default_target_path(DELIVERY_CLAUDE_MD_RULE, SCOPE_PROJECT, str(root), "")
 
 
 def _user_global_path(claude_home: Path | None) -> str:
-    from tokenjam.core.optimize.relearn_apply import RUNG_NOTE, default_target_path
+    from tokenjam.core.optimize.relearn_apply import default_target_path
 
     return default_target_path(
-        RUNG_NOTE, SCOPE_USER_GLOBAL, "", "", claude_home=claude_home,
+        DELIVERY_CLAUDE_MD_RULE, SCOPE_USER_GLOBAL, "", "", claude_home=claude_home,
     )
 
 

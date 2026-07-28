@@ -8406,9 +8406,9 @@ function RulesView() {
                 return html`<div key=${r.signature} style="display:block;padding:12px 0;border-bottom:1px solid var(--border)">
                   <div style="display:flex;align-items:center;gap:10px">
                     <b>${r.title || r.signature}</b>
-                    <span class="dim" style="font-size:12px">${r.analyzer} · rung ${r.rung}${
+                    <span class="dim" style="font-size:12px">${r.analyzer} · ${
                       (deliveryKinds[r.delivery] && deliveryKinds[r.delivery].label)
-                        ? ' · ' + deliveryKinds[r.delivery].label : ''}</span>
+                        || deliveryLabel(r.delivery)}</span>
                     <span style="margin-left:auto">
                       ${r.past_overspend_usd == null
                         ? html`<span class="dim">—</span>`
@@ -9542,9 +9542,9 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // §8 reuse map): pending relearn fixes the cross-session relearn aggregator
 // (core/optimize/analyzers/relearn.py, served from a background-refreshed
 // cache at GET /relearn/proposals — see api/routes/relearn.py) land here for
-// a human to review. Phase 2 wires Approve to a real write, routed by rung,
-// through POST /relearn/apply (core.optimize.relearn_apply — git-commit or
-// gzip-backup reversible, disabled-by-default for hook/wrapper/config rungs).
+// a human to review. Phase 2 wires Approve to a real write, routed by its
+// delivery mechanism, through POST /relearn/apply (core.optimize.relearn_apply
+// — git-commit or gzip-backup reversible, disabled-by-default for hooks).
 // Dismiss stays a client-side-only hide (localStorage, never sent to the
 // server). The chassis (listhead / listbox / addbar / cur-modal) is forked
 // from Optimize ▸ Summarize's curate → diff → Apply/Reject screen
@@ -9562,14 +9562,22 @@ function saveDismissedRelearns(set) {
   try { localStorage.setItem(RELEARN_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
 }
 
-const RUNG_LABELS = {
-  1: 'note (CLAUDE.md)',
-  2: 'skill / doc',
-  3: 'hook',
-  4: 'wrapper / script',
-  5: 'config / env',
+// Delivery mechanisms, mirroring core/rulewrite/kinds.py. A record from an
+// older build carries no mechanism this build can name; it renders as unknown
+// rather than as a guess, because the label is what tells a reader which
+// artifact is about to be written where.
+const DELIVERY_LABELS = {
+  claude_md_rule: 'rule (CLAUDE.md)',
+  path_scoped_rule: 'path-scoped rule',
+  skill: 'skill / doc',
+  executing_hook: 'hook (blocking guard)',
+  injecting_hook: 'hook (context nudge)',
 };
-const ENFORCEMENT_RUNGS = new Set([3, 4, 5]);
+const UNKNOWN_DELIVERY_LABEL = 'unknown (legacy record)';
+function deliveryLabel(name) {
+  return DELIVERY_LABELS[String(name || '')] || UNKNOWN_DELIVERY_LABEL;
+}
+const ENFORCEMENT_DELIVERIES = new Set(['executing_hook', 'injecting_hook']);
 
 // Verdict/recurrence-since-apply labels and the Compound-ledger summary that
 // used to render here were the frontend half of the perpetual verify/receipts
@@ -10191,8 +10199,8 @@ function CollapsedTailRow({ tail, suppressed, summary, onDismissAll, onMarkAllAp
 }
 
 // Human-readable fix-type badge for a relearn cluster (requirement #4) —
-// user vocabulary, never internal jargon ("relearn", "rung 2") as the
-// primary label. `family_key`/`rung` stay available in the row's title
+// user vocabulary, never internal jargon ("relearn", "injecting_hook") as the
+// primary label. `family_key`/`delivery` stay available in the row's title
 // attribute for anyone who wants the internal detail.
 // One sentence answering "what is this" for a relearn cluster, which carries no
 // analyzer prose of its own. The failure TEXT is the answer: it is what actually
@@ -10221,12 +10229,18 @@ function relearnDescription(cluster) {
   return String(candidates.find(isProse) || cluster.title || '').trim();
 }
 
-const RELEARN_BADGE_BY_RUNG = { 1: 'PROMPT TWEAK', 2: 'SNIPPET', 3: 'GUARDRAIL', 4: 'GUARDRAIL', 5: 'GUARDRAIL' };
+const RELEARN_BADGE_BY_DELIVERY = {
+  claude_md_rule: 'PROMPT TWEAK',
+  path_scoped_rule: 'PROMPT TWEAK',
+  skill: 'SNIPPET',
+  executing_hook: 'GUARDRAIL',
+  injecting_hook: 'GUARDRAIL',
+};
 function relearnBadge(cluster) {
   if (cluster.advise_only) return 'ADVISE ONLY';
   const fam = (cluster.family_key || '').toLowerCase();
   if (fam.includes('cache')) return 'CACHE BREAKPOINT';
-  return RELEARN_BADGE_BY_RUNG[cluster.rung] || 'FIX';
+  return RELEARN_BADGE_BY_DELIVERY[cluster.delivery] || 'FIX';
 }
 
 // One relearn cluster, as a card on the single open list.
@@ -10270,7 +10284,7 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
   // the two cannot drift.
   const cannotApplyReason = canApply ? null : String(cluster.advise_only_reason || '').trim();
   // The payback arithmetic, appended only where the budget actually computed
-  // one: a rung-3 hook is executed rather than sent as prompt text, so it has no
+  // one: an executing hook is run rather than sent as prompt text, so it has no
   // standing cost and no ratio, and printing one there would invent a verdict
   // the model never reached.
   const payback = (!canApply && cluster.standing_cost_tokens_per_session && cluster.payback_ratio != null)
@@ -10286,7 +10300,7 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
               fix block below, so blue on every title made the list read as a
               wall of links. */ ''}
         <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
-        <span class="badge badge-warning" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
+        <span class="badge badge-warning" title=${(cluster.family_key || '') + ' · ' + deliveryLabel(cluster.delivery)}>${relearnBadge(cluster)}</span>
         <span style="margin-left:auto;text-align:right">
           ${/* The figure alone. Both row shapes carry exactly this, so the
                 right-hand column reads identically down the list. The basis stays
@@ -10447,7 +10461,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
           <div style="font-size:12.5px;margin-bottom:10px">
             <b>${cluster.sessions}</b> distinct sessions · <b>${cluster.occurrences}</b> occurrences ·
             spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
-            rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
+            ${deliveryLabel(cluster.delivery)}
           </div>
           ${/* What this recurrence ALREADY COST, before any gate. Rendered on
                 the expanded card as well as the row because this is the one
@@ -10514,7 +10528,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
                   placeholder="/absolute/path/to/target"
                   onInput=${e => setTarget(e.target.value)} />
               </div>
-              ${ENFORCEMENT_RUNGS.has(cluster.rung) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">Rung ${cluster.rung} writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
+              ${ENFORCEMENT_DELIVERIES.has(cluster.delivery) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">This writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
             </div>
           ` : html`
             <div class="opt-section" style="margin:0 0 6px">
@@ -10533,7 +10547,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
                   below only reports git-commit vs backup after the fact, and
                   this is the last point at which the user can decline. */ ''}
             <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}
-              title="Writes this fix at its rung: git-committed, or backed up if the target is not a git repo; you confirm the scope and target first">${busy ? 'Applying…' : 'Approve →'}</button>
+              title="Writes this fix: git-committed, or backed up if the target is not a git repo; you confirm the scope and target first">${busy ? 'Applying…' : 'Approve →'}</button>
           ` : html`<span class="dim" style="font-size:12px">Applied. Manage enforcement/revert from the Applied section below.</span>`}
           ${queuePos && onNext ? html`<button class="cur-btn" style="margin-left:auto" onClick=${onNext} title="Leave this one as-is and open the next checked row">Next →</button>` : null}
           <button class="cur-btn" style=${queuePos && onNext ? '' : 'margin-left:auto'} onClick=${onClose}>${queuePos ? 'Stop reviewing' : 'Close'}</button>
@@ -10599,7 +10613,7 @@ function appliedEstimate(rec) {
 // lists). Mockup: title, "Applied N days ago", a green delta figure — always
 // labeled `est.`, NEVER a "verified" claim or chip (behavioral requirement
 // #7, REVISED — see the note above `appliedEstimate` and InboxStatTiles).
-// Enforcement enable/disable (rung 3-5) only ever applies to relearn fixes.
+// Enforcement enable/disable only ever applies to relearn hook fixes.
 // The applied row's loading placeholder, in the same geometry as the real row
 // (title line, metadata line, action line) so real content FILLS IN rather than
 // replacing a differently-shaped block. Kept immediately beside `AppliedItemRow`
@@ -10631,7 +10645,11 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
 
   const isRelearn = rec.kind === 'relearn';
   const enforcement = rec.enforcement;
-  const isEnforcement = isRelearn && ENFORCEMENT_RUNGS.has(rec.rung);
+  // The ledger's own `kind` names the artifact. A record written before
+  // mechanisms had names carries a word this set does not hold, so it simply
+  // offers no enforcement toggle — which is correct: we cannot say what it
+  // wired, so we must not offer to wire it.
+  const isEnforcement = isRelearn && ENFORCEMENT_DELIVERIES.has(rec.kind);
   // A reverted fix yielded nothing, so it renders no figure at all — see the
   // amount slot below.
   const isReverted = rec.state === 'reverted';
@@ -11082,7 +11100,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
                 write acceptable, so it is not chrome. */ ''}
           <div class="opt-title" style="font-size:12.5px;margin-bottom:2px">Apply the sizing note</div>
           <div style="font-size:12.5px;display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin:0 0 4px">
-            <span class="dim" style="font-weight:400">writes a reversible rung-1 note to the project ${prop.target_path ? 'below' : html`<code>CLAUDE.md</code> you paste below, or register it once with <code>tj onboard --add-project</code>`}</span>
+            <span class="dim" style="font-weight:400">writes a reversible note to the project ${prop.target_path ? 'below' : html`<code>CLAUDE.md</code> you paste below, or register it once with <code>tj onboard --add-project</code>`}</span>
             ${!prop.target_path ? html`<${CopySnippetButton} text="tj onboard --add-project" />` : null}
           </div>
           <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">

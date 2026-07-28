@@ -1,8 +1,8 @@
 """Net-of-standing-cost accounting and the write budget for permanent fixes.
 
 Several analyzers propose writing a PERMANENT artifact into the user's agent
-files: a rung-1 ``CLAUDE.md`` rule, a rung-2 ``.claude/skills/<slug>/SKILL.md``
-note. Those artifacts are not free. A CLAUDE.md rule is re-sent on every future
+files: a ``CLAUDE.md`` rule, a ``.claude/skills/<slug>/SKILL.md`` note, a hook.
+Those artifacts are not free. A CLAUDE.md rule is re-sent on every future
 session, forever, and every write-bearing analyzer used to report its saving
 GROSS of that permanent cost with nothing anywhere netting the two. A rule
 costing ~200 tokens per session that prevents a 1,500-token failure twice a
@@ -61,49 +61,15 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from tokenjam.core.optimize.projection import ProjectionBasis
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+    MAX_NUDGES_PER_SESSION,
+)
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 
-# --- Standing cost by intervention rung --------------------------------------
-
-#: How much of a written artifact is re-sent on EVERY future session, by rung
-#: of the intervention ladder (relearn SPEC 6). This distinction is the whole
-#: reason the module is not a flat "count the block" helper:
-#:
-#:   rung 1  CLAUDE.md note  -> the entire block, re-sent in full, forever.
-#:   rung 2  SKILL.md        -> only the frontmatter name + description. The
-#:                              harness lists skills by description and loads
-#:                              a body only when that skill is invoked.
-#:   rung 3+ hook / wrapper / config -> ZERO. A settings file is executed, not
-#:                              sent as prompt text, so it has no standing
-#:                              per-session token cost at all.
-#:
-#: So relearn's rung-3 hook families keep their full gross saving and only the
-#: rung-1/rung-2 prompt-text writes get netted down. That is the correct
-#: answer, not a loophole.
-#:
-#: **READ THIS BEFORE PRICING ANY NEW HOOK AS FREE — "rung 3 is zero" is a
-#: statement about EXECUTING hooks and is FALSE for context-INJECTING ones.**
-#: The zero above is earned by a hook that runs code: a formatter, a lint gate,
-#: a guard that blocks a command. Claude Code also has hooks whose entire
-#: purpose is to put text in front of the model — a ``UserPromptSubmit``
-#: re-injection, a ``PreToolUse`` ``additionalContext`` nudge. Those are prompt
-#: text. They differ from a CLAUDE.md rule only in SCHEDULE (delivered at a
-#: decision point rather than read at session start), which is precisely what
-#: can make them a better fix, and not at all in whether they cost tokens.
-#:
-#: Their cost is in fact worse-behaved than a rule's, not better: an injected
-#: block lands in the conversation and is re-sent with every subsequent turn,
-#: so it is not even bounded by the number of injections the way a one-shot
-#: read is bounded by the session count.
-#:
-#: The rung ladder cannot answer this, because it grades INTERVENTION STRENGTH,
-#: not delivery. The question "does this put tokens in front of the model" is a
-#: property of the MECHANISM, and it is asked as one:
-#: ``core/rulewrite/delivery.DeliveryKind.carries_prompt_text``, with each kind
-#: pricing itself. When a hook delivery arrives, route it through that flag —
-#: do not let it inherit this zero because of the rung it happens to occupy.
-RUNG_CLAUDE_MD = 1
-RUNG_SKILL = 2
+# --- Standing cost by delivery mechanism -------------------------------------
 
 #: ``relearn_apply.render_skill_content`` truncates the description at 200
 #: chars; the name line and frontmatter fences add a little more. The
@@ -185,7 +151,7 @@ MIN_FIX_CHARS = 40
 #: must stay that way — the text handed to :func:`is_placeholder_fix` on the
 #: live relearn path is not the raw fix but the fully RENDERED artifact (a
 #: marker comment, a heading, the fix, an evidence line; see
-#: ``relearn_apply.artifact_for_rung``), so the placeholder sentence sits in the
+#: ``relearn_apply.artifact_for_delivery``), so the placeholder sentence sits in the
 #: middle of the block and an anchored pattern never sees it. Anchoring this one
 #: for symmetry silently switches the whole quality floor off for that path.
 _PLACEHOLDER_PATTERNS = (
@@ -344,25 +310,40 @@ def artifact_tokens(text: str) -> int:
     return tokens_from_chars(len(text)) if text else 0
 
 
-def standing_tokens_per_session(rung: int, text: str) -> int:
-    """Tokens this artifact adds to EVERY future session, by rung.
+def standing_tokens_per_session(delivery: str, text: str) -> int:
+    """Tokens this artifact adds to EVERY future session, by DELIVERY MECHANISM.
 
-    See ``RUNG_CLAUDE_MD`` above for why rung 3 and up are zero: an EXECUTING
-    hook or a config edit is never sent to the model as prompt text.
+    Each mechanism answers for itself, because the answers genuinely differ and
+    nothing about an artifact's appearance predicts them:
 
-    **The rung is not the whole answer, and this function does not claim to be
-    one.** A context-injecting hook sits at rung 3 and is prompt text; pricing
-    it through this ladder alone would report it free. The rung ladder grades
-    intervention strength, not delivery, so a caller with a delivery mechanism
-    in hand asks THAT (``core/rulewrite/delivery``) and reaches this function
-    only for the mechanisms whose cost the ladder genuinely describes. The full
-    reasoning is in the ``RUNG_CLAUDE_MD`` block above; it is load-bearing.
+    * a ``CLAUDE.md`` rule re-sends its entire block, in full, forever;
+    * a skill re-sends only its frontmatter name + description — the harness
+      lists skills by description and loads a body only when one is invoked;
+    * an EXECUTING hook costs zero. A guard, a formatter, a lint gate: run by
+      the harness, never sent to the model as text. This zero is earned;
+    * an INJECTING hook costs the text it injects, per nudge, times the cap the
+      generated script enforces on itself. **It is not zero**, and it is
+      worse-behaved than a rule: the injected block lands in the conversation
+      and is re-sent on every later turn, so this is a floor, not a ceiling.
+
+    The last two are why the mechanism is asked rather than the artifact's
+    shape. Both are "a hook". One is free and one is the most expensive thing
+    here, and a scheme that groups them charges one of them wrongly — silently,
+    and in the direction that makes a fix look better than it is.
     """
     tokens = artifact_tokens(text)
-    if rung >= 3:
+    if delivery == DELIVERY_EXECUTING_HOOK:
         return 0
-    if rung == RUNG_SKILL:
+    if delivery == DELIVERY_INJECTING_HOOK:
+        return tokens * MAX_NUDGES_PER_SESSION
+    if delivery == DELIVERY_SKILL:
         return min(tokens, tokens_from_chars(SKILL_ALWAYS_LOADED_CHARS))
+    # A CLAUDE.md rule, and a path-scoped rule reaching this budget-side pricer
+    # without its rendered frontmatter to measure. Charging a path-scoped rule
+    # the whole block over-states it — its precise price lives on its own
+    # delivery kind, which reads the rendered file — but over-stating a COST is
+    # the safe direction here, and inventing a discount from text we cannot see
+    # is not.
     return tokens
 
 
@@ -613,7 +594,9 @@ class WriteCandidate:
 
     key: str
     family: str
-    rung: int
+    #: HOW this artifact reaches the agent, which is also WHAT gets written and
+    #: therefore what it costs to keep. See ``core/rulewrite/delivery``.
+    delivery: str
     artifact_text: str
     gross_tokens: int
     gross_usd: float | None = None
@@ -711,7 +694,9 @@ def _unpriceable_decision(candidate: WriteCandidate) -> WriteDecision:
     figures pass through untouched, with the basis saying plainly that the
     netting did not run.
     """
-    per_session = standing_tokens_per_session(candidate.rung, candidate.artifact_text)
+    per_session = standing_tokens_per_session(
+        candidate.delivery, candidate.artifact_text,
+    )
     return WriteDecision(
         key=candidate.key, offered=True, reason="",
         standing_tokens_per_session=per_session,
@@ -768,7 +753,7 @@ def _decide_family(
     # withhold the write even when the family's COMBINED return clears the
     # value floor below.
     family_gross_tokens = sum(c.gross_tokens for c in ordered)
-    per_session = standing_tokens_per_session(rep.rung, rep.artifact_text)
+    per_session = standing_tokens_per_session(rep.delivery, rep.artifact_text)
     exposure = max(
         rep.exposure_sessions if rep.exposure_sessions is not None else basis.sessions, 0,
     )

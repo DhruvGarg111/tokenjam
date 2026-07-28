@@ -300,7 +300,7 @@ RESEND_SDK_TRIM_FIX = (
     "caching is enabled."
 )
 
-# The durable claude-code lever: a rung-1 CLAUDE.md rule (same write machinery
+# The durable claude-code lever: a CLAUDE.md rule (same write machinery
 # `script`/`reuse`/`verbosity` use via `cost_proposals._persona_gated_write_fields`)
 # so the context that would otherwise get re-sent every turn never accumulates
 # on the main thread in the first place. Unlike `/compact`, this persists
@@ -465,7 +465,7 @@ class ResendFinding:
     #: ``session_id -> that session's own claimed tokens``. A BREAKDOWN of
     #: `past_overspend_tokens`, not a second quantity: the values sum to it,
     #: over exactly the in-scope sessions the avoidable figure was computed on.
-    #: It exists so `core/optimize/rule_placement` can put this card's rung-1
+    #: It exists so `core/optimize/rule_placement` can put this card's
     #: CLAUDE.md rule in the projects whose sessions incurred the re-sending,
     #: instead of in the one file every project pays for. Weights are TOKENS and
     #: drive both the token and the dollar split, so each destination's implied

@@ -19,7 +19,8 @@ from dataclasses import replace
 from typing import Any
 
 from tokenjam.core.config import TjConfig
-from tokenjam.core.rulewrite.delivery import DEFAULT_DELIVERY
+from tokenjam.core.rulewrite.kinds import DEFAULT_DELIVERY
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 from tokenjam.core.rulewrite.types import RuleDestination, RuleWrite
 
 #: The analyzers whose fix is a permanent rule. Not a copy of a gating map —
@@ -38,6 +39,16 @@ DISMISSED_REASON = (
     "You dismissed this one. What the behaviour already cost is still reported "
     "in full; only the offer is withdrawn, and you can bring it back."
 )
+
+
+def _delivery_of(raw: dict[str, Any]) -> str:
+    """The mechanism this stored proposal names, mapped on read when it comes
+    from a build that named a ladder number instead.
+
+    Read from the payload rather than hardcoded, so an analyzer that starts
+    proposing a different delivery needs no edit here.
+    """
+    return str(raw.get("delivery") or delivery_from_legacy_record(raw) or "")
 
 
 def _destinations_from_proposal(raw: dict[str, Any]) -> tuple[RuleDestination, ...]:
@@ -74,7 +85,6 @@ def _rule_from_cost_proposal(raw: dict[str, Any]) -> RuleWrite | None:
     analyzer = str(raw.get("analyzer", "") or "")
     if analyzer not in RULE_WRITING_ANALYZERS:
         return None
-    rung = int(raw.get("rung", 0) or 0)
     # A suppressed write has its `proposed_fix` cleared and its text moved to
     # `suggestion` by the budget pass, so the artifact has to be read from
     # whichever slot survived. Losing it would make a deferred rule
@@ -83,18 +93,18 @@ def _rule_from_cost_proposal(raw: dict[str, Any]) -> RuleWrite | None:
     offered = bool(raw.get("write_offered", False))
     if not artifact:
         return None
-    if rung < 1 and not raw.get("write_blocked_reason"):
+    # An empty `delivery` means this proposal offers no write at all — the
+    # persona gate cleared it. That is a statement about the OFFER, so a
+    # proposal that also carries no blocked-reason has nothing to list.
+    delivery = _delivery_of(raw)
+    if not delivery and not raw.get("write_blocked_reason"):
         return None
     return RuleWrite(
         signature=str(raw.get("signature", "") or ""),
         analyzer=analyzer,
         title=str(raw.get("title", "") or ""),
-        rung=max(rung, 1),
         artifact_text=artifact,
-        # A stored proposal names no mechanism today, so it gets the default.
-        # Read from the payload rather than hardcoded, so an analyzer that
-        # starts proposing a different delivery needs no edit here.
-        delivery=str(raw.get("delivery", "") or DEFAULT_DELIVERY),
+        delivery=delivery or DEFAULT_DELIVERY,
         destinations=_destinations_from_proposal(raw),
         offered=offered,
         blocked_reason=str(raw.get("write_blocked_reason", "") or ""),
@@ -129,9 +139,8 @@ def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
         signature=str(raw.get("signature", "") or ""),
         analyzer="relearn",
         title=str(raw.get("title", "") or ""),
-        rung=max(int(raw.get("rung", 1) or 1), 1),
         artifact_text=artifact,
-        delivery=str(raw.get("delivery", "") or DEFAULT_DELIVERY),
+        delivery=_delivery_of(raw) or DEFAULT_DELIVERY,
         destinations=destinations,
         offered=bool(raw.get("write_offered", False)) and bool(target),
         blocked_reason=str(raw.get("write_blocked_reason", "") or ""),

@@ -2,7 +2,7 @@
 
 A cost proposal is advise-only (see ``cost_proposals``): its fix lives in the
 user's own application code, which tokenjam has no workspace to write into. So
-unlike ``relearn_apply`` there is NO file write, no rung routing, no git commit
+unlike ``relearn_apply`` there is NO file write, no delivery routing, no git commit
 here. "Apply" means exactly one thing: the user tells tokenjam "I made this
 change".
 

@@ -38,7 +38,6 @@ def _rule(*paths: Path, **kw) -> RuleWrite:
         signature="cost:subagent",
         analyzer="subagent",
         title="Right-size Task-dispatched subagents",
-        rung=1,
         artifact_text=(
             "Default every subagent to the cheapest same-family model that "
             "fits its shape."
@@ -270,15 +269,14 @@ def test_an_unknown_delivery_is_refused_rather_than_rendered_as_markdown(
     assert alpha.read_text(encoding="utf-8") == before
 
 
-def test_the_lifecycle_prices_through_the_mechanism_not_the_rung(config, tmp_path):
+def test_the_lifecycle_prices_through_the_mechanism(config, tmp_path):
     """The load-bearing half of the seam.
 
-    `write_budget`'s ladder charges rung 3+ ZERO because an EXECUTING hook is
-    never sent as prompt text. That is false for a context-INJECTING hook: a
-    `UserPromptSubmit` re-injection is prompt text on a different schedule, and
-    once injected it accretes into history and is re-sent every turn. So the
-    question "does this cost tokens" is asked of the MECHANISM, and a delivery
-    that carries prompt text pays whatever rung it occupies.
+    "A hook is executed, never sent as prompt text" is true of an EXECUTING
+    hook and false of a context-INJECTING one: a `UserPromptSubmit`
+    re-injection is prompt text on a different schedule, and once injected it
+    accretes into history and is re-sent every turn. So the question "does this
+    cost tokens" is asked of the MECHANISM, which is the only thing that knows.
     """
     from dataclasses import replace as dc_replace
 
@@ -288,11 +286,10 @@ def test_the_lifecycle_prices_through_the_mechanism_not_the_rung(config, tmp_pat
     markdown = dv.DELIVERY_KINDS[dv.DELIVERY_CLAUDE_MD_RULE]
     assert markdown.carries_prompt_text is True
 
-    # A rung-3 mechanism that DOES put text in front of the model still pays —
-    # and it prices ITSELF rather than reusing the markdown kind's pricer, which
-    # routes through the rung ladder and would return zero here. That is the
-    # whole reason the pricer is per-mechanism: the ladder is the right answer
-    # for a file the harness reads, and the wrong one for an injected block.
+    # A hook mechanism that DOES put text in front of the model still pays —
+    # and it prices ITSELF rather than inheriting another kind's answer. That is
+    # the whole reason the pricer is per-mechanism: two mechanisms that look
+    # alike from outside can have opposite cost behaviour.
     injecting = dc_replace(
         markdown, name="test_injecting_hook",
         standing_tokens=lambda rule, rendered, existing: 250,
@@ -301,16 +298,14 @@ def test_the_lifecycle_prices_through_the_mechanism_not_the_rung(config, tmp_pat
     dv.DELIVERY_KINDS[injecting.name] = injecting
     dv.DELIVERY_KINDS[free.name] = free
     try:
-        priced = stage_rule(
-            config, _rule(alpha, rung=3, delivery=injecting.name),
-        )[0]
+        priced = stage_rule(config, _rule(alpha, delivery=injecting.name))[0]
         store.clear(config)
-        unpriced = stage_rule(config, _rule(alpha, rung=3, delivery=free.name))[0]
+        unpriced = stage_rule(config, _rule(alpha, delivery=free.name))[0]
     finally:
         del dv.DELIVERY_KINDS[injecting.name]
         del dv.DELIVERY_KINDS[free.name]
 
-    # Same rung, same text, opposite standing cost — decided by the mechanism.
+    # Same shape, same text, opposite standing cost — decided by the mechanism.
     assert priced.standing_tokens_per_session == 250
     assert unpriced.standing_tokens_per_session == 0
 

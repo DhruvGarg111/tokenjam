@@ -2973,7 +2973,7 @@ def test_cost_proposals_wired_into_review_inbox(html):
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
     # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
-    # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
+    # reversible CLAUDE.md rule through the apply-workspace endpoint (dry-run diff
     # then write), unlike the three advise-only analyzers.
     assert "'/relearn/cost-proposals/apply-workspace'" in html
     assert "apply_capable" in html
@@ -3048,7 +3048,7 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "register it once with" in row
     # The reversibility fact rides the same line and is NOT trimmed with the rest:
     # it is what makes a one-click write to the reader's own file acceptable.
-    assert "writes a reversible rung-1 note" in row
+    assert "writes a reversible note" in row
     # The register-command is one-click copyable, not just prose.
     assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
     # Smarter UX: "no path yet" is not an error. The buttons are disabled until
@@ -5449,3 +5449,43 @@ def test_alerts_view_wires_the_acknowledge_endpoint(html):
     assert 'colspan="6"' not in view
     # apiPatch is a real helper, not a call into nothing.
     assert "async function apiPatch(path, body)" in html
+
+
+def test_the_uis_delivery_labels_cover_exactly_the_server_registry(html):
+    """The inbox card names a fix by its delivery mechanism, and it cannot ask
+    the server for the label the way `RulesView` does — that registry is
+    fetched in a different component. So there is a small local map, and a
+    local map is exactly the thing that drifts.
+
+    This pins it in both directions. A mechanism added server-side without a
+    label here renders as "unknown (legacy record)" on a brand-new fix, which
+    reads as a broken record rather than a new capability; a label left here
+    after its mechanism is removed is a name for something that cannot happen.
+    """
+    import re
+
+    from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
+
+    block = re.search(r"const DELIVERY_LABELS = \{(.*?)\n\};", html, re.DOTALL)
+    assert block, "the UI's delivery-label map has moved or been renamed"
+    labelled = set(re.findall(r"^\s*(\w+):", block.group(1), re.MULTILINE))
+
+    assert labelled == set(DELIVERY_KINDS), (
+        "the UI's DELIVERY_LABELS and core/rulewrite/delivery.DELIVERY_KINDS "
+        f"disagree; only in UI: {sorted(labelled - set(DELIVERY_KINDS))}, "
+        f"only in server: {sorted(set(DELIVERY_KINDS) - labelled)}"
+    )
+
+
+def test_every_relearn_badge_maps_a_real_delivery_mechanism(html):
+    """Same discipline for the badge map. Its fallback is the generic 'FIX',
+    so a missing entry degrades quietly rather than visibly — which is why it
+    needs a test rather than a bug report."""
+    import re
+
+    from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
+
+    block = re.search(r"const RELEARN_BADGE_BY_DELIVERY = \{(.*?)\n\};", html, re.DOTALL)
+    assert block, "the relearn badge map has moved or been renamed"
+    badged = set(re.findall(r"^\s*(\w+):", block.group(1), re.MULTILINE))
+    assert badged == set(DELIVERY_KINDS), sorted(badged ^ set(DELIVERY_KINDS))

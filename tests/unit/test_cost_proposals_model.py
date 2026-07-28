@@ -13,6 +13,8 @@ from tokenjam.utils.time_parse import utcnow
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.config import AgentConfig, StorageConfig, TjConfig
 from tokenjam.core.optimize import cost_proposals as cp
 from tokenjam.core.optimize.analyzers.batch_placement import (
@@ -349,7 +351,7 @@ def test_a_dispatch_id_never_resolves_to_an_agent_file(tmp_path, monkeypatch):
     assert card.apply_kind == ""
     assert card.signature == "cost:subagent"
     assert card.target_path == ""
-    assert card.rung == 1
+    assert card.delivery == DELIVERY_CLAUDE_MD_RULE
     assert card.proposed_fix
 
 

@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.optimize import rule_placement as rp
 from tokenjam.core.optimize import write_budget as wb
 from tokenjam.core.optimize.projection import build_projection_basis
@@ -246,7 +248,7 @@ def test_no_resolved_destination_falls_back_to_the_user_global_file(tmp_path):
 
 def _candidate(**kw):
     base = dict(
-        key="k", family="fam", rung=1,
+        key="k", family="fam", delivery=DELIVERY_CLAUDE_MD_RULE,
         # ~500 chars of real rule text: past the placeholder floor, and big
         # enough that its standing cost matters.
         artifact_text="Route context-heavy sub-tasks to a subagent. " * 12,

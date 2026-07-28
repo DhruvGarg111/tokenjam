@@ -2,8 +2,8 @@
 
 Both exist to price a fix HONESTLY rather than to make it look cheap. That
 distinction is the whole file: a path-scoped rule really does cost almost
-nothing, and an injecting hook really does cost something the rung ladder says
-is free.
+nothing, and an injecting hook really does cost something that a blanket
+"a hook is executed, so a hook is free" would call free.
 """
 from __future__ import annotations
 
@@ -33,7 +33,6 @@ def _rule(**kw) -> RuleWrite:
         signature="relearn:migration_read_before_edit",
         analyzer="relearn",
         title="Read a migration before editing it",
-        rung=1,
         artifact_text=(
             "Read a migration file in full before editing it. Migrations are "
             "append-only and ordered, so an edit written from a remembered "
@@ -190,7 +189,7 @@ def test_path_scoped_pricing_makes_a_write_offerable_that_claude_md_could_not():
         per_session = kind.standing_tokens(rule, kind.render(rule, ""), "")
         decisions[kind_name] = wb.allocate_writes(
             [wb.WriteCandidate(
-                key="k", family="f", rung=1,
+                key="k", family="f", delivery=kind_name,
                 artifact_text="x" * (per_session * 4),
                 gross_tokens=9_000, gross_usd=8.0, exposure_sessions=40,
             )],
@@ -206,26 +205,35 @@ def test_path_scoped_pricing_makes_a_write_offerable_that_claude_md_could_not():
     )
 
 
-# --- hooks: the rung-3 zero is earned by ONE of the two kinds ----------------#
+# --- hooks: the zero is earned by ONE of the two kinds ----------------------#
 
 def test_an_injecting_hook_does_not_price_to_zero():
-    """THE assertion. `standing_tokens_per_session(3, ...)` returns 0, and for
-    an executing guard that is correct. An injecting hook puts text in front of
-    the model — and its cost is worse-behaved than a rule's, since the injected
-    block lands in the conversation and is re-sent every subsequent turn."""
-    rule = _rule(delivery=DELIVERY_INJECTING_HOOK, rung=3)
+    """THE assertion. An injecting hook puts text in front of the model — and
+    its cost is worse-behaved than a rule's, since the injected block lands in
+    the conversation and is re-sent every subsequent turn.
+
+    The budget agrees with the mechanism now, which it did not when the answer
+    was derived from the artifact's shape: both sides are asked the same
+    question and both charge.
+    """
+    rule = _rule(delivery=DELIVERY_INJECTING_HOOK)
     kind = DELIVERY_KINDS[DELIVERY_INJECTING_HOOK]
 
-    assert wb.standing_tokens_per_session(3, rule.artifact_text) == 0
+    assert wb.standing_tokens_per_session(
+        DELIVERY_INJECTING_HOOK, rule.artifact_text,
+    ) > 0
     assert kind.standing_tokens(rule, "", "") > 0
     assert kind.carries_prompt_text is True
 
 
 def test_an_executing_hook_still_prices_to_zero():
-    """The case the rung-3 zero was written for: run by the harness, never sent
-    to the model. Removing this would over-charge a genuinely free fix."""
-    rule = _rule(delivery=DELIVERY_EXECUTING_HOOK, rung=3)
+    """The one case a zero was ever earned: run by the harness, never sent to
+    the model. Removing this would over-charge a genuinely free fix."""
+    rule = _rule(delivery=DELIVERY_EXECUTING_HOOK)
     kind = DELIVERY_KINDS[DELIVERY_EXECUTING_HOOK]
+    assert wb.standing_tokens_per_session(
+        DELIVERY_EXECUTING_HOOK, rule.artifact_text,
+    ) == 0
     assert kind.standing_tokens(rule, "", "") == 0
     assert kind.carries_prompt_text is False
 
@@ -236,7 +244,7 @@ def test_the_injecting_price_assumes_the_cap_the_hook_enforces():
     from tokenjam.core.optimize.relearn_apply import _REACTIVE_SPECS, _render_reactive_hook
     from tokenjam.core.rulewrite.delivery import MAX_NUDGES_PER_SESSION
 
-    source = _render_reactive_hook(_REACTIVE_SPECS["stale_read_race"], "T", 3, "sig")
+    source = _render_reactive_hook(_REACTIVE_SPECS["stale_read_race"], "T", "sig")
     assert f"_MAX_NUDGES_PER_SESSION = {MAX_NUDGES_PER_SESSION}" in source
 
 
@@ -248,7 +256,7 @@ def test_the_generated_hook_nests_additional_context_correctly():
     working. It must be nested inside `hookSpecificOutput`."""
     from tokenjam.core.optimize.relearn_apply import _REACTIVE_SPECS, _render_reactive_hook
 
-    source = _render_reactive_hook(_REACTIVE_SPECS["cwd_confusion"], "T", 3, "sig")
+    source = _render_reactive_hook(_REACTIVE_SPECS["cwd_confusion"], "T", "sig")
     ast.parse(source)          # it is valid Python
     assert '"hookSpecificOutput"' in source
     # The key appears INSIDE the nested dict, never as a sibling of it.
@@ -265,7 +273,7 @@ def test_the_generated_hook_dedups_per_session_and_caps_itself():
     script, keyed on the `session_id` passed on stdin."""
     from tokenjam.core.optimize.relearn_apply import _REACTIVE_SPECS, _render_reactive_hook
 
-    source = _render_reactive_hook(_REACTIVE_SPECS["edit_string_not_found"], "T", 3, "sig")
+    source = _render_reactive_hook(_REACTIVE_SPECS["edit_string_not_found"], "T", "sig")
     assert "_nudge_budget_spent" in source
     assert 'payload.get("session_id")' in source
     assert "_MAX_NUDGES_PER_SESSION" in source
@@ -277,7 +285,7 @@ def test_the_generated_hook_is_advisory_and_fails_open():
     is advisory-only and the body runs under a blanket except."""
     from tokenjam.core.optimize.relearn_apply import _REACTIVE_SPECS, _render_reactive_hook
 
-    source = _render_reactive_hook(_REACTIVE_SPECS["stale_read_race"], "T", 3, "sig")
+    source = _render_reactive_hook(_REACTIVE_SPECS["stale_read_race"], "T", "sig")
     assert "except Exception:" in source
     assert "fail-open" in source.lower()
     # It never emits a blocking decision.

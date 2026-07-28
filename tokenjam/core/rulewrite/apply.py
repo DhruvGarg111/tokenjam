@@ -101,17 +101,16 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
             signature=rule.signature,
             path=str(target),
             scope=destination.scope,
-            rung=rule.rung,
             title=rule.title,
             analyzer=rule.analyzer,
             delivery=kind.name,
             source_sha256=store.sha256(existing),
             rendered=rendered,
             diff=_diff(destination.path, existing, rendered),
-            # Priced by the MECHANISM, not by the rung. A mechanism that puts
-            # tokens in front of the model pays a standing cost whatever ladder
-            # rung it occupies; see `delivery.py` on why the rung-3-is-free rule
-            # cannot be trusted for a context-INJECTING hook.
+            # Priced by the MECHANISM, which is the only thing that knows.
+            # A mechanism that puts tokens in front of the model pays a standing
+            # cost; see `delivery.py` on why a context-INJECTING hook cannot
+            # inherit an executing hook's zero just for also being a hook.
             standing_tokens_per_session=(
                 kind.standing_tokens(rule, rendered, existing)
                 if kind.carries_prompt_text else 0
@@ -285,10 +284,10 @@ def undo(
     }
 
 
-# Deliberately no rung constants here. They live on ``types`` (defined) and
-# ``delivery`` (used); re-exporting them from the apply path would suggest this
-# module reasons about the intervention ladder, which is exactly the coupling
-# the delivery seam removed.
+# Deliberately no delivery-kind constants here. They live on ``kinds``
+# (declared) and ``delivery`` (given behaviour); re-exporting them from the
+# apply path would suggest this module decides what an artifact is, which is
+# exactly the coupling the delivery seam removed.
 __all__ = [
     "apply_staged",
     "check_staged",

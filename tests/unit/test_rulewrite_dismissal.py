@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.optimize import cost_apply, dismissals
 from tokenjam.core.rulewrite import RuleWriteRefused, list_rule_writes, stage_rule
@@ -31,7 +33,7 @@ def _seed(config: TjConfig, **kw) -> None:
 
     proposal = {
         "kind": "cost", "analyzer": "subagent", "signature": "cost:subagent",
-        "title": "Right-size subagents", "rung": 1,
+        "title": "Right-size subagents", "delivery": DELIVERY_CLAUDE_MD_RULE,
         "proposed_fix": "Default every subagent to the cheapest model that fits.",
         "write_offered": True,
         "past_overspend_usd": 412.5, "past_overspend_tokens": 9_100_000,

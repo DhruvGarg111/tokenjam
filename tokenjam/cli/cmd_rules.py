@@ -30,6 +30,7 @@ from tokenjam.core.rulewrite import (
 )
 from tokenjam.core.rulewrite import store
 from tokenjam.core.rulewrite.delivery import DEFAULT_DELIVERY, DELIVERY_KINDS
+from tokenjam.core.rulewrite.legacy import UNRESOLVED_DELIVERY_LABEL
 from tokenjam.utils.formatting import console, format_tokens
 
 # Honesty discipline (Critical Rule 14). A rule is a candidate an agent will
@@ -155,8 +156,8 @@ def cmd_rules_show(
     console.print(f"[heading]{escape(rule.title or rule.signature)}[/heading]")
     kind = DELIVERY_KINDS.get(rule.delivery or DEFAULT_DELIVERY)
     console.print(
-        f"[muted]{escape(rule.signature)} · rung {rule.rung} · "
-        f"{escape(kind.label if kind else (rule.delivery or 'unknown'))}[/muted]",
+        f"[muted]{escape(rule.signature)} · "
+        f"{escape(kind.label if kind else UNRESOLVED_DELIVERY_LABEL)}[/muted]",
     )
     console.print()
     console.print(escape(rule.artifact_text))

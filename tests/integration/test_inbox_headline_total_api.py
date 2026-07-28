@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
@@ -115,7 +117,7 @@ def _cluster(
 ) -> RelearnCluster:
     return RelearnCluster(
         signature=signature, family_key=signature, title=f"{signature} recurs",
-        sessions=3, occurrences=9, repos=["demo"], rung=1, scope="project",
+        sessions=3, occurrences=9, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
         proposed_fix="Do the thing that stops this.",
         past_overspend_usd=unbounded_usd, past_overspend_tokens=unbounded_tokens,
         past_reread_usd=round(unbounded_usd * 0.1, 6),

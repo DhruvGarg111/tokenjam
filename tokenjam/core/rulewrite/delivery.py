@@ -13,10 +13,8 @@ HOW it gets there (this module). Adding a second mechanism should be a new
 staging, diff, apply, undo or budget machinery, none of which knows what a
 CLAUDE.md is.
 
-**The pricing trap this seam exists to keep visible.** ``write_budget``'s rung
-ladder charges rung 3+ (hooks, wrappers, config) ZERO standing cost, on the
-reasoning that a settings file is *executed*, never sent as prompt text. That
-is correct for an executing hook — a formatter, a lint gate, a guard that
+**The pricing trap this seam exists to keep visible.** "A hook is free" is a
+statement about an EXECUTING hook — a formatter, a lint gate, a guard that
 blocks a command — and it is **wrong for a context-injecting one**. A
 ``UserPromptSubmit`` re-injection and a ``PreToolUse`` ``additionalContext``
 nudge are prompt text; they merely arrive on a different schedule than a file
@@ -25,53 +23,27 @@ are re-sent with every subsequent turn, so their cost is not even bounded by
 the number of injections.
 
 That is why :attr:`DeliveryKind.carries_prompt_text` is a property of the
-DELIVERY and not of the rung. A mechanism that puts tokens in front of the
-model pays a standing cost whatever ladder rung it happens to occupy, and a
-mechanism that does not, does not. Read the flag; do not infer the answer from
-the rung.
+DELIVERY: asked of the mechanism, answered by it, and never inferred from what
+the artifact looks like. Two hooks that look alike price differently because
+they ARE different mechanisms, each carrying its own pricer. Read the flag.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
 
-from tokenjam.core.rulewrite.types import RUNG_SKILL, RuleWrite, RuleWriteRefused
-
-#: The mechanism shipped today: a markdown block appended to a ``CLAUDE.md``
-#: (or a ``SKILL.md`` at rung 2), loaded by the harness at session start.
-DELIVERY_CLAUDE_MD_RULE = "claude_md_rule"
-
-#: A `.claude/rules/<slug>.md` carrying a ``paths:`` glob. It loads only when
-#: Claude READS a file matching the pattern — not at launch, and not on every
-#: tool use — so its standing cost is a small fraction of the same words in a
-#: `CLAUDE.md`.
-#:
-#: This is not merely a cheaper way to say the same thing. Standing cost is an
-#: INPUT to whether a write is offered at all, so a near-zero-rent destination
-#: makes fixes net-positive that are net-negative against `CLAUDE.md`. It
-#: widens what the product can legitimately recommend rather than just
-#: discounting what it already does.
-DELIVERY_PATH_SCOPED_RULE = "path_scoped_rule"
-
-#: A hook that RUNS CODE and injects nothing — a guard that blocks a command,
-#: a formatter. Genuinely free of standing prompt cost: it is executed, never
-#: sent to the model as text. This is the case the rung-3 zero was written for.
-DELIVERY_EXECUTING_HOOK = "executing_hook"
-
-#: A hook that puts TEXT in front of the model — a ``PostToolUseFailure``
-#: nudge, a ``UserPromptSubmit`` re-injection. **Not free, and worse-behaved
-#: than a rule:** the injected block lands in the conversation and is re-sent
-#: on every subsequent turn, so its cost is not even bounded by session count
-#: the way a session-start read is.
-#:
-#: Three of the four rung-3 families that ship today are this kind, and the
-#: rung ladder priced all of them at zero. That is the trap the seam's per-kind
-#: pricer exists for: the rung grades intervention STRENGTH, not delivery.
-DELIVERY_INJECTING_HOOK = "injecting_hook"
-
-#: The default for a rule that names no mechanism — every rule written before
-#: delivery was a field, and every rule the four current analyzers produce.
-DEFAULT_DELIVERY = DELIVERY_CLAUDE_MD_RULE
+from tokenjam.core.rulewrite.kinds import (
+    DEFAULT_DELIVERY,
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_PATH_SCOPED_RULE,
+    DELIVERY_SKILL,
+    MAX_NUDGES_PER_SESSION,
+    UNRESOLVED_DELIVERY,
+)
+from tokenjam.core.rulewrite.legacy import UNRESOLVED_DELIVERY_LABEL
+from tokenjam.core.rulewrite.types import RuleWrite, RuleWriteRefused
 
 
 @dataclass(frozen=True)
@@ -85,13 +57,17 @@ class DeliveryKind:
     delivery kind has to preserve.
 
     ``standing_tokens`` takes ``(rule, rendered, existing)`` and returns the
-    per-session tokens this delivery adds. It exists so a mechanism can price
-    itself rather than inherit the rung ladder's answer; see the module
-    docstring for why that ladder cannot be trusted for an injecting hook.
+    per-session tokens this delivery adds. It exists so a mechanism prices
+    ITSELF rather than inheriting an answer derived from what it resembles; see
+    the module docstring for why an injecting hook cannot inherit a hook's zero.
     """
 
     name: str
-    #: Short human label, for a CLI column and a UI badge.
+    #: Human label, for a CLI column, an expanded card and a UI badge. One
+    #: form, not one per surface: a second "short" spelling was tried here and
+    #: removed the moment the last caller stopped needing it, because an
+    #: abstraction nothing consumes is how the thing this module replaced got
+    #: started.
     label: str
     #: Whether this mechanism puts tokens in front of the model at all. The
     #: budget's netting is meaningless for a mechanism that does not, and
@@ -101,33 +77,48 @@ class DeliveryKind:
     standing_tokens: Callable[[RuleWrite, str, str], int]
 
 
+def _cluster_for(rule: RuleWrite) -> dict:
+    """The cluster shape ``relearn_apply``'s renderers read, from a rule.
+
+    One place builds it, so a field the renderers depend on cannot be present
+    for one delivery and missing for another.
+    """
+    return {
+        "title": rule.title or rule.signature,
+        "proposed_fix": rule.artifact_text,
+        "sessions": sum(d.sessions for d in rule.destinations),
+        "repos": [d.path for d in rule.destinations],
+    }
+
+
 def _render_claude_md(rule: RuleWrite, existing: str) -> str:
     """Delegates to ``relearn_apply``'s renderers so the marker comments — the
     thing that makes a re-apply replace rather than duplicate, and makes the
     existing Revert path able to find the block — are produced in exactly one
     place."""
-    from tokenjam.core.optimize.relearn_apply import (
-        render_note_content,
-        render_skill_content,
-        slugify,
-    )
+    from tokenjam.core.optimize.relearn_apply import render_note_content
 
-    cluster = {
-        "title": rule.title or rule.signature,
-        "proposed_fix": rule.artifact_text,
-        "rung": rule.rung,
-        "sessions": sum(d.sessions for d in rule.destinations),
-        "repos": [d.path for d in rule.destinations],
-    }
-    if rule.rung == RUNG_SKILL:
-        return render_skill_content(cluster, rule.signature, slugify(rule.title))
-    return render_note_content(existing, cluster, rule.signature)
+    return render_note_content(existing, _cluster_for(rule), rule.signature)
+
+
+def _render_skill(rule: RuleWrite, existing: str) -> str:
+    """A ``SKILL.md``, from the same renderer the apply path uses.
+
+    A skill file is one skill per directory by construction, so there is no
+    sibling content to preserve and the existing bytes are not read.
+    """
+    from tokenjam.core.optimize.relearn_apply import render_skill_content, slugify
+
+    del existing
+    return render_skill_content(
+        _cluster_for(rule), rule.signature, slugify(rule.title or rule.signature),
+    )
 
 
 def _standing_tokens_claude_md(rule: RuleWrite, rendered: str, existing: str) -> int:
     """Priced on the DELTA this write introduces, through
-    ``write_budget.standing_tokens_per_session`` so the rung semantics are
-    applied by the module that owns them rather than restated here.
+    ``write_budget.standing_tokens_per_session`` so one module owns the
+    always-resident model rather than each caller restating it.
 
     A re-apply that replaces an existing block adds nothing, and pricing it as
     if it added a whole block would overstate the cost of keeping a rule
@@ -136,7 +127,22 @@ def _standing_tokens_claude_md(rule: RuleWrite, rendered: str, existing: str) ->
     from tokenjam.core.optimize.write_budget import standing_tokens_per_session
 
     added = max(0, len(rendered) - len(existing))
-    return standing_tokens_per_session(rule.rung, rendered[:added] if added else "")
+    return standing_tokens_per_session(
+        DELIVERY_CLAUDE_MD_RULE, rendered[:added] if added else "",
+    )
+
+
+def _standing_tokens_skill(rule: RuleWrite, rendered: str, existing: str) -> int:
+    """A skill's always-loaded surface: its frontmatter name + description,
+    bounded however long the body is. Same delta discipline as the rule above —
+    a re-apply that replaces an existing file adds nothing new to carry."""
+    from tokenjam.core.optimize.write_budget import standing_tokens_per_session
+
+    del rule
+    added = max(0, len(rendered) - len(existing))
+    return standing_tokens_per_session(
+        DELIVERY_SKILL, rendered[:added] if added else "",
+    )
 
 
 #: Globs a path-scoped rule may carry before the brace-expansion budget is a
@@ -192,17 +198,7 @@ def render_path_scoped_rule(rule: RuleWrite, existing: str) -> str:
             )
     from tokenjam.core.optimize.relearn_apply import render_note_content, slugify
 
-    body = render_note_content(
-        "",
-        {
-            "title": rule.title or rule.signature,
-            "proposed_fix": rule.artifact_text,
-            "rung": rule.rung,
-            "sessions": sum(d.sessions for d in rule.destinations),
-            "repos": [d.path for d in rule.destinations],
-        },
-        rule.signature,
-    )
+    body = render_note_content("", _cluster_for(rule), rule.signature)
     paths_block = "\n".join(f"  - {glob!r}".replace("'", '"') for glob in globs)
     frontmatter = (
         "---\n"
@@ -230,9 +226,8 @@ def _standing_tokens_path_scoped(
     the block, and the difference is the whole point of the delivery.
 
     Deliberately NOT zero. The frontmatter really is carried, and a delivery
-    that priced itself at nothing would be making the same claim the rung-3
-    ladder makes about hooks — which is exactly the claim this seam exists to
-    stop being made by default.
+    that priced itself at nothing would be making the same unearned free claim
+    this seam exists to stop being made by default.
     """
     from tokenjam.core.optimize.write_budget import tokens_from_chars
     from tokenjam.core.summarize.load_semantics import (
@@ -261,7 +256,7 @@ def _render_hook(rule: RuleWrite, existing: str) -> str:
         {
             "family_key": rule.signature.split(":")[-1],
             "title": rule.title or rule.signature,
-            "rung": rule.rung,
+            "delivery": rule.delivery,
             "proposed_fix": rule.artifact_text,
         },
         rule.signature,
@@ -300,13 +295,7 @@ def _standing_tokens_injecting_hook(
     return tokens_from_chars(len(injected)) * MAX_NUDGES_PER_SESSION
 
 
-#: Mirrors the cap the generated hook enforces on itself. Kept here too because
-#: the PRICE has to assume the same ceiling the script honours; if they drift,
-#: the product is charging for one behaviour and shipping another.
-MAX_NUDGES_PER_SESSION = 2
-
-
-#: Every delivery mechanism this product can offer, by name. One today.
+#: Every delivery mechanism this product can offer, by name.
 #:
 #: Adding one means adding an entry here plus its two functions. It must NOT
 #: mean touching ``apply.py``, ``store.py``, ``plan.py`` or ``write_budget`` —
@@ -319,6 +308,15 @@ DELIVERY_KINDS: dict[str, DeliveryKind] = {
         carries_prompt_text=True,
         render=_render_claude_md,
         standing_tokens=_standing_tokens_claude_md,
+    ),
+    DELIVERY_SKILL: DeliveryKind(
+        name=DELIVERY_SKILL,
+        label="skill",
+        # Only the frontmatter is resident, but resident is resident: a skill
+        # the harness lists is a skill whose description is sent every session.
+        carries_prompt_text=True,
+        render=_render_skill,
+        standing_tokens=_standing_tokens_skill,
     ),
     DELIVERY_PATH_SCOPED_RULE: DeliveryKind(
         name=DELIVERY_PATH_SCOPED_RULE,
@@ -358,19 +356,49 @@ def resolve_delivery(name: str | None) -> DeliveryKind:
     """
     key = str(name or DEFAULT_DELIVERY)
     kind = DELIVERY_KINDS.get(key)
-    if kind is None:
+    if kind is not None:
+        return kind
+    if key == UNRESOLVED_DELIVERY:
+        # Not a typo and not a future build — a stored record from before
+        # mechanisms had names, whose artifact could not be established from
+        # anything the record carries. Say that plainly: the user's action is
+        # to re-run the analysis, not to look for a broken name.
         raise RuleWriteRefused(
-            f"unknown delivery mechanism {key!r} — this build knows "
-            f"{', '.join(sorted(DELIVERY_KINDS))}. Refusing to guess how to "
-            "write it.",
+            "this fix was saved by an older version that did not record which "
+            "kind of artifact it writes, and nothing in the saved record "
+            "establishes it. Guessing would write the wrong file. Re-run the "
+            "analysis to refresh it.",
         )
-    return kind
+    raise RuleWriteRefused(
+        f"unknown delivery mechanism {key!r} — this build knows "
+        f"{', '.join(sorted(DELIVERY_KINDS))}. Refusing to guess how to "
+        "write it.",
+    )
+
+
+def delivery_label(name: str | None) -> str:
+    """The human label for a mechanism — a card, a UI badge, a CLI column.
+
+    Never raises, unlike :func:`resolve_delivery`: a surface that merely NAMES
+    an artifact must keep rendering for a record this build cannot resolve, and
+    it says so ("unknown") rather than dropping the column or guessing a label.
+    Refusing is the right answer when about to WRITE the artifact; it is the
+    wrong answer when about to describe one.
+    """
+    kind = DELIVERY_KINDS.get(str(name or ""))
+    return kind.label if kind else UNRESOLVED_DELIVERY_LABEL
 
 
 __all__ = [
     "DEFAULT_DELIVERY",
     "DELIVERY_CLAUDE_MD_RULE",
+    "DELIVERY_EXECUTING_HOOK",
+    "DELIVERY_INJECTING_HOOK",
     "DELIVERY_KINDS",
+    "DELIVERY_PATH_SCOPED_RULE",
+    "DELIVERY_SKILL",
     "DeliveryKind",
+    "MAX_NUDGES_PER_SESSION",
+    "delivery_label",
     "resolve_delivery",
 ]

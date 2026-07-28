@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.optimize import cost_apply, relearn_apply
 from tokenjam.core.rulewrite import RuleWriteRefused, list_rule_writes, stage_rule
@@ -51,7 +53,7 @@ def _proposal(**kw) -> dict:
         "analyzer": "subagent",
         "signature": "cost:subagent",
         "title": "Right-size Task-dispatched subagents",
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "proposed_fix": "Default every subagent to the cheapest model that fits.",
         "write_offered": True,
         "past_overspend_usd": 412.5,
