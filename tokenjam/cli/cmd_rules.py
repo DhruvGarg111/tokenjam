@@ -87,6 +87,7 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
     table.add_column("RULE")
     table.add_column("HOW")
     table.add_column("WHERE")
+    table.add_column("STATE")
     table.add_column("PAST OVERSPEND", justify="right")
     for rule in rules:
         if rule.destinations:
@@ -103,17 +104,25 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
             else f"${rule.past_overspend_usd:,.2f}"
         )
         kind = DELIVERY_KINDS.get(rule.delivery or DEFAULT_DELIVERY)
+        # An applied rule keeps its row and its figure and says so. A row that
+        # simply vanished would leave a user who just applied it unable to tell
+        # "done" from "broken".
+        state = (
+            "applied" if rule.already_applied
+            else ("on offer" if rule.offered else "deferred")
+        )
         table.add_row(
             rule.analyzer,
             escape(rule.title or rule.signature),
             escape(kind.label if kind else (rule.delivery or "unknown")),
             escape(where),
+            state,
             figure,
         )
     console.print(table)
     console.print()
     for rule in rules:
-        if rule.offered:
+        if rule.offered or rule.already_applied:
             continue
         console.print(
             f"[muted]{escape(rule.signature)} — not on offer: "
@@ -164,7 +173,10 @@ def cmd_rules_show(
         console.print(f"[muted]{escape(rule.placement_basis)}[/muted]")
     if rule.placement_coverage_note:
         console.print(f"[muted]{escape(rule.placement_coverage_note)}[/muted]")
-    if not rule.offered:
+    if rule.already_applied:
+        console.print()
+        console.print(f"[ok]✓[/ok] Already applied. {escape(rule.blocked_reason)}")
+    elif not rule.offered:
         console.print()
         console.print(f"[warn]Not on offer:[/warn] {escape(rule.blocked_reason)}")
 

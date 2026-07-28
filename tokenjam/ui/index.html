@@ -8418,12 +8418,14 @@ function RulesView() {
                   </div>` : null}
                   ${r.placement_basis ? html`<div class="opt-line dim">${r.placement_basis}</div>` : null}
                   ${r.placement_coverage_note ? html`<div class="opt-line dim">${r.placement_coverage_note}</div>` : null}
-                  ${!r.offered ? html`<div class="opt-line" style="color:var(--warn)">Not on offer: ${r.blocked_reason}</div>` : null}
+                  ${r.already_applied
+                    ? html`<div class="opt-line"><b>✓ Already applied.</b> <span class="dim">${r.blocked_reason}</span></div>`
+                    : (!r.offered ? html`<div class="opt-line" style="color:var(--warn)">Not on offer: ${r.blocked_reason}</div>` : null)}
                   <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
                     <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
                       ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
                     </button>
-                    ${r.offered && dests.length ? html`
+                    ${r.offered && !r.already_applied && dests.length ? html`
                       <button class="cur-btn" disabled=${busy} onClick=${() => doStage(r.signature)}>Stage diffs</button>` : null}
                     ${st.length ? html`
                       <button class="cur-btn" disabled=${busy} onClick=${() => doPreview(r.signature)}>Preview (${st.length})</button>

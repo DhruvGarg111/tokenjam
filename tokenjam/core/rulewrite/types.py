@@ -79,6 +79,25 @@ class RuleWrite:
     #: indistinguishable from an analyzer that found nothing.
     offered: bool = True
     blocked_reason: str = ""
+    #: The user already dealt with this one — applied it through the product,
+    #: or marked it applied by hand. Read from the apply ledgers via
+    #: ``cost_apply.applied_signatures`` / ``relearn_apply.applied_signatures``
+    #: and matched by ``cost_apply.signature_is_applied``, never by a second
+    #: matcher of this module's own.
+    #:
+    #: **This suppresses the OFFER and NOTHING ELSE (Critical Rule 32).**
+    #: ``past_overspend_usd`` / ``_tokens`` are untouched, deliberately and
+    #: permanently: the waste genuinely happened inside the analyzed window,
+    #: and the user having since fixed it does not un-spend the money. A gate
+    #: on whether WE still have an action available may never reach back and
+    #: edit what a behaviour already cost — that conflation is exactly what
+    #: rule 32 exists to stop, and it is the easiest thing to get wrong here
+    #: because "it is fixed now" feels like it should zero the number.
+    #:
+    #: The row is still LISTED, carrying this flag, rather than vanishing: a
+    #: user who applies something and then sees nothing cannot tell "done"
+    #: from "broken".
+    already_applied: bool = False
     #: Why the rule is going where it is going, and what the placement could not
     #: cover. Carried verbatim from ``core/optimize/rule_placement``; never
     #: re-derived here, so the CLI, the UI and the payload cannot disagree.
@@ -99,6 +118,7 @@ class RuleWrite:
             "destinations": [d.to_dict() for d in self.destinations],
             "offered": self.offered,
             "blocked_reason": self.blocked_reason,
+            "already_applied": self.already_applied,
             "placement_basis": self.placement_basis,
             "placement_coverage_note": self.placement_coverage_note,
             "past_overspend_tokens": self.past_overspend_tokens,
@@ -121,6 +141,7 @@ class RuleWrite:
             ),
             offered=bool(raw.get("offered", True)),
             blocked_reason=str(raw.get("blocked_reason", "") or ""),
+            already_applied=bool(raw.get("already_applied", False)),
             placement_basis=str(raw.get("placement_basis", "") or ""),
             placement_coverage_note=str(raw.get("placement_coverage_note", "") or ""),
             past_overspend_tokens=None if tokens is None else int(tokens),

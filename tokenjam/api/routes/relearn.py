@@ -742,10 +742,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         relearn_proposals.list_cost_proposals(config)
         if block is not None and block.get("cost_computed_at") else []
     )
-    applied_sigs = {
-        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    applied_sigs = cost_apply.applied_signatures(config)
     open_proposals = [
         p for p in proposals
         if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
@@ -772,11 +769,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     relearn_label = inbox_contribution.contribution_window_label(
         relearn_finding, window_days,
     )
-    relearn_applied_sigs = {
-        str(rec.get("signature") or "")
-        for rec in relearn_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    relearn_applied_sigs = relearn_apply.applied_signatures(config)
     relearn_rows = inbox_contribution.relearn_contribution_rows(
         relearn_finding, label=relearn_label,
         applied_signatures=relearn_applied_sigs,

@@ -93,6 +93,27 @@ def list_applied(config: Any) -> list[dict]:
     return _load_ledger(config)
 
 
+def applied_signatures(config: Any) -> set[str]:
+    """The signatures a user has already told tokenjam they dealt with.
+
+    THE derivation of that set — "non-reverted records in ``cost_applied.json``"
+    — stated once. It was written out inline at two call sites (the Review
+    inbox route and the CLI's own rollup) and a third arrived with the
+    rule-write surface; three copies of a ledger filter is three chances for
+    one of them to keep counting a reverted record and silently re-hide a card
+    the user re-opened. Pair it with :func:`signature_is_applied`, which owns
+    the MATCHING half, so neither the set nor the matcher can drift alone.
+
+    Reverted records are excluded on purpose: a revert is the user saying the
+    fix is no longer in place, so the proposal is open again.
+    """
+    return {
+        str(rec.get("signature") or "")
+        for rec in list_applied(config)
+        if rec.get("state") != "reverted" and rec.get("signature")
+    }
+
+
 def signature_is_applied(signature: str, applied_sigs: set[str]) -> bool:
     """Whether ``signature`` should read as already applied against
     ``applied_sigs`` (the signatures on non-reverted ``cost_applied.json``

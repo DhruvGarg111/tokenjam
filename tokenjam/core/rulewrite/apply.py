@@ -62,6 +62,15 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
     it. The rule's text stays copyable either way — a deferral is not a
     deletion.
     """
+    # Checked BEFORE the generic not-offered refusal so the message names the
+    # real reason. "The budget did not select it" would be both wrong and
+    # actively confusing for a rule the user has already applied.
+    if rule.already_applied:
+        raise RuleWriteRefused(
+            f"{rule.signature} is already applied — you told tokenjam you made "
+            "this change. Revert it first if you want to write it again. What "
+            "it cost before you applied it is still reported in full.",
+        )
     if not rule.offered:
         raise RuleWriteRefused(
             f"{rule.signature} is not on offer: "

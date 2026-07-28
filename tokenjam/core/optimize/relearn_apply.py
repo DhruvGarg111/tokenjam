@@ -415,6 +415,21 @@ def list_applied(config: TjConfig) -> list[dict]:
     return _load_ledger(config)
 
 
+def applied_signatures(config: TjConfig) -> set[str]:
+    """The relearn signatures whose fix is currently in place.
+
+    The relearn-lane sibling of ``cost_apply.applied_signatures``, and stated
+    once for the same reason: the filter was written out inline at every call
+    site, so a surface that forgot the reverted-record exclusion would keep
+    hiding a fix the user had explicitly undone.
+    """
+    return {
+        str(rec.get("signature") or "")
+        for rec in list_applied(config)
+        if rec.get("state") != "reverted" and rec.get("signature")
+    }
+
+
 def get_applied(config: TjConfig, fix_id: str) -> dict | None:
     for rec in _load_ledger(config):
         if rec.get("id") == fix_id:

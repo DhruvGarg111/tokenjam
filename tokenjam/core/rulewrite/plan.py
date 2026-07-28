@@ -15,6 +15,7 @@ offer" would put an analyzer pass on a user-facing command.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from tokenjam.core.config import TjConfig
@@ -27,6 +28,12 @@ from tokenjam.core.rulewrite.types import RuleDestination, RuleWrite
 #: (``runner.PERSONA_DISABLED_ANALYZERS``) removes an analyzer from this
 #: surface without any edit here.
 RULE_WRITING_ANALYZERS = ("downsize", "resend", "subagent", "relearn")
+
+#: Stated once, so the CLI, the UI and the payload cannot word it three ways.
+ALREADY_APPLIED_REASON = (
+    "You already applied this one. What it cost before you did is still "
+    "reported in full; only the offer to write it again is withdrawn."
+)
 
 
 def _destinations_from_proposal(raw: dict[str, Any]) -> tuple[RuleDestination, ...]:
@@ -123,6 +130,52 @@ def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
     )
 
 
+def _mark_applied(rules: list[RuleWrite], config: TjConfig) -> list[RuleWrite]:
+    """Flag every rule the user has already dealt with, and withdraw its offer.
+
+    **The offer only.** ``past_overspend_usd``/``_tokens`` are not touched here
+    and must never be: the waste happened inside the analyzed window, and the
+    user fixing it afterwards does not un-spend the money (Critical Rule 32).
+    An action-availability gate that edits a past figure is the exact
+    "we have no remedy" / "this was free" conflation that rule exists to stop.
+
+    Matching goes through ``cost_apply.signature_is_applied``, which already
+    resolves a legacy agent-only mark as covering the later model-qualified
+    signatures for that agent. Writing a second matcher here would silently
+    reopen every card that helper settles.
+
+    Never raises: an unreadable ledger reads as "nothing applied", which leaves
+    every rule on offer. That is the safe direction — it can waste a user's
+    attention, where the opposite hides a fix they never made.
+    """
+    from tokenjam.core.optimize import cost_apply, relearn_apply
+
+    try:
+        cost_sigs = cost_apply.applied_signatures(config)
+    except Exception:
+        cost_sigs = set()
+    try:
+        relearn_sigs = relearn_apply.applied_signatures(config)
+    except Exception:
+        relearn_sigs = set()
+
+    out: list[RuleWrite] = []
+    for rule in rules:
+        known = relearn_sigs if rule.analyzer == "relearn" else cost_sigs
+        if not cost_apply.signature_is_applied(rule.signature, known):
+            out.append(rule)
+            continue
+        out.append(replace(
+            rule,
+            already_applied=True,
+            # Withdrawing the OFFER. Every figure above is carried through
+            # untouched by construction — `replace` names only these two.
+            offered=False,
+            blocked_reason=rule.blocked_reason or ALREADY_APPLIED_REASON,
+        ))
+    return out
+
+
 def list_rule_writes(config: TjConfig) -> list[RuleWrite]:
     """Every permanent rule currently on offer, ranked by what it addresses.
 
@@ -153,6 +206,10 @@ def list_rule_writes(config: TjConfig) -> list[RuleWrite]:
         rule = _rule_from_relearn_cluster(dict(raw))
         if rule is not None and rule.signature:
             out.append(rule)
+    # Applied rules keep their figures and lose their offer — see
+    # `_mark_applied`. They stay in the list on purpose: a user who applied
+    # something and then sees nothing cannot tell "done" from "broken".
+    out = _mark_applied(out, config)
     # Ranked by what the rule addresses, unpriced last. `None` sorts last
     # rather than as zero: "not measured" is not "worth nothing".
     out.sort(key=lambda r: (r.past_overspend_usd is None, -(r.past_overspend_usd or 0.0)))
