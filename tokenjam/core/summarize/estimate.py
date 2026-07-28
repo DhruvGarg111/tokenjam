@@ -27,18 +27,54 @@ falls back to the target only while saying so (see the summarize analyzer's
 `estimate_basis`). Nothing here invents a middle number: a ratio that is neither
 the documented ask nor a measured outcome would be the least defensible of the
 three.
+
+**Waiting for evidence is not the same as having none.** The observed ratio used
+to appear only if a user happened to rewrite files on their own; `tj summarize
+calibrate` (`core/summarize/calibrate`) now runs the real rewrite over a bounded,
+explicitly-consented sample so the measurement can exist on demand. It writes
+through the same `session.check` gate into the same staging dir this module
+reads, so there is exactly one store and one definition of a sample.
+
+**A ratio is also the wrong SHAPE for the goal on an always-resident file.**
+Anthropic publishes a concrete target for that artifact — :data:`PUBLISHED_LINE_TARGET`
+— and a huge file halved is still far past the point where adherence degrades.
+:func:`line_target_prose_words` turns that target into the word budget the
+rewriter is ASKED for. It deliberately does not touch the CLAIM: what a rewrite
+is asked for and what it delivers are the two things this module exists to keep
+apart, so the estimate stays bounded by :func:`observed_prose_ratio` (or the
+target ratio) no matter how aggressive the line goal is.
 """
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
-from tokenjam.core.summarize.detect import CHARS_PER_TOKEN, StructureBreakdown
+from tokenjam.core.summarize import load_semantics
+from tokenjam.core.summarize.detect import CHARS_PER_TOKEN, StructureBreakdown, line_breakdown
 
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
 
 logger = logging.getLogger(__name__)
+
+#: Anthropic's published size target for an always-resident instruction file,
+#: quoted below. Ours is the *application* of it to every ALWAYS-class file
+#: (`.claude/rules/*.md` and `AGENTS.md` load the same way a `CLAUDE.md` does);
+#: the number itself is theirs, which is why every surface that states it also
+#: states where it came from rather than presenting it as a tokenjam threshold.
+PUBLISHED_LINE_TARGET = 200
+PUBLISHED_LINE_TARGET_SOURCE = "https://code.claude.com/docs/en/memory"
+PUBLISHED_LINE_TARGET_QUOTE = (
+    "target under 200 lines per CLAUDE.md file. Longer files consume more "
+    "context and reduce adherence."
+)
+#: Anthropic's own suggested alternative to compressing an oversized instruction
+#: file, quoted so the advice that mentions it cannot drift from what they say.
+#: Summarize only ever MENTIONS this; it does not write path-scoped rules.
+PATH_SCOPED_RULES_QUOTE = (
+    "If your instructions are growing large, use path-scoped rules so "
+    "instructions load only when Claude works with matching files."
+)
 
 #: What the rewriter is INSTRUCTED to hit — `session.prepare` turns this into
 #: the word count in the model's prompt. It is an ask, not a prediction, and
@@ -122,3 +158,57 @@ def observed_prose_ratio(config: "TjConfig | None") -> tuple[float | None, int]:
     # reduction), never a negative saving.
     ratio = 1.0 - (removed_total / prose_before_total)
     return min(1.0, max(0.0, ratio)), samples
+
+
+def gate_failed_attempts(config: "TjConfig | None") -> int:
+    """How many rewrites here were attempted and FAILED the structure gate.
+
+    A failed rewrite is deliberately excluded from :func:`observed_prose_ratio`
+    (it was never a usable outcome), but it is not nothing: a file the rewriter
+    cannot compress without mangling its structure is a real finding about that
+    file, and dropping the attempt silently would let a run that produced only
+    failures look identical to a run that never happened. Reported alongside the
+    ratio so the basis can say what the sample cost as well as what it showed.
+
+    Never raises: an unreadable attempt record is skipped.
+    """
+    if config is None:
+        return 0
+    from tokenjam.core.summarize.session import list_attempts
+
+    try:
+        return len(list_attempts(config))
+    except Exception:
+        logger.debug("summarize estimate: could not read attempt records", exc_info=True)
+        return 0
+
+
+def line_target_prose_words(
+    *,
+    text: str,
+    load_class: str,
+    prose_words: int,
+    line_target: int = PUBLISHED_LINE_TARGET,
+) -> int | None:
+    """Prose-word budget that would bring ``text`` under ``line_target`` lines.
+
+    ``None`` when the target does not apply, and the three reasons are all real
+    rather than error cases: the file is not always-resident (the published
+    guidance is about a file that loads every session), it is already under the
+    target, or its protected structure ALONE exceeds the target — in which case
+    summarizing cannot get there and pretending otherwise would be an ask the
+    fix structurally cannot deliver.
+
+    This is an ASK. It never widens a saving: the caller takes whichever of this
+    and the ratio budget is smaller for the rewriter's prompt, and prices the
+    result off the ratio regardless (see the module docstring).
+    """
+    if load_class != load_semantics.ALWAYS or prose_words <= 0:
+        return None
+    lines = line_breakdown(text)
+    if lines.total_lines <= line_target or lines.prose_lines <= 0:
+        return None
+    allowance = line_target - lines.protected_lines
+    if allowance <= 0:
+        return None
+    return max(8, int(prose_words * (allowance / lines.prose_lines)))

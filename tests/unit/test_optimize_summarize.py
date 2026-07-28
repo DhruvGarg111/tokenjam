@@ -940,6 +940,49 @@ def test_basis_switches_to_the_measured_ratio_when_one_exists(db, monkeypatch):
     assert "upper bound" not in basis
 
 
+def test_basis_names_the_command_that_produces_the_missing_evidence(db):
+    """Waiting passively for a user to happen to rewrite files is what made the
+    target permanent. The unmeasured basis says how to measure it."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert "tj summarize calibrate" in basis
+
+
+def test_basis_discloses_gate_failures_excluded_from_the_ratio(db):
+    """A sample made mostly of failed rewrites must not read as a clean
+    measurement, so the excluded attempts are stated rather than implied."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    clean = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.82, True, 7)
+    noisy = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.82, True, 7, 4)
+
+    assert "failed the structure check" not in clean
+    assert "4 attempted rewrite(s) here failed the structure check" in noisy
+    assert "excluded from the ratio" in noisy
+
+
+def test_basis_attributes_the_line_target_to_anthropic_and_claims_only_tokens(db):
+    """The size target is theirs, the adherence benefit is their rationale and
+    not a saving we measure, and the path-scoped-rules alternative is a mention
+    rather than something summarize writes (Critical Rule 14)."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.estimate import PUBLISHED_LINE_TARGET
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert f"under {PUBLISHED_LINE_TARGET} lines" in basis
+    assert "Anthropic's published guidance" in basis
+    assert "not tokenjam's" in basis
+    assert "only the token reduction is" in basis
+    assert "path-scoped rules" in basis
+    assert "it does not write those rules" in basis
+
+
 def test_measured_ratio_supersedes_the_target_in_the_figure(db, monkeypatch, tmp_path):
     """The measured ratio is fed to the scan, so the reduction shrinks to what
     rewrites really deliver rather than what they are asked for."""

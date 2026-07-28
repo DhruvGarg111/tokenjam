@@ -8,7 +8,9 @@ divider. `prep` wraps a prompt's structure and emits it for you to rewrite (or `
 claude-p`/`--via api` to have a model do it in one shot); `check` verifies the rewrite
 preserved every structure block (a hard gate) and stages it; `apply`
 writes a staged result (taking a backup first), `undo` reverts — both default to a dry-run,
-`--go` writes. See DEC-020/021/024/025.
+`--go` writes. `calibrate` samples real rewrites so the savings estimate can use a MEASURED
+prose ratio instead of the unenforced target it is otherwise assuming; it too defaults to a
+dry-run, because every sample is a billed model call. See DEC-020/021/024/025.
 """
 from __future__ import annotations
 
@@ -21,6 +23,12 @@ from rich.markup import escape
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import apply_staged, undo
+from tokenjam.core.summarize.calibrate import (
+    DEFAULT_SAMPLES,
+    MAX_SAMPLES,
+    CalibrationReport,
+    run_calibration,
+)
 from tokenjam.core.summarize.candidates import list_candidates
 from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
 from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
@@ -242,6 +250,8 @@ def cmd_summarize_prep(
     console.print(f"[dim]{escape(result.path)}[/dim] · prose {result.prose_words} → "
                   f"~{result.target_prose_words} words · "
                   f"{result.protected_blocks} block(s) kept verbatim")
+    if result.target_basis:                         # whose target this is, and why
+        console.print(f"[dim]{escape(result.target_basis)}[/dim]")
     console.print(f"hash: [bold]{result.source_sha256}[/bold]")
     # The manual/copy path: emit the actual payload so the user can rewrite in any model
     # without needing --json (a JSON form is still available via --json for tooling).
@@ -254,6 +264,75 @@ def cmd_summarize_prep(
     console.print()
     console.print("[dim]Save the rewrite to a file, then: tj summarize check "
                   f"{escape(result.path)} --summary <file> --prepped-hash {result.source_sha256}[/dim]")
+
+
+def _print_calibration(report: CalibrationReport) -> None:
+    """The calibration verdict: what was sampled, what it cost, what it showed."""
+    if report.dry_run:
+        for t in report.planned:
+            console.print(f"[dim]would sample[/dim] {escape(t.path)} "
+                          f"({t.prose_words:,} prose words)")
+        console.print(f"[yellow]{escape(report.note)}[/yellow]")
+        return
+
+    for s in report.samples:
+        if s.achieved_ratio is not None:
+            console.print(
+                f"[green]✓[/green] {escape(s.path)} — prose to "
+                f"{s.achieved_ratio * 100:.0f}% of its words "
+                f"({s.words_before}→{s.words_after} words)")
+        else:
+            console.print(f"[red]✗[/red] {escape(s.path)} — "
+                          f"{escape(s.error or 'no usable outcome')} (recorded, not staged)")
+    if not report.samples:
+        console.print("[dim]Nothing was sampled.[/dim]")
+        return
+    if report.rewrite_usd is not None:
+        console.print(f"[dim]{len(report.samples):,} rewrite(s) via {escape(report.via)}; "
+                      f"~${report.rewrite_usd:.4f} billed.[/dim]")
+    else:
+        # Not "free": claude-p spends the user's Claude Code quota, it just
+        # reports no per-token price. Saying $0.00 would be a quiet lie.
+        console.print(f"[dim]{len(report.samples):,} rewrite(s) via {escape(report.via)}; "
+                      f"per-token cost not reported on this path.[/dim]")
+    console.print(escape(report.note))
+
+
+@cmd_summarize.command("calibrate")
+@click.option("--via", "via", type=click.Choice(["claude-p", "api"]), required=True,
+              help="How to run the sample rewrites: 'claude-p' drives your local Claude Code "
+                   "(headless `claude -p`); 'api' calls Anthropic with your TJ_ANTHROPIC_API_KEY "
+                   "(needs [summarize] api_model).")
+@click.option("--limit", "limit", default=DEFAULT_SAMPLES, show_default=True, type=int,
+              help=f"How many files to sample (hard cap {MAX_SAMPLES}).")
+@click.option("--go", is_flag=True,
+              help="Actually run the rewrites (default is a dry-run that spends nothing).")
+@click.argument("path", required=False, default=None)
+@json_option
+@click.pass_context
+def cmd_summarize_calibrate(
+    ctx: click.Context, via: str, limit: int, go: bool, path: str | None,
+    output_json_flag: bool,
+) -> None:
+    """Measure what a rewrite actually delivers here, instead of assuming the target.
+
+    The savings estimate assumes prose compresses to the ratio the rewriter is
+    ASKED for, which nothing enforces. This samples the largest prompt files with
+    real rewrites and records what they achieved, so the estimate can use a
+    measured ratio. Each sample is a billed model call; default is a dry-run.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    on_progress = None if output_json else (lambda m: console.print(f"[dim]{escape(m)}…[/dim]"))
+    try:
+        report = run_calibration(
+            config, via=via, limit=limit, go=go, path=path, on_progress=on_progress)
+    except (DeliveryError, SummarizeRefused) as e:
+        raise click.ClickException(str(e)) from e
+    if output_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _print_calibration(report)
 
 
 @cmd_summarize.command("check")

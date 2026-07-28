@@ -82,6 +82,64 @@ def prose_text(text: str) -> str:
 
 
 @dataclass(frozen=True)
+class LineBreakdown:
+    """How a prompt's LINES divide between protected structure and prose.
+
+    The chars-based :class:`StructureBreakdown` is what pricing runs on; this is
+    the line-based view a *line* target needs (Anthropic publishes one for
+    always-resident instruction files, see
+    ``core/summarize/estimate.PUBLISHED_LINE_TARGET``).
+
+    **Only a span that occupies whole lines counts as a protected LINE.** A
+    fenced block, a table, or a multi-line tag block is restored verbatim and
+    therefore pins every line it covers. An INLINE span (`` `like this` ``) does
+    not: it must survive, but it can be packed into a much shorter sentence, so
+    the line it currently sits on is compressible prose. Counting it as a
+    protected line was measurably wrong — a prose-heavy `CLAUDE.md` with
+    backticks throughout read as majority-structure and the line target was
+    withheld from exactly the files it exists for.
+
+    ``protected_lines + prose_lines == total_lines`` always holds.
+    """
+
+    total_lines: int
+    protected_lines: int
+    prose_lines: int
+
+
+def line_breakdown(text: str) -> LineBreakdown:
+    """Split ``text``'s lines into protected-structure lines and prose lines."""
+    if not text:
+        return LineBreakdown(total_lines=0, protected_lines=0, prose_lines=0)
+    # Line index of every character offset, derived once from the newline
+    # positions so a large file costs one pass rather than one per span.
+    newlines = [i for i, ch in enumerate(text) if ch == "\n"]
+    total = len(newlines) + (0 if text.endswith("\n") else 1)
+
+    def _line_of(offset: int) -> int:
+        lo, hi = 0, len(newlines)
+        while lo < hi:                       # bisect_left over the newline offsets
+            mid = (lo + hi) // 2
+            if newlines[mid] < offset:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    touched: set[int] = set()
+    for start, end, _ in protected_spans(text):
+        if "\n" not in text[start:end]:
+            continue                         # inline span: its line is still prose
+        first = _line_of(start)
+        last = _line_of(max(start, end - 1))
+        touched.update(range(first, last + 1))
+    protected = len({ln for ln in touched if ln < total})
+    return LineBreakdown(
+        total_lines=total, protected_lines=protected, prose_lines=total - protected,
+    )
+
+
+@dataclass(frozen=True)
 class StructureBreakdown:
     """Prose-vs-structure measurement of a single prompt."""
 

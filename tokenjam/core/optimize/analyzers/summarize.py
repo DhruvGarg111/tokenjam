@@ -110,6 +110,11 @@ from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 from tokenjam.core.summarize.estimate import (
     DEFAULT_TARGET_RATIO,
     MIN_OBSERVED_SAMPLES,
+    PATH_SCOPED_RULES_QUOTE,
+    PUBLISHED_LINE_TARGET,
+    PUBLISHED_LINE_TARGET_QUOTE,
+    PUBLISHED_LINE_TARGET_SOURCE,
+    gate_failed_attempts,
     observed_prose_ratio,
 )
 from tokenjam.core.summarize.invocations import InvocationCounts
@@ -171,8 +176,8 @@ _RATIO_TARGET = (
     "is no retry and no gate on hitting the target. No verified rewrite sample "
     "exists here yet ({samples:,} usable so far, {needed:,} needed), so this "
     "figure is an upper bound on the reduction half and should be read as one. "
-    "It is replaced by the measured ratio automatically once enough rewrites "
-    "have been staged and structure-checked."
+    "Run `tj summarize calibrate --via claude-p --go` to measure what a rewrite "
+    "actually delivers on your files; it replaces this target automatically."
 )
 _RATIO_OBSERVED = (
     "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
@@ -183,14 +188,48 @@ _RATIO_OBSERVED = (
     "is asked for, which nothing enforces and which observed rewrites do not "
     "reach."
 )
+#: Appended to either half whenever some rewrite here failed the structure gate.
+#: Those attempts are excluded from the ratio on purpose (a mangled rewrite was
+#: never a usable outcome), and a basis that stayed silent about them would let
+#: a sample built mostly of failures read as a clean measurement.
+_RATIO_GATE_FAILURES = (
+    " {failures:,} attempted rewrite(s) here failed the structure check and are "
+    "excluded from the ratio; those files could not be safely compressed as "
+    "summarized, which is a finding about them rather than a figure."
+)
+#: The reduction target for the files this guidance is published for. Only the
+#: token delta is claimed as a saving (Critical Rule 14) — the adherence benefit
+#: of a shorter file is real, is Anthropic's stated reason for the target, and is
+#: NOT something tokenjam measures, so it appears here as rationale and never as
+#: a dollar or token figure. The target also cannot inflate anything: it changes
+#: what the rewriter is ASKED for, while the figure above stays bounded by the
+#: measured (or target) prose ratio.
+_LINE_TARGET_NOTE = (
+    " For an always-resident instruction file, the fix aims at a size rather "
+    "than only a ratio: getting the file under {lines} lines, which is "
+    'Anthropic\'s published guidance ("{quote}" {source}) and not tokenjam\'s. '
+    "A large file compressed by a ratio can still be far over that size. The "
+    "adherence half of that guidance is their rationale for the target, not a "
+    "saving claimed here; only the token reduction is. Where a file's content "
+    "is specific to one area of a repo, Anthropic's own alternative to "
+    'compressing it is: "{alternative}" tokenjam mentions that; it does not '
+    "write those rules."
+)
 
 
-def _ratio_basis(ratio: float, observed: bool, samples: int) -> str:
+def _ratio_basis(ratio: float, observed: bool, samples: int, gate_failures: int = 0) -> str:
     """How much of each file the figure assumes goes away, stated truthfully."""
     if observed:
-        return _RATIO_OBSERVED.format(pct=ratio * 100, samples=samples)
-    return _RATIO_TARGET.format(
-        pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+        head = _RATIO_OBSERVED.format(pct=ratio * 100, samples=samples)
+    else:
+        head = _RATIO_TARGET.format(
+            pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+        )
+    if gate_failures > 0:
+        head += _RATIO_GATE_FAILURES.format(failures=gate_failures)
+    return head + _LINE_TARGET_NOTE.format(
+        lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
+        source=PUBLISHED_LINE_TARGET_SOURCE, alternative=PATH_SCOPED_RULES_QUOTE,
     )
 
 #: Population half of the basis (Critical Rule 14): which files were even looked
@@ -267,6 +306,7 @@ def _estimate_basis(
     ratio: float = DEFAULT_TARGET_RATIO,
     ratio_observed: bool = False,
     ratio_samples: int = 0,
+    ratio_gate_failures: int = 0,
 ) -> str:
     """The basis string with the evidence actually used spelled out.
 
@@ -289,7 +329,7 @@ def _estimate_basis(
     return SUMMARIZE_ESTIMATE_BASIS.format(
         invocation_source=source,
         population=_population_basis(roots, roots_scanned),
-        ratio=_ratio_basis(ratio, ratio_observed, ratio_samples),
+        ratio=_ratio_basis(ratio, ratio_observed, ratio_samples, ratio_gate_failures),
     )
 
 # Mandatory caveat (Rule 14) — carried as the dataclass default like the other
@@ -421,6 +461,17 @@ class SummarizeFinding:
     prose_ratio_observed: bool = False
     #: Structure-checked rewrites the ratio was derived from (0 when assumed).
     prose_ratio_samples: int = 0
+    #: Rewrites attempted here that FAILED the structure gate. Excluded from the
+    #: ratio (never a usable outcome) but carried, because a sample made mostly
+    #: of failures must not read as a clean measurement — and because a file
+    #: that cannot be safely compressed at all is a real finding about it.
+    prose_ratio_gate_failures: int = 0
+    #: The published size target the fix aims at for an always-resident
+    #: instruction file, and where it comes from. Carried so no surface has to
+    #: restate the number itself; it is Anthropic's guidance, not tokenjam's,
+    #: and it governs what the rewriter is ASKED for, never what is claimed.
+    line_target: int = PUBLISHED_LINE_TARGET
+    line_target_source: str = PUBLISHED_LINE_TARGET_SOURCE
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -925,6 +976,7 @@ def run(ctx: AnalyzerContext) -> None:
     # exists; the basis says which is in force either way (Critical Rule 14).
     measured_ratio, ratio_samples = observed_prose_ratio(ctx.config)
     ratio = measured_ratio if measured_ratio is not None else DEFAULT_TARGET_RATIO
+    ratio_gate_failures = gate_failed_attempts(ctx.config)
 
     try:
         # read-only, never writes. Three scope inputs, one resolved scope:
@@ -967,13 +1019,14 @@ def run(ctx: AnalyzerContext) -> None:
     profile = _load_profile(ctx)
     finding.estimate_basis = _estimate_basis(
         invocations, roots, scan.project_roots_scanned,
-        ratio, measured_ratio is not None, ratio_samples,
+        ratio, measured_ratio is not None, ratio_samples, ratio_gate_failures,
     )
     finding.project_roots_scanned = scan.project_roots_scanned
     finding.project_roots_vanished = roots.vanished
     finding.prose_ratio = round(ratio, 4)
     finding.prose_ratio_observed = measured_ratio is not None
     finding.prose_ratio_samples = ratio_samples
+    finding.prose_ratio_gate_failures = ratio_gate_failures
     finding.invocations_observed = invocations.observed
     finding.invocations_total = invocations.total_invocations
     finding.transcripts_examined = invocations.sessions_scanned
