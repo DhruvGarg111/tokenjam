@@ -209,13 +209,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_INJECTING_HOOK,
-        "fix": (
-            "PostToolUseFailure hook (Bash/Read): react only after a "
-            "'no such file or directory' failure by injecting the real cwd + "
-            "a short directory listing as additionalContext, so the agent "
-            "recovers in one shot instead of a PreToolUse guess-and-block on "
-            "every relative path (which would misfire on normal usage)."
-        ),
+        "fix": _fixes.fix_text("relearn.cwd_confusion"),
     },
     {
         # BY FAR the largest family on a real coding corpus (measured
@@ -245,13 +239,12 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "delivery": DELIVERY_CLAUDE_MD_RULE,
         # Lead-in names what THIS family observed; the durable instruction is
         # the shared catalog record, not a third wording of it (see that
-        # record's note on why three copies is worse than one).
-        "fix": (
-            "This session hit the model's context ceiling and the request was "
-            "rejected outright: the tokens were spent and no completion came "
-            "back. "
-            + _fixes.fix_text("resend.offload_to_subagent")
-        ),
+        # record's note on why three copies is worse than one). BOTH halves are
+        # catalogued — the lead-in lives on the record as this analyzer's
+        # framing, because a sentence written here is prose the lint cannot see,
+        # and prose the lint cannot see is how one instruction comes to be
+        # stated twice inside one written block.
+        "fix": _fixes.fix_text_for("resend.offload_to_subagent", "relearn"),
     },
     {
         "key": "edit_before_read",
@@ -297,10 +290,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
         "label_pattern": re.compile(r"^\s*sleep\b", re.IGNORECASE),
         "delivery": DELIVERY_EXECUTING_HOOK,
-        "fix": (
-            "PreToolUse hook: block a `sleep N && <check>` Bash chain and point the "
-            "agent at the Monitor tool instead of a busy-wait."
-        ),
+        "fix": _fixes.fix_text("relearn.sleep_chain"),
     },
     {
         "key": "stale_read_race",
@@ -308,11 +298,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "tools": {"Edit", "Write", "MultiEdit"},
         "pattern": re.compile(r"modified since (it was last read|read)", re.IGNORECASE),
         "delivery": DELIVERY_INJECTING_HOOK,
-        "fix": (
-            "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after "
-            "a 'modified since read' failure by injecting a re-Read reminder "
-            "as additionalContext — never touches a successful edit."
-        ),
+        "fix": _fixes.fix_text("relearn.reread_before_retrying_edit"),
     },
     {
         "key": "edit_string_not_found",
@@ -323,11 +309,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_INJECTING_HOOK,
-        "fix": (
-            "PostToolUseFailure hook (Edit/MultiEdit): react only after a "
-            "string-not-found failure by injecting a re-Read reminder as "
-            "additionalContext — never touches a successful edit."
-        ),
+        "fix": _fixes.fix_text("relearn.reread_before_retrying_edit"),
     },
     {
         # MUST stay ordered before "edit_string_not_found" above would have
@@ -343,12 +325,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
-            "than once, include enough surrounding lines to make it unique "
-            "rather than retrying the same short string — or pass "
-            "`replace_all: true` when every occurrence really should change."
-        ),
+        "fix": _fixes.fix_text("relearn.edit_ambiguous_match"),
     },
     {
         "key": "read_too_large",
@@ -360,12 +337,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: this file is too large to read whole. Grep "
-            "for the symbol first and Read only the region around the hit "
-            "(`offset`/`limit`), or delegate the sweep to a subagent so the "
-            "bulk never lands in this thread's context."
-        ),
+        "fix": _fixes.fix_text("relearn.read_too_large"),
     },
     {
         "key": "read_directory",
@@ -375,11 +347,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"eisdir|illegal operation on a directory", re.IGNORECASE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
-            "directory use Glob (or `ls` via Bash), then Read the file you "
-            "actually want."
-        ),
+        "fix": _fixes.fix_text("relearn.read_directory"),
     },
     {
         # MUST stay ordered before "deferred_tool_cold" below: that family's
@@ -401,7 +369,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "tools": {"Read"},
         "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
+        "fix": _fixes.fix_text("relearn.read_offset_malformed"),
     },
     {
         "key": "deferred_tool_cold",
@@ -416,10 +384,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_SKILL,
-        "fix": (
-            "Skill/scoped note: deferred tools need a ToolSearch lookup for their "
-            "schema before the first call; optionally a PreToolUse intercept hook."
-        ),
+        "fix": _fixes.fix_text("relearn.deferred_tool_cold"),
     },
     {
         # Downgraded from a config/env fix (Phase 2.5, 2026-07-14): there is
@@ -443,13 +408,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE | re.MULTILINE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
-            "PATH. Common causes here: using bare `python` instead of `python3`, "
-            "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
-            "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
-            "Prefer the portable/explicit form."
-        ),
+        "fix": _fixes.fix_text("relearn.command_not_found"),
     },
     {
         "key": "bash_timeout",
@@ -466,13 +425,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE | re.DOTALL,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: this command outlived the tool's timeout "
-            "and was killed, so its work was lost and the tokens spent "
-            "waiting bought nothing. Run long jobs in the background "
-            "(`run_in_background`) and poll for completion, or raise the "
-            "call's own timeout when the wait is genuinely expected."
-        ),
+        "fix": _fixes.fix_text("relearn.bash_timeout"),
     },
     {
         "key": "bash_chained_approval",
@@ -486,12 +439,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"bash command contains multiple operations", re.IGNORECASE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
-            "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
-            "the entire chain. Issue the parts as separate Bash calls, and "
-            "prefer an absolute path over a leading `cd`."
-        ),
+        "fix": _fixes.fix_text("relearn.bash_chained_approval"),
     },
     {
         "key": "git_branch_exists",
@@ -503,12 +451,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": (
-            "CLAUDE.md/skill note: check out the existing branch "
-            "(`git checkout <name>`) instead of re-creating it, or pick a "
-            "fresh name — `git checkout -b` on an existing branch always "
-            "fails."
-        ),
+        "fix": _fixes.fix_text("relearn.git_branch_exists"),
     },
     {
         "key": "webfetch_domain_blocked",
@@ -529,7 +472,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "delivery": DELIVERY_CLAUDE_MD_RULE,
-        "fix": "CLAUDE.md/skill note: this domain is blocked — use a search tool or a different source instead.",
+        "fix": _fixes.fix_text("relearn.webfetch_domain_blocked"),
     },
 ]
 
@@ -1834,7 +1777,9 @@ def build_proposals(
         # mechanism, so it gets the default one. That is a real default, not a
         # guess about the artifact: with no matcher there is no hook to write.
         delivery = family["delivery"] if family else DELIVERY_CLAUDE_MD_RULE
-        fix = family["fix"] if family else "Review examples — no known fix template matched."
+        fix = family["fix"] if family else _fixes.fix_text(
+            "relearn.no_template_matched",
+        )
 
         repos = sorted(cluster.repos)
         occurrences = len(cluster.failures)

@@ -277,14 +277,8 @@ def _offloadable_share_disclosure(measured: OffloadableShare) -> str:
         f"delegability measure is computed anywhere today.{spread}"
     )
 
-COMPACTION_FIX = (
-    "Run /compact (or start a fresh session) once accumulated context crosses "
-    "your working set. The repeated volume this finding measures is the same "
-    "content being re-sent turn over turn: trimming it directly cuts future "
-    "prompt size, regardless of whether caching is on. This is a manual, "
-    "per-session action, so it never fixes the pattern going forward — treat "
-    "it as immediate relief for an already-full session, not the durable fix."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+COMPACTION_FIX = _fixes.fix_text("resend.compaction_relief")
 
 # The SDK-persona fallback when no priced `cache_control` example exists
 # (``fix_cache_control`` == ""). `/compact` is a Claude Code interactive
@@ -292,13 +286,11 @@ COMPACTION_FIX = (
 # unlike COMPACTION_FIX above, this stays scoped to what any SDK caller
 # controls directly: the content it assembles into the next request, not a
 # harness-specific command.
-RESEND_SDK_TRIM_FIX = (
-    "Trim or summarize the accumulated context before including it in the "
-    "next request instead of resending it unchanged turn over turn. This is "
-    "the same repeated volume this finding measures; cutting it at the call "
-    "site directly reduces future prompt size, independent of whether "
-    "caching is enabled."
-)
+# THE text lives in `core/fixes/registry.py`. It was ALSO a clause inside the
+# `resend.sdk_cache_breakpoint` record, and both are shown on the same SDK
+# card — so the trim instruction reached one user twice. One record each now:
+# that one says where to put the breakpoint, this one says what to trim.
+RESEND_SDK_TRIM_FIX = _fixes.fix_text("resend.sdk_trim_context")
 
 # The durable claude-code lever: a CLAUDE.md rule (same write machinery
 # `script`/`reuse`/`verbosity` use via `cost_proposals._persona_gated_write_fields`)
