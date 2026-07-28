@@ -18,6 +18,11 @@ from tokenjam.core.summarize.estimate import (
     PUBLISHED_LINE_TARGET,
     PUBLISHED_LINE_TARGET_SOURCE,
 )
+from tokenjam.core.summarize.route import (
+    HOOK_QUOTE,
+    PATH_SCOPE_QUOTE,
+    PRUNE_TEST_QUOTE,
+)
 from tokenjam.core.summarize.session import (
     SummarizeRefused, check, clear, list_attempts, list_staged, prepare, read_staged,
 )
@@ -161,19 +166,29 @@ def test_prepare_aims_at_the_published_line_target_for_an_oversized_claude_md(tm
     # The line goal is the binding one: stricter than keeping half the prose.
     assert res.target_prose_words < int(0.5 * res.prose_words)
     assert str(PUBLISHED_LINE_TARGET) in res.system_rules
-    assert "Anthropic's published guidance" in res.target_basis
+    assert "under 200 lines" in res.target_basis
     assert PUBLISHED_LINE_TARGET_SOURCE in res.target_basis
+    assert "That target is theirs, not tokenjam's" in res.target_basis
     # Rule 14: adherence is the RATIONALE for the target, never a claimed saving.
-    assert "Only the token reduction is claimed as a saving" in res.target_basis
-    # Anthropic's own alternative is mentioned, and disclaimed as not-a-write.
-    assert "path-scoped rules" in res.target_basis
-    assert "does not write those rules" in res.target_basis
+    assert "Only the token reduction is ever claimed as a saving" in res.target_basis
+    # Compression must NOT be presented as the only or default route.
+    assert "only ONE of four routes" not in res.target_basis   # (that phrasing is the analyzer's)
+    assert "four routes" in res.target_basis
+    assert "summarize only performs the last" in res.target_basis
+    assert PRUNE_TEST_QUOTE in res.target_basis
+    assert PATH_SCOPE_QUOTE in res.target_basis
+    assert HOOK_QUOTE in res.target_basis
+    assert "does not write them for you" in res.target_basis
+    # ...and the quality tax that makes compression the worst route here.
+    assert "trades adherence for tokens" in res.target_basis
 
 
 def test_prepare_states_the_ratio_target_is_ours_when_no_published_one_applies(tmp_path):
     """Where no published target exists for the file class, the ratio stays and
     is labelled as tokenjam's own, unenforced ask."""
-    path = _write(tmp_path, "CLAUDE.md", PROSE)
+    d = tmp_path / "skills" / "ship"
+    d.mkdir(parents=True)
+    path = _write(d, "SKILL.md", PROSE)
 
     res = prepare(path=path)
 
@@ -181,6 +196,22 @@ def test_prepare_states_the_ratio_target_is_ours_when_no_published_one_applies(t
     assert res.target_prose_words == max(8, int(0.5 * res.prose_words))
     assert "tokenjam's own target, not published guidance" in res.target_basis
     assert PUBLISHED_LINE_TARGET_SOURCE not in res.target_basis
+    # Still honest about what is and is not verified.
+    assert "not checked by anything automatic" in res.target_basis
+
+
+def test_a_short_instruction_file_still_gets_the_route_framing(tmp_path):
+    """The published target is not the only reason the routes matter: a
+    rule-heavy file that is already short is still the wrong thing to compress,
+    so the advice does not wait for the file to cross 200 lines."""
+    rules = "\n".join(f"- Never skip step {i}; run its check first." for i in range(40))
+    path = _write(tmp_path, "CLAUDE.md", rules)
+
+    res = prepare(path=path)
+
+    assert res.line_target is None                    # under the published target
+    assert "rules ACCUMULATED" in res.target_basis    # ...and still diagnosed
+    assert PRUNE_TEST_QUOTE in res.target_basis
 
 
 def test_line_target_does_not_apply_to_an_on_demand_skill_body(tmp_path):

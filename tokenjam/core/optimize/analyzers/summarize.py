@@ -110,13 +110,13 @@ from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 from tokenjam.core.summarize.estimate import (
     DEFAULT_TARGET_RATIO,
     MIN_OBSERVED_SAMPLES,
-    PATH_SCOPED_RULES_QUOTE,
     PUBLISHED_LINE_TARGET,
     PUBLISHED_LINE_TARGET_QUOTE,
     PUBLISHED_LINE_TARGET_SOURCE,
     gate_failed_attempts,
     observed_prose_ratio,
 )
+from tokenjam.core.summarize.route import BEST_PRACTICES_SOURCE, PRUNE_TEST_QUOTE
 from tokenjam.core.summarize.invocations import InvocationCounts
 from tokenjam.core.summarize.repo_roots import ResolvedRoots, resolve_roots
 
@@ -210,10 +210,31 @@ _LINE_TARGET_NOTE = (
     'Anthropic\'s published guidance ("{quote}" {source}) and not tokenjam\'s. '
     "A large file compressed by a ratio can still be far over that size. The "
     "adherence half of that guidance is their rationale for the target, not a "
-    "saving claimed here; only the token reduction is. Where a file's content "
-    "is specific to one area of a repo, Anthropic's own alternative to "
-    'compressing it is: "{alternative}" tokenjam mentions that; it does not '
-    "write those rules."
+    "saving claimed here; only the token reduction is."
+)
+#: The offer must not present compression as the only or default route for an
+#: instruction file. Such a file is usually long because rules ACCUMULATED, so
+#: compressing it shortens each surviving rule rather than removing any — which
+#: trades adherence for tokens and fails Critical Rule 26's third gate. The
+#: other three routes do not. Every candidate carries a `reduction_route` so a
+#: rule-heavy file is flagged as a PRUNE candidate rather than being offered
+#: compression as though it were the obvious move.
+_ROUTE_NOTE = (
+    " Compression is only ONE of four routes to that size, and the only one "
+    "that costs specificity. The others — pruning rules that do not earn their "
+    "place (\"{prune_test}\" {best_practices}), moving area-specific rules "
+    "behind `paths:` frontmatter so they load only for matching files, and "
+    "escalating a must-always-run instruction to a hook — remove tokens without "
+    "making any surviving instruction vaguer, and summarize performs NONE of "
+    "them; it names them. Each candidate carries a `reduction_route` diagnosing "
+    "which it wants, read from whether its prose is written as discrete "
+    "directives (rules accumulated: prune or scope it) or as running paragraphs "
+    "(padding: a genuine compression candidate). That is a measurement of the "
+    "SHAPE of the prose, never of which rules earn their place, and it is "
+    "withheld rather than guessed where a file is too small to read a shape "
+    "from. Applying stays a dry-run until `--go` because a human reading the "
+    "diff is the only check on meaning: the structure gate verifies that code "
+    "blocks, tables and tags came back verbatim, and does not read the prose."
 )
 
 
@@ -229,7 +250,9 @@ def _ratio_basis(ratio: float, observed: bool, samples: int, gate_failures: int 
         head += _RATIO_GATE_FAILURES.format(failures=gate_failures)
     return head + _LINE_TARGET_NOTE.format(
         lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
-        source=PUBLISHED_LINE_TARGET_SOURCE, alternative=PATH_SCOPED_RULES_QUOTE,
+        source=PUBLISHED_LINE_TARGET_SOURCE,
+    ) + _ROUTE_NOTE.format(
+        prune_test=PRUNE_TEST_QUOTE, best_practices=BEST_PRACTICES_SOURCE,
     )
 
 #: Population half of the basis (Critical Rule 14): which files were even looked
@@ -337,7 +360,10 @@ def _estimate_basis(
 # drop it. Names summary's ONE risk: structure is guaranteed (restore-by-id),
 # meaning is not.
 SUMMARIZE_HONESTY_CAVEAT = (
-    "Structure is guaranteed; meaning may change — review each rewrite before applying."
+    "Structure is guaranteed; meaning may change — nothing automatic checks it. "
+    "The structure gate verifies that code blocks, tables and tags came back "
+    "verbatim; it does not read the prose. Review each rewrite's diff before "
+    "applying."
 )
 
 
@@ -382,6 +408,16 @@ class SummarizeCandidate:
     #: condition ``est_usd_saved`` uses; the one-time per-call reduction stays
     #: available as ``est_tokens_saved``.
     est_tokens_saved_window: int | None = None
+    #: Which route to a smaller file this candidate wants — see
+    #: ``core/summarize/route``. ``prune`` means the file is long because rules
+    #: accumulated, so compressing it would shorten each surviving rule instead
+    #: of removing any; ``compress`` means the prose is genuinely padded;
+    #: ``undiagnosed`` means the file was too small to read a shape from and no
+    #: route is guessed. The saving stays the same either way — this changes
+    #: what the product OFFERS, never what it claims.
+    reduction_route: str = ""
+    #: Share of prose words in discrete directives — the evidence for the route.
+    directive_share: float = 0.0
 
 
 @dataclass
@@ -472,6 +508,12 @@ class SummarizeFinding:
     #: and it governs what the rewriter is ASKED for, never what is claimed.
     line_target: int = PUBLISHED_LINE_TARGET
     line_target_source: str = PUBLISHED_LINE_TARGET_SOURCE
+    #: How many candidates want each route (``route`` -> count), so a surface
+    #: can say "N of these want pruning, not compression" without walking the
+    #: list. Counts only; it changes what is OFFERED, never what is claimed —
+    #: a prune-route candidate keeps its full token and dollar figure, because
+    #: the tokens are recoverable by whichever route the user picks.
+    candidates_by_route: dict[str, int] = field(default_factory=dict)
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -1084,6 +1126,8 @@ def run(ctx: AnalyzerContext) -> None:
                 )
                 if priceable else None
             ),
+            reduction_route=str(getattr(c, "reduction_route", "") or ""),
+            directive_share=float(getattr(c, "directive_share", 0.0) or 0.0),
         )
         if _is_measured_zero(candidate):
             continue
@@ -1096,6 +1140,11 @@ def run(ctx: AnalyzerContext) -> None:
     finding.duplicate_copies_collapsed = collapsed
     finding.candidates = candidates
     finding.files = len(finding.candidates)
+    route_counts: dict[str, int] = {}
+    for cand in finding.candidates:
+        if cand.reduction_route:
+            route_counts[cand.reduction_route] = route_counts.get(cand.reduction_route, 0) + 1
+    finding.candidates_by_route = route_counts
     if finding.candidates:
         # One-time aggregate (curate/diff basis) — always available regardless
         # of whether any loading session was observed.

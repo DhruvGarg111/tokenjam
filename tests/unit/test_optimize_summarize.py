@@ -979,8 +979,50 @@ def test_basis_attributes_the_line_target_to_anthropic_and_claims_only_tokens(db
     assert "Anthropic's published guidance" in basis
     assert "not tokenjam's" in basis
     assert "only the token reduction is" in basis
-    assert "path-scoped rules" in basis
-    assert "it does not write those rules" in basis
+
+
+def test_basis_refuses_to_present_compression_as_the_only_route(db):
+    """An instruction file is usually long because rules ACCUMULATED, so
+    compressing it shortens each surviving rule rather than removing any. That
+    trades adherence for tokens (Critical Rule 26, gate 3), so the three routes
+    that cost no specificity have to be named alongside it."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+    from tokenjam.core.summarize.route import PRUNE_TEST_QUOTE
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert "only ONE of four routes" in basis
+    assert "the only one that costs specificity" in basis
+    assert PRUNE_TEST_QUOTE in basis                  # prune
+    assert "`paths:` frontmatter" in basis            # path-scope
+    assert "escalating a must-always-run instruction to a hook" in basis
+    assert "summarize performs NONE of them; it names them" in basis
+    # The diagnosis is of prose SHAPE, never of which rules are needed.
+    assert "never of which rules earn their place" in basis
+    assert "withheld rather than guessed" in basis
+    # And meaning is not verified by anything automatic.
+    assert "does not read the prose" in basis
+
+
+def test_a_prune_route_candidate_keeps_its_full_figure(db, monkeypatch, tmp_path):
+    """The route changes what is OFFERED, never what is claimed: the tokens are
+    recoverable by whichever route the user picks, so a rule-heavy file is not
+    quietly discounted for being a pruning candidate."""
+    from tokenjam.core.summarize import route
+    from tokenjam.core.summarize.candidates import Candidate
+
+    rules = "\n".join(f"- Never skip step {i}; run its own check first." for i in range(60))
+    advice = route.recommend_route(text=rules, load_class="always")
+    assert advice.route == route.ROUTE_PRUNE
+
+    c = Candidate(
+        path="/x/CLAUDE.md", prose_words=600, total_chars=4_000, protected_blocks=0,
+        est_tokens_saved=500, pricing_mode="api", scope="project", is_prompt=True,
+        reduction_route=advice.route, directive_share=advice.directive_share,
+    )
+    assert c.est_tokens_saved == 500                  # undiscounted
+    assert c.to_dict()["reduction_route"] == route.ROUTE_PRUNE
 
 
 def test_measured_ratio_supersedes_the_target_in_the_figure(db, monkeypatch, tmp_path):

@@ -164,6 +164,74 @@ def analyze(text: str) -> StructureBreakdown:
     )
 
 
+#: A prose line that OPENS a discrete instruction: a markdown bullet, a numbered
+#: item, or a heading. Deliberately narrow — these are the three shapes a rule
+#: is actually written in; anything else is treated as running prose.
+_DIRECTIVE_OPENER_RE = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)]|#{1,6})[ \t]+\S")
+
+
+@dataclass(frozen=True)
+class ProseShape:
+    """How a prompt's prose is SHAPED: discrete directives vs running prose.
+
+    A long instruction file is long for one of two very different reasons, and
+    the remedy differs. Prose-heavy means padded explanation, which summarizing
+    genuinely compresses. Rule-heavy means directives ACCUMULATED, and squeezing
+    words there makes each surviving rule shorter and vaguer rather than fewer.
+
+    **This measures FORM, not NECESSITY.** It can say a file is written as 120
+    bullets averaging 14 words; it cannot say which of them earn their place.
+    That is the pruning question, and only the file's owner can answer it. Any
+    copy derived from this must keep the distinction — a diagnosis of shape
+    presented as a judgement about need would be exactly the wrong guess.
+
+    A "unit" starts at a directive opener or after a blank line, so a wrapped
+    bullet stays one unit and a blank-line-separated paragraph stays one unit.
+    """
+
+    units: int
+    directive_units: int
+    paragraph_units: int
+    prose_words: int
+    directive_words: int
+    paragraph_words: int
+
+    @property
+    def directive_share(self) -> float:
+        """Share of prose words living inside directives (0.0 with no prose)."""
+        return self.directive_words / self.prose_words if self.prose_words else 0.0
+
+    @property
+    def mean_words_per_directive(self) -> float:
+        return self.directive_words / self.directive_units if self.directive_units else 0.0
+
+
+def prose_shape(text: str) -> ProseShape:
+    """Measure how ``text``'s prose divides into directives vs running prose."""
+    prose = prose_text(text)
+    units: list[tuple[bool, int]] = []          # (is_directive, words)
+    start_new = True
+    for line in prose.splitlines():
+        words = len(_WORD_RE.findall(line))
+        if not line.strip():
+            start_new = True                    # blank line closes the current unit
+            continue
+        opens = bool(_DIRECTIVE_OPENER_RE.match(line))
+        if opens or start_new or not units:
+            units.append((opens, words))
+        else:
+            is_dir, had = units[-1]
+            units[-1] = (is_dir, had + words)   # continuation of a wrapped unit
+        start_new = False
+    d_units = [w for is_dir, w in units if is_dir]
+    p_units = [w for is_dir, w in units if not is_dir]
+    return ProseShape(
+        units=len(units), directive_units=len(d_units), paragraph_units=len(p_units),
+        prose_words=sum(w for _, w in units),
+        directive_words=sum(d_units), paragraph_words=sum(p_units),
+    )
+
+
 def is_candidate(text: str, min_prose_words: int = MIN_PROSE_WORDS) -> bool:
     """True if ``text`` has enough prose to be worth summarizing."""
     return analyze(text).prose_words >= min_prose_words

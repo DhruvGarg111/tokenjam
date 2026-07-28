@@ -29,6 +29,7 @@ from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
 from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO, tokens_saved
+from tokenjam.core.summarize.route import recommend_route
 
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
@@ -84,6 +85,22 @@ class Candidate:
     #: identifies copies without assuming their bytes still agree. Empty for a
     #: global-scope file, which has no project root.
     scan_root: str = ""
+    #: Which route to a smaller file this candidate actually wants — see
+    #: ``core/summarize/route``. Compression is one of four routes to the
+    #: published size target and the only one that costs specificity, so a
+    #: rule-heavy instruction file is flagged as a PRUNE candidate rather than
+    #: being offered compression as though it were the obvious move. The full
+    #: user-facing reasoning is NOT carried per candidate (it is a paragraph and
+    #: a corpus scan holds hundreds of these); surfaces render it via
+    #: `route.recommend_route` for the one file the user is looking at.
+    reduction_route: str = ""
+    #: Share of this file's prose words living in discrete directives — the
+    #: evidence behind ``reduction_route``, carried so a consumer can show the
+    #: evidence and not only the verdict.
+    directive_share: float = 0.0
+    #: True when this rule already declares `paths:` frontmatter, so it is never
+    #: told to path-scope itself. Advice only; deliberately does not reprice it.
+    already_path_scoped: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -102,6 +119,9 @@ class Candidate:
             "on_demand_tokens_saved": self.on_demand_tokens_saved,
             "always_resident_chars": self.always_resident_chars,
             "scan_root": self.scan_root,
+            "reduction_route": self.reduction_route,
+            "directive_share": round(self.directive_share, 4),
+            "already_path_scoped": self.already_path_scoped,
         }
 
 
@@ -260,6 +280,11 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
     # worth (invocations). See core/summarize/load_semantics.
     load_class = load_semantics.classify(str(path))
     resident_text, on_demand_text = load_semantics.split_always_resident(text, load_class)
+    # Why this file is long, and therefore which route to a smaller one it
+    # wants. Compression is only one of four, and the only one that costs
+    # specificity — so a rule-heavy instruction file is not offered compression
+    # as though it were the obvious move. Diagnosis only; nothing is written.
+    advice = recommend_route(text=text, load_class=load_class)
     return Candidate(
         scan_root=str(scan_root) if scan_root is not None else "",
         path=str(path), prose_words=b.prose_words, total_chars=b.total_chars,
@@ -270,6 +295,8 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
         always_resident_tokens_saved=tokens_saved(analyze(resident_text), ratio),
         on_demand_tokens_saved=tokens_saved(analyze(on_demand_text), ratio),
         always_resident_chars=len(resident_text),
+        reduction_route=advice.route, directive_share=advice.directive_share,
+        already_path_scoped=advice.already_path_scoped,
     )
 
 

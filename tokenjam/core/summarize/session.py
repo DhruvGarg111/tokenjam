@@ -21,14 +21,14 @@ from pathlib import Path
 
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize import detect, load_semantics, wrap
+from tokenjam.core.summarize import route as route_mod
 from tokenjam.core.summarize.estimate import (
     DEFAULT_TARGET_RATIO,
-    PATH_SCOPED_RULES_QUOTE,
     PUBLISHED_LINE_TARGET,
     PUBLISHED_LINE_TARGET_QUOTE,
-    PUBLISHED_LINE_TARGET_SOURCE,
     line_target_prose_words,
 )
+from tokenjam.core.summarize.route import recommend_route
 
 
 class SummarizeRefused(Exception):
@@ -45,25 +45,24 @@ GATE_FAIL_NOTE = (
     "Structure check failed — not staged. The prompt can't be safely compressed as summarized."
 )
 
-#: Why the rewriter is being asked for THIS word budget, in the user's words.
-#: The line-target half quotes Anthropic rather than asserting a tokenjam
-#: threshold, and it is explicit that the adherence benefit is the REASON for
-#: the target and not a saving tokenjam measures (Critical Rule 14: only the
-#: token delta is claimable).
-TARGET_BASIS_LINES = (
-    "Aiming to bring this file under {lines} lines. That target is Anthropic's "
-    'published guidance for an always-resident instruction file ("{quote}" '
-    "{source}), not tokenjam's; it applies here because this file is loaded into "
-    "every session. Only the token reduction is claimed as a saving. Better "
-    "adherence in a shorter file is the reason for the target, and tokenjam does "
-    "not measure it. If this file's content is specific to one area of the repo, "
-    "Anthropic suggests an alternative to compressing it: \"{alternative}\" "
-    "tokenjam does not write those rules for you."
-)
+#: Why the rewriter is being asked for THIS word budget, for a file the
+#: published size guidance does NOT cover. States plainly that the ratio is
+#: tokenjam's own and that nothing enforces it. For an always-resident
+#: instruction file the basis comes from `route.recommend_route` instead, which
+#: names all four routes to the published target and the quality tax that makes
+#: compression the worst of them for such a file.
 TARGET_BASIS_RATIO = (
     "Aiming to keep about {pct:.0f}% of the prose. That ratio is tokenjam's own "
     "target, not published guidance, and nothing enforces it: whatever the "
-    "rewrite returns is accepted so long as the structure survives."
+    "rewrite returns is accepted so long as the structure survives. Only the "
+    "token reduction is claimed as a saving; whether the rewrite preserved your "
+    "meaning is not checked by anything automatic, so read the diff."
+)
+#: Prefixed to the route advice when the line target is what set the budget, so
+#: the number in `target_prose_words` is traceable to the target it came from.
+TARGET_BASIS_LINE_PREFIX = (
+    "Aiming to bring this file from {lines_before:,} lines to under {lines} by "
+    "rewriting prose, which is what the {words:,}-word budget above encodes. "
 )
 
 
@@ -365,23 +364,32 @@ def prepare(
             lines_before=lines.total_lines,
         )
     wrapped, _saved, _order, plan = wrap.protect(content, hide_if_chars)
+    load_class = load_semantics.classify(path)
     ratio_target = max(8, int(ratio * n_prose))
     line_budget = line_target_prose_words(
-        text=content, load_class=load_semantics.classify(path), prose_words=n_prose,
+        text=content, load_class=load_class, prose_words=n_prose,
     )
     if line_budget is None:
         target = ratio_target
         rules = wrap.WRAP_SUMM_SYS.format(n=target)
-        basis = TARGET_BASIS_RATIO.format(pct=ratio * 100)
     else:
         target = max(8, min(ratio_target, line_budget))
         rules = wrap.WRAP_SUMM_SYS.format(n=target) + wrap.WRAP_SUMM_SYS_LINE_GOAL.format(
             lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
         )
-        basis = TARGET_BASIS_LINES.format(
-            lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
-            source=PUBLISHED_LINE_TARGET_SOURCE, alternative=PATH_SCOPED_RULES_QUOTE,
-        )
+    # For an always-resident instruction file the basis is the ROUTE advice, not
+    # a bare target: compression is one of four routes to the published size
+    # target and the only one that costs specificity, so the offer must not
+    # present it as the default. Everything else keeps the ratio statement.
+    advice = recommend_route(text=content, load_class=load_class)
+    if advice.route == route_mod.ROUTE_NOT_INSTRUCTION:
+        basis = TARGET_BASIS_RATIO.format(pct=ratio * 100)
+    elif line_budget is None:
+        basis = advice.advice
+    else:
+        basis = TARGET_BASIS_LINE_PREFIX.format(
+            lines_before=lines.total_lines, lines=PUBLISHED_LINE_TARGET, words=target,
+        ) + advice.advice
     return PrepResult(
         path=path, source_sha256=source_hash, wrapped_prompt=wrapped,
         system_rules=rules,
