@@ -44,7 +44,7 @@ import hashlib
 import json
 import re
 import threading
-from dataclasses import asdict, dataclass, is_dataclass, replace
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -154,12 +154,38 @@ _REUSE_NOTE_INTRO = (
 # The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
 # edit — it names the observed oversized dispatches and states the routing rule.
+#
+# TWO THINGS THIS TEXT MUST NOT DO AGAIN, both of which it once did.
+#
+# (a) It must not pass a long, tool-heavy dispatch. The sentence that used to
+# close this rubric ("a subagent that does little tool work and returns a short
+# result rarely needs the premium tier") encoded the very gate that was DELETED
+# from `analyzers/subagent_rightsizing.py` — the `output_tokens < 2000` /
+# `tool_calls <= 5` clauses that made the most expensive dispatches the LEAST
+# eligible to be flagged (Critical Rule 29's gate inversion). Every dispatch in
+# the claim this rubric is written against is large, tool-heavy and
+# long-output, so that sentence told the agent to keep doing precisely what the
+# card is billing it for: applying the fix would have left the number where it
+# found it, which is a correctness bug, not a wording preference.
+#
+# (b) The premium escape hatch must be CHECKABLE BY AN OUTSIDE READER, never
+# self-assessed. "Unless the subtask genuinely needs deep reasoning" asks the
+# dispatching agent to rate its own task's difficulty, and an agent asked that
+# question answers yes — the exception then swallows the rule. The conditions
+# below are stated as things that are either written into the dispatch or not,
+# so a reader of the transcript can decide whether the exception applied
+# without re-running anyone's judgement.
 SUBAGENT_RUBRIC_INTRO = (
-    "Right-size Task-dispatched subagents: default a subagent to the cheapest "
-    "same-family model that fits its shape, and only reach for a premium-tier "
-    "model (Opus / Fable) when the subtask genuinely needs deep reasoning. A "
-    "subagent that does little tool work and returns a short result rarely needs "
-    "the premium tier."
+    "Right-size Task-dispatched subagents: default every subagent to the "
+    "cheapest same-family model that fits its shape, and treat that default as "
+    "the answer unless the dispatch itself states one of these conditions: the "
+    "subtask IS the architecture or design decision this session exists to "
+    "make; it must reconcile sources that disagree into one judgement a later "
+    "step cannot re-derive; or a cheaper model already attempted it in this "
+    "session and its output was rejected. How much tool work a subagent does "
+    "and how long its result runs are not on that list: a broad, tool-heavy, "
+    "long-output dispatch is the expensive one, not the hard one, and it is "
+    "the one this rule exists to route down."
 )
 
 # The downsize card's claude-code CTA. Mirrors `cmd_optimize._render_downgrade_
@@ -341,6 +367,31 @@ class CostProposal:
     # text still carried as a copyable `suggestion`.
     write_offered:            bool         = False
     write_blocked_reason:     str          = ""
+    # WHERE the permanent rule would be written (`core/optimize/rule_placement`).
+    # Every field here describes placement, never a saving: `placement_paths` is
+    # the set of CLAUDE.md files the rule lands in, `placement_scope` is
+    # "project" or "user-global", and the two standing figures are the chosen
+    # and the rejected alternative, kept side by side so the decision is
+    # inspectable rather than a bare verdict. `placement_footprint_tokens` is
+    # what the FILES have to carry (per-session x files written) as distinct
+    # from what the rule costs to KEEP — see `write_budget.WriteCandidate.
+    # destinations` for why those are two different questions.
+    #
+    # These carry no dollars on purpose. Placement changes what a rule COSTS,
+    # and that change is already expressed in the netted `past_overspend_usd`
+    # and the `standing_cost_*` fields above; a second dollar figure here would
+    # be a fourth name for a quantity the field contract allows one name.
+    placement_scope:          str          = ""
+    placement_paths:          list[str]    = field(default_factory=list)
+    placement_standing_tokens: int         = 0
+    placement_alternative_standing_tokens: int = 0
+    placement_footprint_tokens: int        = 0
+    placement_basis:          str          = ""
+    #: What the placement split covers and what it could not place, ending by
+    #: saying the difference is what was not analysed (Critical Rule 30). Kept
+    #: separate from `coverage_note` above, which is about the FIGURE's
+    #: population rather than the RULE's.
+    placement_coverage_note:  str          = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -2689,7 +2740,7 @@ def cost_proposals_from_report(
             proposals.extend(adapter(finding))
         except Exception:
             continue
-    proposals = _apply_write_budget(proposals, report, window_days)
+    proposals = _apply_write_budget(proposals, report, window_days, config)
     # Order matters: the write budget can NET a proposal's figure down against
     # what its rule costs to keep, and the past-overspend basis stamp must
     # describe the netted figure, never the gross.
@@ -2729,8 +2780,110 @@ def _write_budget_basis(report: Any, window_days: float) -> Any:
     )
 
 
+#: Cap on the sessions whose transcript is opened to resolve a destination.
+#: Distinct sessions, and deliberately far above ``_MAX_SCOPE_SESSIONS``: that
+#: cap answers "which ONE repo does this agent definition live in", where 20
+#: samples settle it, while placement is answering "which of the user's
+#: projects incurred this and in what proportion", where a truncated sample
+#: silently concentrates the whole finding into whichever repos happened to
+#: sort first. The read itself is cheap — the leading records of each
+#: transcript, through the shared parse cache — so the cap is a bound on a
+#: pathological corpus, not a sampling decision.
+_MAX_PLACEMENT_SESSIONS = 400
+
+
+def _placement_weights(analyzer: str, report: Any) -> dict[str, int]:
+    """``session_id -> attribution weight`` for one rule-writing analyzer.
+
+    Each of the three cost-lane rule writers already knows which sessions its
+    claim came from; none of them published it in a form placement could read
+    until now. The weights are TOKENS in every case, and they are a breakdown
+    of the analyzer's own ``past_overspend_tokens`` rather than a new
+    measurement — see the field notes on ``DowngradeFinding.driver_session_tokens``
+    and ``ResendFinding.session_weights``.
+
+    An analyzer with no per-session breakdown returns ``{}``, which places its
+    rule in the user-global file exactly as before. That is a real answer, not
+    a failure: a rule with no evidence about WHERE belongs in the file every
+    session loads.
+    """
+    findings = getattr(report, "findings", {}) or {}
+    if analyzer == "downsize":
+        finding = getattr(report, "downgrade", None)
+        return {
+            str(k): int(v)
+            for k, v in (getattr(finding, "driver_session_tokens", {}) or {}).items()
+            if k and int(v or 0) > 0
+        }
+    if analyzer == "resend":
+        finding = findings.get("resend")
+        return {
+            str(k): int(v)
+            for k, v in (getattr(finding, "session_weights", {}) or {}).items()
+            if k and int(v or 0) > 0
+        }
+    if analyzer == "subagent":
+        finding = findings.get("subagent")
+        weights: dict[str, int] = {}
+        for row in (getattr(finding, "flagged", None) or []):
+            if "over_powered" not in (getattr(row, "flags", None) or []):
+                continue
+            sid = str(getattr(row, "session_id", "") or "")
+            if not sid:
+                continue
+            # The dispatch's own billed volume. Claude Code files a subagent's
+            # turns under its PARENT session id (Critical Rule 34), which is
+            # exactly what placement wants: the parent session is the one whose
+            # working directory names the project the rule belongs in.
+            weights[sid] = weights.get(sid, 0) + sum(int(
+                getattr(row, field_name, 0) or 0
+            ) for field_name in (
+                "input_tokens", "output_tokens", "cache_tokens", "cache_write_tokens",
+            ))
+        return {k: v for k, v in weights.items() if v > 0}
+    return {}
+
+
+def _placement_for(
+    proposal: CostProposal, report: Any, config: Any,
+) -> Any | None:
+    """Where ``proposal``'s rule should be written, or ``None``.
+
+    ``None`` means "no placement evidence" — the caller then keeps the
+    single-destination behaviour. Never raises: placement reads the live
+    filesystem and the live transcript tree, and a hiccup there must degrade to
+    the historical answer rather than sink the inbox.
+    """
+    from tokenjam.core.optimize import rule_placement as rp
+
+    weights = _placement_weights(proposal.analyzer, report)
+    if not weights:
+        return None
+    ranked = sorted(weights.items(), key=lambda kv: -kv[1])[:_MAX_PLACEMENT_SESSIONS]
+    from tokenjam.core.optimize.scope import _claude_home_for
+    from tokenjam.core.transcript import resolve_projects_root, session_cwd_map
+
+    override = getattr(getattr(config, "loop", None), "transcript_path", None)
+    projects_root = resolve_projects_root(override)
+    cwds = session_cwd_map([sid for sid, _ in ranked], projects_root)
+    return rp.build_placement_plan(
+        [rp.SessionShare(session_id=sid, weight=weight) for sid, weight in ranked],
+        cwds,
+        total_tokens=int(proposal.past_overspend_tokens or 0),
+        total_usd=proposal.past_overspend_usd,
+        # The user-global fallback has to name the SAME machine the transcripts
+        # came from. Derived from the resolved projects root rather than from
+        # `Path.home()`, so a review served against a throwaway `--db` cannot
+        # offer to write into the operator's real `~/.claude/CLAUDE.md` — the
+        # scope-agreement requirement `relearn_apply.default_target_path`
+        # takes this argument for in the first place.
+        claude_home=_claude_home_for(projects_root),
+    )
+
+
 def _apply_write_budget(
     proposals: list[CostProposal], report: Any, window_days: float,
+    config: Any = None,
 ) -> list[CostProposal]:
     """Net every write-bearing card against what its rule costs to KEEP, and
     bound how many permanent rules the window may offer.
@@ -2748,7 +2901,7 @@ def _apply_write_budget(
     same way the persona gate already degrades one: advise-only, with the
     identical text still carried as a copyable ``suggestion``.
     """
-    from tokenjam.core.optimize import write_budget as wb
+    from tokenjam.core.optimize import rule_placement, write_budget as wb
 
     basis = _write_budget_basis(report, window_days)
     findings = getattr(report, "findings", {}) or {}
@@ -2765,7 +2918,45 @@ def _apply_write_budget(
         existing_agent_file_tokens=wb.measured_agent_file_tokens(
             findings.get("summarize"),
         ),
+        # Per-FILE sizes from the same scan, so each destination's growth
+        # allowance is sized against its OWN file rather than against the
+        # corpus-wide aggregate — a distinction that did not exist while there
+        # was one destination, and that decides whether two rules may converge
+        # on one small project CLAUDE.md.
+        existing_by_path=wb.measured_agent_file_tokens_by_path(
+            findings.get("summarize"),
+        ),
     )
+
+    writers = [
+        p for p in proposals if p.apply_capable and p.rung >= 1 and p.proposed_fix
+    ]
+    if not writers:
+        return proposals
+
+    # WHERE each rule goes, decided before HOW MUCH it may cost — placement is
+    # an input to the netting, not a presentation of it. A rule confined to the
+    # three projects that actually exhibited the behaviour is re-sent in those
+    # projects only, so its standing cost falls by the ratio of their sessions
+    # to the window's, and a rule that reads net-negative against the
+    # user-global file can legitimately flip to net-positive purely by landing
+    # in the right place.
+    placements: dict[str, Any] = {}
+    for p in writers:
+        try:
+            plan = _placement_for(p, report, config)
+        except Exception:
+            plan = None
+        if plan is None:
+            continue
+        choice = rule_placement.choose_placement(
+            plan,
+            standing_tokens_per_session=wb.standing_tokens_per_session(
+                p.rung, p.proposed_fix,
+            ),
+            total_sessions=int(getattr(getattr(report, "window", None), "sessions", 0) or 0),
+        )
+        placements[p.signature] = (plan, choice)
 
     candidates = [
         wb.WriteCandidate(
@@ -2775,12 +2966,16 @@ def _apply_write_budget(
             artifact_text=p.proposed_fix,
             gross_tokens=int(p.past_overspend_tokens or 0),
             gross_usd=p.past_overspend_usd,
+            exposure_sessions=(
+                placements[p.signature][1].exposure_sessions
+                if p.signature in placements else None
+            ),
+            destinations=tuple(
+                d.path for d in placements[p.signature][1].destinations
+            ) if p.signature in placements else (),
         )
-        for p in proposals
-        if p.apply_capable and p.rung >= 1 and p.proposed_fix
+        for p in writers
     ]
-    if not candidates:
-        return proposals
     decisions = wb.allocate_writes(candidates, budget, basis)
 
     out: list[CostProposal] = []
@@ -2805,6 +3000,26 @@ def _apply_write_budget(
             "write_offered": decision.offered,
             "write_blocked_reason": decision.reason,
         }
+        placed = placements.get(p.signature)
+        if placed is not None:
+            plan, choice = placed
+            updates.update(
+                placement_scope=choice.scope,
+                placement_paths=[d.path for d in choice.destinations],
+                placement_standing_tokens=choice.standing_tokens,
+                placement_alternative_standing_tokens=(
+                    choice.alternative_standing_tokens
+                ),
+                placement_footprint_tokens=choice.footprint_tokens,
+                placement_basis=choice.basis,
+                # The placement gap rides on its OWN note rather than being
+                # merged into the analyzer's `coverage_note`: that field states
+                # what the analyzer's FIGURE covers, and this states which
+                # sessions the rule could be PLACED for. Two different
+                # populations, so merging them would recreate exactly the
+                # ratio-of-two-populations defect Critical Rule 30 is about.
+                placement_coverage_note=plan.coverage_note,
+            )
         if not decision.offered:
             updates.update(
                 apply_capable=False, advise_only=True, rung=0, scope="",

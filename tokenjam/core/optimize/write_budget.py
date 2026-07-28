@@ -56,7 +56,8 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Iterable, Sequence
 
 from tokenjam.core.optimize.projection import ProjectionBasis
@@ -375,6 +376,43 @@ def measured_agent_file_tokens(summarize_finding: object | None) -> int | None:
     return tokens_from_chars(total_chars)
 
 
+def measured_agent_file_tokens_by_path(
+    summarize_finding: object | None,
+) -> dict[str, int]:
+    """The always-loaded footprint of EACH agent file, keyed by resolved path.
+
+    :func:`measured_agent_file_tokens` collapses the same scan into one number,
+    which is the right input for "how much new standing text may this window
+    take on at all". It is the wrong input for "may this rule grow THIS file",
+    and the difference only became visible once a rule could land in several
+    files: a growth share computed against the aggregate lets two rules
+    converge on one small project ``CLAUDE.md`` and add more to it than the
+    whole file contained, while the aggregate — dominated by a large root file
+    — reports plenty of headroom.
+
+    A path absent from the scan simply has no measured size; the caller falls
+    back to the lane budget rather than inventing one, which is the same
+    "an unmeasured file is not evidence of a full one" default the aggregate
+    already applies.
+    """
+    if summarize_finding is None:
+        return {}
+    out: dict[str, int] = {}
+    for candidate in (getattr(summarize_finding, "candidates", None) or []):
+        path = str(getattr(candidate, "path", "") or "")
+        if not path:
+            continue
+        chars = _always_loaded_chars(candidate)
+        if chars <= 0:
+            continue
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = path
+        out[key] = out.get(key, 0) + tokens_from_chars(chars)
+    return out
+
+
 @dataclass(frozen=True)
 class WriteBudget:
     """How much new permanent standing cost this window may take on.
@@ -391,6 +429,36 @@ class WriteBudget:
     max_writes: int
     existing_tokens: int
     ceiling_reached: bool
+    #: Per-FILE always-loaded footprint, resolved path -> tokens, from the same
+    #: ``summarize`` scan ``existing_tokens`` aggregates. Used to size one
+    #: file's own growth allowance; empty means no per-file measurement, and
+    #: every destination then falls back to ``budget_tokens``.
+    existing_by_path: dict[str, int] = field(default_factory=dict)
+
+    def destination_budget(self, path: str) -> int:
+        """How much new standing text ONE file may take on.
+
+        The same growth share the lane budget uses, applied to this file's own
+        measured size rather than to the aggregate — so a small project
+        ``CLAUDE.md`` gets a small allowance even when a large root file makes
+        the corpus-wide footprint look roomy. Unmeasured files fall back to the
+        lane budget, which is the historical single-destination behaviour.
+        """
+        if self.ceiling_reached:
+            return 0
+        if not path:
+            return self.budget_tokens
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = path
+        existing = self.existing_by_path.get(key)
+        if existing is None:
+            return self.budget_tokens
+        return max(
+            MIN_WRITE_BUDGET_TOKENS,
+            int(existing * AGENT_FILE_GROWTH_SHARE_PER_WINDOW),
+        )
 
 
 def build_write_budget(
@@ -398,6 +466,7 @@ def build_write_budget(
     lane_budget_tokens: int,
     lane_max_writes: int,
     existing_agent_file_tokens: int | None = None,
+    existing_by_path: dict[str, int] | None = None,
 ) -> WriteBudget:
     """Size this lane's write budget against the measured agent-file footprint.
 
@@ -413,16 +482,17 @@ def build_write_budget(
     and the lane cap bounds the whole thing regardless.
     """
     lane_cap = max(0, lane_budget_tokens)
+    by_path = dict(existing_by_path or {})
     if existing_agent_file_tokens is None:
         return WriteBudget(
             budget_tokens=lane_cap, max_writes=max(0, lane_max_writes),
-            existing_tokens=0, ceiling_reached=False,
+            existing_tokens=0, ceiling_reached=False, existing_by_path=by_path,
         )
     existing = max(0, int(existing_agent_file_tokens))
     if existing >= AGENT_FILE_STANDING_CEILING_TOKENS:
         return WriteBudget(
             budget_tokens=0, max_writes=0, existing_tokens=existing,
-            ceiling_reached=True,
+            ceiling_reached=True, existing_by_path=by_path,
         )
     allowed_growth = max(
         MIN_WRITE_BUDGET_TOKENS, int(existing * AGENT_FILE_GROWTH_SHARE_PER_WINDOW),
@@ -432,6 +502,7 @@ def build_write_budget(
         max_writes=max(0, lane_max_writes),
         existing_tokens=existing,
         ceiling_reached=False,
+        existing_by_path=by_path,
     )
 
 
@@ -464,6 +535,23 @@ class WriteCandidate:
     #: same basis mismatch in a different costume. ``None`` falls back to the
     #: basis's own session count (the user-global case).
     exposure_sessions: int | None = None
+    #: The FILES this artifact would be written into, when placement resolved
+    #: more than the single user-global default (see
+    #: :mod:`tokenjam.core.optimize.rule_placement`). Empty means the historical
+    #: one-destination behaviour, which is still correct for a genuinely global
+    #: rule.
+    #:
+    #: Two distinct costs fall out of this and they must not be conflated. The
+    #: STANDING cost is per-session x ``exposure_sessions`` — what the rule
+    #: costs to keep, and the only figure the saving is netted against. The
+    #: FOOTPRINT cost is per-session x the number of destinations — what the
+    #: FILES have to carry, and the only figure the budget is spent in. Three
+    #: project files each grow by one block even though no single session ever
+    #: loads more than one of them, so a placement that halves the standing cost
+    #: can still triple the budget spend. Both are real; charging either one for
+    #: the other's question is how a placement decision silently stops being
+    #: arithmetic.
+    destinations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -506,6 +594,13 @@ class WriteDecision:
     #: saving is real and whose snippet is still copyable today.
     claim_suppressed: bool
     basis: str
+    #: Per-session tokens x the number of files written — what the budget is
+    #: spent in. Equals ``standing_tokens_per_session`` for the single-file
+    #: case; see ``WriteCandidate.destinations`` for why the two differ.
+    footprint_tokens: int = 0
+    #: The files this write lands in, carried through so a caller can stage one
+    #: diff per destination without re-deriving the placement.
+    destinations: tuple[str, ...] = ()
 
 
 def _rate_per_token(gross_usd: float | None, gross_tokens: int) -> float | None:
@@ -527,17 +622,25 @@ def _unpriceable_decision(candidate: WriteCandidate) -> WriteDecision:
     figures pass through untouched, with the basis saying plainly that the
     netting did not run.
     """
+    per_session = standing_tokens_per_session(candidate.rung, candidate.artifact_text)
     return WriteDecision(
         key=candidate.key, offered=True, reason="",
-        standing_tokens_per_session=standing_tokens_per_session(
-            candidate.rung, candidate.artifact_text,
-        ),
+        standing_tokens_per_session=per_session,
         standing_tokens=0, standing_usd=None,
         net_tokens=0, net_usd=candidate.gross_usd,
         payback_ratio=None, net_negative=False, exposure_sessions=0,
+        footprint_tokens=per_session * _destination_count(candidate),
+        destinations=candidate.destinations,
         claimed_tokens=candidate.gross_tokens, claimed_usd=candidate.gross_usd,
         claim_suppressed=False, basis=BASIS_NOT_PRICEABLE,
     )
+
+
+def _destination_count(candidate: WriteCandidate) -> int:
+    """How many files this write grows. One when placement resolved nothing —
+    the historical single-destination case is a write into exactly one file,
+    never into none."""
+    return max(1, len(candidate.destinations))
 
 
 def _decide_family(
@@ -604,6 +707,8 @@ def _decide_family(
         standing_tokens=standing, standing_usd=standing_usd,
         net_tokens=max(net_tokens, 0), net_usd=clamped_net_usd,
         payback_ratio=payback, net_negative=net_negative, exposure_sessions=exposure,
+        footprint_tokens=per_session * _destination_count(rep),
+        destinations=rep.destinations,
         claimed_tokens=0 if net_negative else max(net_tokens, 0),
         claimed_usd=(
             None if family_gross_usd is None
@@ -692,6 +797,14 @@ def allocate_writes(
     ranked.sort(key=lambda pair: (-pair[1].net_tokens, pair[0].key))
     spent_tokens = 0
     offered_count = 0
+    #: Per-DESTINATION spend, so four analyzers proposing rules into the same
+    #: file cannot each spend the whole budget against it. Before placement
+    #: existed there was exactly one destination and the single ``spent_tokens``
+    #: counter was that guarantee by construction; once a write can land in
+    #: three project files and another write in two of the same three, the
+    #: global counter stops answering "how much did THIS file grow" — which is
+    #: the question the growth share and the standing ceiling are both asked in.
+    spent_by_destination: dict[str, int] = {}
     for rep, decision in ranked:
         # Spent in PER-SESSION tokens, the same unit the ceiling and the
         # summarize-measured footprint are in. Charging the window TOTAL here
@@ -699,12 +812,25 @@ def allocate_writes(
         # is backwards: a busier user is exactly who a good permanent rule pays
         # off for. The window total is what the SAVING is netted against; the
         # per-session figure is what the FILE has to carry.
+        #
+        # The write is all-or-nothing across its destinations: a rule offered
+        # into two of its three projects would leave the third exhibiting the
+        # behaviour with no rule and a card claiming it was covered.
+        targets = decision.destinations or ("",)
+        per_file = decision.standing_tokens_per_session
         fits = (
             offered_count < budget.max_writes
-            and spent_tokens + decision.standing_tokens_per_session <= budget.budget_tokens
+            and spent_tokens + decision.footprint_tokens <= budget.budget_tokens
+            and all(
+                spent_by_destination.get(path, 0) + per_file
+                <= budget.destination_budget(path)
+                for path in targets
+            )
         )
         if fits:
-            spent_tokens += decision.standing_tokens_per_session
+            spent_tokens += decision.footprint_tokens
+            for path in targets:
+                spent_by_destination[path] = spent_by_destination.get(path, 0) + per_file
             offered_count += 1
             decisions[rep.key] = decision
             continue
@@ -716,6 +842,8 @@ def allocate_writes(
             net_tokens=decision.net_tokens, net_usd=decision.net_usd,
             payback_ratio=decision.payback_ratio, net_negative=False,
             exposure_sessions=decision.exposure_sessions,
+            footprint_tokens=decision.footprint_tokens,
+            destinations=decision.destinations,
             claimed_tokens=decision.claimed_tokens, claimed_usd=decision.claimed_usd,
             claim_suppressed=False, basis=decision.basis,
         )

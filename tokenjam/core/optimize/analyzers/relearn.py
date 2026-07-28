@@ -2380,7 +2380,11 @@ def _repo_cwd_map_for(
     directory name is unreliable, so this reads each session's transcript's
     first ``cwd`` field directly (cheap: short-circuits after the first hit)
     for one representative session per repo."""
-    from tokenjam.core.transcript import _locate_transcript, read_records
+    from tokenjam.core.transcript import (
+        _locate_transcript,
+        first_recorded_cwd,
+        read_records,
+    )
 
     out: dict[str, str] = {}
     for session_id, repo in sessions:
@@ -2389,11 +2393,12 @@ def _repo_cwd_map_for(
         path = _locate_transcript(session_id, projects_root)
         if path is None:
             continue
-        for record in read_records(path, cache_dir=transcript_cache_dir)[:5]:
-            cwd = record.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                out[repo] = cwd
-                break
+        # `first_recorded_cwd` is the shared extractor (deadweight and rule
+        # placement read it too) — see its docstring for why this is not three
+        # copies of the same five-record loop any more.
+        cwd = first_recorded_cwd(read_records(path, cache_dir=transcript_cache_dir))
+        if cwd:
+            out[repo] = cwd
     return out
 
 

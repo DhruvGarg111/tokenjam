@@ -323,12 +323,22 @@ SUBAGENT_OFFLOAD_FIX = (
 #: The second half of the compound lever. Offloading decides WHERE the work
 #: runs; this decides what it runs ON. Both are settable in the same agent
 #: file's frontmatter, so the two land as one artifact rather than two cards.
+#:
+#: This text used to say a subagent "doing broad reads and returning a short
+#: conclusion rarely needs the premium tier" — the same contradiction the
+#: subagent rubric carried (see ``cost_proposals.SUBAGENT_RUBRIC_INTRO``'s note).
+#: Breadth of reading is exactly what the offload half of this compound fix
+#: creates, so pairing "offload the broad reads" with "broad reads are cheap"
+#: told the agent the resulting worker did not need right-sizing at all, and
+#: applying the fix would not have erased the number that motivated it.
 RIGHTSIZE_FIX_TEMPLATE = (
-    "Then right-size what you offload to. A subagent doing broad reads and "
-    "returning a short conclusion rarely needs the premium tier: pin both its "
-    "model and its reasoning effort in its own definition file so every future "
-    "dispatch inherits them instead of defaulting to whatever the parent runs "
-    "on."
+    "Then right-size what you offload to. Default the worker to the cheapest "
+    "same-family model that fits its shape, and pin both that model and its "
+    "reasoning effort in its own definition file so every future dispatch "
+    "inherits them instead of defaulting to whatever the parent runs on. How "
+    "much it reads and how long its conclusion runs are not reasons to keep "
+    "the premium tier; they are what makes the dispatch expensive in the "
+    "first place."
 )
 
 # Cap on evidence rows carried in the finding payload; aggregates are over ALL
@@ -457,6 +467,15 @@ class ResendFinding:
     #: of being claimed here (Critical Rule 27). Surfaced so the partition is
     #: visible on the payload rather than being an invisible subtraction.
     driver_role_sessions:      int = 0
+    #: ``session_id -> that session's own claimed tokens``. A BREAKDOWN of
+    #: `past_overspend_tokens`, not a second quantity: the values sum to it,
+    #: over exactly the in-scope sessions the avoidable figure was computed on.
+    #: It exists so `core/optimize/rule_placement` can put this card's rung-1
+    #: CLAUDE.md rule in the projects whose sessions incurred the re-sending,
+    #: instead of in the one file every project pays for. Weights are TOKENS and
+    #: drive both the token and the dollar split, so each destination's implied
+    #: per-token rate equals the finding's own (Critical Rule 28).
+    session_weights: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -727,6 +746,9 @@ def run(ctx: AnalyzerContext) -> None:
     sessions_by_class: dict[str, int] = {
         COVERAGE_IN_SCOPE: 0, COVERAGE_DRIVER_ROLE: 0, COVERAGE_NO_LEVER: 0,
     }
+    #: Per-session breakdown of the claimed tokens, for rule placement. Filled
+    #: alongside the two totals it decomposes, never re-derived afterwards.
+    session_weights: dict[str, int] = {}
 
     for sid, session_turns in by_session.items():
         prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in session_turns]
@@ -847,6 +869,11 @@ def run(ctx: AnalyzerContext) -> None:
             offloadable_tail = tail_tokens * offloadable_share
             offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
             offload_tokens_total += round(offloadable_tail)
+            # Same addend, attributed to the session it came from — the
+            # placement weight (see `ResendFinding.session_weights`). Kept on
+            # the same line as the total so the two can never drift into
+            # covering different turns.
+            session_weights[sid] = session_weights.get(sid, 0) + round(offloadable_tail)
             # Same tail at a hypothetical full share: the ceiling the scope
             # factor is applied to, kept so the card can separate "outside the
             # tail definition" from "outside the measured delegable share"
@@ -874,6 +901,9 @@ def run(ctx: AnalyzerContext) -> None:
                 if rate_gap > 0:
                     rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
                     rightsize_tokens_total += round(offloaded_material)
+                    session_weights[sid] = (
+                        session_weights.get(sid, 0) + round(offloaded_material)
+                    )
 
     if total_sum <= 0:
         finding.notes.append(
@@ -929,6 +959,7 @@ def run(ctx: AnalyzerContext) -> None:
             offload_usd_total + rightsize_usd_total, 6
         )
         finding.past_overspend_tokens = claimed_tokens
+        finding.session_weights = dict(session_weights)
     else:
         # Symmetric degrade (Rule 28 corollary a): no dollars means no tokens
         # either. The measured `repeat_tokens` and the compaction lever's own
