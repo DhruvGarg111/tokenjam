@@ -31,6 +31,11 @@ from tokenjam.core.summarize.calibrate import (
 )
 from tokenjam.core.summarize.candidates import list_candidates
 from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
+from tokenjam.core.summarize.relocate import (
+    DEFAULT_TARGET,
+    apply_relocation,
+    plan_relocation,
+)
 from tokenjam.core.summarize.estimate import (
     DEFAULT_TARGET_RATIO,
     UNMEASURED_PRIOR_RANGE,
@@ -458,3 +463,86 @@ def cmd_summarize_undo(
         console.print(f"[dim]would restore {escape(result['path'])} from backup — re-run with --go.[/dim]")
     else:
         console.print(f"[green]✓[/green] restored {escape(result['path'])} from backup")
+
+
+@cmd_summarize.command("relocate")
+@click.argument("path")
+@click.option("--to", "target", default=None,
+              help=f"Where the reference material goes (default: {DEFAULT_TARGET} beside PATH).")
+@click.option("--section", "sections", multiple=True,
+              help="Only this section (repeatable). Still subject to the classifier.")
+@click.option("--go", is_flag=True,
+              help="Write the files (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_relocate(
+    ctx: click.Context, path: str, target: str | None, sections: tuple[str, ...],
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Move REFERENCE sections out of PATH into a linked file, leaving a pointer.
+
+    Nothing is rewritten and nothing is deleted: the text moves and a pointer
+    stays behind, so unlike a summary this cannot change what any surviving
+    instruction says. Only sections a classifier is confident describe what
+    EXISTS are moved; anything that might be an instruction is left alone and
+    the reason is printed. Default dry-run; --go writes.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    source = Path(path).expanduser()
+    if source.is_dir():
+        raise click.UsageError("PATH is a directory; relocate takes one file.")
+    if not source.is_file():
+        raise click.UsageError(f"{path} is not a file.")
+
+    target_path = Path(target).expanduser() if target else source.parent / DEFAULT_TARGET
+    target_text = target_path.read_text(encoding="utf-8") if target_path.is_file() else ""
+    try:
+        plan = plan_relocation(
+            source_path=str(source), source_text=source.read_text(encoding="utf-8"),
+            target_path=str(target_path), target_text=target_text,
+            titles=list(sections) or None,
+        )
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+
+    if plan is None:
+        if output_json:
+            click.echo(json.dumps({"plan": None, "applied": False}, indent=2))
+            return
+        console.print(
+            f"[muted]No section of {escape(str(source))} is confidently reference "
+            f"material, so nothing is offered. Leaving a section in place costs a "
+            f"saving; moving an instruction out of an always-loaded file costs "
+            f"correctness, so the ambiguous cases stay put.[/muted]"
+        )
+        return
+
+    result = apply_relocation(config, plan, go=go)
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    for s in plan.sections:
+        verb = "moved" if result["applied"] else "would move"
+        console.print(
+            f"[ok]✓[/ok] {verb} [accent]{escape(s.title)}[/accent] to "
+            f"[accent]{escape(str(target_path))}[/accent] "
+            f"(~{format_tokens(s.tokens_freed)} always-resident tok/read)"
+        )
+        console.print(f"  [muted]{escape(s.classification.reason)}[/muted]")
+    for title, verdict in plan.declined:
+        console.print(f"[muted]left in place: {escape(title)}; {escape(verdict.reason)}[/muted]")
+    for skip in result["skipped"]:
+        console.print(f"[warn]skip[/warn] {escape(skip['path'])}; {escape(skip['reason'])}")
+    if result["dry_run"]:
+        console.print("[muted]dry-run; nothing written. Re-run with --go to apply.[/muted]")
+    elif result["applied"]:
+        console.print(
+            f"[muted]Both files are backed up; `tj summarize undo {escape(str(source))} --go` "
+            f"restores the original.[/muted]"
+        )
