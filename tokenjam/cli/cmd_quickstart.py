@@ -86,7 +86,16 @@ DEFAULT_MAX_SESSIONS = 300
 #: neither supports a drop-in "works with anything OTel" claim, so do not
 #: upgrade this wording without adding a protobuf decoder first.
 #:
-#: Two things are deliberately NOT named. **Metrics**: `POST /v1/metrics` is a
+#: **Codex is deliberately NOT named, and this one is not a code question.**
+#: A real parser exists (`core/ingest_adapters/codex.py`, reached by
+#: `tj backfill codex` and `tj onboard --codex`) and it passes its own suites,
+#: which is exactly why a later reader will be tempted to "fix" this omission.
+#: Do not. Shipping-readiness is an operator call, not a code-presence one, and
+#: the operator's is that tokenjam is Claude Code only for now. Advertising a
+#: half-supported source on the FIRST screen a stranger sees is the specific
+#: defect this sentence was verified against in the first place.
+#:
+#: Two more things are deliberately NOT named. **Metrics**: `POST /v1/metrics` is a
 #: stub that returns 200 and discards the body, so "OTel" here means spans and
 #: says so. **The MCP server**: `mcp/server.py` exposes only read/query and
 #: apply tools, with no ingest tool at all, so it is not a source. The copy this
@@ -94,13 +103,11 @@ DEFAULT_MAX_SESSIONS = 300
 #: server", and the second half of that was never true.
 #:
 #: Langfuse and Helicone backfills also exist (`tj backfill langfuse` /
-#: `helicone`) and work. They are left off for length, not for doubt: they
-#: import from another tool you already run rather than describing a way
-#: tokenjam watches your own agents, and this block must not grow into a
-#: feature list.
+#: `helicone`) and work. They are left off for length: they import from another
+#: tool you already run rather than describing a way tokenjam watches your own
+#: agents, and this block must not grow into a feature list.
 _OTHER_SOURCES = (
-    "It also reads Codex CLI sessions, and OTel spans your SDK or API agents "
-    "send it."
+    "It also reads OTel spans your SDK or API agents send it."
 )
 
 #: Held on screen while the analyzer pass runs. Present tense, the product's

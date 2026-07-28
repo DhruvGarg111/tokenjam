@@ -978,10 +978,11 @@ def test_quickstart_degrades_cleanly_when_nothing_is_recoverable(tmp_path):
 
 # ── The screen is not Claude-Code-only ─────────────────────────────────────
 #
-# Standing rule: entry copy never reads as Claude Code only. tokenjam also
-# ingests Codex CLI sessions and OTel spans from any SDK or API agent. Every
-# source named on screen is verified against the code below, because a source
-# that does not work is a worse defect than the framing it was added to fix.
+# Standing rule: entry copy never reads as Claude Code only. The daemon mounts
+# an OTLP receiver an instrumented SDK or API agent can post to, so the Claude
+# Code transcripts this screen reads are not the whole product. The source named
+# on screen is verified against the code below, because a source that does not
+# work is a worse defect than the framing it was added to fix.
 
 
 def test_the_closing_block_names_a_non_claude_code_source(tmp_path):
@@ -990,18 +991,28 @@ def test_the_closing_block_names_a_non_claude_code_source(tmp_path):
 
     assert result.exit_code == 0, result.output
     flat = _flat(result.output)
-    assert "Codex" in flat
     assert "OTel" in flat
     assert "SDK or API agents send it" in flat
 
 
-def test_the_codex_source_named_on_screen_really_ingests():
-    """`tj backfill codex` and `tj onboard --codex` both reach a real parser."""
-    from tokenjam.cli.cmd_backfill import cmd_backfill
-    from tokenjam.core.ingest_adapters.codex import ingest_codex
+def test_the_screen_does_not_name_codex(tmp_path):
+    """A real Codex parser exists and passes its own suites, which is exactly
+    why a later reader will be tempted to "fix" this omission. Do not.
 
-    assert callable(ingest_codex)
-    assert "codex" in cmd_backfill.commands
+    Shipping-readiness is an operator call, not a code-presence one, and the
+    operator's is that tokenjam is Claude Code only for now. Advertising a
+    half-supported source on the FIRST screen a stranger sees is the specific
+    defect the source sentence was verified against in the first place.
+    """
+    from tokenjam.cli.cmd_quickstart import _OTHER_SOURCES
+
+    assert "codex" not in _OTHER_SOURCES.lower()
+
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "codex" not in _flat(result.output).lower()
 
 
 def test_the_otel_source_named_on_screen_really_receives():
