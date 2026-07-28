@@ -72,6 +72,12 @@ class RuleWrite:
     #: Empty means the default, which is what every rule written before this
     #: was a field carries.
     delivery: str = ""
+    #: Path globs this rule is confined to, when its observation is confined to
+    #: identifiable paths. Non-empty is what makes a path-scoped delivery
+    #: legitimate: a rule that must hold on every turn regardless of what is
+    #: being touched belongs in a CLAUDE.md, and scoping it to globs would make
+    #: it silently stop applying. DERIVED from the observation, never guessed.
+    paths: tuple[str, ...] = ()
     destinations: tuple[RuleDestination, ...] = ()
     #: Mirrors the proposal's own verdict. A rule the write budget did not
     #: offer is still LISTED — its text is copyable and its reason is stated —
@@ -115,6 +121,7 @@ class RuleWrite:
             "rung": self.rung,
             "artifact_text": self.artifact_text,
             "delivery": self.delivery,
+            "paths": list(self.paths),
             "destinations": [d.to_dict() for d in self.destinations],
             "offered": self.offered,
             "blocked_reason": self.blocked_reason,
@@ -136,6 +143,7 @@ class RuleWrite:
             rung=int(raw.get("rung", 0) or 0),
             artifact_text=str(raw.get("artifact_text", "")),
             delivery=str(raw.get("delivery", "") or ""),
+            paths=tuple(str(x) for x in (raw.get("paths") or []) if x),
             destinations=tuple(
                 RuleDestination.from_dict(d) for d in (raw.get("destinations") or [])
             ),

@@ -209,6 +209,29 @@ EDIT_BEFORE_READ = register(FixRecord(
     advisory_only=True,
 ))
 
+#: An awareness fix that IS confined to identifiable files, so it can carry a
+#: glob and cost almost nothing. The observation names the file class directly:
+#: the mistake happens when editing a migration without reading it, which is a
+#: statement about a kind of file rather than about the shape of the next
+#: action. Contrast every model/effort/offload record above, which decide
+#: something BEFORE any file is read and so must stay always-resident.
+MIGRATION_READ_FIRST = register(FixRecord(
+    key="relearn.migration_read_before_edit",
+    text=(
+        "Read a migration file in full before editing it. Migrations are "
+        "append-only and ordered, so an edit written from a remembered shape "
+        "rather than the current contents lands in the wrong place or "
+        "duplicates an existing step, and the failure surfaces later as a "
+        "schema that does not match its own history."
+    ),
+    delivery="path_scoped_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"relearn"}),
+    answers="edits to migration files written without reading the file first",
+    lever=LEVER_AWARENESS,
+    path_globs=("**/migrations/**", "**/migrate/**"),
+))
+
 
 __all__ = [
     "EDIT_BEFORE_READ",

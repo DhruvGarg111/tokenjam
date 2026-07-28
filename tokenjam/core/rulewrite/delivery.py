@@ -41,6 +41,34 @@ from tokenjam.core.rulewrite.types import RUNG_SKILL, RuleWrite, RuleWriteRefuse
 #: (or a ``SKILL.md`` at rung 2), loaded by the harness at session start.
 DELIVERY_CLAUDE_MD_RULE = "claude_md_rule"
 
+#: A `.claude/rules/<slug>.md` carrying a ``paths:`` glob. It loads only when
+#: Claude READS a file matching the pattern — not at launch, and not on every
+#: tool use — so its standing cost is a small fraction of the same words in a
+#: `CLAUDE.md`.
+#:
+#: This is not merely a cheaper way to say the same thing. Standing cost is an
+#: INPUT to whether a write is offered at all, so a near-zero-rent destination
+#: makes fixes net-positive that are net-negative against `CLAUDE.md`. It
+#: widens what the product can legitimately recommend rather than just
+#: discounting what it already does.
+DELIVERY_PATH_SCOPED_RULE = "path_scoped_rule"
+
+#: A hook that RUNS CODE and injects nothing — a guard that blocks a command,
+#: a formatter. Genuinely free of standing prompt cost: it is executed, never
+#: sent to the model as text. This is the case the rung-3 zero was written for.
+DELIVERY_EXECUTING_HOOK = "executing_hook"
+
+#: A hook that puts TEXT in front of the model — a ``PostToolUseFailure``
+#: nudge, a ``UserPromptSubmit`` re-injection. **Not free, and worse-behaved
+#: than a rule:** the injected block lands in the conversation and is re-sent
+#: on every subsequent turn, so its cost is not even bounded by session count
+#: the way a session-start read is.
+#:
+#: Three of the four rung-3 families that ship today are this kind, and the
+#: rung ladder priced all of them at zero. That is the trap the seam's per-kind
+#: pricer exists for: the rung grades intervention STRENGTH, not delivery.
+DELIVERY_INJECTING_HOOK = "injecting_hook"
+
 #: The default for a rule that names no mechanism — every rule written before
 #: delivery was a field, and every rule the four current analyzers produce.
 DEFAULT_DELIVERY = DELIVERY_CLAUDE_MD_RULE
@@ -111,6 +139,173 @@ def _standing_tokens_claude_md(rule: RuleWrite, rendered: str, existing: str) ->
     return standing_tokens_per_session(rule.rung, rendered[:added] if added else "")
 
 
+#: Globs a path-scoped rule may carry before the brace-expansion budget is a
+#: concern. Claude Code expands brace patterns against a shared budget of 1,000
+#: expanded patterns, and a pattern that EXCEEDS it is used unexpanded — which
+#: matches nothing at all. A rule that matches nothing is not a cheap rule, it
+#: is an absent one that still reads as applied, so the renderer refuses to
+#: emit a pattern it cannot vouch for rather than shipping a silent no-op.
+MAX_BRACE_EXPANSIONS = 1_000
+
+
+def _brace_expansions(pattern: str) -> int:
+    """How many patterns ``pattern`` expands to. 1 when it has no braces.
+
+    Multiplicative across brace groups, which is how the budget is actually
+    consumed: ``{a,b}/{c,d,e}`` is six patterns, not five.
+    """
+    import re as _re
+
+    total = 1
+    for group in _re.findall(r"\{([^{}]*)\}", pattern or ""):
+        total *= max(1, len(group.split(",")))
+    return total
+
+
+def render_path_scoped_rule(rule: RuleWrite, existing: str) -> str:
+    """A `.claude/rules/<slug>.md` whose frontmatter scopes it to the globs the
+    rule was derived from.
+
+    **The ``paths:`` line is the entire reason this delivery is cheap.** A rule
+    in the same directory WITHOUT it loads at launch with the same priority as
+    `CLAUDE.md` — so a path-scoped kind that emits no globs has silently become
+    an always-resident rule while still being priced as if it were not. This
+    refuses rather than degrading, because the failure is invisible: the file
+    is written, the rule works, and only the cost is wrong.
+    """
+    globs = tuple(rule.paths)
+    if not globs:
+        raise RuleWriteRefused(
+            f"{rule.signature} has no path globs, so a path-scoped rule would "
+            "carry no `paths:` frontmatter — which makes it load at launch "
+            "like a CLAUDE.md rule while being priced as if it did not. "
+            "Write it as a CLAUDE.md rule instead, or derive the globs.",
+        )
+    for glob in globs:
+        expansions = _brace_expansions(glob)
+        if expansions > MAX_BRACE_EXPANSIONS:
+            raise RuleWriteRefused(
+                f"the glob {glob!r} expands to {expansions} patterns, over the "
+                f"{MAX_BRACE_EXPANSIONS} brace-expansion budget. Past it the "
+                "pattern is used UNEXPANDED and matches nothing, so the rule "
+                "would read as applied while never firing.",
+            )
+    from tokenjam.core.optimize.relearn_apply import render_note_content, slugify
+
+    body = render_note_content(
+        "",
+        {
+            "title": rule.title or rule.signature,
+            "proposed_fix": rule.artifact_text,
+            "rung": rule.rung,
+            "sessions": sum(d.sessions for d in rule.destinations),
+            "repos": [d.path for d in rule.destinations],
+        },
+        rule.signature,
+    )
+    paths_block = "\n".join(f"  - {glob!r}".replace("'", '"') for glob in globs)
+    frontmatter = (
+        "---\n"
+        f"description: {slugify(rule.title or rule.signature).replace('-', ' ')}\n"
+        "paths:\n"
+        f"{paths_block}\n"
+        "---\n\n"
+    )
+    # Re-applying replaces the whole file: a path-scoped rule is one rule per
+    # file by construction, so there is no sibling content to preserve and
+    # appending would duplicate the block.
+    del existing
+    return frontmatter + body
+
+
+def _standing_tokens_path_scoped(
+    rule: RuleWrite, rendered: str, existing: str,
+) -> int:
+    """What a path-scoped rule adds to a session, priced through the SAME
+    load-semantics split the read side uses.
+
+    Only the frontmatter is resident — that is how the harness knows the rule
+    exists and what it matches — and the instruction body arrives only on a
+    read that matches the glob. So the standing cost is the frontmatter, not
+    the block, and the difference is the whole point of the delivery.
+
+    Deliberately NOT zero. The frontmatter really is carried, and a delivery
+    that priced itself at nothing would be making the same claim the rung-3
+    ladder makes about hooks — which is exactly the claim this seam exists to
+    stop being made by default.
+    """
+    from tokenjam.core.optimize.write_budget import tokens_from_chars
+    from tokenjam.core.summarize.load_semantics import (
+        PATH_SCOPED,
+        split_always_resident,
+    )
+
+    del rule, existing
+    resident, _on_demand = split_always_resident(rendered, PATH_SCOPED)
+    return tokens_from_chars(len(resident))
+
+
+def _render_hook(rule: RuleWrite, existing: str) -> str:
+    """The hook script for this rule, from ``relearn_apply``'s renderers.
+
+    Delegates rather than re-implementing: hook generation already ships and
+    works (guard + reactive renderers, the settings patch, the enforcement
+    wiring), and a second generator would be the scattered-implementation
+    problem this catalog exists to close, with the added hazard that two
+    generators can disagree about a script that runs in the user's loop.
+    """
+    from tokenjam.core.optimize.relearn_apply import render_hook_content
+
+    del existing
+    return render_hook_content(
+        {
+            "family_key": rule.signature.split(":")[-1],
+            "title": rule.title or rule.signature,
+            "rung": rule.rung,
+            "proposed_fix": rule.artifact_text,
+        },
+        rule.signature,
+    )
+
+
+def _standing_tokens_executing_hook(
+    rule: RuleWrite, rendered: str, existing: str,
+) -> int:
+    """Zero, and this is the one delivery where that is EARNED.
+
+    An executing hook is run by the harness; its source is never sent to the
+    model. Nothing about it is resident, so nothing is charged.
+    """
+    del rule, rendered, existing
+    return 0
+
+
+def _standing_tokens_injecting_hook(
+    rule: RuleWrite, rendered: str, existing: str,
+) -> int:
+    """What an injecting hook costs — never zero.
+
+    Priced on the TEXT IT INJECTS, not on the size of the script that injects
+    it: the script is executed, the injected block is what the model reads.
+    Charged per nudge and multiplied by the per-session cap, because a nudge
+    that fires twice costs twice — and because the injected block then rides in
+    the conversation for every later turn, this is a floor rather than a
+    ceiling. Erring low on a COST is the wrong direction, so it is stated as a
+    floor rather than dressed up as exact.
+    """
+    from tokenjam.core.optimize.write_budget import tokens_from_chars
+
+    del rendered, existing
+    injected = rule.artifact_text or ""
+    return tokens_from_chars(len(injected)) * MAX_NUDGES_PER_SESSION
+
+
+#: Mirrors the cap the generated hook enforces on itself. Kept here too because
+#: the PRICE has to assume the same ceiling the script honours; if they drift,
+#: the product is charging for one behaviour and shipping another.
+MAX_NUDGES_PER_SESSION = 2
+
+
 #: Every delivery mechanism this product can offer, by name. One today.
 #:
 #: Adding one means adding an entry here plus its two functions. It must NOT
@@ -124,6 +319,30 @@ DELIVERY_KINDS: dict[str, DeliveryKind] = {
         carries_prompt_text=True,
         render=_render_claude_md,
         standing_tokens=_standing_tokens_claude_md,
+    ),
+    DELIVERY_PATH_SCOPED_RULE: DeliveryKind(
+        name=DELIVERY_PATH_SCOPED_RULE,
+        label="path-scoped rule",
+        # It carries prompt text — just far less of it, and only the
+        # frontmatter unconditionally. Flagging it False would be the
+        # hooks-are-free mistake in a different costume.
+        carries_prompt_text=True,
+        render=render_path_scoped_rule,
+        standing_tokens=_standing_tokens_path_scoped,
+    ),
+    DELIVERY_EXECUTING_HOOK: DeliveryKind(
+        name=DELIVERY_EXECUTING_HOOK,
+        label="hook (blocking guard)",
+        carries_prompt_text=False,
+        render=_render_hook,
+        standing_tokens=_standing_tokens_executing_hook,
+    ),
+    DELIVERY_INJECTING_HOOK: DeliveryKind(
+        name=DELIVERY_INJECTING_HOOK,
+        label="hook (context nudge)",
+        carries_prompt_text=True,
+        render=_render_hook,
+        standing_tokens=_standing_tokens_injecting_hook,
     ),
 }
 

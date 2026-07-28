@@ -826,6 +826,44 @@ def _context(payload: dict) -> str:
     return f"[TokenJam, signature {signature}] {{_NOTE}}{{extra}}"
 
 
+#: Injected context is NOT free and is not even bounded by session count: the
+#: block lands in the conversation and is re-sent on every subsequent turn. So
+#: a nudge that fires on every matching failure compounds without limit inside
+#: one session. `PostToolUseFailure` fires per matching call -- only
+#: `SessionStart` is structurally once-per-session -- and the `once` field is
+#: honored ONLY in skill frontmatter, never in a settings file, so the cap has
+#: to be enforced here.
+_MAX_NUDGES_PER_SESSION = 2
+
+
+def _nudge_budget_spent(session_id: str) -> bool:
+    """True once this session has already had its allowance of nudges.
+
+    Keyed on the `session_id` Claude Code passes on stdin, in a marker file
+    under the OS temp dir. Fail-OPEN on any error: if the marker cannot be
+    read or written we let the nudge through, because a missing nudge is a
+    smaller harm than a hook that starts erroring.
+    """
+    try:
+        if not session_id:
+            return False
+        import tempfile
+        marker = os.path.join(
+            tempfile.gettempdir(), f"tokenjam-nudge-{{re.sub(r'[^A-Za-z0-9_.-]', '_', session_id)}}"
+        )
+        seen = 0
+        if os.path.exists(marker):
+            with open(marker, encoding="utf-8") as fh:
+                seen = int((fh.read() or "0").strip() or 0)
+        if seen >= _MAX_NUDGES_PER_SESSION:
+            return True
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(str(seen + 1))
+        return False
+    except Exception:
+        return False
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read()
@@ -833,8 +871,13 @@ def main() -> int:
         context = _context(payload)
         if not context:
             return 0   # no match -- pass through, nothing printed
+        if _nudge_budget_spent(str(payload.get("session_id") or "")):
+            return 0   # already nudged this session -- say it once, not every time
         out = {{
             "hookSpecificOutput": {{
+                # MUST be nested here. At the top level `additionalContext` is
+                # silently ignored -- the hook runs, exits 0, and injects
+                # nothing, which is indistinguishable from working.
                 "hookEventName": "PostToolUseFailure",
                 "additionalContext": context,
             }}

@@ -81,6 +81,12 @@ class FixRecord:
     #: The analyzer bills for these; a fix that excuses them cannot erase the
     #: number that produced it. Checked by the lint.
     must_not_relicense: frozenset[str] = field(default_factory=frozenset)
+    #: Path globs this fix's instruction is confined to, when it genuinely is.
+    #: Empty is the default and the safe answer — see
+    #: ``core/optimize/rule_scope``: a rule about the shape of the next action
+    #: scoped to files would load only after the decision it governs was made.
+    #: A record opts IN by naming globs; nothing infers them from prose.
+    path_globs: tuple[str, ...] = ()
 
     def applies_to(self, persona: str) -> bool:
         return PERSONA_ANY in self.personas or persona in self.personas
