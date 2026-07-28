@@ -58,11 +58,34 @@ def test_a_fix_is_defined_once_and_a_duplicate_key_is_refused():
 def test_the_analyzer_constants_read_from_the_catalog_rather_than_redefining_it():
     """The two constants that drifted now resolve THROUGH the catalog, so a
     correction lands in both places or neither."""
-    from tokenjam.core.optimize.analyzers.context_resend import RIGHTSIZE_FIX_TEMPLATE
-    from tokenjam.core.optimize.cost_proposals import SUBAGENT_RUBRIC_INTRO
+    from tokenjam.core.optimize.analyzers.context_resend import (
+        COMPACTION_FIX,
+        RESEND_SDK_TRIM_FIX,
+        RIGHTSIZE_FIX_TEMPLATE,
+    )
+    from tokenjam.core.optimize.analyzers.output_verbosity import (
+        VERBOSITY_REMEDY_SNIPPET,
+    )
+    from tokenjam.core.optimize.cost_proposals import (
+        CACHE_NO_LEVER_TEXT,
+        SUBAGENT_RUBRIC_INTRO,
+        _DOWNSIZE_CC_LEVER,
+        _REUSE_NOTE_INTRO,
+        _SCRIPT_SKILL_INTRO,
+    )
 
-    assert SUBAGENT_RUBRIC_INTRO == fix_text("subagent.sizing_rubric")
-    assert RIGHTSIZE_FIX_TEMPLATE == fix_text("resend.rightsize_worker")
+    for constant, key in (
+        (SUBAGENT_RUBRIC_INTRO, "subagent.sizing_rubric"),
+        (RIGHTSIZE_FIX_TEMPLATE, "resend.rightsize_worker"),
+        (COMPACTION_FIX, "resend.compaction_relief"),
+        (RESEND_SDK_TRIM_FIX, "resend.sdk_trim_context"),
+        (VERBOSITY_REMEDY_SNIPPET, "verbosity.prefer_shorter_when_it_serves"),
+        (CACHE_NO_LEVER_TEXT, "cache.no_claude_code_lever"),
+        (_DOWNSIZE_CC_LEVER, "downsize.claude_code_levers"),
+        (_SCRIPT_SKILL_INTRO, "script.replace_agent_turn_with_script"),
+        (_REUSE_NOTE_INTRO, "reuse.template_the_plan_skeleton"),
+    ):
+        assert constant == fix_text(key), key
 
 
 def test_a_missing_key_raises_rather_than_returning_empty_text():
@@ -176,9 +199,22 @@ def test_the_no_action_pattern_tolerates_a_list_of_nouns():
 
 
 def test_the_catalog_covers_the_analyzers_that_write_rules():
-    for analyzer in ("subagent", "resend", "relearn"):
+    """Coverage is the whole point, and a floor is how it stays that way.
+
+    The catalog held eight records while every other analyzer kept its fix text
+    as its own constants — and the lint only guards what is catalogued, so a
+    green lint read as "the fix text is checked" while most of it was not. That
+    is worse to be complacent about than having no lint at all.
+    """
+    for analyzer in (
+        "subagent", "resend", "relearn", "downsize", "cache",
+        "verbosity", "trim", "script", "reuse", "batch",
+    ):
         assert fixes_for(analyzer), analyzer
-    assert len(FIX_CATALOG) >= 7
+    # A floor rather than an equality: adding a fix must not need this edited,
+    # but silently dropping the surface back toward the original eight must
+    # fail. The number is a coverage claim, not a measurement of the product.
+    assert len(FIX_CATALOG) > 8
 
 
 # --- one instruction, one record (the three-analyzers-one-rule case) ---------#
@@ -271,6 +307,103 @@ def test_an_unrelated_fix_is_not_flagged_as_a_duplicate():
         fix_text("resend.offload_to_subagent"),
         fix_text("resend.sdk_cache_breakpoint"),
     ) < NEAR_DUPLICATE_OVERLAP
+
+
+def test_no_composable_group_states_one_instruction_twice():
+    """The check the pairwise one structurally cannot make.
+
+    ``lint_duplicates`` compares whole records, so it only sees redundancy
+    between two records taken entire. This defect does not have that shape: a
+    model-pinning sentence folded into the offload rule scored 42% against the
+    record that owns pinning — under threshold, because each record was only
+    PARTLY redundant — while the compound card rendered both back to back and
+    put the same instruction in front of the user twice. It was found by
+    rendering the artifact and reading it, which is not a check.
+
+    The groups are derived from the catalog rather than hand-listed, so a record
+    added tomorrow is covered without anyone remembering to extend a list.
+    """
+    from tokenjam.core.fixes.lint import lint_composed
+
+    assert lint_composed() == {}
+
+
+def test_the_artifacts_the_product_actually_emits_are_checked_too():
+    """Derived groups are necessary but not sufficient.
+
+    ``composable_groups`` reasons about which records COULD co-land. This
+    renders what the product DOES emit, through the real composition helper both
+    the card and the CLI lead with — the one place where a change to how the
+    parts are joined, rather than to any record, could reintroduce the defect.
+    """
+    from tokenjam.core.fixes.lint import lint_composed_text
+    from tokenjam.core.optimize.cost_proposals import compound_offload_fix
+
+    where = fix_text("resend.offload_to_subagent")
+    what_on = fix_text("resend.rightsize_worker")
+    # Both shapes the helper emits: with and without a concrete right-sizing
+    # target, since the third part only appears when one was observed.
+    for rightsize in (
+        {},
+        {
+            "agent_name": "Explore", "proposed_model": "claude-haiku-4-5",
+            "target_path": ".claude/agents/Explore.md",
+        },
+    ):
+        composed = compound_offload_fix(rightsize, where, what_on)
+        assert lint_composed_text("compound_offload_fix", [
+            ("resend.offload_to_subagent", where),
+            ("resend.rightsize_worker", what_on),
+            ("rendered:concrete", composed[len(where) + len(what_on):]),
+        ]) == []
+
+
+def test_the_composed_check_catches_the_defect_that_motivated_it():
+    """The check's own regression test, on the real shape it missed.
+
+    A composed check that cannot fail is indistinguishable from one that
+    passes. This reinstates the pinning sentence the offload record used to
+    carry and asserts the check reports it — the pairwise check, run on the same
+    pair, does not, which is the whole reason this one exists.
+    """
+    from tokenjam.core.fixes.lint import (
+        NEAR_DUPLICATE_OVERLAP,
+        _overlap,
+        lint_composed_text,
+    )
+
+    reopened = fix_text("resend.offload_to_subagent") + (
+        " Pin the worker's model in its own definition file so every dispatch "
+        "inherits the cheaper tier instead of the parent's."
+    )
+    what_on = fix_text("resend.rightsize_worker")
+
+    problems = lint_composed_text("compound", [
+        ("resend.offload_to_subagent", reopened),
+        ("resend.rightsize_worker", what_on),
+    ])
+    assert any("states one instruction twice" in p for p in problems)
+    # And the pairwise check on the same pair does NOT fire — which is the
+    # blind spot, pinned, so nobody "simplifies" this back to one check.
+    assert _overlap(reopened, what_on) < NEAR_DUPLICATE_OVERLAP
+
+
+def test_the_composed_check_does_not_fire_on_a_shared_delivery_label():
+    """The false-positive direction, which matters more than the gap.
+
+    Many fix texts open with the mechanism they are delivered through
+    ("CLAUDE.md/skill note:"). That names the DELIVERY, which is already a field
+    on the record, so leaving it in the comparison makes every record of one
+    kind look partly like every other — two unrelated Read rules scored 71% on
+    the prefix alone. A false positive teaches the next author to reach for an
+    exception rather than to fix the text, and an exception here is permanent.
+    """
+    from tokenjam.core.fixes.lint import lint_composed_text
+
+    assert lint_composed_text("read-rules", [
+        ("relearn.read_directory", fix_text("relearn.read_directory")),
+        ("relearn.read_too_large", fix_text("relearn.read_too_large")),
+    ]) == []
 
 
 def test_each_record_carries_ONE_instruction_so_composition_is_safe():

@@ -423,6 +423,25 @@ VERBOSITY_PREFER_SHORTER = register(FixRecord(
     lever=LEVER_AWARENESS,
 ))
 
+#: The batch-placement instruction. Advise-only in practice — adoption is an
+#: architectural change rather than a configuration flip, and the card says so
+#: next to the number — but the instruction itself is one sentence and belongs
+#: here rather than inline in the one-paste block, which is precisely the slot
+#: whose text a user pastes without re-reading.
+BATCH_SUBMIT_ASYNC = register(FixRecord(
+    key="batch.submit_through_batch_api",
+    text=(
+        "Submit these workloads through the Batch API instead of the "
+        "synchronous endpoint: they are billed at the batch rate, and nothing "
+        "downstream of them is waiting on the response."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_SDK}),
+    analyzers=frozenset({"batch"}),
+    answers="non-interactive workloads billed at the synchronous rate",
+    lever=LEVER_ROUTING,
+))
+
 #: The residual bucket's placeholder. Not an instruction and not pretending to
 #: be one: a cluster that matched no known family has no fix to hand out, and
 #: this says so rather than inventing something plausible.

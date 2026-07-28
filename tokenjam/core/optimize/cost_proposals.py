@@ -1019,8 +1019,7 @@ def _placement_to_proposals(
         advise_text=advise,
         suggestion=agents,
         one_paste_fix=(
-            "# Submit these workloads through the Batch API instead of the "
-            "synchronous endpoint:\n"
+            "# " + fixes.fix_text("batch.submit_through_batch_api") + "\n"
             + "\n".join(f"#   {c.agent_id}" for c in candidates)
         ),
         past_overspend_usd=recoverable_usd,
@@ -1797,10 +1796,16 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
         f"({model_list}) but did little work (small output, few tool calls). "
         f"Subagents are {pct:.0f}% of the window's cost."
     )
+    # The trailing sentence here used to RESTATE the rubric — "route that shape
+    # to the cheaper same-family model next time" is the rubric's own core
+    # instruction in fewer words — so the artifact a user pastes into a
+    # CLAUDE.md carried the same directive twice, a paragraph apart. The
+    # pairwise catalog lint cannot see it, because only one of the two is a
+    # record. What the sentence legitimately added is the OBSERVATION, which is
+    # kept: the models are evidence, not a second copy of the rule.
     proposed_fix = (
         SUBAGENT_RUBRIC_INTRO
-        + f"\n\nObserved oversized dispatches ran on: {model_list}. Route that "
-        "shape to the cheaper same-family model next time."
+        + f"\n\nObserved oversized dispatches ran on: {model_list}."
     )
     # Apply-capable when we have a concrete model to name in the rubric; else
     # degrade to advise-only (no clean workspace surface to write).

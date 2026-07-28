@@ -45,7 +45,21 @@ import pytest
 
 from tokenjam.core.fixes.lint import MIN_FIX_CHARS
 
-ANALYZERS = Path(__file__).resolve().parents[2] / "tokenjam" / "core" / "optimize" / "analyzers"
+ROOT = Path(__file__).resolve().parents[2] / "tokenjam"
+ANALYZERS = ROOT / "core" / "optimize" / "analyzers"
+
+#: Every module that BUILDS a card, not only the analyzers. Scoping this to
+#: `analyzers/` alone would have left the largest holder of fix prose out: the
+#: card builders are where an analyzer's finding acquires the words a user
+#: reads, and two of the three defects this migration found were there rather
+#: than in an analyzer — a fourth copy of the offload rule in a one-paste
+#: block, and a sentence restating the subagent rubric a paragraph below it.
+_CARD_BUILDERS = (
+    ROOT / "core" / "optimize" / "cost_proposals.py",
+    ROOT / "core" / "optimize" / "relearn_apply.py",
+    ROOT / "core" / "optimize" / "relearn_proposals.py",
+    ROOT / "cli" / "cmd_optimize.py",
+)
 
 #: Names whose value IS the fix a user is shown or writes into a file. Slot
 #: names rather than a guess at prose: what makes a string a fix is where it
@@ -148,6 +162,24 @@ def test_no_analyzer_defines_its_own_fix_prose(module):
     against.
     """
     offenders = _offenders_in(ANALYZERS / module)
+    assert not offenders, (
+        "fix prose defined outside the catalog — move it to "
+        "core/fixes/registry.py and read it back with fix_text():\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("module", [p.name for p in _CARD_BUILDERS])
+def test_no_card_builder_defines_its_own_fix_prose(module):
+    """The same rule where the cards are actually assembled.
+
+    An analyzer produces a finding; these modules turn it into the words a user
+    reads and the block a user pastes. A rule authored here is exactly as
+    unlinted as one authored in an analyzer, and harder to notice, because the
+    surrounding code is legitimately full of per-row evidence prose.
+    """
+    path = next(p for p in _CARD_BUILDERS if p.name == module)
+    offenders = _offenders_in(path)
     assert not offenders, (
         "fix prose defined outside the catalog — move it to "
         "core/fixes/registry.py and read it back with fix_text():\n  "
