@@ -230,15 +230,14 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "rung": 1,
+        # Lead-in names what THIS family observed; the durable instruction is
+        # the shared catalog record, not a third wording of it (see that
+        # record's note on why three copies is worse than one).
         "fix": (
-            "CLAUDE.md note: this session hit the model's context ceiling and "
-            "the request was rejected outright — the tokens were spent and no "
-            "completion came back. The durable fix is to keep bulk content off "
-            "the main thread: delegate whole-file reads, log sweeps and "
-            "multi-file investigations to a subagent (its tool output lives in "
-            "its own context and is never re-sent on a later parent turn), and "
-            "prefer Grep plus a targeted Read offset/limit over reading a "
-            "large file end to end."
+            "This session hit the model's context ceiling and the request was "
+            "rejected outright: the tokens were spent and no completion came "
+            "back. "
+            + _fixes.fix_text("resend.offload_to_subagent")
         ),
     },
     {

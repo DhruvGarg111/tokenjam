@@ -144,14 +144,102 @@ def lint_fix(record: FixRecord) -> list[str]:
     return problems
 
 
+#: Two records this similar are two wordings of one instruction. Measured on
+#: content words (the shared vocabulary is what makes two rules read as
+#: duplicates), so a shared boilerplate caveat does not trip it while a
+#: genuinely restated instruction does.
+NEAR_DUPLICATE_OVERLAP = 0.6
+
+#: Words that carry no instruction and would inflate any two texts' overlap.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "для", "for",
+    "from", "in", "is", "it", "its", "not", "of", "on", "or", "own", "so",
+    "than", "that", "the", "their", "them", "then", "there", "this", "to",
+    "up", "was", "were", "what", "when", "which", "with", "you", "your",
+})
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z][a-z0-9_-]{2,}", (text or "").lower())
+        if w not in _STOPWORDS
+    }
+
+
+def _overlap(left: str, right: str) -> float:
+    """CONTAINMENT over content words, not Jaccard.
+
+    Jaccard divides by the union, so it collapses when the two texts differ in
+    LENGTH — and that is precisely the shape of the case this check exists for.
+    Measured against the real defect: the driver-role wording scored 22% Jaccard
+    against the canonical rule it duplicated, far under any usable threshold, so
+    a Jaccard check would have reported the three-analyzers-one-rule case clean.
+    A check that cannot catch the defect it was written for is worse than no
+    check, because it certifies the problem as absent.
+
+    Containment (``|a ∩ b| / min(|a|, |b|)``) asks the right question instead:
+    is the shorter text's instruction largely contained in the longer one? Two
+    rules saying the same thing at different lengths are still two rules.
+    """
+    a, b = _content_words(left), _content_words(right)
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def lint_duplicates() -> dict[str, list[str]]:
+    """Pairs of records carrying substantially the same instruction.
+
+    THE check that catches the three-analyzers-one-rule case. Three fixes told
+    the agent to delegate context-heavy work to a subagent in three
+    separately-authored wordings, so three near-identical blocks could land in
+    one CLAUDE.md — and the write budget's one-block-per-family rule could not
+    see it, because they were three families from three analyzers.
+
+    The harm is not untidiness. Length and redundancy REDUCE adherence, so
+    writing a rule three times makes it less likely to be followed than writing
+    it once: each analyzer's duplicate actively defeats the others.
+    """
+    out: dict[str, list[str]] = {}
+    records = sorted(FIX_CATALOG.values(), key=lambda r: r.key)
+    for i, left in enumerate(records):
+        for right in records[i + 1:]:
+            score = _overlap(left.text, right.text)
+            if score < NEAR_DUPLICATE_OVERLAP:
+                continue
+            note = (
+                f"carries substantially the same instruction as {right.key!r} "
+                f"({score:.0%} content-word overlap). Two wordings of one rule "
+                "can both land in the same file, and length plus redundancy "
+                "REDUCE adherence — so writing it twice is worse than writing "
+                "it once. Collapse them onto one record and let each analyzer "
+                "reference it."
+            )
+            out.setdefault(left.key, []).append(note)
+    return out
+
+
 def lint_catalog() -> dict[str, list[str]]:
-    """Every catalogued fix's violations, keyed by fix key. Empty dict = clean."""
+    """Every catalogued fix's violations, keyed by fix key. Empty dict = clean.
+
+    Includes the cross-record duplicate check, so a caller cannot get a clean
+    bill of health while two records restate one instruction.
+    """
     out = {}
     for key, record in FIX_CATALOG.items():
         problems = lint_fix(record)
         if problems:
             out[key] = problems
+    for key, problems in lint_duplicates().items():
+        out.setdefault(key, []).extend(problems)
     return out
 
 
-__all__ = ["MAX_FIX_LINES", "MIN_FIX_CHARS", "lint_catalog", "lint_fix"]
+__all__ = [
+    "MAX_FIX_LINES",
+    "MIN_FIX_CHARS",
+    "NEAR_DUPLICATE_OVERLAP",
+    "lint_catalog",
+    "lint_duplicates",
+    "lint_fix",
+]

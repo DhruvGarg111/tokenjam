@@ -216,3 +216,56 @@ def test_only_the_swept_family_is_advisory_only():
 
     advisory = {f["key"] for f in _KNOWN_FAMILIES if f.get("advisory_only")}
     assert advisory == {"edit_before_read"}
+
+
+# --- one finding, one fix, across surfaces -----------------------------------#
+
+def test_compaction_is_never_listed_as_an_actionable_lever():
+    """`/compact` is transient, persists nothing past the session, and users
+    who feel a session filling already do it unprompted — it sits below the
+    actionable ceiling. Listing it beside three durable levers implies it is
+    the same kind of thing, and pads a list whose length is itself a cost to
+    adherence."""
+    from tokenjam.core.optimize.cost_proposals import (
+        _DOWNSIZE_CC_LEVER,
+        _DOWNSIZE_MIXED_CC_NOTE,
+    )
+
+    for text in (_DOWNSIZE_CC_LEVER, _DOWNSIZE_MIXED_CC_NOTE):
+        assert "/compact" not in text
+    # The durable levers survive — this is a removal, not a gutting.
+    assert "tj route export" in _DOWNSIZE_CC_LEVER
+    assert "tj optimize subagent" in _DOWNSIZE_CC_LEVER
+    assert "CLAUDE.md" in _DOWNSIZE_CC_LEVER
+
+
+def test_the_cli_and_the_card_lead_with_the_same_fix_for_one_finding():
+    """They disagreed: the card led with the durable offload rule while the CLI
+    led with `/compact`, for the identical finding, and the CLI led with the
+    weaker one. Both now render through the same helper, so they cannot drift
+    into different wordings again."""
+    from tokenjam.core.optimize.cost_proposals import compound_offload_fix
+
+    class _Finding:
+        repeat_share = 0.6
+        sessions_examined = 12
+        repeat_tokens = 1_000_000
+        fix_compaction = "Run /compact."
+        fix_cache_control = ""
+        fix_subagent_offload = "OFFLOAD-TEXT"
+        fix_rightsize = "RIGHTSIZE-TEXT"
+        past_overspend_usd = 10.0
+        past_overspend_tokens = 100
+        coverage_note = ""
+        estimate_basis = ""
+        caveat = ""
+
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    card = _resend_to_proposals(_Finding(), persona="claude-code")[0]
+    shared = compound_offload_fix({}, "OFFLOAD-TEXT", "RIGHTSIZE-TEXT")
+    # The card's advise leads with the shared compound fix...
+    assert card.advise_text.startswith(shared)
+    # ...and demotes compaction to the same explicitly-secondary position.
+    assert "Immediate relief in an already-full session" in card.advise_text
+    assert card.advise_text.index("OFFLOAD-TEXT") < card.advise_text.index("Run /compact.")

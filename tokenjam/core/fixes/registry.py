@@ -120,21 +120,53 @@ SUBAGENT_EFFORT = register(FixRecord(
     lever=LEVER_EFFORT,
 ))
 
+#: THE offload instruction. Three analyzers used to write this into a
+#: CLAUDE.md in three separately-authored wordings — `resend`'s
+#: `SUBAGENT_OFFLOAD_FIX`, `downsize`'s driver-role advice, and `relearn`'s
+#: `context_overflow` family. They price genuinely different span populations
+#: (Critical Rule 27 is untouched), but they were all telling the agent the
+#: same thing, so three near-identical blocks could land in one file.
+#:
+#: That is not merely untidy: length and redundancy REDUCE adherence, so
+#: writing the rule three times makes it less likely to be followed than
+#: writing it once — the opposite of what each analyzer intended. It also
+#: reads as broken to anyone who opens the file.
+#:
+#: The text below is what the three wordings shared, stated once. Per-analyzer
+#: framing (why THIS card is showing it) belongs in the card's advise text,
+#: never in a second copy of the rule.
+#:
+#: **This record is about WHERE the work runs and nothing else.** Model pinning
+#: belongs to ``resend.rightsize_worker``, which owns "what it runs on", and
+#: keeping the two separate is not pedantry: the compound artifact renders both
+#: records back to back, so a pinning sentence here lands immediately before
+#: the one that owns it and the user reads the same instruction twice. Caught
+#: by rendering the composed artifact and reading it — the pairwise catalog
+#: lint scored the pair at 42%, under threshold, because each record is only
+#: partly redundant. One record, one instruction, is what makes composition
+#: safe.
 OFFLOAD_RULE = register(FixRecord(
     key="resend.offload_to_subagent",
     text=(
-        "Offload context-heavy sub-tasks (broad file reads, multi-file "
-        "search, long tool-output loops, exploratory investigation) to a "
-        "subagent instead of running them inline in the main thread. A "
-        "subagent's own tool logs and intermediate output stay in its own "
-        "context; only its short conclusion returns to the caller, so the "
-        "material that keeps getting re-sent turn over turn never accumulates "
-        "on the main thread to begin with."
+        "Offload context-heavy sub-tasks (broad file reads, log sweeps, "
+        "multi-file search, long tool-output loops, exploratory "
+        "investigation) to a subagent instead of running them inline in the "
+        "main thread, and prefer a targeted search plus a bounded read over "
+        "reading a large file end to end. A subagent's own tool logs and "
+        "intermediate output stay in its own context; only its short "
+        "conclusion returns to the caller, so the material that would "
+        "otherwise be re-sent on every later turn never accumulates on the "
+        "main thread to begin with. This is not a request to downgrade the "
+        "session you are driving: the driver keeps the premium model and "
+        "keeps making the decisions. What changes is where the bulk context "
+        "lives."
     ),
     delivery="claude_md_rule",
     personas=frozenset({PERSONA_CLAUDE_CODE}),
-    analyzers=frozenset({"resend", "downsize"}),
-    answers="context re-sent every turn because the work that produced it stayed in the main thread",
+    # One record, three analyzers. Each prices a different population and each
+    # references THIS text rather than authoring its own.
+    analyzers=frozenset({"resend", "downsize", "relearn"}),
+    answers="context-heavy work run inline on the main thread, re-sent on every later turn",
     lever=LEVER_OFFLOAD,
 ))
 

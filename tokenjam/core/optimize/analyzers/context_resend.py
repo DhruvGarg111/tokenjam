@@ -309,17 +309,14 @@ RESEND_SDK_TRIM_FIX = (
 # instead of `/compact` (founder critique, 2026-07-25: a real CC user abandons
 # an over-full session and starts fresh rather than compacting it, so telling
 # them to compact isn't a useful recommendation).
-SUBAGENT_OFFLOAD_FIX = (
-    "Offload context-heavy sub-tasks (broad file reads, multi-file search, "
-    "long tool-output loops, exploratory investigation) to a subagent instead "
-    "of running them inline in the main thread. A subagent's own tool logs "
-    "and intermediate output stay in its own context; only its short "
-    "conclusion returns to the caller, so the material that keeps getting "
-    "re-sent turn over turn never accumulates on the main thread to begin "
-    "with. Where available, pair this with a hook that warns once context "
-    "crosses a size threshold, as a second, automated nudge toward the same "
-    "behavior."
-)
+# THE text lives in `core/fixes/registry.py`. This constant, `downsize`'s
+# driver-role advice and `relearn`'s `context_overflow` family were three
+# separately-authored wordings of ONE instruction, so three near-identical
+# blocks could land in a single CLAUDE.md. Length and redundancy reduce
+# adherence, which makes writing the rule three times strictly worse than
+# writing it once — and the write budget's one-block-per-family rule cannot
+# catch it, because they are three families from three analyzers.
+SUBAGENT_OFFLOAD_FIX = _fixes.fix_text("resend.offload_to_subagent")
 
 #: The second half of the compound lever. Offloading decides WHERE the work
 #: runs; this decides what it runs ON. Both are settable in the same agent

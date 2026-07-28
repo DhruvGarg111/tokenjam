@@ -179,3 +179,121 @@ def test_the_catalog_covers_the_analyzers_that_write_rules():
     for analyzer in ("subagent", "resend", "relearn"):
         assert fixes_for(analyzer), analyzer
     assert len(FIX_CATALOG) >= 7
+
+
+# --- one instruction, one record (the three-analyzers-one-rule case) ---------#
+
+def test_no_two_records_carry_substantially_the_same_instruction():
+    """Three fixes told the agent to delegate context-heavy work to a subagent
+    in three separately-authored wordings, so three near-identical blocks could
+    land in one CLAUDE.md — and the write budget's one-block-per-family rule
+    could not see it, because they were three families from three analyzers.
+
+    The harm is not untidiness: length and redundancy REDUCE adherence, so
+    writing a rule three times makes it less likely to be followed than writing
+    it once. Each analyzer's duplicate actively defeats the others."""
+    from tokenjam.core.fixes.lint import lint_duplicates
+
+    assert lint_duplicates() == {}
+
+
+def test_all_three_offload_analyzers_reference_one_record():
+    """Their CLAIMS stay disjoint — they legitimately price different span
+    populations (Critical Rule 27) — but they must not each author their own
+    copy of the same instruction."""
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
+    from tokenjam.core.optimize.analyzers.relearn import _FAMILY_BY_KEY
+    from tokenjam.core.optimize.cost_proposals import (
+        _driver_role_advice as _DRIVER_ROLE_ADVICE,
+    )
+
+    canonical = fix_text("resend.offload_to_subagent")
+    assert SUBAGENT_OFFLOAD_FIX == canonical
+    # The other two lead in with their own framing, then quote the ONE rule.
+    assert canonical in _DRIVER_ROLE_ADVICE()
+    assert canonical in _FAMILY_BY_KEY["context_overflow"]["fix"]
+    # One record, three analyzers.
+    record = fix_for("resend.offload_to_subagent")
+    assert record is not None
+    assert record.analyzers == frozenset({"resend", "downsize", "relearn"})
+
+
+def test_the_duplicate_check_uses_containment_not_jaccard():
+    """The metric matters, and the first draft got it wrong.
+
+    Jaccard divides by the union, so it collapses when two texts differ in
+    LENGTH — which is exactly the shape of this defect. Measured against the
+    real wordings, the driver-role text scored 22% Jaccard against the rule it
+    duplicated: far under any usable threshold, so a Jaccard check would have
+    certified the defect as absent. A check that cannot catch what it was
+    written for is worse than no check.
+
+    Compared against the COMPOSED artifact, because that is what each of these
+    wordings actually duplicated: the driver-role text restated both halves —
+    where the work runs and what it runs on — which is why it reads as a near
+    copy of the pair rather than of either record alone.
+    """
+    from tokenjam.core.fixes.lint import NEAR_DUPLICATE_OVERLAP, _overlap
+    from tokenjam.core.optimize.cost_proposals import compound_offload_fix
+
+    composed = compound_offload_fix(
+        {},
+        fix_text("resend.offload_to_subagent"),
+        fix_text("resend.rightsize_worker"),
+    )
+    for shipped_wording in (
+        "Route this shape of work to workers instead of doing it inline. Add a "
+        "standing rule to CLAUDE.md telling the agent to dispatch a subagent "
+        "for context-heavy sub-tasks (broad file reads, multi-file search, "
+        "long tool-output loops, exploratory investigation) rather than "
+        "running them in the main thread, and pin the worker's model in its "
+        "own frontmatter so every dispatch inherits the cheaper tier.",
+        "The durable fix is to keep bulk content off the main thread: delegate "
+        "whole-file reads, log sweeps and multi-file investigations to a "
+        "subagent (its tool output lives in its own context and is never "
+        "re-sent on a later parent turn).",
+    ):
+        containment = _overlap(shipped_wording, composed)
+        assert containment >= NEAR_DUPLICATE_OVERLAP, containment
+        # And the metric that would have missed it, pinned so the choice
+        # cannot be quietly reverted: Jaccard on the same pair.
+        a = set(shipped_wording.lower().split()) & set(composed.lower().split())
+        b = set(shipped_wording.lower().split()) | set(composed.lower().split())
+        assert len(a) / len(b) < NEAR_DUPLICATE_OVERLAP
+
+
+def test_an_unrelated_fix_is_not_flagged_as_a_duplicate():
+    """The check has to be usable: two genuinely different instructions that
+    share this domain's vocabulary must not trip it."""
+    from tokenjam.core.fixes.lint import NEAR_DUPLICATE_OVERLAP, _overlap
+
+    assert _overlap(
+        fix_text("resend.offload_to_subagent"),
+        fix_text("resend.sdk_cache_breakpoint"),
+    ) < NEAR_DUPLICATE_OVERLAP
+
+
+def test_each_record_carries_ONE_instruction_so_composition_is_safe():
+    """The compound artifact renders two records back to back, so a record that
+    strays into its neighbour's job puts the same instruction in front of the
+    user twice — the very defect, in miniature, inside one block.
+
+    This was caught by rendering the composed artifact and READING it: the
+    pairwise catalog lint scored the pair at 42%, under threshold, because each
+    record was only partly redundant. A pairwise check cannot see redundancy
+    that only appears once two records are concatenated.
+    """
+    from tokenjam.core.fixes.lint import _overlap
+    from tokenjam.core.optimize.cost_proposals import compound_offload_fix
+
+    where = fix_text("resend.offload_to_subagent")
+    what_on = fix_text("resend.rightsize_worker")
+    # The offload record is about WHERE the work runs; pinning belongs to the
+    # right-sizing record, which owns "what it runs on".
+    assert "pin" not in where.lower()
+    assert "pin both that model" in what_on
+    assert _overlap(where, what_on) < 0.30
+
+    composed = compound_offload_fix({}, where, what_on)
+    # One mention of the pinning instruction in the artifact a user receives.
+    assert composed.lower().count("definition file") == 1

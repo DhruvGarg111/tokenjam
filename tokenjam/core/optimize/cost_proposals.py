@@ -189,14 +189,23 @@ SUBAGENT_RUBRIC_INTRO = fixes.fix_text("subagent.sizing_rubric")
 # is not a fix this persona can act on. Used wherever the card would otherwise
 # hand a CC window the same generic model-swap text an SDK caller gets (see
 # ticket-level "no CC user gets a raw-model-swap CTA" requirement).
+#: `/compact` IS NOT ON THIS LIST, and that is deliberate. It sits below the
+#: actionable ceiling recorded in the persona matrix under product-state: it is
+#: transient, persists nothing past the session, and users who feel a session
+#: filling already do it unprompted. Listing it beside three durable levers
+#: implies it is the same kind of thing, which is the mistake that entry exists
+#: to name — and it pads a list whose length is itself a cost to adherence.
+#: It survives as explicitly-labelled immediate relief where a card has room
+#: for one (see the resend card's "Immediate relief" position); it is never a
+#: fix.
 _DOWNSIZE_CC_LEVER = (
     "You can't switch your own interactive model mid-session, so this is not a "
     "fix to paste into your own request the way an SDK caller would. The "
     "actionable levers instead: `tj route export --target ccr` (or --target "
     "litellm) to route future calls through a cheaper model, `tj optimize "
-    "subagent` to right-size subagent models and context, `/compact` to trim "
-    "context mid-session, or a CLAUDE.md/subagent directive telling this agent "
-    "to dispatch cheaper subagents for this shape of work."
+    "subagent` to right-size subagent models and context, or a "
+    "CLAUDE.md/subagent directive telling this agent to dispatch cheaper "
+    "subagents for this shape of work."
 )
 
 # Appended (not substituted) for a "mixed" window: the swap text above already
@@ -205,7 +214,7 @@ _DOWNSIZE_CC_LEVER = (
 _DOWNSIZE_MIXED_CC_NOTE = (
     " For the Claude Code sessions in this window: you can't switch your own "
     "interactive model mid-session — use `tj route export`, `tj optimize "
-    "subagent`, or `/compact` instead."
+    "subagent`, or a CLAUDE.md directive instead."
 )
 
 
@@ -526,18 +535,28 @@ def _tiny_session_basis(finding: Any) -> str:
     )
 
 
-_DRIVER_ROLE_ADVICE = (
-    "Route this shape of work to workers instead of doing it inline. Add a "
-    "standing rule to CLAUDE.md telling the agent to dispatch a subagent for "
-    "context-heavy sub-tasks (broad file reads, multi-file search, long "
-    "tool-output loops, exploratory investigation) rather than running them in "
-    "the main thread, and pin the worker's model in its own "
-    "`.claude/agents/<name>.md` frontmatter so every dispatch inherits the "
-    "cheaper tier. This is not a request to downgrade your own interactive "
-    "session: the driver stays on the premium model and keeps making the "
-    "decisions. What changes is that the worker's tool output lives in the "
-    "worker's context, so it never gets re-read by every later turn of yours."
-)
+# The driver-role card's advice: one lead-in sentence naming why THIS card is
+# showing the rule, then the canonical rule itself. The lead-in is per-analyzer
+# framing; the rule is not, and a second copy of it here is exactly what let
+# three analyzers write three wordings of one instruction into one file.
+def _driver_role_advice() -> str:
+    """The driver-role card's advice: a lead-in naming why THIS card shows the
+    rule, then BOTH halves composed from the records that own them.
+
+    A function rather than a module constant because it composes helpers
+    defined further down; the alternative was reordering the module around a
+    string. Composed rather than restated on purpose — this card's original
+    wording carried its own copy of each half, which is how one instruction
+    came to be authored three times across three analyzers.
+    """
+    return (
+        "Route this shape of work to workers instead of doing it inline. "
+        + compound_offload_fix(
+            {},
+            fixes.fix_text("resend.offload_to_subagent"),
+            fixes.fix_text("resend.rightsize_worker"),
+        )
+    )
 
 
 def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
@@ -597,7 +616,7 @@ def _driver_role_proposals(finding: Any, persona: str = "unknown") -> list[CostP
             "driver_tokens": int(getattr(finding, "driver_tokens", 0) or 0),
             "substitutes": substitutes,
         },
-        advise_text=_DRIVER_ROLE_ADVICE,
+        advise_text=_driver_role_advice(),
         suggestion=one_paste,
         one_paste_fix=one_paste,
         past_overspend_usd=round(usd, 6),
@@ -2347,8 +2366,14 @@ def _rightsize_target(subagent_finding: Any, config: Any) -> dict[str, Any]:
         return {}
 
 
-def _compound_offload_fix(rightsize: dict[str, Any], fix_offload: str, fix_rightsize: str) -> str:
+def compound_offload_fix(rightsize: dict[str, Any], fix_offload: str, fix_rightsize: str) -> str:
     """The single rung-1 rule that carries BOTH halves of the compound lever.
+
+    PUBLIC because the CLI renders the same finding and must lead with the same
+    fix. It used to lead with `/compact` while the inbox card led with this —
+    two surfaces showing different fixes for one finding, and the CLI showing
+    the weaker one, which `COMPACTION_FIX`'s own text disclaims as "never fixes
+    the pattern going forward".
 
     One artifact, not two: the offload directive decides where context-heavy
     work runs, the right-sizing directive decides what it runs on, and they
@@ -2488,7 +2513,7 @@ def _resend_to_proposals(
     rightsize = _rightsize_target(subagent_finding, config)
 
     if persona in {"claude-code", "mixed"} and fix_subagent_offload:
-        compound_fix = _compound_offload_fix(rightsize, fix_subagent_offload, fix_rightsize)
+        compound_fix = compound_offload_fix(rightsize, fix_subagent_offload, fix_rightsize)
         advise = compound_fix
         if fix_compaction:
             advise = advise + " Immediate relief in an already-full session: " + fix_compaction
