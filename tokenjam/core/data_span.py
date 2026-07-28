@@ -74,10 +74,12 @@ class DataSpan:
     #: other: clamp a SELECTOR against ``available_days``, size a LOOKBACK
     #: against this.
     #:
-    #: Only safe to expose because ingest no longer writes epoch sentinels: one
-    #: 1970 row used to move this by decades, which is what the contiguous-block
-    #: measure was introduced to survive. The plausible-year floor below remains
-    #: the backstop for rows written before that changed.
+    #: Only safe to expose because ingest no longer ADMITS an epoch sentinel: a
+    #: record with no observed time is rejected at the boundary rather than
+    #: stored with a made-up one. A single 1970 row used to move this by
+    #: decades, which is what the contiguous-block measure was introduced to
+    #: survive; the plausible-year floor below remains the backstop for rows an
+    #: older build already wrote (and `tj doctor --repair` removes those).
     oldest:                    str | None = None
 
     def to_dict(self) -> dict[str, Any]:

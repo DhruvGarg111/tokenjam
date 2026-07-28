@@ -151,13 +151,14 @@ CREATE TABLE IF NOT EXISTS spans (
     kind                TEXT NOT NULL,
     status_code         TEXT NOT NULL,
     status_message      TEXT,
-    -- NULLABLE, deliberately (migration 21). A source timestamp that is missing
-    -- or unparseable writes NULL here, never an epoch sentinel: the row is kept
-    -- and can be counted, but it can never TIME anything, and every ordering,
-    -- range and day-union query excludes it for free under SQL NULL semantics.
-    -- A 1970 sentinel does the opposite — it participates in MIN() and drags a
-    -- span measure back by decades.
-    start_time          TIMESTAMPTZ,
+    -- NOT NULL, and deliberately so. A row with no observed time is REJECTED at
+    -- ingest rather than stored (see api/routes/logs.py) — the alternative,
+    -- a nullable column, moves the problem into ~25 `ORDER BY start_time` sites
+    -- whose null placement is a DuckDB session setting rather than a property of
+    -- the query, and buys only the ability to keep rows that can never time
+    -- anything. What must never appear here is an epoch SENTINEL: a 1970 stamp
+    -- participates in MIN() and drags a span measure back by decades.
+    start_time          TIMESTAMPTZ NOT NULL,
     end_time            TIMESTAMPTZ,
     duration_ms         DOUBLE,
     attributes          JSON NOT NULL DEFAULT '{}',
@@ -363,8 +364,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
     agent_id            TEXT NOT NULL,
     conversation_id     TEXT,
-    -- Nullable for the same reason as spans.start_time above (migration 21).
-    started_at          TIMESTAMPTZ,
+    started_at          TIMESTAMPTZ NOT NULL,
     ended_at            TIMESTAMPTZ,
     status              TEXT NOT NULL DEFAULT 'active',
     total_cost_usd      DOUBLE,
@@ -712,43 +712,6 @@ MIGRATIONS: list[tuple[int, str]] = [
     # deletion that happened always has a record and a record that exists always
     # describes a deletion. `tj doctor` reads it; nothing else writes it.
     (20, RETENTION_EVENTS_TABLE_SQL),
-    # Migration 21: unknown timestamps become NULL rather than a 1970 sentinel.
-    #
-    # Ingest stamped a zero epoch whenever a source carried no usable time —
-    # Claude Code's own OTel log exporter sends `timeUnixNano=0` on some
-    # records, and Codex's ISO fallback can fail to parse. A sentinel is not a
-    # neutral placeholder: it participates in `MIN()`, in `ORDER BY`, and in any
-    # day union, so ONE such row made a two-month corpus report a span in the
-    # thousands of days. `core/data_span.py` had to defend against it at READ
-    # time, which fixes the surfaces that remember to and no others.
-    #
-    # NULL is the honest representation and it defends itself: every comparison,
-    # range filter and aggregate excludes it under ordinary SQL semantics, with
-    # no per-query guard to forget. The rows are kept — they still carry tokens,
-    # cost and an agent — they simply cannot time anything.
-    #
-    # The existing sentinels are DELETED rather than migrated to NULL. A row
-    # whose only recorded fact was a false timestamp has nothing left to
-    # attribute once that is removed, and keeping it would leave a row that is
-    # counted by every COUNT(*) and placed by nothing.
-    #
-    # The index choreography is not optional: DuckDB refuses to ALTER a column
-    # on a table carrying ART indexes, so both index sets come off and go
-    # straight back on from the same constants the initial schema uses.
-    (21, (
-        "".join(
-            f"DROP INDEX IF EXISTS {name};\n"
-            for name, _ in SPANS_INDEXES + SESSIONS_INDEXES
-        )
-        + "ALTER TABLE spans ALTER COLUMN start_time DROP NOT NULL;\n"
-        + "ALTER TABLE sessions ALTER COLUMN started_at DROP NOT NULL;\n"
-        + f"DELETE FROM spans WHERE EXTRACT(year FROM start_time) "
-          f"< {MIN_PLAUSIBLE_YEAR};\n"
-        + f"DELETE FROM sessions WHERE EXTRACT(year FROM started_at) "
-          f"< {MIN_PLAUSIBLE_YEAR};\n"
-        + SPANS_INDEX_SQL + ";\n"
-        + SESSIONS_INDEX_SQL
-    )),
 ]
 
 
@@ -1690,6 +1653,64 @@ def check_spans_stats_corruption(conn: duckdb.DuckDBPyConnection) -> bool:
     return False
 
 
+# Rows stamped with an epoch sentinel instead of an observed time. The ingest
+# paths that could write one are closed (a record with no observed time is
+# rejected at the boundary now), so this is a one-shot cleanup for corpora an
+# older build already wrote — surfaced by `tj doctor` and removed by
+# `tj doctor --repair` rather than living as a SQL snippet in a PR description.
+_SENTINEL_TABLES: tuple[tuple[str, str], ...] = (
+    ("spans", "start_time"),
+    ("sessions", "started_at"),
+)
+
+
+def count_sentinel_timestamp_rows(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, int]:
+    """Per-table counts of rows dated before ``MIN_PLAUSIBLE_YEAR``.
+
+    Only tables with a non-zero count appear, so an empty dict means clean. A
+    missing table contributes nothing rather than failing the whole probe.
+    """
+    found: dict[str, int] = {}
+    for table, column in _SENTINEL_TABLES:
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM {table} "  # noqa: S608 - table names are literals above
+                f"WHERE {column} IS NOT NULL "
+                f"AND EXTRACT(year FROM {column}) < $1",
+                [MIN_PLAUSIBLE_YEAR],
+            ).fetchone()
+        except duckdb.Error:
+            continue
+        count = int(row[0]) if row else 0
+        if count:
+            found[table] = count
+    return found
+
+
+def purge_sentinel_timestamp_rows(
+    conn: duckdb.DuckDBPyConnection,
+) -> dict[str, int]:
+    """Delete the sentinel-dated rows, returning what was removed per table.
+
+    Deleted rather than corrected: there is nothing to correct TO. A row whose
+    only recorded fact about time was false has no other evidence of when it
+    happened, and leaving it would keep a row that every ``COUNT(*)`` counts and
+    nothing can place on a calendar.
+    """
+    removed = count_sentinel_timestamp_rows(conn)
+    for table, column in _SENTINEL_TABLES:
+        if table not in removed:
+            continue
+        conn.execute(
+            f"DELETE FROM {table} "  # noqa: S608 - table names are literals above
+            f"WHERE {column} IS NOT NULL AND EXTRACT(year FROM {column}) < $1",
+            [MIN_PLAUSIBLE_YEAR],
+        )
+    return removed
+
+
 def check_spans_index_corruption(
     conn: duckdb.DuckDBPyConnection,
 ) -> list[tuple[str, str]]:
@@ -2148,6 +2169,22 @@ class DuckDBBackend:
                     service_instance_id, cache_write_tokens, run_id, parent_session_id
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                 ON CONFLICT (session_id) DO UPDATE SET
+                    -- `started_at` was absent from this list entirely, which
+                    -- made it WRITE-ONCE: whatever the first span to reach a
+                    -- session stamped was permanent, and no genuinely earlier
+                    -- span arriving later could correct it. Since only
+                    -- `ended_at` ever advanced, a session opened by an
+                    -- out-of-order or mis-stamped span stayed wrong forever —
+                    -- which is why bad session timestamps accumulated in a
+                    -- corpus instead of healing. A session starts when its
+                    -- EARLIEST observed span does, so take the minimum; the
+                    -- COALESCE keeps a NULL incoming value from erasing a
+                    -- stored one, since MIN semantics here must not be
+                    -- confused with "unknown wins".
+                    started_at = LEAST(
+                        sessions.started_at,
+                        COALESCE(EXCLUDED.started_at, sessions.started_at)
+                    ),
                     ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                     -- Refuse to downgrade a row the live path already marked
                     -- 'active' when the incoming write's own last-activity is

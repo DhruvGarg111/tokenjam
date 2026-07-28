@@ -8,6 +8,7 @@ from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import load_config, resolve_config_path
+from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
 from tokenjam.core.db import SPANS_INDEXES
 from tokenjam.utils.formatting import console, display_path
 
@@ -90,6 +91,9 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 18. Duplicate call ingest — one LLM call stored twice, once per observer
     checks.append(_check_duplicate_call_ingest(ctx.obj["db"]))
+
+    # 18b. Timestamp sentinels an older build wrote — a one-shot cleanup.
+    checks.append(_check_sentinel_timestamps(ctx.obj["db"]))
 
     # 19. Retention — the analysis span, what it keeps, and what the last run
     #     actually deleted. A delete of user history has to be readable after
@@ -447,6 +451,43 @@ def _check_retention(config: object, db: object) -> dict:
             "message": f"Analyzing {span}, so {kept_text}.{clamp}{last}"}
 
 
+def _check_sentinel_timestamps(db: object) -> dict:
+    """Find rows an older build stamped with an epoch sentinel instead of a time.
+
+    Ingest can no longer produce one — a record with no observed time is
+    rejected at the boundary — so this is a one-shot cleanup for corpora already
+    written, offered here rather than as a SQL snippet somebody has to be told
+    about. A warning, not an error: the rows are inert until something takes a
+    naive `MIN()` over them, at which point a single row reports a span decades
+    wide and crushes every derived rate to zero.
+    """
+    from tokenjam.core.db import count_sentinel_timestamp_rows
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        found = count_sentinel_timestamp_rows(conn)
+    except duckdb.Error as e:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": f"Skipped — could not scan for sentinels: {e}"}
+    if found:
+        detail = ", ".join(f"{count} in {table}" for table, count in sorted(found.items()))
+        return {
+            "name": "Timestamp sentinels",
+            "level": "warning",
+            "message": f"Rows dated before {MIN_PLAUSIBLE_YEAR} — {detail}. These "
+                       f"carry no real observed time and a single one makes a "
+                       f"naive MIN() report a span decades wide. Run `tj doctor "
+                       f"--repair` to delete them.",
+            "repair_action": "purge_timestamp_sentinels",
+        }
+    return {"name": "Timestamp sentinels", "level": "ok",
+            "message": "No rows carry a placeholder timestamp."}
+
+
 def _check_schema_integrity(db: object) -> dict:
     """Detect a recorded-but-unlanded migration (missing columns #55 / tables #382).
 
@@ -734,6 +775,7 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
         check_spans_index_corruption,
         ensure_expected_columns,
         ensure_expected_tables,
+        purge_sentinel_timestamp_rows,
         repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
@@ -848,6 +890,30 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"{len(sessions)} session(s); their totals were "
                     f"reconciled.[/green]"
                 )
+            continue
+        if action == "purge_timestamp_sentinels":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                removed = purge_sentinel_timestamp_rows(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Sentinel purge failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                detail = ", ".join(
+                    f"{count} from {table}" for table, count in sorted(removed.items())
+                ) or "nothing"
+                console.print(f"  [green]Deleted {detail}.[/green]")
             continue
         if action == "rebuild_spans_indexes":
             if conn is None:

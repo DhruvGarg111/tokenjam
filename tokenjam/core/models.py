@@ -63,13 +63,12 @@ class NormalizedSpan:
     name:           str
     kind:           SpanKind
     status_code:    SpanStatus
-    # None when the source carried no usable timestamp. NOT an epoch sentinel:
-    # a 1970 stamp participates in MIN(), ORDER BY and every day union, so one
-    # such row can stretch a two-month corpus's measured span by decades, while
-    # a NULL is excluded by ordinary SQL semantics with no per-query guard to
-    # forget. The row is kept and can be counted; it simply cannot time
-    # anything. Ingest paths must pass None rather than substituting a default.
-    start_time:     datetime | None
+    # Always a REAL observed instant. Ingest may neither substitute a default
+    # (a zero epoch drags every MIN() and day union back by decades; `now`
+    # silently dates historical work to whenever tj received it) nor leave it
+    # unset — a record with no observed time is rejected at the boundary
+    # instead. See `api/routes/logs.py` and `core/backfill.py`.
+    start_time:     datetime
     parent_span_id: str | None     = None
     session_id:     str | None     = None
     agent_id:       str | None     = None
@@ -173,9 +172,7 @@ class NormalizedSpan:
 class SessionRecord:
     session_id:      str
     agent_id:        str
-    # None when the first span attributed to this session carried no usable
-    # timestamp — same rule and same reason as NormalizedSpan.start_time above.
-    started_at:      datetime | None
+    started_at:      datetime
     conversation_id: str | None   = None
     ended_at:        datetime | None = None
     status:          str          = "active"
