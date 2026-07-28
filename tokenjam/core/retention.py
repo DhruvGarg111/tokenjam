@@ -67,26 +67,17 @@ def run_retention_cleanup(db: StorageBackend, config: StorageConfig) -> Retentio
         )
 
     cutoff = utcnow() - timedelta(days=days)
-    spans_deleted, sessions_deleted = db.delete_spans_before(cutoff)
-
-    record = getattr(db, "record_retention_event", None)
-    if record is not None:
-        try:
-            record(
-                cutoff=cutoff,
-                retention_days=days,
-                analysis_span_days=analysis_span_days(config),
-                spans_deleted=spans_deleted,
-                sessions_deleted=sessions_deleted,
-            )
-        except Exception as exc:
-            # A ledger that cannot be written must not abort a delete that has
-            # already happened — that would leave the store trimmed AND the run
-            # reading as a failure. Logged at warning because an unrecorded
-            # deletion is the exact state this ledger exists to prevent.
-            logger.warning(
-                "retention ran but its ledger row could not be written: %s", exc,
-            )
+    # The deletes and their ledger row land in ONE transaction — see
+    # `delete_spans_before`. Not a detail: this job runs from an apscheduler
+    # cron inside an ad-hoc `tj serve`, so being killed mid-run is ordinary, and
+    # a completed delete with no trace is the exact failure the ledger exists to
+    # make impossible. Two sequential commits would deliver that guarantee only
+    # on the happy path, which is the path where nobody needs it.
+    spans_deleted, sessions_deleted = db.delete_spans_before(
+        cutoff,
+        retention_days=days,
+        analysis_span_days=analysis_span_days(config),
+    )
 
     if spans_deleted or sessions_deleted:
         logger.info(

@@ -128,7 +128,13 @@ class StorageBackend(Protocol):
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
     ) -> list[dict]: ...
-    def delete_spans_before(self, cutoff: datetime) -> tuple[int, int]: ...
+    def delete_spans_before(
+        self,
+        cutoff: datetime,
+        *,
+        retention_days: int | None = None,
+        analysis_span_days: int | None = None,
+    ) -> tuple[int, int]: ...
     def close(self) -> None: ...
 
 
@@ -3101,78 +3107,94 @@ class DuckDBBackend:
             for r in rows
         ]
 
-    def delete_spans_before(self, cutoff: datetime) -> tuple[int, int]:
-        """Delete aged-out spans AND the session rows they leave behind.
+    def delete_spans_before(
+        self,
+        cutoff: datetime,
+        *,
+        retention_days: int | None = None,
+        analysis_span_days: int | None = None,
+    ) -> tuple[int, int]:
+        """Delete aged-out history AND write its ledger row, ATOMICALLY.
 
         Returns ``(spans deleted, sessions deleted)``.
 
-        Deleting only from ``spans`` used to leave the parent ``sessions`` rows
-        in place forever, and those rows are not inert: ``data_span`` unions
-        ``sessions.started_at`` into the day set it measures the available span
-        from, so every orphan went on asserting that a day carried data after
-        the data for that day had been destroyed. The deletion actively skewed
-        the measure of what survived it.
+        **The ledger row is written in the SAME TRANSACTION as the deletes, and
+        that is the point rather than a detail.** What this mechanism has to
+        guarantee is that a delete of the user's own history is observable after
+        the fact; a ledger the process can skip by dying between two commits
+        delivers that only on the happy path, which is exactly the path where
+        nobody needs it. This job runs from an apscheduler cron inside an ad-hoc
+        ``tj serve``, so being killed mid-run is an ordinary event — and a
+        completed delete with no trace is the precise failure the ledger exists
+        to make impossible. Either both land or neither does.
 
-        A session is removed only once it has NO spans left at all, which is
-        strictly narrower than "started before the cutoff": a long session
-        straddling the boundary keeps every span the cutoff spared, so deleting
-        it would discard live rows' parent. A pre-cutoff session that never had
-        spans goes too — it is aged-out history like any other, and leaving it
-        would let it keep asserting a day beyond the retention horizon.
+        Three statements, in order:
 
-        Both statements and the ledger row run under one write lock so a reader
-        cannot observe spans gone with their sessions still present.
+        1. Aged-out spans go.
+        2. Sessions the delete ORPHANED go with them. Deleting only from
+           ``spans`` used to leave parent ``sessions`` rows in place forever,
+           and those are not inert: ``data_span`` unions ``sessions.started_at``
+           into the day set it measures the available span from, so every orphan
+           went on asserting that a day carried data after that day's data was
+           destroyed — the deletion skewed the measure of its own aftermath. A
+           session goes only once it has NO spans left, which is strictly
+           narrower than "started before the cutoff": a long session straddling
+           the boundary keeps every span the cutoff spared, so deleting it would
+           discard live rows' parent. A pre-cutoff session that never had spans
+           goes too — it is aged-out history like any other, and leaving it
+           would let it keep asserting a day beyond the retention horizon.
+        3. The ledger row, with ``oldest_kept`` read after the deletes (visible
+           within the transaction) so it states what survived rather than what
+           was intended to.
         """
         span_row = self.conn.execute(
             "SELECT COUNT(*) FROM spans WHERE start_time < $1", [cutoff]
         ).fetchone()
         spans_deleted = int(span_row[0]) if span_row else 0
+
         with self._write_lock:
-            self.conn.execute("DELETE FROM spans WHERE start_time < $1", [cutoff])
-            orphan_row = self.conn.execute(
-                "SELECT COUNT(*) FROM sessions s WHERE s.started_at < $1 "
-                "AND NOT EXISTS (SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
-                [cutoff],
-            ).fetchone()
-            sessions_deleted = int(orphan_row[0]) if orphan_row else 0
-            self.conn.execute(
-                "DELETE FROM sessions s WHERE s.started_at < $1 "
-                "AND NOT EXISTS (SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
-                [cutoff],
-            )
+            self.conn.execute("BEGIN TRANSACTION")
+            try:
+                self.conn.execute(
+                    "DELETE FROM spans WHERE start_time < $1", [cutoff]
+                )
+                orphan_row = self.conn.execute(
+                    "SELECT COUNT(*) FROM sessions s WHERE s.started_at < $1 "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
+                    [cutoff],
+                ).fetchone()
+                sessions_deleted = int(orphan_row[0]) if orphan_row else 0
+                self.conn.execute(
+                    "DELETE FROM sessions s WHERE s.started_at < $1 "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
+                    [cutoff],
+                )
+                oldest_row = self.conn.execute(
+                    "SELECT MIN(start_time) FROM spans WHERE start_time IS NOT NULL"
+                ).fetchone()
+                self.conn.execute(
+                    "INSERT INTO retention_events (event_id, ran_at, cutoff, "
+                    "retention_days, analysis_span_days, spans_deleted, "
+                    "sessions_deleted, oldest_kept) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                    [
+                        str(uuid.uuid4()), utcnow(), cutoff, retention_days,
+                        analysis_span_days, spans_deleted, sessions_deleted,
+                        oldest_row[0] if oldest_row else None,
+                    ],
+                )
+            except Exception:
+                # A ledger row that cannot be written takes the delete down with
+                # it. Keeping the delete and merely logging the failure — which
+                # is what this used to do — produces exactly the state the
+                # ledger exists to prevent: history gone, nothing saying so.
+                self.conn.execute("ROLLBACK")
+                raise
+            self.conn.execute("COMMIT")
+
         return spans_deleted, sessions_deleted
-
-    def record_retention_event(
-        self,
-        *,
-        cutoff: datetime,
-        retention_days: int | None,
-        analysis_span_days: int | None,
-        spans_deleted: int,
-        sessions_deleted: int,
-    ) -> None:
-        """Append one row to the retention ledger.
-
-        The ledger exists because a deletion of the user's own history that
-        leaves no account of itself is only discoverable by measuring the store
-        twice, days apart, and diffing — which is how eight weeks of the oldest
-        history went missing unnoticed. `oldest_kept` is read AFTER the delete so
-        the row states what survived, not what was intended to.
-        """
-        oldest_row = self.conn.execute(
-            "SELECT MIN(start_time) FROM spans WHERE start_time IS NOT NULL"
-        ).fetchone()
-        with self._write_lock:
-            self.conn.execute(
-                "INSERT INTO retention_events (event_id, ran_at, cutoff, "
-                "retention_days, analysis_span_days, spans_deleted, "
-                "sessions_deleted, oldest_kept) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-                [
-                    str(uuid.uuid4()), utcnow(), cutoff, retention_days,
-                    analysis_span_days, spans_deleted, sessions_deleted,
-                    oldest_row[0] if oldest_row else None,
-                ],
-            )
 
     def close(self) -> None:
         # Closing the root connection tears down the database and all cursors.

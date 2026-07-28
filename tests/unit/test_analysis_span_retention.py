@@ -224,16 +224,50 @@ def test_a_disabled_run_writes_no_row_because_it_did_not_run(store):
     ).fetchone()[0] == 0
 
 
-def test_a_ledger_write_failure_never_undoes_a_delete_that_happened(store, caplog):
-    """A trimmed store plus a run reading as a failure is the worst outcome."""
-    store.conn.execute("DROP TABLE retention_events")
+def test_a_delete_can_never_commit_without_its_ledger_row(store):
+    """The delete and its ledger row are ONE transaction, so neither can outlive
+    the other.
+
+    The earlier version of this kept the delete and merely logged a failed
+    ledger write, on the reasoning that a trimmed store plus a run reading as a
+    failure was the worst outcome. It is not — history gone with nothing saying
+    so is, and it is the exact state this whole mechanism exists to prevent. The
+    same hole existed for a crash between two sequential commits, which on a
+    daemon killed mid-run is an ordinary event rather than an exotic one.
+
+    Staged by making the ledger write fail: the transaction rolls back and the
+    spans are still there. A test that only checks the happy path cannot see
+    this, because on the happy path both writes land either way.
+    """
     _seed(store, days_ago=120, session_id="outside")
+    _seed(store, days_ago=2, session_id="inside")
+    store.conn.execute("DROP TABLE retention_events")
 
-    run = run_retention_cleanup(store, StorageConfig(analysis_span="90d"))
+    with pytest.raises(Exception):
+        run_retention_cleanup(store, StorageConfig(analysis_span="90d"))
 
-    assert run.spans_deleted == 1
-    assert store.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 0
-    assert "ledger row could not be written" in caplog.text
+    # Nothing was destroyed, so there is nothing that needed recording.
+    assert store.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 2
+    assert store.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 2
+
+
+def test_no_deleted_history_is_ever_unaccounted_for(store):
+    """The invariant the ledger is FOR, asserted over the store.
+
+    Whatever the run did, the rows it removed are the rows the ledger says it
+    removed — there is no path that trims the store and reports nothing.
+    """
+    for days_ago in (200, 150, 120, 30, 2):
+        _seed(store, days_ago=days_ago, session_id=f"s{days_ago}")
+    before = store.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+    run_retention_cleanup(store, StorageConfig(analysis_span="90d"))
+
+    after = store.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+    ledgered = store.conn.execute(
+        "SELECT COALESCE(SUM(spans_deleted), 0) FROM retention_events"
+    ).fetchone()[0]
+    assert before - after == ledgered == 3
 
 
 def test_the_deletion_no_longer_skews_the_span_it_leaves_behind(store):
