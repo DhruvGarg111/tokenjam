@@ -29,6 +29,7 @@ from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
 from tokenjam.core.summarize.estimate import UNMEASURED_PRIOR_RATIO, tokens_saved
+from tokenjam.core.summarize.relocate import relocatable_content_chars
 from tokenjam.core.summarize.route import recommend_route
 
 if TYPE_CHECKING:
@@ -101,6 +102,14 @@ class Candidate:
     #: True when this rule already declares `paths:` frontmatter, so it is never
     #: told to path-scope itself. Advice only; deliberately does not reprice it.
     already_path_scoped: bool = False
+    #: Content characters this file would shed by RELOCATING its reference
+    #: sections into a non-loaded document — net of the pointer stubs left
+    #: behind, and zero unless the classifier is confident (see
+    #: ``core/summarize/relocate`` and ``core/summarize/classify``). A different
+    #: OPERATION on the same file, not an addition to ``est_tokens_saved``:
+    #: relocating a section and then compressing it would price the same text
+    #: twice (Critical Rule 27), so consumers pick one, never a sum.
+    relocatable_content_chars: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -122,7 +131,17 @@ class Candidate:
             "reduction_route": self.reduction_route,
             "directive_share": round(self.directive_share, 4),
             "already_path_scoped": self.already_path_scoped,
+            "relocatable_content_chars": self.relocatable_content_chars,
+            "relocatable_tokens": self.relocatable_tokens,
         }
+
+    @property
+    def relocatable_tokens(self) -> int:
+        """One-time always-resident token reduction from relocating, on the
+        shared chars->tokens constant so it is comparable with
+        ``est_tokens_saved``."""
+        from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+        return max(0, round(self.relocatable_content_chars / CHARS_PER_TOKEN))
 
 
 @dataclass(frozen=True)
@@ -285,6 +304,15 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
     # specificity — so a rule-heavy instruction file is not offered compression
     # as though it were the obvious move. Diagnosis only; nothing is written.
     advice = recommend_route(text=text, load_class=load_class)
+    # How much of this file is REFERENCE that could be moved out wholesale
+    # instead of compressed in place. Measured here, where the text is already
+    # in hand, rather than by a second read in the analyzer. Only meaningful
+    # for an always-resident file: relocating a skill BODY saves nothing,
+    # because the body is not resident until it is invoked.
+    relocatable = (
+        relocatable_content_chars(text)
+        if load_class == load_semantics.ALWAYS else 0
+    )
     return Candidate(
         scan_root=str(scan_root) if scan_root is not None else "",
         path=str(path), prose_words=b.prose_words, total_chars=b.total_chars,
@@ -297,6 +325,7 @@ def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
         always_resident_chars=len(resident_text),
         reduction_route=advice.route, directive_share=advice.directive_share,
         already_path_scoped=advice.already_path_scoped,
+        relocatable_content_chars=relocatable,
     )
 
 

@@ -242,16 +242,30 @@ _ROUTE_NOTE = (
     "from. Applying stays a dry-run until `--go` because a human reading the "
     "diff is the only check on meaning: the structure gate verifies that code "
     "blocks, tables and tags came back verbatim, and does not read the prose."
-    " COVERAGE: the figure above prices ONLY what compression recovers, because "
-    "compression is the only one of the four routes this product performs. It "
-    "is not the size of the opportunity. The other three routes recover real "
-    "tokens that are NOT counted here — relocating reference material out of an "
-    "always-loaded file into a linked one is a pure MOVE with no semantic loss "
-    "at all, and on a rule-heavy file it is typically larger than anything "
-    "compression can reach. The difference between this figure and what those "
-    "routes would recover is unmeasured, not zero: it is the part this analyzer "
-    "does not yet perform, and pricing an operation the product cannot carry out "
-    "would be a ceiling the user could disprove."
+    " COVERAGE: the figure above prices ONLY what compression recovers. "
+    "It is not the size of the opportunity. A SECOND operation is now performed "
+    "and priced separately in `relocation_past_overspend_usd` / "
+    "`relocation_past_overspend_tokens`: relocating a whole REFERENCE section — "
+    "a module inventory, an API surface, a directory layout — out of an "
+    "always-loaded file into a linked one, leaving a followable pointer behind. "
+    "That is a pure MOVE with no semantic loss at all, which is why it is the "
+    "safer of the two: compression rewrites prose and can erode a modifier that "
+    "no structural check would catch, whereas nothing here is rewritten or "
+    "deleted. **The two must never be added together**: a section relocated out "
+    "of a file is no longer there to be compressed, so summing them would price "
+    "the same text twice (Critical Rule 27). They are alternatives to pick "
+    "between, per file. The relocation figure covers only sections a validated "
+    "classifier is confident about, and it is deliberately conservative — the "
+    "cost of moving an instruction out of the file that carries it is a silent "
+    "correctness bug, while the cost of leaving a reference section in place is "
+    "a missed saving, so ambiguity always resolves to leaving it alone. Measured "
+    "against a hand-labelled set of real sections, it moved nothing it should "
+    "not have and declined a majority of what it could have moved. The remaining "
+    "two routes — pruning rules that do not earn their place, and path-scoping "
+    "area-specific ones behind `paths:` frontmatter — recover real tokens that "
+    "are still unmeasured, not zero: they are the part this analyzer does not "
+    "perform, and pricing an operation the product cannot carry out would be a "
+    "ceiling the user could disprove."
 )
 
 
@@ -442,6 +456,15 @@ class SummarizeCandidate:
     reduction_route: str = ""
     #: Share of prose words in discrete directives — the evidence for the route.
     directive_share: float = 0.0
+    #: One-time always-resident token reduction available by RELOCATING this
+    #: file's reference sections into a non-loaded document, and what that is
+    #: worth over the window on the SAME session/call multiplier the
+    #: compression figures use. An ALTERNATIVE operation on overlapping text,
+    #: never an addition: relocating a section and then compressing it prices
+    #: the same tokens twice (Critical Rule 27).
+    relocatable_tokens: int = 0
+    relocation_tokens_window: int | None = None
+    relocation_usd: float | None = None
 
 
 @dataclass
@@ -538,6 +561,29 @@ class SummarizeFinding:
     #: a prune-route candidate keeps its full token and dollar figure, because
     #: the tokens are recoverable by whichever route the user picks.
     candidates_by_route: dict[str, int] = field(default_factory=dict)
+    #: The RELOCATION figures, carried beside the compression ones and
+    #: deliberately NOT summed into ``past_overspend_usd`` /
+    #: ``past_overspend_tokens``. The two operations act on overlapping text —
+    #: a section relocated out of a file is no longer there to be compressed —
+    #: so adding them would double-count exactly the way Critical Rule 27
+    #: forbids. They are alternatives the user picks between, and relocation is
+    #: the safer of the two by construction: it moves text and rewrites none, so
+    #: it cannot erode a modifier the way a rewrite can.
+    #:
+    #: Same basis as their compression counterparts (Critical Rule 28): the same
+    #: sessions x reads-per-session event count, one counted and one priced, and
+    #: ``None`` on the same "no loading session observed" condition rather than a
+    #: zero.
+    relocation_past_overspend_usd: float | None = None
+    relocation_past_overspend_tokens: int | None = None
+    #: One-time sum of the per-file relocatable reduction — the relocation
+    #: counterpart of ``file_reduction_tokens``, on the same one-time basis.
+    relocation_file_reduction_tokens: int | None = None
+    #: How many candidate files have any relocatable reference section at all.
+    #: Deliberately reported: on a corpus where this is small the ceiling above
+    #: is concentrated in a handful of files, which is a materially different
+    #: claim from a broad one and a reader cannot tell them apart from a total.
+    relocation_files: int = 0
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -1112,6 +1158,7 @@ def run(ctx: AnalyzerContext) -> None:
         load_class = getattr(c, "load_class", load_semantics.ALWAYS)
         on_demand = load_class in load_semantics.ON_DEMAND_CLASSES
         resident_tokens, on_demand_tokens = _load_split(c)
+        relocatable = int(getattr(c, "relocatable_tokens", 0) or 0)
         sessions = _sessions_loading(c.path, c.scope, profile) if profile else 0
         calls_per_session = (
             _repo_calls_per_session(c.path, c.scope, profile) if profile else 0.0
@@ -1158,6 +1205,24 @@ def run(ctx: AnalyzerContext) -> None:
             ),
             reduction_route=str(getattr(c, "reduction_route", "") or ""),
             directive_share=float(getattr(c, "directive_share", 0.0) or 0.0),
+            relocatable_tokens=relocatable,
+            # Routed through the SAME multiplier the compression figures use, so
+            # the two operations are directly comparable and the token and
+            # dollar fields count the same events (Critical Rule 28). Relocation
+            # only ever touches always-resident text, so the on-demand term is
+            # structurally zero rather than merely unobserved.
+            relocation_tokens_window=(
+                _tokens_saved_over_window(
+                    relocatable, 0, sessions, calls_per_session, 0,
+                )
+                if priceable and relocatable > 0 else None
+            ),
+            relocation_usd=(
+                _price_reduction(
+                    relocatable, 0, sessions, calls_per_session, 0, profile.rates,
+                )
+                if priceable and relocatable > 0 and profile is not None else None
+            ),
         )
         if _is_measured_zero(candidate):
             continue
@@ -1193,6 +1258,28 @@ def run(ctx: AnalyzerContext) -> None:
         # — a candidate contributes to either both sums or neither.
         finding.past_overspend_tokens = sum(window_tokens) if window_tokens else None
         finding.past_overspend_usd = round(sum(priced), 6) if priced else None
+        # The relocation aggregates, on the same degrade-symmetrically rule and
+        # deliberately kept OUT of the compression sums above (Critical Rule 27
+        # — the two operations act on overlapping text and are alternatives,
+        # never addends).
+        reloc_one_time = sum(c.relocatable_tokens for c in finding.candidates)
+        finding.relocation_file_reduction_tokens = reloc_one_time or None
+        finding.relocation_files = sum(
+            1 for c in finding.candidates if c.relocatable_tokens > 0
+        )
+        reloc_window = [
+            c.relocation_tokens_window for c in finding.candidates
+            if c.relocation_tokens_window is not None
+        ]
+        reloc_priced = [
+            c.relocation_usd for c in finding.candidates if c.relocation_usd is not None
+        ]
+        finding.relocation_past_overspend_tokens = (
+            sum(reloc_window) if reloc_window else None
+        )
+        finding.relocation_past_overspend_usd = (
+            round(sum(reloc_priced), 6) if reloc_priced else None
+        )
         if profile is not None:
             finding.sessions_examined = profile.sessions_total
             finding.calls_per_session = round(profile.calls_per_session, 2)

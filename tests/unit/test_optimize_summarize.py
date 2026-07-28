@@ -1018,11 +1018,14 @@ def test_basis_refuses_to_present_compression_as_the_only_route(db):
 
 
 def test_basis_states_the_figure_prices_only_the_operation_we_perform(db):
-    """The dollar figure is the COMPRESSION slice, not the size of the
-    opportunity. Measured on a real corpus, relocating reference material out of
-    always-loaded files is several times larger — and it is not counted here,
-    because pricing an operation the product cannot carry out would be a ceiling
-    the user could disprove. The gap must be stated, not implied by omission."""
+    """The coverage statement must stay accurate as the product grows.
+
+    It used to say relocation was NOT counted and its size unmeasured. Relocation
+    is now performed and priced, so the same pin is INVERTED rather than deleted
+    (Critical Rule 23): it now asserts that relocation is priced in its own named
+    fields, that the two figures must not be added, and that the two routes still
+    NOT performed are the ones described as unmeasured. Deleting the assertion
+    would have left the whole class uncovered at exactly the moment it changed."""
     from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
     from tokenjam.core.summarize.invocations import InvocationCounts
 
@@ -1031,9 +1034,13 @@ def test_basis_states_the_figure_prices_only_the_operation_we_perform(db):
     assert "COVERAGE:" in basis
     assert "prices ONLY what compression recovers" in basis
     assert "not the size of the opportunity" in basis
-    assert "unmeasured, not zero" in basis
-    # ...and names the largest uncounted route as the lossless one it is.
+    # Relocation is now performed, priced, and named — no longer "not counted".
+    assert "relocation_past_overspend_usd" in basis
     assert "pure MOVE with no semantic loss" in basis
+    assert "must never be added together" in basis
+    # ...and the routes still unperformed are the ones called unmeasured.
+    assert "unmeasured, not zero" in basis
+    assert "pruning rules that do not earn their place" in basis
 
 
 def test_a_prune_route_candidate_keeps_its_full_figure(db, monkeypatch, tmp_path):
@@ -1094,3 +1101,129 @@ def test_measured_ratio_supersedes_the_target_in_the_figure(db, monkeypatch, tmp
     assert f.prose_ratio == pytest.approx(0.9)
     assert f.prose_ratio_observed is True
     assert f.prose_ratio_samples == 3
+
+
+# --------------------------------------------------------------------------- #
+# Relocation: the second operation, priced beside compression and never added
+# to it (Critical Rules 27 + 28)
+# --------------------------------------------------------------------------- #
+
+def _reloc_cand(path: str, saved: int, relocatable_chars: int, *, scope: str = "global"):
+    import dataclasses
+    return dataclasses.replace(
+        _cand(path, saved, scope=scope), relocatable_content_chars=relocatable_chars,
+    )
+
+
+def test_relocation_is_priced_on_the_same_multiplier_as_compression(db, monkeypatch):
+    """The whole point of routing it through the same per-file session/call
+    multiplier: the two operations become directly comparable, and the token and
+    dollar fields count the same events (Critical Rule 28)."""
+    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(session_id="s2"))
+    for sid in ("s1", "s2"):
+        for _ in range(3):
+            db.insert_span(make_llm_span(
+                session_id=sid, provider="anthropic", model="claude-haiku-4-5",
+                input_tokens=100, output_tokens=10,
+                start_time=utcnow() - timedelta(days=1),
+            ))
+    # 4_000 content chars relocatable = 1_000 tokens on the shared constant,
+    # which is exactly the compression reduction — so the two figures must come
+    # out identical, proving they run through one multiplier and not two.
+    _patch_scan(monkeypatch, [_reloc_cand("~/.claude/CLAUDE.md", 1_000, 4_000)])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    assert f.relocation_files == 1
+    assert f.relocation_file_reduction_tokens == 1_000
+    assert f.relocation_past_overspend_tokens == f.past_overspend_tokens
+    assert f.relocation_past_overspend_usd == pytest.approx(f.past_overspend_usd)
+
+
+def test_the_relocation_figure_is_never_summed_into_the_compression_one(db, monkeypatch):
+    """A section relocated out of a file is no longer there to be compressed, so
+    adding the two would price the same text twice (Critical Rule 27). They are
+    alternatives the user picks between, per file."""
+    db.upsert_session(make_session(session_id="s1"))
+    for _ in range(3):
+        db.insert_span(make_llm_span(
+            session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1),
+        ))
+    _patch_scan(monkeypatch, [_reloc_cand("~/.claude/CLAUDE.md", 1_000, 4_000)])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    # The compression aggregate is untouched by the relocation figure existing.
+    assert f.past_overspend_tokens == f.candidates[0].est_tokens_saved_window
+    assert f.relocation_past_overspend_tokens is not None
+    assert f.past_overspend_tokens != (
+        f.past_overspend_tokens + f.relocation_past_overspend_tokens
+    )
+
+
+def test_the_relocation_implied_rate_lands_inside_a_real_price_band(db, monkeypatch):
+    """Critical Rule 28, written as the mechanical check it prescribes: divide
+    the dollars by the tokens and the implied per-token rate must sit between
+    the cache-read rate and the input rate. A hardcoded-number assertion passes
+    happily while both fields drift; a rate assertion cannot, because a basis
+    mismatch always throws the implied rate orders of magnitude out of band."""
+    from tokenjam.core.pricing import get_rates
+
+    db.upsert_session(make_session(session_id="s1"))
+    for _ in range(8):
+        db.insert_span(make_llm_span(
+            session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1),
+        ))
+    _patch_scan(monkeypatch, [_reloc_cand("~/.claude/CLAUDE.md", 1_000, 4_000)])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    implied = f.relocation_past_overspend_usd / f.relocation_past_overspend_tokens * 1_000_000
+    assert rates.cache_read_per_mtok <= implied <= rates.input_per_mtok
+
+
+def test_a_file_with_nothing_relocatable_carries_no_relocation_figure(db, monkeypatch):
+    """Symmetric degrade: a measured zero is not a figure to render, and the
+    aggregate is `None` rather than `0` when nothing qualified — "no reference
+    section here" is not "relocation is worth nothing"."""
+    db.upsert_session(make_session(session_id="s1"))
+    db.insert_span(make_llm_span(
+        session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=100, output_tokens=10,
+        start_time=utcnow() - timedelta(days=1),
+    ))
+    _patch_scan(monkeypatch, [_cand("~/.claude/CLAUDE.md", 1_000, scope="global")])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    assert f.relocation_files == 0
+    assert f.relocation_past_overspend_usd is None
+    assert f.relocation_past_overspend_tokens is None
+    assert f.relocation_file_reduction_tokens is None
+    # ...while the compression figure is unaffected.
+    assert f.past_overspend_usd is not None
+
+
+def test_an_unpriceable_window_carries_neither_relocation_figure(db, monkeypatch):
+    """Same "no evidence" condition the compression figures degrade on: a file
+    no observed session loads gets no window figure at all, never a zero."""
+    _patch_scan(monkeypatch, [_reloc_cand("./CLAUDE.md", 400, 4_000, scope="repo")])
+    f = _run(db)
+    assert f.relocation_past_overspend_usd is None
+    assert f.relocation_past_overspend_tokens is None
+    # The one-time figure survives, exactly as `file_reduction_tokens` does.
+    assert f.relocation_file_reduction_tokens == 1_000
