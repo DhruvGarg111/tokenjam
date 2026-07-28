@@ -242,6 +242,16 @@ _ROUTE_NOTE = (
     "from. Applying stays a dry-run until `--go` because a human reading the "
     "diff is the only check on meaning: the structure gate verifies that code "
     "blocks, tables and tags came back verbatim, and does not read the prose."
+    " COVERAGE: the figure above prices ONLY what compression recovers, because "
+    "compression is the only one of the four routes this product performs. It "
+    "is not the size of the opportunity. The other three routes recover real "
+    "tokens that are NOT counted here — relocating reference material out of an "
+    "always-loaded file into a linked one is a pure MOVE with no semantic loss "
+    "at all, and on a rule-heavy file it is typically larger than anything "
+    "compression can reach. The difference between this figure and what those "
+    "routes would recover is unmeasured, not zero: it is the part this analyzer "
+    "does not yet perform, and pricing an operation the product cannot carry out "
+    "would be a ceiling the user could disprove."
 )
 
 

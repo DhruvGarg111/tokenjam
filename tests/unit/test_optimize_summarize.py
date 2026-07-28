@@ -1017,6 +1017,25 @@ def test_basis_refuses_to_present_compression_as_the_only_route(db):
     assert "does not read the prose" in basis
 
 
+def test_basis_states_the_figure_prices_only_the_operation_we_perform(db):
+    """The dollar figure is the COMPRESSION slice, not the size of the
+    opportunity. Measured on a real corpus, relocating reference material out of
+    always-loaded files is several times larger — and it is not counted here,
+    because pricing an operation the product cannot carry out would be a ceiling
+    the user could disprove. The gap must be stated, not implied by omission."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert "COVERAGE:" in basis
+    assert "prices ONLY what compression recovers" in basis
+    assert "not the size of the opportunity" in basis
+    assert "unmeasured, not zero" in basis
+    # ...and names the largest uncounted route as the lossless one it is.
+    assert "pure MOVE with no semantic loss" in basis
+
+
 def test_a_prune_route_candidate_keeps_its_full_figure(db, monkeypatch, tmp_path):
     """The route changes what is OFFERED, never what is claimed: the tokens are
     recoverable by whichever route the user picks, so a rule-heavy file is not
