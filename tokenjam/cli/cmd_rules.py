@@ -109,6 +109,7 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
         # "done" from "broken".
         state = (
             "applied" if rule.already_applied
+            else "dismissed" if rule.dismissed
             else ("on offer" if rule.offered else "deferred")
         )
         table.add_row(
@@ -122,7 +123,7 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
     console.print(table)
     console.print()
     for rule in rules:
-        if rule.offered or rule.already_applied:
+        if rule.offered or rule.already_applied or rule.dismissed:
             continue
         console.print(
             f"[muted]{escape(rule.signature)} — not on offer: "
@@ -176,6 +177,13 @@ def cmd_rules_show(
     if rule.already_applied:
         console.print()
         console.print(f"[ok]✓[/ok] Already applied. {escape(rule.blocked_reason)}")
+    elif rule.dismissed:
+        console.print()
+        console.print(f"[muted]Dismissed.[/muted] {escape(rule.blocked_reason)}")
+        console.print(
+            f"[muted]bring it back: [accent]tj rules undismiss "
+            f"{escape(rule.signature)}[/accent][/muted]",
+        )
     elif not rule.offered:
         console.print()
         console.print(f"[warn]Not on offer:[/warn] {escape(rule.blocked_reason)}")
@@ -327,3 +335,48 @@ def cmd_rules_applied(ctx: click.Context, output_json_flag: bool) -> None:
             f"[muted]{escape(row['signature'])} · {escape(row['applied_at'])}"
             f"[/muted]{state}",
         )
+
+
+@cmd_rules.command("dismiss")
+@click.argument("signature")
+@click.option("--reason", default="", help="Optional note, stored verbatim.")
+@json_option
+@click.pass_context
+def cmd_rules_dismiss(
+    ctx: click.Context, signature: str, reason: str, output_json_flag: bool,
+) -> None:
+    """Stop offering a rule. Reversible, and the figure is untouched."""
+    from tokenjam.core.optimize import dismissals
+
+    config: TjConfig = ctx.obj["config"]
+    record = dismissals.dismiss(config, signature, reason=reason)
+    if resolve_output_json(ctx, output_json_flag):
+        console.print_json(json.dumps(record))
+        return
+    console.print(f"[ok]✓[/ok] dismissed [accent]{escape(signature)}[/accent]")
+    console.print(
+        "[muted]What the behaviour already cost is still reported. Bring it "
+        f"back with [accent]tj rules undismiss {escape(signature)}[/accent]."
+        "[/muted]",
+    )
+
+
+@cmd_rules.command("undismiss")
+@click.argument("signature")
+@json_option
+@click.pass_context
+def cmd_rules_undismiss(
+    ctx: click.Context, signature: str, output_json_flag: bool,
+) -> None:
+    """Bring a dismissed rule back."""
+    from tokenjam.core.optimize import dismissals
+
+    config: TjConfig = ctx.obj["config"]
+    record = dismissals.undismiss(config, signature)
+    if resolve_output_json(ctx, output_json_flag):
+        console.print_json(json.dumps(record or {}))
+        return
+    if record is None:
+        console.print(f"[muted]{escape(signature)} was not dismissed.[/muted]")
+        return
+    console.print(f"[ok]✓[/ok] restored [accent]{escape(signature)}[/accent]")

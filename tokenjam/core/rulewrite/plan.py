@@ -34,6 +34,10 @@ ALREADY_APPLIED_REASON = (
     "You already applied this one. What it cost before you did is still "
     "reported in full; only the offer to write it again is withdrawn."
 )
+DISMISSED_REASON = (
+    "You dismissed this one. What the behaviour already cost is still reported "
+    "in full; only the offer is withdrawn, and you can bring it back."
+)
 
 
 def _destinations_from_proposal(raw: dict[str, Any]) -> tuple[RuleDestination, ...]:
@@ -130,6 +134,21 @@ def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
     )
 
 
+def dismissals_covers(signature: str, dismissed: set[str]) -> bool:
+    """Whether ``signature`` reads as dismissed.
+
+    Delegates the MATCHING to ``cost_apply.signature_is_applied``, which
+    already resolves a legacy agent-only mark as covering the later
+    model-qualified signatures for that agent. A dismissal has to honour the
+    same equivalence or a card the user dismissed under one signature would
+    reappear under its refinement — the same defect a second matcher would
+    reintroduce for applies.
+    """
+    from tokenjam.core.optimize import cost_apply
+
+    return cost_apply.signature_is_applied(signature, dismissed)
+
+
 def _mark_applied(rules: list[RuleWrite], config: TjConfig) -> list[RuleWrite]:
     """Flag every rule the user has already dealt with, and withdraw its offer.
 
@@ -148,7 +167,7 @@ def _mark_applied(rules: list[RuleWrite], config: TjConfig) -> list[RuleWrite]:
     every rule on offer. That is the safe direction — it can waste a user's
     attention, where the opposite hides a fix they never made.
     """
-    from tokenjam.core.optimize import cost_apply, relearn_apply
+    from tokenjam.core.optimize import cost_apply, dismissals, relearn_apply
 
     try:
         cost_sigs = cost_apply.applied_signatures(config)
@@ -158,10 +177,25 @@ def _mark_applied(rules: list[RuleWrite], config: TjConfig) -> list[RuleWrite]:
         relearn_sigs = relearn_apply.applied_signatures(config)
     except Exception:
         relearn_sigs = set()
+    try:
+        dismissed_sigs = dismissals.dismissed_signatures(config)
+    except Exception:
+        dismissed_sigs = set()
 
     out: list[RuleWrite] = []
     for rule in rules:
         known = relearn_sigs if rule.analyzer == "relearn" else cost_sigs
+        # ONE resolution pass over all three ledgers, matched by the ONE
+        # matcher. A dismissal is a different statement from an apply — "not
+        # this one" versus "I did this" — so it carries its own flag and its
+        # own reason, but it resolves through the same helper rather than a
+        # fourth copy of the signature filter.
+        if dismissals_covers(rule.signature, dismissed_sigs):
+            out.append(replace(
+                rule, dismissed=True, offered=False,
+                blocked_reason=rule.blocked_reason or DISMISSED_REASON,
+            ))
+            continue
         if not cost_apply.signature_is_applied(rule.signature, known):
             out.append(rule)
             continue

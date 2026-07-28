@@ -104,6 +104,16 @@ class RuleWrite:
     #: user who applies something and then sees nothing cannot tell "done"
     #: from "broken".
     already_applied: bool = False
+    #: The user dismissed this card. Same discipline as ``already_applied``
+    #: and for the same reason (Critical Rule 32): it withdraws the OFFER and
+    #: leaves ``past_overspend_*`` untouched. The behaviour still happened and
+    #: still cost what it cost; "not this one" is a statement about our
+    #: recommendation, not about their bill.
+    #:
+    #: Reversible by construction — the row stays listed carrying this flag so
+    #: there is something to un-dismiss. A durable dismissal with no way back
+    #: is worse than the browser-local one it replaces.
+    dismissed: bool = False
     #: Why the rule is going where it is going, and what the placement could not
     #: cover. Carried verbatim from ``core/optimize/rule_placement``; never
     #: re-derived here, so the CLI, the UI and the payload cannot disagree.
@@ -126,6 +136,7 @@ class RuleWrite:
             "offered": self.offered,
             "blocked_reason": self.blocked_reason,
             "already_applied": self.already_applied,
+            "dismissed": self.dismissed,
             "placement_basis": self.placement_basis,
             "placement_coverage_note": self.placement_coverage_note,
             "past_overspend_tokens": self.past_overspend_tokens,
@@ -150,6 +161,7 @@ class RuleWrite:
             offered=bool(raw.get("offered", True)),
             blocked_reason=str(raw.get("blocked_reason", "") or ""),
             already_applied=bool(raw.get("already_applied", False)),
+            dismissed=bool(raw.get("dismissed", False)),
             placement_basis=str(raw.get("placement_basis", "") or ""),
             placement_coverage_note=str(raw.get("placement_coverage_note", "") or ""),
             past_overspend_tokens=None if tokens is None else int(tokens),

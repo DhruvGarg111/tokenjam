@@ -95,6 +95,11 @@ class ApplyRequest(BaseModel):
     go: bool = False
 
 
+class DismissRequest(BaseModel):
+    signature: str
+    reason: str = ""
+
+
 class UndoRequest(BaseModel):
     signature: str
     #: One destination, or every destination this rule was applied to.
@@ -147,3 +152,32 @@ def post_rules_undo(request: Request, body: UndoRequest) -> dict[str, Any]:
         return undo(_config(request), body.signature, body.path, go=body.go)
     except RuleWriteRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/rules/dismiss", dependencies=[Depends(require_api_key)])
+def post_rules_dismiss(request: Request, body: DismissRequest) -> dict[str, Any]:
+    """Stop offering a rule, durably and server-side.
+
+    Replaces a browser-local dismissal that was never really recorded: a
+    cleared profile or a second browser brought every dismissed card back.
+    Suppresses the OFFER only — every ``past_overspend_*`` figure is untouched,
+    because the behaviour happened and cost what it cost regardless of what the
+    user thinks of our recommendation.
+    """
+    from tokenjam.core.optimize import dismissals
+
+    return dismissals.dismiss(_config(request), body.signature, reason=body.reason)
+
+
+@router.post("/rules/undismiss", dependencies=[Depends(require_api_key)])
+def post_rules_undismiss(request: Request, body: DismissRequest) -> dict[str, Any]:
+    """Bring a dismissed rule back.
+
+    The half that makes a durable dismissal safe to offer: without it the user
+    trades a card that returned on every browser for one that never returns
+    anywhere.
+    """
+    from tokenjam.core.optimize import dismissals
+
+    record = dismissals.undismiss(_config(request), body.signature)
+    return record or {"signature": body.signature, "state": "not-dismissed"}
