@@ -3146,31 +3146,33 @@ class DuckDBBackend:
         3. The ledger row, with ``oldest_kept`` read after the deletes (visible
            within the transaction) so it states what survived rather than what
            was intended to.
-        """
-        span_row = self.conn.execute(
-            "SELECT COUNT(*) FROM spans WHERE start_time < $1", [cutoff]
-        ).fetchone()
-        spans_deleted = int(span_row[0]) if span_row else 0
 
+        **Both counts come from the DELETEs themselves, not from a preceding
+        ``COUNT(*)``.** DuckDB returns the affected-row count for a ``DELETE``,
+        and using it is what makes the ledger's figure the number of rows this
+        transaction actually removed rather than an estimate of how many it
+        expected to. A separate count is wrong even inside the transaction and
+        badly wrong outside it: an ingest committing an aged-out span between
+        the count and the delete would have that span destroyed while the ledger
+        persisted the smaller, earlier number. Deriving the figure from the
+        delete makes that race structurally impossible instead of merely narrow,
+        which matters because the entire purpose of this ledger is that it can
+        be trusted about what was destroyed.
+        """
         with self._write_lock:
             self.conn.execute("BEGIN TRANSACTION")
             try:
-                self.conn.execute(
+                span_row = self.conn.execute(
                     "DELETE FROM spans WHERE start_time < $1", [cutoff]
-                )
-                orphan_row = self.conn.execute(
-                    "SELECT COUNT(*) FROM sessions s WHERE s.started_at < $1 "
-                    "AND NOT EXISTS ("
-                    "SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
-                    [cutoff],
                 ).fetchone()
-                sessions_deleted = int(orphan_row[0]) if orphan_row else 0
-                self.conn.execute(
+                spans_deleted = int(span_row[0]) if span_row else 0
+                session_row = self.conn.execute(
                     "DELETE FROM sessions s WHERE s.started_at < $1 "
                     "AND NOT EXISTS ("
                     "SELECT 1 FROM spans p WHERE p.session_id = s.session_id)",
                     [cutoff],
-                )
+                ).fetchone()
+                sessions_deleted = int(session_row[0]) if session_row else 0
                 oldest_row = self.conn.execute(
                     "SELECT MIN(start_time) FROM spans WHERE start_time IS NOT NULL"
                 ).fetchone()

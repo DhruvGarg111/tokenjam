@@ -506,3 +506,61 @@ def test_onboarding_is_idempotent_so_a_two_leg_flow_asks_once(monkeypatch):
     config = SimpleNamespace(storage=StorageConfig(analysis_span="30d"))
     cmd_onboard._apply_analysis_span(config)
     assert config.storage.analysis_span == "30d"
+
+
+def test_the_ledger_counts_rows_this_run_actually_deleted(store, monkeypatch):
+    """A span arriving between the count and the delete must still be counted.
+
+    Both figures come from the DELETEs' own affected-row counts rather than a
+    preceding `COUNT(*)`, which makes this race structurally impossible instead
+    of merely narrow. A separate count is wrong even inside the transaction: an
+    ingest committing an aged-out span in that gap would have it destroyed while
+    the ledger persisted the smaller, earlier number, so `tj doctor` would
+    under-report how much history was removed.
+
+    The interception point is the `DELETE FROM spans` statement, which exists in
+    BOTH the old and new shapes — a test hooked to the vanished `COUNT(*)` would
+    pass trivially against the fix and prove nothing.
+    """
+    _seed(store, days_ago=120, session_id="outside-1")
+    _seed(store, days_ago=150, session_id="outside-2")
+
+    real_conn = store.conn
+    late_arrival = {"done": False}
+
+    class ConnWithALateArrival:
+        """Delegates everything, but slips one more aged-out span in immediately
+        BEFORE the delete runs — the window a preceding COUNT(*) leaves open."""
+
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+
+        def execute(self, sql, *args, **kwargs):
+            if not late_arrival["done"] and sql.startswith("DELETE FROM spans"):
+                late_arrival["done"] = True
+                real_conn.execute(
+                    "INSERT INTO spans (span_id, trace_id, name, kind, "
+                    "status_code, start_time) "
+                    "VALUES ('late','t','x','internal','ok',$1)",
+                    [utcnow() - timedelta(days=200)],
+                )
+            return real_conn.execute(sql, *args, **kwargs)
+
+    before = real_conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+    proxy = ConnWithALateArrival()
+    monkeypatch.setattr(type(store), "conn", property(lambda self: proxy))
+    try:
+        run_retention_cleanup(store, StorageConfig(analysis_span="90d"))
+    finally:
+        monkeypatch.undo()
+
+    assert late_arrival["done"], "the late arrival never fired; test proves nothing"
+    after = real_conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+    ledgered = real_conn.execute(
+        "SELECT spans_deleted FROM retention_events"
+    ).fetchone()[0]
+
+    # Three spans existed by the time the delete ran, and all three went.
+    assert before == 2
+    assert after == 0
+    assert ledgered == 3
