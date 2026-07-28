@@ -139,6 +139,32 @@ def test_the_lint_catches_a_fix_that_relicenses_what_its_analyzer_bills_for():
     assert any("little tool work" in p for p in problems)
 
 
+def test_every_relicense_guard_actually_fires():
+    """A declared guard that cannot fire is decoration.
+
+    ``must_not_relicense`` is the load-bearing property — applying a fix has to
+    be able to ERASE the number its analyzer found — but it is data, and data
+    can be wrong in a way that always passes: a shape nobody would ever write,
+    or one already absent by construction. So every declared shape is injected
+    into its own record and must produce a NAMED violation.
+
+    It also covers the migration's own risk. The guard used to exist on the
+    sizing family alone, which is the one place it was already known to be
+    needed; the records that came in from the analyzers arrived with none, so
+    the property held over three records while reading as if it held over all.
+    """
+    guarded = [r for r in FIX_CATALOG.values() if r.must_not_relicense]
+    assert len(guarded) > 3, "the guard covers barely more than it started with"
+    for record in guarded:
+        for shape in sorted(record.must_not_relicense):
+            reopened = replace(record, text=f"{record.text} Also fine: {shape}.")
+            problems = lint_fix(reopened)
+            assert any("re-licenses the behaviour" in p for p in problems), (
+                record.key, shape,
+            )
+            assert any(shape in p for p in problems), (record.key, shape)
+
+
 def test_the_lint_catches_a_self_graded_escape_hatch():
     """"Unless the subtask genuinely needs deep reasoning" asks the agent to
     rate its own task's difficulty, and an agent asked that answers yes — so

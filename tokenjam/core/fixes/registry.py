@@ -279,6 +279,11 @@ SDK_TRIM_CONTEXT = register(FixRecord(
     analyzers=frozenset({"resend"}),
     answers="accumulated context reassembled into every request unchanged",
     lever=LEVER_ROUTING,
+    must_not_relicense=frozenset({
+        # The billed behaviour is resending the accumulated context unchanged.
+        "resend it unchanged",
+        "the harness will trim",
+    }),
 ))
 
 #: IMMEDIATE RELIEF, and labelled as such rather than as a fix. `/compact` is
@@ -301,6 +306,13 @@ COMPACTION_RELIEF = register(FixRecord(
     analyzers=frozenset({"resend"}),
     answers="a single session already carrying more accumulated context than its working set",
     lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # This record is allowed to be transient — it says so — but it must not
+        # present itself as the durable fix, because the analyzer bills for the
+        # pattern continuing, not for one full session.
+        "this fixes the pattern",
+        "no further change is needed",
+    }),
 ))
 
 #: An OBSERVATION for the Claude Code persona, not an offer. Prompt caching is
@@ -421,6 +433,15 @@ VERBOSITY_PREFER_SHORTER = register(FixRecord(
     analyzers=frozenset({"verbosity"}),
     answers="output tokens running well above the median for the same task shape",
     lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # The analyzer bills for output well above the cohort median. A fix that
+        # says long output is fine gives a pass to its entire population — and
+        # this record's honest hedge sits one clause away from exactly that, so
+        # it is the record most worth guarding mechanically.
+        "length is not a problem",
+        "longer output is always",
+        "ignore the length",
+    }),
 ))
 
 #: The batch-placement instruction. Advise-only in practice — adoption is an
@@ -566,6 +587,12 @@ RELEARN_SLEEP_CHAIN = register(FixRecord(
     analyzers=frozenset({"relearn"}),
     answers="blocked sleep-chain Bash commands retried after the harness refused them",
     lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # A busy-wait is the whole population. Suggesting a shorter sleep keeps
+        # the sleep.
+        "use a shorter sleep",
+        "sleep for less",
+    }),
 ))
 
 #: ONE record for TWO families. `stale_read_race` ("modified since read") and
@@ -593,6 +620,13 @@ RELEARN_REREAD_BEFORE_RETRYING_EDIT = register(FixRecord(
     analyzers=frozenset({"relearn"}),
     answers="edits retried against remembered file contents after the file moved underneath them",
     lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # The billed behaviour IS the retry against remembered contents. A fix
+        # that says to retry, or to try a shorter string, re-licenses it.
+        "retry the same edit",
+        "try again with",
+        "retry without reading",
+    }),
 ))
 
 #: The OPPOSITE failure to ``edit_string_not_found`` — too many matches, not
@@ -698,6 +732,15 @@ RELEARN_BASH_TIMEOUT = register(FixRecord(
     analyzers=frozenset({"relearn"}),
     answers="Bash commands held in the foreground until the harness killed them",
     lever=LEVER_AWARENESS,
+    must_not_relicense=frozenset({
+        # The analyzer bills for the tokens spent WAITING on a call the harness
+        # then killed. A fix that says to wait longer, or to keep it in the
+        # foreground, leaves that number exactly where it found it.
+        "wait for it to finish",
+        "just wait",
+        "run it in the foreground",
+        "block until",
+    }),
 ))
 
 RELEARN_BASH_CHAINED_APPROVAL = register(FixRecord(
