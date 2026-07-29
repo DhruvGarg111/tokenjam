@@ -1112,9 +1112,9 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .po-amount { font-family: 'Geist Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text); }
 /* A `.po-observed-tag` rule lived here, styling an "OBSERVED" chip beside the
    avoided-tile's label. Element and rule are both GONE, on founder call: the
-   tile's own title is already past tense ("What you could have avoided") and its
-   caption already names the window and the population ("over the last 30 days ·
-   ~22.2B tok · 13 causes"), so the chip restated what the surrounding copy says.
+   tile's own title is already past tense ("You Overspent") and its caption
+   already names the window and the population ("over the last 30 days · ~22.2B
+   tok · 13 causes"), so the chip restated what the surrounding copy says.
    Nothing else used the class.
    The tense now rests entirely on that title and that caption, which is why
    neither may be reworded forward-looking or shortened. */
@@ -10450,7 +10450,7 @@ function PastOverspendTile({ block }) {
   return html`
     <div class="opt-section opt-tile">
       <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">
-        What you could have avoided
+        You Overspent
       </div>
       ${/* Past tense in the figure's own caption, not only in the label: a
             screenshot of this tile has to carry its own tense. */ ''}
@@ -11546,17 +11546,28 @@ function ExcludedWasteNote({ excluded }) {
 // then printed "0" and "most recent unknown" for the next minute, which is a
 // settled claim of absence made before its own data existed. Absence is the most
 // dangerous thing to guess wrong, because it reads as reassurance.
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnown, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
-  const appliedPriceable = appliedEstimates.filter(i => i.usd != null);
-  const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
-  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.usd, 0);
-  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.tokens || 0), 0);
-  // Falls back to the bare count when nothing applied carries an estimate —
-  // never a fabricated "$0"/"0 tok" standing in for "no data".
-  const appliedBig = appliedLeadWithUsd ? fmtUsd(appliedUsdSum)
-    : appliedTokSum > 0 ? '~' + fmtTokens(appliedTokSum) + ' tok'
-    : String(appliedCount);
+// The applied estimate, demoted to the count tile's tooltip. It was the tile's
+// hero figure; the count replaced it there (see the note at the render site), and
+// this keeps the number reachable instead of deleting it. Returns '' when nothing
+// applied carries an estimate — never a fabricated "$0"/"0 tok" standing in for
+// "no data", which is the whole reason this is a hint and not a headline.
+// `suppressed` is load-bearing, not cosmetic: under local framing there is no
+// marginal cost to price, so a dollar figure must not appear even in a tooltip.
+// The old hero-figure derivation honoured it and this has to as well.
+function appliedEstimateHint(appliedEstimates, suppressed) {
+  const estimates = appliedEstimates || [];
+  const priceable = estimates.filter(i => i.usd != null);
+  const usd = priceable.reduce((s, i) => s + i.usd, 0);
+  const toks = estimates.reduce((s, i) => s + (i.tokens || 0), 0);
+  const figure = !suppressed && priceable.length > 0 && priceable.length * 2 >= estimates.length
+    ? fmtUsd(usd)
+    : toks > 0 ? '~' + fmtTokens(toks) + ' tok' : null;
+  if (!figure) return '';
+  return figure + ' estimated across these fixes — each one\'s own estimate at the '
+    + 'moment it was applied, never re-measured afterward';
+}
 
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnown, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
   const hasExcluded = Object.keys(excluded || {}).length > 0;
   // Whether the server's block actually has something to state. Checked here
   // rather than inside the band so the excluded-waste note has a home when it
@@ -11591,14 +11602,24 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
     <div style="display:flex;gap:14px;flex-wrap:wrap">
       ${hasOpenOverspend ? html`<${PastOverspendTile} block=${pastOverspend} />` : null}
       <div class="opt-section opt-tile">
-        <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes applied</div>
+        <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes</div>
         ${/* The green belongs to the label, not the figure: the number reads as
               a plain fact, matching the blue tile where the figure is also
               body-coloured rather than tinted. */ ''}
         ${/* Skeleton, never a zero. Same geometry as the real figure so the tile
               does not resize when the read lands. */ ''}
+        ${/* THE COUNT IS THE FIGURE. It used to be a token/dollar estimate
+              (`appliedBig`), which put an estimated quantity in the hero slot of a
+              tile whose subject is "how many fixes are in place" — two different
+              claims, and the estimate is the weaker one (each figure is a
+              point-in-time snapshot taken at apply and never re-measured). The
+              count is a fact the ledger knows exactly. Founder call.
+
+              Still gated: a skeleton, never a zero. `appliedCount` excludes
+              reverted records, which is what lets the caption below say
+              "successfully" without overclaiming. */ ''}
         ${appliedKnown
-          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied; never re-measured afterward">${appliedBig}</div>`
+          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title=${appliedEstimateHint(appliedEstimates, suppressed)}>${appliedCount}</div>`
           : html`<div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>`}
         ${/* The sub-line never restates the number above it. When the big
               figure is an estimate, the line dates it to apply time (the same
@@ -11609,10 +11630,13 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
         ${/* "most recent unknown" is a settled value too, and it was rendering
               before the read that would have supplied the date. Held back with
               the figure. */ ''}
+        ${/* Lowercase on purpose (founder call) — the uppercase label above it is
+              the tile's name, this is its sentence. It states what the number
+              MEANS rather than restating the number, and it carries the recency
+              the old estimate caption did. */ ''}
         ${appliedKnown
-          ? html`<div class="dim" style="font-size:12px;margin-top:2px">${appliedBig === String(appliedCount)
-              ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
-              : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>`
+          ? html`<div class="dim" style="font-size:12px;margin-top:2px">successfully applied${
+              daysAgoLabel(lastAppliedAt) ? ' · most recent ' + daysAgoLabel(lastAppliedAt) : ''}</div>`
           : html`<div class="shimmer" style="height:12px;width:66%;margin-top:6px"></div>`}
       </div>
     </div>
