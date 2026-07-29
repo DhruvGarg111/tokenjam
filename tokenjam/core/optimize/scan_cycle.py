@@ -182,6 +182,7 @@ def _trigger_analyzer_pass(
             cost_proposals.recompute_cost_proposals(
                 backend, config, until=anchor, report=report,
             )
+            _refresh_rule_presence(config)
         except Exception:  # noqa: BLE001 - background job, never crash a thread
             pass
         finally:
@@ -207,6 +208,37 @@ def _trigger_analyzer_pass(
         _CYCLE_COMPUTING.clear()
         raise
     return True
+
+
+def _refresh_rule_presence(config: Any) -> None:
+    """Ask which proposed rules are ALREADY in the user's instruction files.
+
+    Last leg of the cycle, and deliberately here rather than on a route: it shells
+    out to the user's local ``claude`` (one call per destination file, cached
+    against each file's content hash), and an analyzer-grade cost may never sit on
+    a user-facing request. ``core/rulewrite/presence`` owns the mechanism and why
+    the question needs a model rather than a matcher.
+
+    Runs AFTER the proposal stores are written, because it reads them: the rules
+    it asks about are exactly the ones this pass just produced.
+
+    Never raises and never blocks the cycle's own completion — every failure mode
+    (no CLI, timeout, unreadable file) resolves to "not present", which leaves the
+    rules on offer. A missing verdict costs a user one unnecessary row; a wrong
+    one hides a fix they never made.
+    """
+    try:
+        from tokenjam.core.rulewrite.plan import all_rule_writes
+        from tokenjam.core.rulewrite.presence import detect_presence
+
+        # The UNFILTERED set on purpose. `list_rule_writes` drops what the budget
+        # declined, and a rule already in the user's files is very often declined
+        # *because* those files are what saturate the budget — so asking only
+        # about the listable subset would never reach the population this exists
+        # to find.
+        detect_presence(config, all_rule_writes(config))
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
 
 
 def _write_relearn_from(

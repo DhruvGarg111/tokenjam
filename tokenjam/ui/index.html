@@ -8633,6 +8633,7 @@ function RulesView() {
   const [msg, setMsg] = useState(null);
   const [open, setOpen] = useState(null);         // signature whose detail is expanded
   const [preview, setPreview] = useState(null);   // { signature, applied, skipped }
+  const [tab, setTab] = useState('open');         // 'open' | 'applied'
 
   // Each panel gates on ITS OWN fetch. `null` is "not yet known" and renders a
   // skeleton; `[]` is "known and empty" and is the only state allowed to say
@@ -8657,6 +8658,16 @@ function RulesView() {
   (staged || []).forEach(s => {
     (stagedBySig[s.signature] = stagedBySig[s.signature] || []).push(s);
   });
+
+  // The two tab populations, split ONCE. "In place" is either route to done:
+  // tokenjam applied it (a ledger knows, exactly) or the user already had it
+  // (`already_present`, resolved by the model on the analyzer pass). Everything
+  // else is open. Split here rather than filtered inline at each render site, so
+  // the counts on the tabs and the rows inside them cannot disagree — and the
+  // predicate matches the server's own `open_count`/`in_place_count` derivation.
+  const allRules = rules || [];
+  const inPlaceRules = allRules.filter(r => r.already_applied || r.already_present);
+  const openRules = allRules.filter(r => !r.already_applied && !r.already_present);
 
   const doStage = async (sig) => {
     setBusy(true); setMsg(null);
@@ -8722,12 +8733,44 @@ function RulesView() {
       ${err ? html`<div class="panel"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
       ${msg ? html`<div class="panel"><div class="panel-body opt-line">${msg}</div></div>` : null}
 
-      <div class="rules-zone">On offer</div>
+      ${/* TWO POPULATIONS, TWO TABS. This page used to be one "On offer" zone
+            listing every rule, including the ones the write budget refused, each
+            explaining its refusal: "below the $5 floor", "would cost more to keep
+            than it recovers", "your instruction files already carry more standing
+            context than the budget allows to grow". Individually honest;
+            collectively a page of things the product declined to do, shown to a
+            user who came looking for something to apply.
+
+            The gate moved below this surface, so there is no refusal prose left
+            to render. What remains splits cleanly: something to do, or something
+            already done. Counts come from the server (`open_count` /
+            `in_place_count`) rather than being re-derived here, and they are held
+            back until the fetch resolves — a "(0)" painted mid-flight reads as a
+            settled "you have nothing", which is the worst thing this page can
+            say wrongly (root anti-pattern 22). */ ''}
+      <div class="tabs" role="tablist">
+        <button class="tab ${tab === 'open' ? 'active' : ''}" role="tab" aria-selected=${tab === 'open'} onClick=${() => setTab('open')}>
+          Open ${rules === null
+            ? html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`
+            : html`(${openRules.length})`}
+        </button>
+        <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>
+          Applied ${rules === null
+            ? html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`
+            : html`(${inPlaceRules.length})`}
+        </button>
+      </div>
+
+      ${tab === 'open' ? html`
       ${rules === null
           ? html`<div class="opt-line dim">Loading…</div>`
-          : rules.length === 0
-            ? html`<div class="empty compact">No permanent rules on offer. Run an optimize pass, then reload.</div>`
-            : rules.map(r => {
+          : openRules.length === 0
+            ? html`<div class="empty compact">${
+                inPlaceRules.length > 0
+                  ? 'Nothing left to write. Every rule the analyzers derived is already in your files.'
+                  : 'No permanent rules to write. Run an optimize pass, then reload.'
+              }</div>`
+            : openRules.map(r => {
                 const dests = r.destinations || [];
                 const st = stagedBySig[r.signature] || [];
                 return html`<div key=${r.signature} class="opt-section inbox-row" style="display:block">
@@ -8754,20 +8797,22 @@ function RulesView() {
                   </div>` : null}
                   ${r.placement_basis ? html`<div class="opt-line dim">${r.placement_basis}</div>` : null}
                   ${r.placement_coverage_note ? html`<div class="opt-line dim">${r.placement_coverage_note}</div>` : null}
-                  ${r.already_applied
-                    ? html`<div class="opt-line"><b>✓ Already applied.</b> <span class="dim">${r.blocked_reason}</span></div>`
-                    : r.dismissed
-                      ? html`<div class="opt-line dim"><b>Dismissed.</b> ${r.blocked_reason}</div>`
-                      : (!r.offered ? html`<div class="opt-line" style="color:var(--warn)">Not on offer: ${r.blocked_reason}</div>` : null)}
+                  ${/* No "Not on offer: <reason>" line any more. A rule the budget
+                        declined is not in this list at all — the gate sits below
+                        the surface now — so the only state worth stating here is
+                        the user's own: they dismissed it. */ ''}
+                  ${r.dismissed
+                    ? html`<div class="opt-line dim"><b>Dismissed.</b> ${r.blocked_reason}</div>`
+                    : null}
                   <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
                     <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
                       ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
                     </button>
-                    ${r.offered && !r.already_applied && !r.dismissed && dests.length ? html`
+                    ${r.offered && !r.dismissed && dests.length ? html`
                       <button class="cur-btn" disabled=${busy} onClick=${() => doStage(r.signature)}>Stage diffs</button>` : null}
                     ${r.dismissed
                       ? html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, true)}>Bring back</button>`
-                      : (!r.already_applied ? html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, false)}>Dismiss</button>` : null)}
+                      : html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, false)}>Dismiss</button>`}
                     ${st.length ? html`
                       <button class="cur-btn" disabled=${busy} onClick=${() => doPreview(r.signature)}>Preview (${st.length})</button>
                       <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(r.signature)}>Apply</button>` : null}
@@ -8795,19 +8840,68 @@ function RulesView() {
           </div>
         </div>
       </div>` : null}
+      ` : null}
 
-      <div class="rules-zone">Applied</div>
-      ${applied === null
+      ${tab === 'applied' ? html`
+      ${/* IN PLACE, BY EITHER ROUTE. Two ways a rule ends up here and the row
+            says which: tokenjam wrote it (an apply ledger knows, exactly), or the
+            user already had it (the model read their file and quoted back the
+            words that cover it). The second is the one that was missing, and it
+            is the reason a machine whose instruction files are full of these
+            rules used to see a page of refusals instead of a page of checkmarks.
+
+            Both keep their figure. What the recurrence cost before it was fixed
+            is what it cost (Critical Rule 32) — being fixed now does not un-spend
+            it, and for an already-present rule that still recurs the figure is
+            the interesting part, since it says the wording is not working. */ ''}
+      ${rules === null
           ? html`<div class="opt-line dim">Loading…</div>`
+          : inPlaceRules.length === 0
+            ? html`<div class="empty compact">No rules are in place yet. Nothing here has been written, and nothing matching was found in your instruction files.</div>`
+            : inPlaceRules.map(r => html`
+                <div key=${r.signature} class="opt-section inbox-row" style="display:block">
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <b>${r.title || r.signature}</b>
+                    <span class="dim" style="font-size:12px">${r.analyzer}</span>
+                    <span style="margin-left:auto">
+                      ${r.past_overspend_usd == null
+                        ? html`<span class="dim">—</span>`
+                        : html`<span>${fmtUsd(r.past_overspend_usd)}</span>`}
+                    </span>
+                  </div>
+                  ${r.already_applied
+                    ? html`<div class="opt-line" style="color:var(--success)">✓ Applied by tokenjam.</div>`
+                    : html`<div class="opt-line" style="color:var(--success)">
+                        ✓ Already in your instruction files${r.presence_path ? html` · <span class="mono" title=${r.presence_path}>${shortPath(r.presence_path)}</span>` : null}
+                      </div>
+                      ${/* The model's own evidence, shown rather than summarised:
+                            this verdict is an inference, and a reader who did not
+                            make it needs the file's words to check it against. */ ''}
+                      ${r.presence_evidence ? html`<div class="opt-line dim">Found: ${r.presence_evidence}</div>` : null}`}
+                  <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
+                      ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
+                    </button>
+                  </div>
+                  ${open === r.signature ? html`<pre class="sz-copybox" style="margin-top:10px">${r.artifact_text}</pre>` : null}
+                </div>`)}
+
+      ${/* The file-level undo surface, kept beneath the rows. It answers a
+            different question — which FILES tokenjam has written into and can
+            still restore — so it is not merged with the rule rows above. */ ''}
+      ${applied === null
+          ? null
           : applied.length === 0
-            ? html`<div class="empty compact">Nothing applied yet.</div>`
-            : applied.map(a => html`<div class="opt-section inbox-row opt-line" key=${a.source_path + a.signature}>
+            ? null
+            : html`<div class="rules-zone">Written by tokenjam · undo</div>
+              ${applied.map(a => html`<div class="opt-section inbox-row opt-line" key=${a.source_path + a.signature}>
                 <span class="mono" title=${a.source_path}>${shortPath(a.source_path)}</span>
                 <span class="dim"> · ${a.applied_at}</span>
                 ${a.undoable
                   ? html` <button class="cur-btn" disabled=${busy} onClick=${() => doUndo(a.signature, a.source_path)}>Undo</button>`
                   : html` <span class="dim">(${a.reason})</span>`}
-              </div>`)}
+              </div>`)}`}
+      ` : null}
     </div>`;
 }
 

@@ -28,6 +28,19 @@ from tokenjam.core.optimize import cost_apply, report_store, scan_cycle
 from tokenjam.core.optimize.build_stamp import UNKNOWN, tj_build
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_cycle_flag():
+    """The cycle's in-flight flag is a MODULE-GLOBAL Event, so a test that leaves
+    it set makes every later test in the process — in any file — believe a scan is
+    running. Cleared on both sides: before, so a leak from elsewhere cannot make a
+    test here pass or fail for the wrong reason; after, so nothing this module does
+    escapes it. The individual tests still clear it in their own `finally`; this is
+    the backstop for the ones that fail before reaching it."""
+    scan_cycle._CYCLE_COMPUTING.clear()
+    yield
+    scan_cycle._CYCLE_COMPUTING.clear()
+
+
 @pytest.fixture
 def cfg(tmp_path) -> TjConfig:
     return TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
@@ -322,14 +335,24 @@ def client(tmp_path):
     from fastapi.testclient import TestClient
 
     from tokenjam.api.app import create_app
-    from tokenjam.core.config import ApiAuthConfig, ApiConfig
+    from tokenjam.core.config import ApiAuthConfig, ApiConfig, OptimizeConfig
     from tokenjam.core.db import InMemoryBackend
     from tokenjam.core.ingest import build_default_pipeline
 
+    # `scan_enabled=False` IS LOAD-BEARING, not tidiness. App startup otherwise
+    # kicks a real analyzer cycle on a background thread, and the in-flight flags
+    # that thread sets are MODULE-GLOBAL — so a scan still running when this
+    # fixture tears down leaks "computing" into whatever test runs next, in a
+    # different file, on the same process. That is exactly how this module made
+    # `test_relearn_proposals_carries_persona_when_never_run` fail on 3.10 while
+    # passing on 3.11/3.12: a race, surfaced by test ordering rather than by any
+    # logic difference. A test that only needs to read a payload shape must not
+    # start a corpus pass.
     config = TjConfig(
         version="1",
         storage=StorageConfig(path=str(tmp_path / "t.duckdb")),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        optimize=OptimizeConfig(scan_enabled=False),
     )
     db = InMemoryBackend()
     app = create_app(
