@@ -119,6 +119,9 @@ def get_optimize(
     payload: dict[str, Any] = dict(body)
     payload.update(envelope)
     payload["report_available"] = True
+    payload["findings"] = _with_window_scoped_relearn(
+        payload.get("findings"), envelope.get("window_days"),
+    )
 
     report = report_store.stored_report(config)
     if report is None:
@@ -208,6 +211,69 @@ def get_optimize_analyzers() -> dict[str, Any]:
             "disabled": sorted(disabled),
         }
     return {"registered": registered, "personas": personas}
+
+
+#: The tile-level fields a window-scoped finding publishes. Present on relearn
+#: whenever a bucket for the report's own window exists; the surface renders
+#: THESE, never the unbounded `past_overspend_usd` beside them.
+WINDOW_SCOPED_USD = "window_scoped_past_overspend_usd"
+WINDOW_SCOPED_TOKENS = "window_scoped_past_overspend_tokens"
+WINDOW_SCOPED_WINDOW = "window_scoped_window"
+WINDOW_SCOPED_BASIS = "window_scoped_basis"
+
+#: Why a finding that HAS a window vocabulary published no figure for this
+#: report's window. A surface may not fall back to the unbounded figure on
+#: seeing this — that fallback is the defect this whole field exists to close.
+WINDOW_SCOPED_UNAVAILABLE_BASIS = (
+    "unknown, not zero, and emphatically not the unbounded figure beside it. "
+    "This analyzer measures over all retained history and publishes bounded "
+    "buckets for a fixed vocabulary of windows; none of them equals the window "
+    "this report was computed over, so it has no figure that can sit beside "
+    "this report's other findings. Refresh the analyzer pass to fold this in"
+)
+
+
+def _with_window_scoped_relearn(findings: Any, window_days: Any) -> Any:
+    """``findings`` with relearn carrying a figure on THIS report's window.
+
+    Relearn is the one analyzer whose ``past_overspend_usd`` is unbounded by
+    design — its signal is recurrence across history, so ``run(ctx)``
+    deliberately does not forward the report's ``since``. Every other finding on
+    this payload is scoped to ``window_days``. The Dashboard's recoverable-waste
+    row rendered all of them as peers, so relearn's all-history figure sat
+    unmarked beside five window-scoped ones and a reader summing the row got a
+    total on no basis at all.
+
+    The bounded figure already existed: the detector precomputes a windowed
+    bucket vocabulary while it still holds the per-occurrence dates
+    (``core/optimize/relearn_window``). This selects the one matching this
+    report's own window and nets it through the SAME helper the Review inbox
+    row uses, so the two surfaces publish one relearn number per window from
+    one code path rather than two that happen to agree.
+
+    Derived on read, not stored: the stored dict stays exactly what the
+    analyzers wrote (the unbounded fields feed the write budget's pre-net gross
+    and must not be shrunk in place — see ``core/optimize/write_budget``).
+
+    Immutable: returns new dicts, never writes into the stored body.
+    """
+    from tokenjam.core.optimize.inbox_contribution import window_scoped_finding_figure
+
+    if not isinstance(findings, dict):
+        return findings
+    relearn = findings.get("relearn")
+    if not isinstance(relearn, dict):
+        return findings
+    figure = window_scoped_finding_figure(relearn, days=window_days)
+    scoped = {
+        WINDOW_SCOPED_USD: None if figure is None else figure["usd"],
+        WINDOW_SCOPED_TOKENS: None if figure is None else figure["tokens"],
+        WINDOW_SCOPED_WINDOW: None if figure is None else figure["window"],
+        WINDOW_SCOPED_BASIS: (
+            WINDOW_SCOPED_UNAVAILABLE_BASIS if figure is None else figure["basis"]
+        ),
+    }
+    return {**findings, "relearn": {**relearn, **scoped}}
 
 
 def _mix(fn: Any, conn: Any, since_dt: Any, until_dt: Any, agent_id: str | None) -> dict:

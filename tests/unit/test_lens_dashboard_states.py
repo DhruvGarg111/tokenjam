@@ -377,7 +377,10 @@ def test_the_recoverable_waste_heading_has_no_estimated_badge(html):
     # The heading now also carries the scan's provenance + rescan control, so it
     # spans several lines; the property being pinned is that no "estimated" pill
     # sits beside the heading TEXT, not the exact one-line markup it used to have.
-    idx = html.index(">Recoverable waste<")
+    # The heading text is now followed by the band's own window statement
+    # ("· over the last N days"), so anchor on the text rather than on the
+    # closing bracket that used to sit immediately after it.
+    idx = html.index(">Recoverable waste")
     heading = html[idx - 400:idx + 400]
     assert "band-label" in heading
     assert "estimated-tag" not in heading

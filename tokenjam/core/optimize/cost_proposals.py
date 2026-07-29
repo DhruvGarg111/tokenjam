@@ -50,8 +50,9 @@ from typing import Any, Callable
 
 from tokenjam.core import fixes
 from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_SKILL
-from tokenjam.core.analysis_span import FALLBACK_WINDOW_DAYS as _FALLBACK_WINDOW_DAYS
-from tokenjam.core.analysis_span import window_days_for
+from tokenjam.core.optimize.report_window import (
+    FALLBACK_WINDOW_DAYS as _REPORT_FALLBACK_WINDOW_DAYS,
+)
 
 # House-style label strings. Kept verbatim on every cost proposal so no channel
 # can surface a savings figure without the honesty framing (Rule 14).
@@ -2627,32 +2628,32 @@ def _resend_to_proposals(
 #: run uses"; ``cost_window_days_for`` below is that, and every production
 #: caller goes through it.
 #:
-#: A fixed 30 days was the whole look-back for as long as this was the default,
-#: and a rolling month is not history: a dead MCP server injected into hundreds
-#: of sessions with zero invocations did not begin costing money 30 days ago,
-#: and pricing it as though it did understates a past-tense figure by however
-#: long the behaviour actually ran. The basis is now the span the user chose at
-#: onboarding, bounded by what the store actually holds — the same span
-#: retention is derived from, so the figure can never claim a window whose data
-#: has been deleted.
-FALLBACK_COST_WINDOW_DAYS = _FALLBACK_WINDOW_DAYS
+#: Re-exported from ``core/optimize/report_window`` rather than defined here:
+#: the stored analyzer report falls back to the same number, and two fallbacks
+#: would put the two surfaces back on two windows in exactly the degraded case
+#: where nobody can check. How far back a normal run looks is
+#: ``[optimize] scan_window_days``, bounded by the chosen analysis span and by
+#: the history the store actually holds — see that module.
+FALLBACK_COST_WINDOW_DAYS = _REPORT_FALLBACK_WINDOW_DAYS
 
 
 def cost_window_days_for(config: Any, conn: Any) -> int:
     """The span past-overspend may accumulate over.
 
-    Two independent bounds, and the honest answer is the smaller: the span the
-    user asked for (``storage.analysis_span``) and how far back this store's
-    oldest dated row actually sits. A 90-day choice over a store that has been
-    running a week is answerable for a week, and an "all available" choice is
-    exactly the measured history.
-
-    The arithmetic itself lives in ``core/analysis_span`` so relearn's
-    precomputed window vocabulary resolves the SAME number — the Review inbox
-    publishes one window label across both feeds, and two derivations of it
-    would be free to disagree.
+    Delegated to ``core/optimize/report_window`` — the ONE seam the stored
+    analyzer report resolves its window through too. This function used to call
+    ``analysis_span.window_days_for`` directly, i.e. the chosen span bounded by
+    the measured history, while the Dashboard's tiles came off a report scoped
+    to ``[optimize] scan_window_days``. Both published ``past_overspend_usd``
+    and the two windows were free to disagree; on a real corpus they did (69
+    against 30), so the Review inbox headline and the tile row could not be
+    compared even though they name the same metric. Read that module's
+    docstring before changing what a window means here, and do not restore a
+    second derivation.
     """
-    return window_days_for(getattr(config, "storage", None), conn)
+    from tokenjam.core.optimize.report_window import report_window_days
+
+    return report_window_days(config, conn)
 
 
 #: Mirrors ``relearn_store``'s own ``_LOCK``/``_COMPUTING`` pair, kept local to
@@ -2894,7 +2895,7 @@ def cost_proposals_from_report(
     (that helper's conservative default runs the other way — see its own
     docstring) — neither ever assumes ``"claude-code"``.
 
-    ``window_days`` (the resolved analysis span — see ``cost_window_days_for``)
+    ``window_days`` (the shared report window — see ``cost_window_days_for``)
     is used for exactly ONE thing: sizing the
     write budget's per-month standing-cost comparison
     (``_write_budget_basis``). It never rescales a proposal's figure. Every

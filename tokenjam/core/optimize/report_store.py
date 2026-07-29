@@ -301,13 +301,18 @@ def _min_rescan_seconds(config: TjConfig | None) -> int:
         return 60
 
 
-def _window_days(config: TjConfig | None) -> int:
-    opt = getattr(config, "optimize", None)
-    try:
-        days = int(getattr(opt, "scan_window_days", 30))
-    except (TypeError, ValueError):
-        days = 30
-    return days if days > 0 else 30
+def _window_days(config: TjConfig | None, conn: Any = None) -> int:
+    """The window this scan observes over — the SAME seam the Review inbox's
+    cost-proposal recompute resolves through (``core/optimize/report_window``).
+
+    It used to read ``scan_window_days`` alone while the cost side read the
+    resolved analysis span, so the two surfaces published one metric under two
+    windows and neither said which. See that module's docstring; do not
+    reintroduce a local derivation here.
+    """
+    from tokenjam.core.optimize.report_window import report_window_days
+
+    return report_window_days(config, conn)
 
 
 def recompute_now(
@@ -339,7 +344,10 @@ def recompute_now(
         from tokenjam.core.optimize import build_report, report_to_dict
         from tokenjam.utils.time_parse import utcnow
 
-        days = window_days if window_days is not None else _window_days(config)
+        days = (
+            window_days if window_days is not None
+            else _window_days(config, getattr(db, "conn", None))
+        )
         until = utcnow()
         since = until - timedelta(days=days)
         try:

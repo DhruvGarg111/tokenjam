@@ -7196,10 +7196,33 @@ function classifyFinding(name, fd, skipped) {
   if (fd && fd.enabled === false) {
     return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
   }
-  const usd = fd ? fd.past_overspend_usd : null;
-  const tokens = fd ? fd.past_overspend_tokens : null;
+  // WHICH FIGURE A TILE IS ALLOWED TO SHOW. Every tile in this row sits under
+  // ONE window (the stored report's `window_days`), so a tile may only publish a
+  // figure observed over that window. Most analyzers have exactly one figure and
+  // it is already window-scoped. relearn does not: its `past_overspend_usd` is
+  // unbounded by design (its signal is recurrence across all retained history —
+  // core/optimize/analyzers/relearn.py's `run(ctx)` deliberately does not
+  // forward the report window), and rendering it here put an all-history number
+  // beside five 30-day ones with nothing marking it. Measured on a real corpus
+  // that tile said $386.64 while the Review inbox said $260.21 for the same
+  // analyzer over the same days, and a reader summing the row got a total on no
+  // basis at all.
+  //
+  // The server now derives the bounded figure for this report's own window and
+  // publishes it as `window_scoped_past_overspend_usd`, through the same helper
+  // the inbox row uses (core/optimize/inbox_contribution). When that field is
+  // PRESENT it is the only figure this tile may render — including when it is
+  // null, which means "no figure on this window's basis". Falling back to the
+  // unbounded number there is the exact defect this closes, so `not_ready` is
+  // the honest state rather than a bigger, wrong-basis dollar amount.
+  const windowScoped = fd && 'window_scoped_past_overspend_usd' in fd;
+  const usd = fd ? (windowScoped ? fd.window_scoped_past_overspend_usd : fd.past_overspend_usd) : null;
+  const tokens = fd ? (windowScoped ? fd.window_scoped_past_overspend_tokens : fd.past_overspend_tokens) : null;
   if (usd != null && usd > 0) {
-    return { state: 'actionable', usd, tokens, basis: fd.estimate_basis || '' };
+    return { state: 'actionable', usd, tokens, basis: (windowScoped ? fd.window_scoped_basis : fd.estimate_basis) || '' };
+  }
+  if (windowScoped && usd == null) {
+    return { state: 'not_ready', hint: 'No figure on this window’s basis yet; rescan to fold it in.' };
   }
   // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
   // (positive) from "nothing here" so we never tell a user to raise efficacy
@@ -12238,7 +12261,17 @@ function DashboardView({ params }) {
         ${html`
             <div class="dash-triage">
               <div class="dash-col">
-                <div class="band-label">Recoverable waste</div>
+                ${/* The band states its OWN window, beside the figures rather
+                      than only in the provenance bar at the top of the page.
+                      These tiles come from a stored analyzer pass, so the
+                      window is the one that pass ran at — NOT the `since` the
+                      page's own picker is set to, which re-scopes the live
+                      spend chart below and nothing here. Two surfaces published
+                      this metric under two windows and neither said so; the
+                      windows are one seam now (core/optimize/report_window.py)
+                      and each surface still names it, because a figure whose
+                      window the reader cannot see is not auditable. */ ''}
+                <div class="band-label">Recoverable waste${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays} days</span>` : null}</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
