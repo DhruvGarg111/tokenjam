@@ -2693,6 +2693,31 @@ def is_computing_cost_proposals() -> bool:
 #: whose fix has no representable inbox card, should one appear.
 
 
+def _adapter_failure_entries(failures: dict[str, str]) -> dict[str, Any]:
+    """``excluded`` entries for analyzers whose adapter raised.
+
+    Same channel the rollup already uses for money a caller deliberately did
+    not sum in — here the money is not withheld but UNKNOWN, so the figure
+    fields are ``None`` rather than ``0``. Absent is never zero: a surface
+    reading this states that the analyzer is missing from the total, which is
+    the one honest thing to say when its contribution could not be built.
+    """
+    return {
+        name: {
+            "past_overspend_usd": None,
+            "past_overspend_tokens": None,
+            "label": name,
+            "note": (
+                f"The {name} analyzer could not be turned into review rows on "
+                f"this refresh, so none of its money is in the total above. "
+                f"The figure is unknown, not zero."
+            ),
+            "error": message,
+        }
+        for name, message in sorted(failures.items())
+    }
+
+
 def recompute_cost_proposals(
     db: Any,
     config: Any,
@@ -2798,10 +2823,23 @@ def recompute_cost_proposals(
             # this gates — see `_placement_to_proposals`).
             plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
             pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
+            # An analyzer whose adapter raised contributed NOTHING to the
+            # proposals about to be stored, so the headline summed over them
+            # is short by that analyzer's whole figure. Recorded as an
+            # `excluded` entry with NO number: what it would have contributed
+            # is precisely what could not be computed, and inventing a zero
+            # there would restate the bug as a fact.
+            adapter_failures: dict[str, str] = {}
+
+            def _record_adapter_failure(name: str, exc: BaseException) -> None:
+                adapter_failures[name] = f"{type(exc).__name__}: {exc}"
+
             proposals = cost_proposals_from_report(
                 report, config=config, pricing_mode=pricing_mode,
                 window_days=float(effective_window_days),
+                on_adapter_error=_record_adapter_failure,
             )
+            excluded = _adapter_failure_entries(adapter_failures)
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -2813,6 +2851,7 @@ def recompute_cost_proposals(
             relearn_store.write_cost_proposals(
                 proposals, config=config,
                 window_days=effective_window_days,
+                excluded=excluded or None,
                 # The RESOLVED bounds, not just the length. A day count alone
                 # cannot be compared against the analyzer report's own
                 # scan_since/scan_until, which is what made a per-analyzer
@@ -2897,6 +2936,7 @@ def trigger_background_cost_recompute(
 def cost_proposals_from_report(
     report: Any, config: Any = None, *, pricing_mode: str = "api",
     window_days: float = 30.0,
+    on_adapter_error: Any = None,
 ) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
@@ -2907,6 +2947,20 @@ def cost_proposals_from_report(
     findings (analyzer not run, no candidates) contribute nothing. Never
     raises — a malformed finding is skipped so one bad analyzer can't sink
     the inbox.
+
+    **A skipped analyzer is a hole in the headline, so it is never silent.**
+    Swallowing the exception keeps the inbox alive, which is right; swallowing
+    it WITHOUT A TRACE published a smaller total that looked complete, which is
+    the failure this argument exists to end. A whole analyzer once vanished
+    this way — a stored report rehydrated its per-agent rows as plain dicts,
+    every ``row.delta_usd`` raised, and the inbox quietly dropped the entire
+    ``downsize`` contribution while the Dashboard tile went on showing it, so
+    the two surfaces disagreed by that analyzer's full figure with no error
+    anywhere. ``on_adapter_error(analyzer_name, exc)`` is called for each
+    adapter that raises; a caller that persists the result routes those into
+    the ``excluded`` channel so the surface states "this analyzer is missing"
+    rather than implying its money is zero. ``None`` keeps the bare skip, for
+    callers with nowhere to put the disclosure.
 
     ``config`` is optional and used for one thing: looking up the local source
     path a user registered for an agent, which decides whether the downsize card
@@ -2968,30 +3022,38 @@ def cost_proposals_from_report(
     def _pick(name: str) -> Any:
         return None if name in disabled else findings.get(name)
 
+    # NAMED, because the name is what a failure has to be reported AS: an
+    # adapter that raises contributes nothing, and "nothing" is only
+    # distinguishable from "this analyzer found nothing" if the skip can say
+    # which analyzer it was. See `on_adapter_error` in the docstring.
     adapters = (
         (
+            "downsize",
             lambda f: _downsize_to_proposal(f, config, persona=persona),
             getattr(report, "downgrade", None),
         ),
-        (lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
-        (lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
-        (lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
-        (lambda f: _cache_lookback_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_lookback_to_proposals(f, persona=persona), _pick("cache")),
         (
+            "cache-recommend",
             lambda f: _cache_recommend_to_proposals(f, _pick("cache"), persona=persona),
             _pick("cache-recommend"),
         ),
-        (_trim_to_proposals, _pick("trim")),
-        (lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
+        ("trim", _trim_to_proposals, _pick("trim")),
+        ("subagent", lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
         (
+            "placement",
             lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode, persona=persona),
             _pick("placement"),
         ),
-        (_deadweight_to_proposals, _pick("deadweight")),
-        (lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
-        (lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
-        (lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
+        ("deadweight", _deadweight_to_proposals, _pick("deadweight")),
+        ("script", lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
+        ("reuse", lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
+        ("verbosity", lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
         (
+            "resend",
             # The resend card is compound: it names the concrete over-powered
             # subagent (from the `subagent` finding) that the offload rule
             # should also right-size, so the two levers land as one card rather
@@ -3002,12 +3064,17 @@ def cost_proposals_from_report(
             ),
             _pick("resend"),
         ),
-        (_summarize_to_proposals, _pick("summarize")),
+        ("summarize", _summarize_to_proposals, _pick("summarize")),
     )
-    for adapter, finding in adapters:
+    for name, adapter, finding in adapters:
         try:
             proposals.extend(adapter(finding))
-        except Exception:
+        except Exception as exc:
+            if on_adapter_error is not None:
+                try:
+                    on_adapter_error(name, exc)
+                except Exception:
+                    pass   # a broken reporter must not sink the inbox either
             continue
     proposals = _apply_write_budget(proposals, report, window_days, config)
     # Order matters: the write budget can NET a proposal's figure down against

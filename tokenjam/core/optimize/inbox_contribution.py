@@ -223,6 +223,7 @@ def _net_of_reread(bucket: Mapping[str, Any]) -> dict[str, Any] | None:
 
 def window_scoped_finding_figure(
     finding: Any, *, days: float | int | None,
+    applied_signatures: Iterable[str] = (),
 ) -> dict[str, Any] | None:
     """Relearn's FINDING-level past overspend, on the window ``days`` names.
 
@@ -244,6 +245,23 @@ def window_scoped_finding_figure(
     nearest-match fallback): a surface must then say it has no figure on this
     window's basis, never fall back to the unbounded one.
 
+    **SAME POPULATION AS THE INBOX, NOT JUST THE SAME WINDOW.** The
+    finding-level bucket covers EVERY cluster the detector retained, including
+    ones the user has already applied a fix for; the Review inbox sums the
+    OPEN clusters, because a headline answers what is still outstanding. Same
+    window, same netting, different population — so the two disagreed by
+    exactly the applied clusters' worth, and the Dashboard went on claiming
+    money the user had already recovered (apply a fix, watch the tile not
+    move). ``applied_signatures`` closes that: the figure is summed from the
+    open clusters through ``relearn_contribution_rows`` — the inbox's OWN
+    derivation, not a second one that agrees today — so the two surfaces are
+    equal by construction. The bucket still decides whether this window has a
+    basis at all, and still supplies the window labels.
+
+    Passing no signatures keeps the whole-population figure, which is correct
+    for a caller that genuinely wants every cluster (nothing applied is the
+    normal case, and then the two are identical anyway).
+
     Immutable: reads the finding, returns a new dict, never writes to it.
     """
     if not isinstance(finding, Mapping):
@@ -260,6 +278,16 @@ def window_scoped_finding_figure(
     netted = _net_of_reread(bucket)
     if netted is None:
         return None
+    applied = {str(s) for s in applied_signatures}
+    if applied:
+        rows = relearn_contribution_rows(
+            finding, label=label, applied_signatures=applied,
+        )
+        netted = {
+            **netted,
+            "usd": sum((r.get("past_overspend_usd") or 0.0) for r in rows),
+            "tokens": sum((r.get("past_overspend_tokens") or 0) for r in rows),
+        }
     return {
         **netted,
         "window": label,

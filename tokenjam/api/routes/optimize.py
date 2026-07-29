@@ -120,7 +120,7 @@ def get_optimize(
     payload.update(envelope)
     payload["report_available"] = True
     payload["findings"] = _with_window_scoped_relearn(
-        payload.get("findings"), envelope.get("window_days"),
+        payload.get("findings"), envelope.get("window_days"), config=config,
     )
 
     report = report_store.stored_report(config)
@@ -233,7 +233,9 @@ WINDOW_SCOPED_UNAVAILABLE_BASIS = (
 )
 
 
-def _with_window_scoped_relearn(findings: Any, window_days: Any) -> Any:
+def _with_window_scoped_relearn(
+    findings: Any, window_days: Any, *, config: Any = None,
+) -> Any:
     """``findings`` with relearn carrying a figure on THIS report's window.
 
     Relearn is the one analyzer whose ``past_overspend_usd`` is unbounded by
@@ -264,7 +266,22 @@ def _with_window_scoped_relearn(findings: Any, window_days: Any) -> Any:
     relearn = findings.get("relearn")
     if not isinstance(relearn, dict):
         return findings
-    figure = window_scoped_finding_figure(relearn, days=window_days)
+    # The clusters the user has ALREADY fixed, excluded here for the same
+    # reason the Review inbox excludes them: a headline states what is still
+    # outstanding. Without this the tile kept counting recovered money, so
+    # applying a fix moved the inbox and left the Dashboard unchanged. Failing
+    # to resolve them degrades toward the whole-population figure, which is
+    # the old behaviour rather than a new wrong one.
+    applied: set[str] = set()
+    try:
+        from tokenjam.core.optimize import relearn_apply
+
+        applied = set(relearn_apply.applied_signatures(config))
+    except Exception:
+        applied = set()
+    figure = window_scoped_finding_figure(
+        relearn, days=window_days, applied_signatures=applied,
+    )
     scoped = {
         WINDOW_SCOPED_USD: None if figure is None else figure["usd"],
         WINDOW_SCOPED_TOKENS: None if figure is None else figure["tokens"],
