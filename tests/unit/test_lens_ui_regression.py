@@ -4949,7 +4949,14 @@ def test_rescan_control_sits_top_right_of_each_heading_row(html):
     ov_head_start = dash_fn.index('<div class="ov-head">')
     ov_head_end = dash_fn.index("</div>\n    </div>", ov_head_start)
     assert "<${ScanBar}" in dash_fn[ov_head_start:ov_head_end]
-    assert '<div class="band-label">Recoverable waste</div>' in dash_fn
+    # The band label carries the band's own window ("· over the last N days")
+    # and nothing else. The property pinned here is that the rescan control is
+    # not among that "nothing else" — provenance and the re-run button live in
+    # the heading row, one per page, not per band.
+    band_at = dash_fn.index('<div class="band-label">Recoverable waste')
+    band_label = dash_fn[band_at:dash_fn.index("</div>", band_at)]
+    assert "<${ScanBar}" not in band_label
+    assert "rescan" not in band_label.lower()
 
     # Review inbox: ScanBar renders beside the "Inbox" page-title, not as a
     # bespoke sz-link.
