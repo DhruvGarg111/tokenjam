@@ -28,6 +28,17 @@ explicit rescan from any surface — refreshes all three stores, and
 as "keeps the daemon from ever scanning on its own", and relearn and the cost
 proposals are scans).
 
+ONE PASS, TWO VIEWS. The deeper defect the anchor work uncovered: a cycle ran
+``build_report`` TWICE. The report store built one; ``recompute_cost_proposals``
+built another. So an analyzer like ``subagent`` was computed twice per cycle, by
+two separate scans of a database that ingestion keeps writing to, and the two
+results were stored separately and then published side by side on two surfaces.
+No amount of window or anchor agreement can make those match, because they read
+the corpus at different moments — the figures were only ever as close as the gap
+between two scans. The cycle now builds ONE report and hands it to the cost
+adapters, which are a pure transformation of a report rather than a second
+measurement of the corpus, so the two surfaces are identical BY CONSTRUCTION.
+
 ONE ANCHOR, RESOLVED HERE. The window LENGTH is one seam already
 (``core/optimize/report_window.py``); the instant it is subtracted from was
 not. Each pass called ``utcnow()`` for itself, so two surfaces publishing one
@@ -86,8 +97,7 @@ def trigger_scan_cycle(
     the surface can show "last refresh failed" rather than a stale figure with
     no explanation).
     """
-    from tokenjam.core.optimize import cost_proposals, relearn_store, report_store
-
+    from tokenjam.core.optimize import relearn_store
     from tokenjam.utils.time_parse import utcnow
 
     # Resolved ONCE, before anything is dispatched, so every pass in this cycle
@@ -101,13 +111,60 @@ def trigger_scan_cycle(
         except Exception:  # noqa: BLE001 - one store must not sink the cycle
             started[name] = False
 
-    _try("report", lambda: report_store.trigger_background_recompute(
-        backend_factory, config, until=anchor,
+    _try("report_and_cost", lambda: _trigger_report_and_cost(
+        backend_factory, config, anchor,
     ))
     _try("relearn", lambda: relearn_store.trigger_background_recompute(
         backend_factory, config=config,
     ))
-    _try("cost_proposals", lambda: cost_proposals.trigger_background_cost_recompute(
-        backend_factory, config=config, until=anchor,
-    ))
     return started
+
+
+def _trigger_report_and_cost(
+    backend_factory: Callable[[], Any], config: Any, anchor: Any,
+) -> bool:
+    """The single analyzer pass, feeding BOTH the report and the cost stores.
+
+    One thread, one backend, one ``build_report``. The report store is written
+    first (it is the one every analyzer surface reads), then the SAME findings
+    are adapted into cost proposals — see this module's docstring on why that
+    has to be one measurement rather than two.
+
+    Returns ``False`` when the report store's own overlap guard declined, which
+    means a pass is already in flight and this cycle is a no-op.
+    """
+    import threading
+
+    from tokenjam.core.optimize import cost_proposals, report_store
+
+    if report_store.is_computing():
+        return False
+
+    def _job() -> None:
+        backend = None
+        try:
+            backend = backend_factory()
+            stored = report_store.recompute_now(backend, config, until=anchor)
+            if stored is None:
+                # The overlap guard declined between the check above and here.
+                return
+            # The typed report the pass just wrote. `None` when the stored
+            # payload cannot be rehydrated (corrupt, or written by a newer
+            # producer); the cost recompute then builds its own, which is the
+            # old behaviour and strictly better than publishing nothing.
+            report = report_store.stored_report(config)
+            cost_proposals.recompute_cost_proposals(
+                backend, config, until=anchor, report=report,
+            )
+        except Exception:  # noqa: BLE001 - background job, never crash a thread
+            pass
+        finally:
+            close = getattr(backend, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_job, name="analyzer-scan-cycle", daemon=True).start()
+    return True

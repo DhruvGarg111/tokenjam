@@ -2700,6 +2700,7 @@ def recompute_cost_proposals(
     window_days: int | None = None,
     agent_id: str | None = None,
     until: Any | None = None,
+    report: Any | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
     cost findings into proposals, and write them into the shared proposal
@@ -2766,14 +2767,31 @@ def recompute_cost_proposals(
                 agent_persona_mix(conn, since, until, agent_id=agent_id) if conn is not None else {},
                 declared_plan=config_declared_plan(config),
             )
-            report = build_report(
-                db, config, since, until, agent_id=agent_id,
-                # `summarize` IS a COST_ANALYZER now and would already
-                # be selected by `cost_analyzers_for_persona`; this is the
-                # PERSONA-SCOPED list, not the raw one — the skip gate still
-                # decides which cost analyzers run for this window.
-                findings=list(cost_analyzers_for_persona(persona)),
-            )
+            # A REPORT THE CALLER ALREADY BUILT, when there is one. This
+            # function used to always build its own, which meant every scan
+            # cycle ran `build_report` TWICE over the same window — so an
+            # analyzer like `subagent` was computed twice, by two separate
+            # scans of a database that ingestion keeps writing to, and the two
+            # results were stored separately and published side by side. Same
+            # window and same anchor could not make them agree, because they
+            # read the corpus at different moments. One pass, two views: the
+            # adapters below are a pure transformation of a report, so reusing
+            # the cycle's report makes the two surfaces identical by
+            # construction rather than by timing.
+            #
+            # The persona gate is NOT lost by reusing it: `build_report` applies
+            # the gate internally (it is the choke point), and the adapters only
+            # read findings they know how to adapt, so an analyzer outside
+            # `COST_ANALYZERS` present on a full report contributes nothing.
+            if report is None:
+                report = build_report(
+                    db, config, since, until, agent_id=agent_id,
+                    # `summarize` IS a COST_ANALYZER now and would already
+                    # be selected by `cost_analyzers_for_persona`; this is the
+                    # PERSONA-SCOPED list, not the raw one — the skip gate still
+                    # decides which cost analyzers run for this window.
+                    findings=list(cost_analyzers_for_persona(persona)),
+                )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
             # does (placement's batch-lever dollars, currently the only card
@@ -2816,6 +2834,7 @@ def trigger_background_cost_recompute(
     config: Any | None = None,
     window_days: int | None = None,
     until: Any | None = None,
+    report: Any | None = None,
 ) -> bool:
     """Fire-and-forget a cost-proposals recompute on a daemon thread — the
     Cost-advisories-tab equivalent of ``relearn_store.
@@ -2837,6 +2856,7 @@ def trigger_background_cost_recompute(
             backend = backend_factory()
             recompute_cost_proposals(
                 backend, config, window_days=window_days, until=until,
+                report=report,
             )
         except Exception:
             # Best-effort background job — never crash the scheduler/thread.

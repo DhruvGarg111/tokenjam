@@ -26,6 +26,7 @@ the unbounded one for the same analyzer — is asserted at the FINDING level her
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -377,48 +378,62 @@ def test_a_cycle_refreshes_every_analyzer_store(monkeypatch):
 
     calls = {}
     monkeypatch.setattr(
-        "tokenjam.core.optimize.report_store.trigger_background_recompute",
-        lambda _f, _c, **kw: calls.setdefault("report", kw) is None or True,
+        scan_cycle, "_trigger_report_and_cost",
+        lambda _f, _c, anchor: calls.setdefault("report_and_cost", anchor) is None or True,
     )
     monkeypatch.setattr(
         "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
         lambda _f, **kw: calls.setdefault("relearn", kw) is None or True,
     )
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.cost_proposals.trigger_background_cost_recompute",
-        lambda _f, **kw: calls.setdefault("cost", kw) is None or True,
-    )
 
     started = scan_cycle.trigger_scan_cycle(lambda: None, _Config())
-    assert set(started) == {"report", "relearn", "cost_proposals"}
+    assert set(started) == {"report_and_cost", "relearn"}
     assert all(started.values())
-    assert set(calls) == {"report", "relearn", "cost"}
+    assert set(calls) == {"report_and_cost", "relearn"}
 
 
-def test_every_pass_in_a_cycle_subtracts_from_ONE_anchor(monkeypatch):
-    # The window LENGTH was already one seam; the instant it is subtracted from
-    # was not, so two surfaces covered windows whose edges sat wherever their
-    # threads happened to start — unobservable in the artifacts, and
-    # indistinguishable from a real basis divergence.
-    from tokenjam.core.optimize import scan_cycle
+def test_the_report_and_cost_stores_come_from_ONE_analyzer_pass(monkeypatch):
+    # THE defect behind the residual delta. A cycle used to run `build_report`
+    # TWICE — once for the report store, once inside the cost recompute — so an
+    # analyzer was measured twice against a database ingestion keeps writing to,
+    # and the two results were published side by side. No window or anchor
+    # agreement can reconcile two separate measurements; only one measurement can.
+    from tokenjam.core.optimize import cost_proposals, report_store, scan_cycle
 
-    anchors = {}
+    seen = {}
+    sentinel = object()
+
     monkeypatch.setattr(
-        "tokenjam.core.optimize.report_store.trigger_background_recompute",
-        lambda _f, _c, **kw: anchors.setdefault("report", kw.get("until")) is None or True,
+        report_store, "recompute_now",
+        lambda _db, _cfg, **kw: seen.setdefault("anchor_report", kw.get("until")) or {"ok": 1},
     )
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
-        lambda _f, **kw: True,
-    )
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.cost_proposals.trigger_background_cost_recompute",
-        lambda _f, **kw: anchors.setdefault("cost", kw.get("until")) is None or True,
-    )
+    monkeypatch.setattr(report_store, "is_computing", lambda: False)
+    monkeypatch.setattr(report_store, "stored_report", lambda _cfg: sentinel)
+
+    def _cost(_db, _cfg, **kw):
+        seen["report_arg"] = kw.get("report")
+        seen["anchor_cost"] = kw.get("until")
+        return []
+
+    done = threading.Event()
+
+    def _cost_then_signal(*a, **kw):
+        try:
+            return _cost(*a, **kw)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(cost_proposals, "recompute_cost_proposals", _cost_then_signal)
 
     scan_cycle.trigger_scan_cycle(lambda: None, _Config())
-    assert anchors["report"] is not None
-    assert anchors["report"] == anchors["cost"]
+    assert done.wait(timeout=5), "the cycle never reached the cost half"
+
+    # The cost side was handed the report the pass just built — it did not
+    # build its own.
+    assert seen["report_arg"] is sentinel
+    # And both halves used the same anchor.
+    assert seen["anchor_report"] is not None
+    assert seen["anchor_report"] == seen["anchor_cost"]
 
 
 def test_one_store_failing_to_start_never_stops_the_others(monkeypatch):
@@ -427,22 +442,15 @@ def test_one_store_failing_to_start_never_stops_the_others(monkeypatch):
     def _boom(*_a, **_k):
         raise RuntimeError("store unavailable")
 
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.report_store.trigger_background_recompute", _boom,
-    )
+    monkeypatch.setattr(scan_cycle, "_trigger_report_and_cost", _boom)
     monkeypatch.setattr(
         "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
         lambda _f, **kw: True,
     )
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.cost_proposals.trigger_background_cost_recompute",
-        lambda _f, **kw: True,
-    )
 
     started = scan_cycle.trigger_scan_cycle(lambda: None, _Config())
-    assert started["report"] is False
+    assert started["report_and_cost"] is False
     assert started["relearn"] is True
-    assert started["cost_proposals"] is True
 
 
 def test_the_kill_switch_gates_every_store_not_only_the_report():
