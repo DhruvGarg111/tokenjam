@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from tokenjam.core.analysis_span import retention_days_for
+from tokenjam.core.optimize.build_stamp import tj_build
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding, compute_relearn_finding
 
 if TYPE_CHECKING:
@@ -99,6 +100,10 @@ def write_cache(
     payload: dict[str, Any] = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": stamp_proposal_ids(asdict(finding)),
+        # The build that produced these clusters — see `report_store.write_report`
+        # on why a timestamp alone lets a previous build's figures read as merely
+        # recent across an upgrade.
+        "tj_version": tj_build(),
     }
     if "cost_proposals" in existing:
         payload["cost_proposals"] = existing["cost_proposals"]
@@ -114,13 +119,20 @@ def write_cache(
         # every route falls back to the same default, but round-tripping both
         # keys here means a variable window survives regardless of which
         # producer wrote the cache last.
-        if "cost_window_days" in existing:
-            payload["cost_window_days"] = existing["cost_window_days"]
-        for key in ("cost_since", "cost_until"):
+        #
+        # THE WHITELIST IS THE TRAP. Every `cost_*` key a cost write produces has
+        # to be named here or this write silently drops it, and the symptom is
+        # never an error — it is a field that reads as "never stamped". Caught
+        # live: `cost_tj_version` was added to `write_cost_proposals` and omitted
+        # here, so a freshly-booted daemon served a cost payload claiming an
+        # unknown producing build, because the pass writes the cost proposals and
+        # then the relearn cache over the top of them.
+        for key in (
+            "cost_window_days", "cost_since", "cost_until", "cost_excluded",
+            "cost_tj_version",
+        ):
             if key in existing:
                 payload[key] = existing[key]
-        if "cost_excluded" in existing:
-            payload["cost_excluded"] = existing["cost_excluded"]
     _atomic_write(p, payload)
     return payload
 
@@ -181,6 +193,15 @@ def read_cost_proposals(
         "cost_since": raw.get("cost_since"),
         "cost_until": raw.get("cost_until"),
         "cost_excluded": raw.get("cost_excluded") or {},
+        # The build that computed these proposals. `None` on a cache written
+        # before the stamp existed — absent, never the running build, which
+        # would assert agreement about figures we cannot vouch for.
+        #
+        # This is the SECOND whitelist a `cost_*` key has to be named in (the
+        # first is the round-trip list in `write_cache`). Both drop an unnamed
+        # key silently, and the symptom is a field that reads as "never
+        # stamped" rather than an error.
+        "cost_tj_version": raw.get("cost_tj_version"),
     }
 
 
@@ -270,6 +291,7 @@ def write_cost_proposals(
     payload = dict(existing)
     payload["cost_proposals"] = serialised
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
+    payload["cost_tj_version"] = tj_build()
     if window_days is not None:
         payload["cost_window_days"] = window_days
     if since is not None:

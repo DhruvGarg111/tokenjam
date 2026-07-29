@@ -67,7 +67,37 @@ on that timer and the daemon owns when scanning happens.
 """
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable
+
+# THE CYCLE'S OWN IN-FLIGHT FLAG — the whole pass, not one of the stores it
+# writes.
+#
+# One pass refreshes three stores sequentially on one thread (report, then
+# relearn, then the cost proposals), and each store owns an INDEPENDENT
+# overlap guard. So `report_store.is_computing()` goes false the moment the
+# report lands, while relearn — the most expensive analyzer in the product —
+# and the cost proposals behind the Review inbox are still being built. A
+# surface reading the report's flag alone therefore stops saying "Scanning…"
+# and starts asserting freshness while the figures beside it are still the
+# previous pass's. Measured gap on a warm distill cache: seconds; on a cold
+# one or a large corpus: minutes.
+#
+# OR-ing the three store flags does not fix it either — between one store
+# finishing and the next starting, all three are legitimately false, so the
+# indicator flickers off mid-cycle. The cycle is the thing a user pressed and
+# the thing they are waiting for, so the cycle is what carries the flag.
+#
+# A store refreshed on its own (a lone trigger, a test) still reports through
+# its OWN guard; a surface wants `computing or cycle_computing`, never this
+# alone. Set before the thread is dispatched so a GET racing the POST's return
+# already sees it.
+_CYCLE_COMPUTING = threading.Event()
+
+
+def is_cycle_computing() -> bool:
+    """True while a full analyzer cycle is in flight, across every store."""
+    return _CYCLE_COMPUTING.is_set()
 
 
 def scan_enabled(config: Any) -> bool:
@@ -129,11 +159,9 @@ def _trigger_analyzer_pass(
     Returns ``False`` when the report store's own overlap guard declined, which
     means a pass is already in flight and this cycle is a no-op.
     """
-    import threading
-
     from tokenjam.core.optimize import cost_proposals, report_store
 
-    if report_store.is_computing():
+    if report_store.is_computing() or is_cycle_computing():
         return False
 
     def _job() -> None:
@@ -157,6 +185,10 @@ def _trigger_analyzer_pass(
         except Exception:  # noqa: BLE001 - background job, never crash a thread
             pass
         finally:
+            # Cleared here and NOWHERE else on the success path: the flag has to
+            # outlive the report write, since the two stores built after it are
+            # exactly the ones a report-only flag went silent about.
+            _CYCLE_COMPUTING.clear()
             close = getattr(backend, "close", None)
             if callable(close):
                 try:
@@ -164,7 +196,16 @@ def _trigger_analyzer_pass(
                 except Exception:
                     pass
 
-    threading.Thread(target=_job, name="analyzer-scan-cycle", daemon=True).start()
+    # Before the dispatch, so a GET racing this POST's return already sees the
+    # cycle. Cleared again if the thread never starts — a flag left set with no
+    # pass behind it would show "Scanning…" forever and disable the button that
+    # would recover it.
+    _CYCLE_COMPUTING.set()
+    try:
+        threading.Thread(target=_job, name="analyzer-scan-cycle", daemon=True).start()
+    except Exception:
+        _CYCLE_COMPUTING.clear()
+        raise
     return True
 
 

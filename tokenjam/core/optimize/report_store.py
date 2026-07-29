@@ -46,6 +46,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from tokenjam.core.optimize.build_stamp import tj_build
+
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
 
@@ -136,6 +138,15 @@ def write_report(
         "window_days": window_days,
         "since": since,
         "until": until,
+        # WHICH BUILD PRODUCED THIS, not just when. `computed_at` answers HOW
+        # OLD and readers take it for WHICH VERSION. These stores are caches
+        # with no build identity and nothing invalidates them on upgrade, so
+        # after upgrading tokenjam the next pass stamps a fresh timestamp over
+        # figures the replaced binary may have produced — and the audience for
+        # that is precisely the user who upgraded to get a fix and will
+        # conclude it did not work. A surface can only qualify the freshness
+        # claim if the producing build travels with the result.
+        "tj_version": tj_build(),
     }
     _atomic_write(p, payload)
     return payload
@@ -196,6 +207,8 @@ def stored_report_block(
     One shape, computed in one place, so two surfaces reading the same store
     can never disagree about whether it is cold, stale or degraded.
     """
+    from tokenjam.core.optimize import scan_cycle
+
     stored = read_report(path, config=config)
     computing = is_computing()
     status = report_status(stored, computing=computing)
@@ -207,6 +220,20 @@ def stored_report_block(
         "scan_since": (stored or {}).get("since"),
         "scan_until": (stored or {}).get("until"),
         "computing": computing,
+        # THE CYCLE, not this store. `computing` above goes false the instant
+        # the report lands, while the relearn cache and the cost proposals the
+        # same pass feeds are still being built — so a surface reading only it
+        # asserts freshness over figures that are still the previous pass's.
+        # `scan_cycle.is_cycle_computing` covers the whole pass; a surface's
+        # "scanning" state is the OR of the two, never either alone.
+        "cycle_computing": scan_cycle.is_cycle_computing(),
+        # Build provenance. `computed_build` is the build that PRODUCED the
+        # stored figures (absent on anything written before this stamp existed);
+        # `build` is the one serving them. When they differ, the timestamp is
+        # still honest about age and no longer sufficient on its own — see
+        # `write_report`.
+        "computed_build": (stored or {}).get("tj_version"),
+        "build": tj_build(),
         # `degraded` is for the case a LATER scan failed after an earlier one
         # succeeded: the surface still renders the last good result, with the
         # failure disclosed beside it rather than silently pretending the last

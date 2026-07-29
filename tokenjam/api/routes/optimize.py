@@ -343,12 +343,22 @@ def rescan_optimize(request: Request) -> dict[str, Any]:
     # than the inbox headline they are naturally compared against. One cycle,
     # one meaning: see `core/optimize/scan_cycle.py`.
     started = trigger_scan_cycle(lambda: DuckDBBackend(config.storage), config)
+    any_started = any(started.values())
     return {
         **report_store.stored_report_block(config),
         # True when ANY pass started. A `False` per store is its own overlap
         # guard declining because a pass is already in flight — a no-op, not a
         # failure — so the per-store detail travels alongside rather than
         # collapsing into a single misleading `false`.
-        "started": any(started.values()),
+        "started": any_started,
         "started_by_store": started,
+        # EVERY `started: false` carries a reason, on this path too. The two
+        # early returns above have said why since they were written; this one
+        # answered 200 with a bare `false` and nothing to render, so a refusal
+        # arrived at the client indistinguishable from a successful start. It
+        # fires when the cycle's own in-flight guard declines — a pass launched
+        # by the daemon's startup kick, or one whose report leg has landed while
+        # relearn and the cost proposals are still being built (exactly when an
+        # impatient user presses the button).
+        **({} if any_started else {"reason": "a scan is already running"}),
     }

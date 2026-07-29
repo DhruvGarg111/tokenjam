@@ -658,6 +658,14 @@ table.archive-list .a-id { color: var(--text); }
 .scan-provenance { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; white-space: nowrap; }
 .scan-error { font-size: 11px; color: var(--error); }
 .scan-degraded { font-size: 11px; color: var(--warn); }
+/* The freshness claim is no longer sufficient on its own: these figures were
+   produced by a build other than the one serving them (or by one that did not
+   stamp itself). Warn-toned, not error-toned — the timestamp is still true and
+   the figures are still the last good ones; what is missing is the vouch. */
+.scan-stale-build { font-size: 11px; color: var(--warn); white-space: nowrap; }
+/* The server answered 200 saying it did NOT start a pass. Neither a success nor
+   a failure, so neither the provenance colour nor the error colour. */
+.scan-declined { font-size: 11px; color: var(--warn); }
 .btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; position: relative; display: inline-flex; align-items: center; gap: 5px; }
 .btn-restore.copied { border-color: var(--success); color: var(--success); }
 .btn-restore svg { width: 12px; height: 12px; flex-shrink: 0; }
@@ -7454,8 +7462,23 @@ function scanState(opt) {
     status: (opt && opt.status) || (fetchFailed ? 'unknown' : 'ready'),
     known, fetchFailed,
     cold: !fetchFailed && !known,
-    computing: !!opt && opt.status === 'computing',
+    // THE CYCLE, NOT THIS STORE. `status === 'computing'` is the report's own
+    // in-flight flag, and one pass writes three stores sequentially on one
+    // thread — report, then relearn, then the cost proposals behind the Review
+    // inbox. So the report's flag drops the moment its leg lands and this
+    // control switched from "Scanning…" to asserting freshness while the most
+    // expensive analyzer in the product was still running. `cycle_computing`
+    // covers the whole pass; the OR is what stays true until the last store
+    // lands, and an older server that sends neither still reads correctly.
+    computing: !!opt && (opt.status === 'computing' || opt.cycle_computing === true),
     computedAt: (opt && opt.computed_at) || null,
+    // The build that PRODUCED the stored figures vs the one SERVING them. Equal
+    // is the ordinary case; different means a card the previous build computed
+    // is being rendered under a fresh timestamp, because these stores are caches
+    // and an upgrade does not invalidate them. `null`/absent is UNKNOWN, which
+    // is not the same as agreement — see ScanBar.
+    computedBuild: (opt && opt.computed_build) || null,
+    build: (opt && opt.build) || null,
     windowDays: (opt && opt.window_days) || null,
     degraded: !!(opt && opt.degraded),
     lastError: (opt && opt.last_error) || null,
@@ -7484,19 +7507,49 @@ async function rescanAnalyzers() { return apiPostOrDetail('/optimize/rescan', {}
 // rescan link. A real <button>, not a styled span, so it is keyboard-operable
 // and gets a focus ring for free; `disabled` while a scan is in flight is
 // what makes "scanning\u2026" actually true rather than just its label.
-function ScanBar({ scan, busy, error, onRescan }) {
+// WHETHER THE FRESHNESS CLAIM IS STILL SUFFICIENT ON ITS OWN.
+//
+// `computed <age> ago` answers HOW OLD; readers take it for WHICH BUILD. The
+// analyzer stores are caches and an upgrade does not invalidate them, so the
+// next pass after one stamps a fresh timestamp over figures the replaced binary
+// may have produced \u2014 and the audience for that sentence is exactly the user who
+// upgraded to get a fix and will conclude it did not work.
+//
+// Three cases, and the middle one is the trap: SAME build (say nothing \u2014 the
+// timestamp is the whole truth), DIFFERENT build (the figures predate this
+// build; say so), and UNKNOWN (the result predates the stamp, so we cannot
+// vouch either way \u2014 which is NOT agreement and must not render as it).
+// Returns null when there is nothing honest to add.
+function buildQualifier(scan) {
+  if (!scan.computedAt) return null;              // nothing to qualify
+  if (!scan.build) return null;                   // older server: no stance either way
+  if (!scan.computedBuild) return 'producing build unknown';
+  if (scan.computedBuild === scan.build) return null;
+  return 'computed by ' + scan.computedBuild + ', you are on ' + scan.build;
+}
+
+function ScanBar({ scan, busy, error, declined, onRescan }) {
   const scanning = !!(busy || scan.computing);
   const when = scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
       ? 'computed ' + fmtAgo(scan.computedAt) + (scan.windowDays ? ' \u00b7 ' + scan.windowDays + 'd window' : '')
       : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
+  const qualifier = buildQualifier(scan);
   return html`<span class="rescan-bar">
     <span class="scan-provenance">${when}</span>
+    ${qualifier ? html`<span class="scan-stale-build" title="These figures are a cached result. Rescan to recompute them on this build.">${qualifier}</span>` : null}
     <button type="button" class="rescan-ctl${scanning ? ' scanning' : ''}" onClick=${onRescan} disabled=${scanning}
       aria-label=${scanning ? 'Scanning\u2026' : 'Rescan'}>
       <span aria-hidden="true" class="rescan-ctl-icon">\u27f3</span>${scanning ? 'Scanning\u2026' : 'Rescan'}
     </button>
     ${error ? html`<span class="scan-error">rescan failed: ${error}</span>` : null}
+    ${/* The server answered 200 saying it did NOT start a pass (an overlap guard
+          or the rate limit declined). That used to resolve as an ordinary
+          success: the button spun, re-enabled, reloaded, and showed the same
+          provenance line \u2014 the server said "I did not start" and the control
+          dropped it. Rendered here as its own state, distinct from both a
+          success and a thrown error. */
+      !error && declined ? html`<span class="scan-declined">${declined}</span>` : null}
     ${scan.degraded ? html`<span class="scan-degraded" title=${scan.lastError || ''}>last refresh failed</span>` : null}
   </span>`;
 }
@@ -7508,20 +7561,51 @@ function ScanBar({ scan, busy, error, onRescan }) {
 // behaviour even though what they re-run differs. Surfaces the failure: a
 // rescan whose POST was refused reports the server's reason instead of
 // silently looking like a success.
+// A REFUSAL IS NOT AN ERROR AND NOT A SUCCESS.
+//
+// `POST /optimize/rescan` answers HTTP 200 with `started: false` plus a `reason`
+// when a guard declines — a pass is already in flight (including the daemon's
+// own startup kick, which is precisely when an impatient user presses the
+// button), or the rate limit refused. `useRescan` only ever surfaced THROWN
+// errors, so a refusal resolved normally and the press read as a broken button:
+// spinner, re-enable, reload, identical numbers. The server said "I did not
+// start" and the control dropped it.
+//
+// Returns the text to show, or null when the response really was a start.
+// Deliberately requires an EXPLICIT `started === false`: a response that omits
+// the field (an older server, a surface whose action is not this endpoint) is
+// not evidence of a refusal, and inventing one would put a permanent "already
+// running" on a control that works.
+function declinedReason(res) {
+  if (!res || res.started !== false) return null;
+  if (res.reason) return res.reason;
+  return res.throttled ? 'rescanned too recently' : 'a scan is already running';
+}
+
 function useRescan(reload, action = rescanAnalyzers) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [declined, setDeclined] = useState(null);
   const rescan = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setDeclined(null);
     try {
-      await action();
+      setDeclined(declinedReason(await action()));
     } catch (e) {
       setError(e.message || String(e));
     }
-    setTimeout(() => { setBusy(false); reload(); }, 1500);
+    // No fixed timeout. The 1.5s wait was standing in for "is it running yet",
+    // and it answered that question by guessing: it re-enabled the button
+    // whether or not a pass was in flight, and reloaded once whether or not
+    // anything had landed. The cycle's in-flight flag is set before the POST
+    // returns (`scan_cycle._CYCLE_COMPUTING`), so the reload below already sees
+    // it and `scan.computing` — not this hook's `busy` — is what keeps the
+    // control saying "Scanning…" for as long as that is true.
+    setBusy(false);
+    reload();
   }, [reload, action]);
-  return { busy, error, rescan };
+  return { busy, error, declined, rescan };
 }
 
 // Re-READ the stored result on the server-published cadence, visibility-gated so
@@ -8045,7 +8129,7 @@ function OptimizeView({ params }) {
   // `st.opt` is deliberately kept across a reload (`loading: !s.opt` above), so
   // a rescan in flight keeps the last completed findings on screen.
   const scan = scanState(st.opt);
-  const { busy: rescanning, error: rescanError, rescan: doRescan } = useRescan(load);
+  const { busy: rescanning, error: rescanError, declined: rescanDeclined, rescan: doRescan } = useRescan(load);
   useAutoRefresh(scan, load);
 
   // Scroll the focused finding into view + highlight it (deep-link from Overview).
@@ -8108,7 +8192,7 @@ function OptimizeView({ params }) {
         Optimize <${PlanBadge} framing=${framing} />
       </div>
       <${PersonaPicker} />
-      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
+      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} onRescan=${doRescan} />
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
@@ -11530,8 +11614,6 @@ function ReviewInboxView({ params }) {
   const [modalSig, setModalSig] = useState(null);
   const [reviewQueue, setReviewQueue] = useState([]);
   const [reviewTotal, setReviewTotal] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState(null); // a rescan POST that was refused, honestly surfaced
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
   const [costProps, setCostProps] = useState([]);          // advise-only cost proposals
@@ -11561,6 +11643,11 @@ function ReviewInboxView({ params }) {
       const f = r.finding || {};
       setD({
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
+        // Cycle-wide in-flight + build provenance, carried through to the
+        // header's ScanBar. `status` above is this store's own leg of the pass.
+        cycleComputing: r.cycle_computing === true,
+        computedBuild: r.computed_build || null,
+        build: r.build || null,
         clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
         failuresExamined: f.failures_examined,
         // Kept on the finding state even though the per-row span caption was
@@ -11634,16 +11721,16 @@ function ReviewInboxView({ params }) {
   // A refused POST is still not swallowed — the shared ScanBar control needs an
   // honest error to show (Critical Rule: a rescan that failed must not look
   // like one that succeeded).
-  const doRefresh = useCallback(async () => {
-    setRefreshing(true);
-    setRefreshError(null);
-    try {
-      await apiPostOrDetail('/optimize/rescan', {});
-    } catch (e) {
-      setRefreshError((e && (e.message || String(e))) || 'unknown error');
-    }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
-  }, [load, loadCost]);
+  //
+  // Through `useRescan` like the other two surfaces, rather than a second
+  // hand-rolled copy of the same busy/error/timing behaviour. It already POSTs
+  // the same endpoint they do; keeping a private copy meant the declined-rescan
+  // and in-flight handling had to be fixed here a second time, and two copies
+  // of one derivation are free to disagree the moment only one is touched.
+  const reloadInbox = useCallback(() => { load(); loadCost(); }, [load, loadCost]);
+  const {
+    busy: refreshing, error: refreshError, declined: refreshDeclined, rescan: doRefresh,
+  } = useRescan(reloadInbox);
 
   // A scan-state shape ScanBar can render, built from the inbox's own two
   // reads rather than from `/optimize` — same control, different store. The
@@ -11655,7 +11742,15 @@ function ReviewInboxView({ params }) {
     fetchFailed: false,
     computedAt: d.computedAt,
     windowDays: null,
-    computing: d.status === 'computing' || costStatus === 'computing',
+    // Both stores' own flags OR the cycle's. The two `status` fields drop as
+    // each store's leg of the pass lands, and the report's leg — which neither
+    // of them covers — runs first, so on its own this went quiet while the rows
+    // below were still the previous pass's. `cycleComputing` is the pass.
+    computing: d.status === 'computing' || costStatus === 'computing' || d.cycleComputing === true,
+    // The relearn cache's build, since its `computed_at` is this header's
+    // provenance. Same three cases ScanBar's `buildQualifier` resolves.
+    computedBuild: d.computedBuild,
+    build: d.build,
     degraded: costDegraded,
     lastError: costLastError,
     status: (d.status === 'never_run' && costStatus === 'never_run')
@@ -11873,7 +11968,7 @@ function ReviewInboxView({ params }) {
       <span style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
         ${d.sessionsScanned != null ? html`<span class="scan-provenance">${d.sessionsScanned} sessions scanned</span>` : null}
         <${PersonaPicker} />
-      <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} onRescan=${doRefresh} />
+      <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} declined=${refreshDeclined} onRescan=${doRefresh} />
       </span>
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
@@ -12381,7 +12476,7 @@ function DashboardView({ params, persona }) {
   // below cannot disagree about how fresh their figures are or whether anything
   // has been computed at all.
   const scan = scanState(optData);
-  const { busy: rescanning, error: rescanError, rescan: doRescan } = useRescan(loadOptimize);
+  const { busy: rescanning, error: rescanError, declined: rescanDeclined, rescan: doRescan } = useRescan(loadOptimize);
   useAutoRefresh(scan, loadOptimize);
 
   // Budgets ride on the same /optimize payload, so the "Budgets at risk" tile
@@ -12428,7 +12523,7 @@ function DashboardView({ params, persona }) {
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <${PersonaPicker} />
         <div class="filters" style="margin:0">${winPicker}</div>
-        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
+        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} onRescan=${doRescan} />
       </div>
     </div>
     ${/* A past-overspend hero band rendered here once. Removed: it read as heavy
