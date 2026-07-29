@@ -97,7 +97,6 @@ def trigger_scan_cycle(
     the surface can show "last refresh failed" rather than a stale figure with
     no explanation).
     """
-    from tokenjam.core.optimize import relearn_store
     from tokenjam.utils.time_parse import utcnow
 
     # Resolved ONCE, before anything is dispatched, so every pass in this cycle
@@ -111,24 +110,21 @@ def trigger_scan_cycle(
         except Exception:  # noqa: BLE001 - one store must not sink the cycle
             started[name] = False
 
-    _try("report_and_cost", lambda: _trigger_report_and_cost(
+    _try("analyzer_pass", lambda: _trigger_analyzer_pass(
         backend_factory, config, anchor,
-    ))
-    _try("relearn", lambda: relearn_store.trigger_background_recompute(
-        backend_factory, config=config,
     ))
     return started
 
 
-def _trigger_report_and_cost(
+def _trigger_analyzer_pass(
     backend_factory: Callable[[], Any], config: Any, anchor: Any,
 ) -> bool:
-    """The single analyzer pass, feeding BOTH the report and the cost stores.
+    """The single analyzer pass, feeding EVERY store.
 
     One thread, one backend, one ``build_report``. The report store is written
     first (it is the one every analyzer surface reads), then the SAME findings
-    are adapted into cost proposals — see this module's docstring on why that
-    has to be one measurement rather than two.
+    become the relearn cache and the cost proposals — see this module's
+    docstring on why that has to be one measurement rather than three.
 
     Returns ``False`` when the report store's own overlap guard declined, which
     means a pass is already in flight and this cycle is a no-op.
@@ -150,9 +146,11 @@ def _trigger_report_and_cost(
                 return
             # The typed report the pass just wrote. `None` when the stored
             # payload cannot be rehydrated (corrupt, or written by a newer
-            # producer); the cost recompute then builds its own, which is the
-            # old behaviour and strictly better than publishing nothing.
+            # producer); the downstream stores then fall back to computing
+            # their own, which is the old behaviour and strictly better than
+            # publishing nothing.
             report = report_store.stored_report(config)
+            _write_relearn_from(report, config, backend_factory)
             cost_proposals.recompute_cost_proposals(
                 backend, config, until=anchor, report=report,
             )
@@ -168,3 +166,42 @@ def _trigger_report_and_cost(
 
     threading.Thread(target=_job, name="analyzer-scan-cycle", daemon=True).start()
     return True
+
+
+def _write_relearn_from(
+    report: Any, config: Any, backend_factory: Callable[[], Any],
+) -> None:
+    """Publish the relearn cache from the pass's OWN relearn finding.
+
+    ``compute_relearn_finding`` used to run twice per cycle: once inside
+    ``build_report`` (as the registered ``relearn`` analyzer) and once more for
+    this cache. It is the most expensive analyzer in the product — full-corpus,
+    minutes, plus a distill pass that makes LLM calls — so that alone was the
+    largest piece of wasted compute per cycle. The correctness half mattered
+    more: the two calls passed DIFFERENT parameters (``min_sessions`` from
+    config versus the function default, the resolved report window versus the
+    fixed label vocabulary, and the write budget's ``existing_agent_file_tokens``
+    versus nothing), so the Dashboard and the Review inbox could disagree about
+    which clusters to offer, not merely about a figure's size.
+
+    The registered analyzer's version is the richer of the two on every one of
+    those axes, so this is a merge toward it rather than a choice between them.
+
+    Falls back to a standalone recompute when the pass produced no usable
+    relearn finding (an un-rehydratable payload, or a scope that disabled the
+    filesystem scan): a cache that is stale-but-present beats one this cycle
+    silently left untouched.
+    """
+    from tokenjam.core.optimize import relearn_store
+
+    finding = None
+    findings = getattr(report, "findings", None)
+    if isinstance(findings, dict):
+        finding = findings.get("relearn")
+    if finding is None:
+        relearn_store.trigger_background_recompute(backend_factory, config=config)
+        return
+    try:
+        relearn_store.write_cache(finding, config=config)
+    except Exception:  # noqa: BLE001 - a cache write must not sink the pass
+        pass

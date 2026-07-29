@@ -336,11 +336,23 @@ def recompute_now(
                 transcript_cache_dir = default_cache_dir(config)
             except Exception:
                 transcript_cache_dir = None
-        # Full-corpus persona classification (relearn scans unbounded history
-        # like the finding itself, not a window) — same functions
-        # `runner.build_report` uses for `AnalyzerContext.persona`/
-        # `OptimizeReport.persona`, so the daemon's relearn cache gates its
-        # workspace write by the same rule the rest of the product does.
+        # WINDOW-SCOPED persona, matching `runner.build_report`. This used to
+        # classify over the full corpus, on the argument that relearn's own
+        # evidence is unbounded — a defensible reading in isolation, and a bug
+        # across surfaces. Persona gates WHICH ANALYZERS RUN
+        # (`PERSONA_DISABLED_ANALYZERS`) and whether relearn may offer a
+        # workspace write, so a corpus whose recent window is claude-code
+        # dominant but whose full history is mixed (or the reverse) resolved a
+        # DIFFERENT gate here than on the report the Dashboard reads. That is
+        # two surfaces disagreeing about which findings exist, not about a
+        # figure's size. One derivation, over the window every other figure is
+        # published on (`core/optimize/report_window.py`).
+        #
+        # In the daemon's normal path this branch is not even reached: the scan
+        # cycle writes this cache from the report pass's own relearn finding,
+        # which already carries the report's persona. It stands for a STANDALONE
+        # recompute, and it has to agree with the cycle rather than diverge the
+        # moment someone calls it directly.
         persona = "unknown"
         if conn is not None:
             try:
@@ -350,8 +362,16 @@ def recompute_now(
                     dominant_persona,
                 )
 
+                from datetime import timedelta
+
+                from tokenjam.core.optimize.report_window import report_window_days
+                from tokenjam.utils.time_parse import utcnow
+
+                until = utcnow()
+                since = until - timedelta(days=report_window_days(config, conn))
                 persona = dominant_persona(
-                    agent_persona_mix(conn), declared_plan=config_declared_plan(config),
+                    agent_persona_mix(conn, since, until),
+                    declared_plan=config_declared_plan(config),
                 )
             except Exception:
                 persona = "unknown"

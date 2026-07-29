@@ -26,6 +26,7 @@ the unbounded one for the same analyzer — is asserted at the FINDING level her
 """
 from __future__ import annotations
 
+import pathlib
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -378,18 +379,14 @@ def test_a_cycle_refreshes_every_analyzer_store(monkeypatch):
 
     calls = {}
     monkeypatch.setattr(
-        scan_cycle, "_trigger_report_and_cost",
-        lambda _f, _c, anchor: calls.setdefault("report_and_cost", anchor) is None or True,
-    )
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
-        lambda _f, **kw: calls.setdefault("relearn", kw) is None or True,
+        scan_cycle, "_trigger_analyzer_pass",
+        lambda _f, _c, anchor: calls.setdefault("analyzer_pass", anchor) is None or True,
     )
 
     started = scan_cycle.trigger_scan_cycle(lambda: None, _Config())
-    assert set(started) == {"report_and_cost", "relearn"}
+    assert set(started) == {"analyzer_pass"}
     assert all(started.values())
-    assert set(calls) == {"report_and_cost", "relearn"}
+    assert set(calls) == {"analyzer_pass"}
 
 
 def test_the_report_and_cost_stores_come_from_ONE_analyzer_pass(monkeypatch):
@@ -436,21 +433,16 @@ def test_the_report_and_cost_stores_come_from_ONE_analyzer_pass(monkeypatch):
     assert seen["anchor_report"] == seen["anchor_cost"]
 
 
-def test_one_store_failing_to_start_never_stops_the_others(monkeypatch):
+def test_a_pass_that_cannot_start_is_reported_not_raised(monkeypatch):
     from tokenjam.core.optimize import scan_cycle
 
     def _boom(*_a, **_k):
         raise RuntimeError("store unavailable")
 
-    monkeypatch.setattr(scan_cycle, "_trigger_report_and_cost", _boom)
-    monkeypatch.setattr(
-        "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
-        lambda _f, **kw: True,
-    )
+    monkeypatch.setattr(scan_cycle, "_trigger_analyzer_pass", _boom)
 
     started = scan_cycle.trigger_scan_cycle(lambda: None, _Config())
-    assert started["report_and_cost"] is False
-    assert started["relearn"] is True
+    assert started["analyzer_pass"] is False
 
 
 def test_the_kill_switch_gates_every_store_not_only_the_report():
@@ -501,3 +493,84 @@ def test_a_cache_predating_the_bounds_reports_them_absent_never_derived(tmp_path
     assert stored["cost_window_days"] == 30
     assert stored["cost_since"] is None
     assert stored["cost_until"] is None
+
+
+def test_the_relearn_cache_is_written_from_the_passs_own_finding(monkeypatch):
+    # `compute_relearn_finding` ran TWICE per cycle: once inside build_report as
+    # the registered analyzer, once more for this cache — the most expensive
+    # analyzer in the product, duplicated. And not even the same computation:
+    # the two calls passed different min_sessions, different window labels and
+    # the write budget in only one, so the two surfaces could disagree about
+    # WHICH CLUSTERS to offer.
+    from tokenjam.core.optimize import relearn_store, scan_cycle
+
+    finding = object()
+    written = {}
+    monkeypatch.setattr(
+        relearn_store, "write_cache",
+        lambda f, *a, **kw: written.setdefault("finding", f),
+    )
+    recomputed = []
+    monkeypatch.setattr(
+        relearn_store, "trigger_background_recompute",
+        lambda *a, **kw: recomputed.append(1) or True,
+    )
+
+    class _Report:
+        findings = {"relearn": finding}
+
+    scan_cycle._write_relearn_from(_Report(), _Config(), lambda: None)
+    assert written["finding"] is finding
+    # And nothing recomputed it.
+    assert recomputed == []
+
+
+def test_a_pass_with_no_relearn_finding_falls_back_rather_than_leaving_it_stale(
+    monkeypatch,
+):
+    from tokenjam.core.optimize import relearn_store, scan_cycle
+
+    recomputed = []
+    monkeypatch.setattr(
+        relearn_store, "trigger_background_recompute",
+        lambda *a, **kw: recomputed.append(1) or True,
+    )
+    monkeypatch.setattr(
+        relearn_store, "write_cache", lambda *a, **kw: pytest.fail("must not write"),
+    )
+
+    scan_cycle._write_relearn_from(None, _Config(), lambda: None)
+    assert recomputed == [1]
+
+
+def test_no_surface_classifies_persona_over_all_history():
+    # Persona gates WHICH ANALYZERS RUN (`PERSONA_DISABLED_ANALYZERS`) and
+    # whether relearn may offer a workspace write. `agent_persona_mix`'s
+    # since/until are optional, and two callers omitted them — so a corpus whose
+    # recent window is claude-code dominant but whose full history is mixed
+    # resolved a different gate on the Dashboard than in the Review inbox. That
+    # is two surfaces disagreeing about which findings EXIST.
+    import subprocess
+
+    import tokenjam as _pkg
+
+    root = pathlib.Path(_pkg.__file__).parent
+    hits = subprocess.run(
+        ["grep", "-rn", "agent_persona_mix(conn)", str(root)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert not hits, f"unwindowed persona classification reintroduced:\n{hits}"
+
+
+def test_the_apply_target_and_the_write_guard_share_one_derivation():
+    # `relearn_store` resolved the suggested write target through
+    # `resolve_write_scope(...).suggest_root` and carried a comment recording why:
+    # the API's write guard authorizes against the other half of that same type,
+    # so deriving them independently let the suggestion and the guard disagree.
+    # The registered analyzer passed `scope.claude_home` directly — the exact
+    # path that comment warns against.
+    from tokenjam.core.optimize.analyzers import relearn as _relearn
+
+    src = pathlib.Path(_relearn.__file__).read_text(encoding="utf-8")
+    assert "claude_home=resolve_write_scope(scope=scope).suggest_root" in src
+    assert "claude_home=scope.claude_home" not in src

@@ -148,20 +148,37 @@ def _conn(request: Request) -> Any | None:
 
 
 def _persona(request: Request) -> str:
-    """Dominant user persona, full-corpus (relearn is the unbounded-history
-    detector — see its module docstring — so its own empty-state copy needs
-    the same unbounded classification, not a windowed one that could
-    disagree with what the daemon actually gated relearn's write levers on
-    in ``relearn_store.recompute_now``). Mirrors that same computation;
-    degrades to ``"unknown"`` on any error so a persona-classification
-    failure never breaks the inbox itself.
+    """Dominant user persona, over the SAME window every published figure is.
+
+    This classified over the full corpus, and said so for a reason: it mirrored
+    ``relearn_store.recompute_now``, which also classified full-corpus, so that
+    this surface's empty-state copy could not disagree with what the daemon had
+    actually gated relearn's write levers on. The mirroring was right; the thing
+    being mirrored was not. Persona decides which analyzers run at all
+    (``PERSONA_DISABLED_ANALYZERS``), and resolving it over all history here
+    while ``runner.build_report`` resolved it over the window meant the
+    Dashboard and this surface could disagree about which findings exist.
+
+    Both now resolve it over the report window
+    (``core/optimize/report_window.py``), so the mirroring still holds and there
+    is one answer rather than two. Degrades to ``"unknown"`` on any error, so a
+    persona-classification failure never breaks the inbox itself.
     """
     try:
         conn = _conn(request)
         if conn is None:
             return "unknown"
+        from datetime import timedelta
+
+        from tokenjam.core.optimize.report_window import report_window_days
+        from tokenjam.utils.time_parse import utcnow
+
+        config = _config(request)
+        until = utcnow()
+        since = until - timedelta(days=report_window_days(config, conn))
         return dominant_persona(
-            agent_persona_mix(conn), declared_plan=config_declared_plan(_config(request)),
+            agent_persona_mix(conn, since, until),
+            declared_plan=config_declared_plan(config),
         )
     except Exception:
         return "unknown"
