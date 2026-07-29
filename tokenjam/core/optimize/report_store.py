@@ -321,6 +321,7 @@ def recompute_now(
     *,
     path: Path | None = None,
     window_days: int | None = None,
+    until: Any | None = None,
 ) -> dict[str, Any] | None:
     """Run every analyzer and store the result, on the CALLING thread.
 
@@ -348,7 +349,15 @@ def recompute_now(
             window_days if window_days is not None
             else _window_days(config, getattr(db, "conn", None))
         )
-        until = utcnow()
+        # ONE anchor across a scan cycle. When several stores are refreshed
+        # together (`core/optimize/scan_cycle.py`) they subtract their window
+        # from the SAME instant, so two surfaces publishing one metric cannot
+        # cover windows offset from each other. `None` means a lone refresh,
+        # which owns its own anchor. Anything that is not a datetime is
+        # discarded rather than raised on: the anchor crosses a thread
+        # boundary, and a malformed one must not sink a pass that would
+        # otherwise have succeeded.
+        until = until if isinstance(until, datetime) else utcnow()
         since = until - timedelta(days=days)
         try:
             report = build_report(db=db, config=config, since=since, until=until)
@@ -373,6 +382,7 @@ def trigger_background_recompute(
     *,
     path: Path | None = None,
     window_days: int | None = None,
+    until: Any | None = None,
 ) -> bool:
     """Fire-and-forget a scan on a daemon thread. Returns ``False`` when one is
     already running (the overlap guard — nothing is started, nothing stacks).
@@ -388,7 +398,9 @@ def trigger_background_recompute(
         backend = None
         try:
             backend = backend_factory()
-            recompute_now(backend, config, path=path, window_days=window_days)
+            recompute_now(
+                backend, config, path=path, window_days=window_days, until=until,
+            )
         except Exception as exc:   # noqa: BLE001
             # Never crash the scheduler thread — but never swallow the failure
             # either. `relearn_store`'s equivalent job discards its exception

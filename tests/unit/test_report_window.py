@@ -363,3 +363,133 @@ def test_a_payload_without_relearn_is_returned_unchanged():
     findings = {"resend": {"past_overspend_usd": 1.0}}
     assert _with_window_scoped_relearn(findings, 30) == findings
     assert _with_window_scoped_relearn(None, 30) is None
+
+
+# --------------------------------------------------------------------------- #
+# One scan cycle, one anchor
+# --------------------------------------------------------------------------- #
+def test_a_cycle_refreshes_every_analyzer_store(monkeypatch):
+    # "Rescan" used to mean a different thing per screen: `/optimize/rescan`
+    # refreshed the report, the Review inbox's own Refresh refreshed the other
+    # two, and nothing refreshed all three. So the stores feeding two surfaces
+    # of one metric could age apart with nothing disclosing it.
+    from tokenjam.core.optimize import scan_cycle
+
+    calls = {}
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.report_store.trigger_background_recompute",
+        lambda _f, _c, **kw: calls.setdefault("report", kw) is None or True,
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
+        lambda _f, **kw: calls.setdefault("relearn", kw) is None or True,
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.cost_proposals.trigger_background_cost_recompute",
+        lambda _f, **kw: calls.setdefault("cost", kw) is None or True,
+    )
+
+    started = scan_cycle.trigger_scan_cycle(lambda: None, _Config())
+    assert set(started) == {"report", "relearn", "cost_proposals"}
+    assert all(started.values())
+    assert set(calls) == {"report", "relearn", "cost"}
+
+
+def test_every_pass_in_a_cycle_subtracts_from_ONE_anchor(monkeypatch):
+    # The window LENGTH was already one seam; the instant it is subtracted from
+    # was not, so two surfaces covered windows whose edges sat wherever their
+    # threads happened to start — unobservable in the artifacts, and
+    # indistinguishable from a real basis divergence.
+    from tokenjam.core.optimize import scan_cycle
+
+    anchors = {}
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.report_store.trigger_background_recompute",
+        lambda _f, _c, **kw: anchors.setdefault("report", kw.get("until")) is None or True,
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
+        lambda _f, **kw: True,
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.cost_proposals.trigger_background_cost_recompute",
+        lambda _f, **kw: anchors.setdefault("cost", kw.get("until")) is None or True,
+    )
+
+    scan_cycle.trigger_scan_cycle(lambda: None, _Config())
+    assert anchors["report"] is not None
+    assert anchors["report"] == anchors["cost"]
+
+
+def test_one_store_failing_to_start_never_stops_the_others(monkeypatch):
+    from tokenjam.core.optimize import scan_cycle
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.report_store.trigger_background_recompute", _boom,
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.relearn_store.trigger_background_recompute",
+        lambda _f, **kw: True,
+    )
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.cost_proposals.trigger_background_cost_recompute",
+        lambda _f, **kw: True,
+    )
+
+    started = scan_cycle.trigger_scan_cycle(lambda: None, _Config())
+    assert started["report"] is False
+    assert started["relearn"] is True
+    assert started["cost_proposals"] is True
+
+
+def test_the_kill_switch_gates_every_store_not_only_the_report():
+    # `scan_enabled` is documented as "keeps the daemon from ever scanning on
+    # its own". It used to gate only the report job while relearn and the cost
+    # proposals kept scanning on their own 6h schedules.
+    from tokenjam.core.optimize import scan_cycle
+
+    config = _Config()
+    config.optimize.scan_enabled = False
+    assert scan_cycle.scan_enabled(config) is False
+    config.optimize.scan_enabled = True
+    assert scan_cycle.scan_enabled(config) is True
+    # Absent (an older config object) means enabled, not disabled.
+    assert scan_cycle.scan_enabled(object()) is True
+
+
+def test_the_cost_store_records_the_bounds_it_ran_over(tmp_path):
+    # A day count alone is not provenance: while this store recorded only a
+    # length, its window could not be compared against the report's own
+    # scan_since/scan_until, so a per-analyzer disagreement between the two
+    # surfaces was undiagnosable from the artifacts.
+    from tokenjam.core.optimize import relearn_store
+
+    path = tmp_path / "relearn_cache.json"
+    relearn_store.write_cost_proposals(
+        [], path,
+        window_days=30,
+        since="2026-06-29T09:40:21+00:00",
+        until="2026-07-29T09:40:21+00:00",
+    )
+    stored = relearn_store.read_cost_proposals(path)
+    assert stored is not None
+    assert stored["cost_window_days"] == 30
+    assert stored["cost_since"] == "2026-06-29T09:40:21+00:00"
+    assert stored["cost_until"] == "2026-07-29T09:40:21+00:00"
+
+
+def test_a_cache_predating_the_bounds_reports_them_absent_never_derived(tmp_path):
+    # Absent, never guessed from the day count: deriving them would invent the
+    # very provenance the field exists to supply.
+    from tokenjam.core.optimize import relearn_store
+
+    path = tmp_path / "relearn_cache.json"
+    relearn_store.write_cost_proposals([], path, window_days=30)
+    stored = relearn_store.read_cost_proposals(path)
+    assert stored is not None
+    assert stored["cost_window_days"] == 30
+    assert stored["cost_since"] is None
+    assert stored["cost_until"] is None

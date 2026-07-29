@@ -7356,18 +7356,31 @@ function useRescan(reload, action = rescanAnalyzers) {
   return { busy, error, rescan };
 }
 
-// Auto-rescan on the server-published cadence, visibility-gated so a hidden tab
-// never asks the daemon to scan. 0 seconds — or `scan_enabled = false` — turns
-// it off, which is the kill switch from the browser side.
-function useAutoRescan(scan, rescan) {
-  const seconds = scan.scanEnabled ? scan.pollSeconds : 0;
+// Re-READ the stored result on the server-published cadence, visibility-gated so
+// a hidden tab does no work. 0 seconds turns it off entirely.
+//
+// This polls the STORE; it does not ask the daemon to scan. The knob behind it
+// says so in its own definition — `[optimize] scan_ui_poll_seconds`: "how often
+// a UI surface re-reads the stored result (NOT how often the scan runs)" — and
+// this hook used to contradict that by firing a rescan on every tick. At the
+// default cadence that put a full-corpus analyzer pass on a five-minute timer,
+// against passes that take minutes on a real corpus: most of a duty cycle of
+// continuous scanning, driven by nothing but a browser tab being open. The
+// daemon owns WHEN scanning happens (`core/optimize/scan_cycle.py`); a surface
+// owns only how often it looks. An explicit Rescan press still scans.
+//
+// `scanEnabled` is deliberately NOT consulted any more. It is the kill switch
+// for automatic SCANNING, and gating reads on it left a surface that had turned
+// scanning off unable to notice a scan a human had just triggered by hand.
+function useAutoRefresh(scan, reload) {
+  const seconds = scan.pollSeconds;
   useEffect(() => {
     if (!seconds || seconds <= 0) return undefined;
     const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') rescan();
+      if (document.visibilityState === 'visible') reload();
     }, seconds * 1000);
     return () => clearInterval(timer);
-  }, [seconds, rescan]);
+  }, [seconds, reload]);
 }
 
 function recoverableTiles(opt) {
@@ -7865,7 +7878,7 @@ function OptimizeView({ params }) {
   // a rescan in flight keeps the last completed findings on screen.
   const scan = scanState(st.opt);
   const { busy: rescanning, error: rescanError, rescan: doRescan } = useRescan(load);
-  useAutoRescan(scan, doRescan);
+  useAutoRefresh(scan, load);
 
   // Scroll the focused finding into view + highlight it (deep-link from Overview).
   useEffect(() => {
@@ -11444,21 +11457,24 @@ function ReviewInboxView({ params }) {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [analyzerFocus, costProps]);
 
-  // Two stores, one rescan press: relearn's own cache and the cost-advisory
-  // cache recompute on the same cadence, so one control re-runs both. Unlike
-  // the old fire-and-forget version, a refused POST is not swallowed — the
-  // shared ScanBar control needs an honest error to show (Critical Rule: a
-  // rescan that failed must not look like one that succeeded).
+  // ONE rescan press, every analyzer store — the same endpoint the Dashboard's
+  // and Optimize's Rescan press. This used to POST relearn's and the
+  // cost-advisory's own refresh endpoints (two of the three stores), while
+  // `/optimize/rescan` refreshed the report (the third). So "Rescan" meant a
+  // different thing on each screen, and the figures those stores feed could
+  // age apart with nothing disclosing it. The server side now fans one request
+  // out to all three (`core/optimize/scan_cycle.py`).
+  //
+  // A refused POST is still not swallowed — the shared ScanBar control needs an
+  // honest error to show (Critical Rule: a rescan that failed must not look
+  // like one that succeeded).
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
     setRefreshError(null);
-    const results = await Promise.allSettled([
-      apiPostOrDetail('/relearn/refresh', {}),
-      apiPostOrDetail('/relearn/cost-proposals/refresh', {}),
-    ]);
-    const failed = results.filter(r => r.status === 'rejected');
-    if (failed.length) {
-      setRefreshError(failed.map(r => (r.reason && (r.reason.message || String(r.reason))) || 'unknown error').join('; '));
+    try {
+      await apiPostOrDetail('/optimize/rescan', {});
+    } catch (e) {
+      setRefreshError((e && (e.message || String(e))) || 'unknown error');
     }
     setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
   }, [load, loadCost]);
@@ -12167,7 +12183,7 @@ function DashboardView({ params }) {
   // has been computed at all.
   const scan = scanState(optData);
   const { busy: rescanning, error: rescanError, rescan: doRescan } = useRescan(loadOptimize);
-  useAutoRescan(scan, doRescan);
+  useAutoRefresh(scan, loadOptimize);
 
   // Budgets ride on the same /optimize payload, so the "Budgets at risk" tile
   // inherits that read's outcome: 0 with the caption "none configured" is a

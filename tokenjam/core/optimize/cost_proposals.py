@@ -2637,6 +2637,19 @@ def _resend_to_proposals(
 FALLBACK_COST_WINDOW_DAYS = _REPORT_FALLBACK_WINDOW_DAYS
 
 
+def _as_anchor(value: Any) -> Any | None:
+    """A caller-supplied window anchor as a usable datetime, or ``None``.
+
+    Defensive because the anchor crosses a thread boundary from the scan cycle:
+    anything that is not a datetime is discarded rather than raised on, so a
+    malformed anchor degrades to "this pass owns its own" instead of sinking a
+    background recompute that would otherwise have succeeded.
+    """
+    from datetime import datetime as _datetime
+
+    return value if isinstance(value, _datetime) else None
+
+
 def cost_window_days_for(config: Any, conn: Any) -> int:
     """The span past-overspend may accumulate over.
 
@@ -2686,6 +2699,7 @@ def recompute_cost_proposals(
     *,
     window_days: int | None = None,
     agent_id: str | None = None,
+    until: Any | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
     cost findings into proposals, and write them into the shared proposal
@@ -2732,7 +2746,13 @@ def recompute_cost_proposals(
                 max(1, window_days) if window_days is not None
                 else cost_window_days_for(config, getattr(db, "conn", None))
             )
-            until = utcnow()
+            # `until` is the anchor the trailing window is subtracted from.
+            # A caller that is refreshing SEVERAL stores in one cycle passes
+            # ONE instant for all of them (`core/optimize/scan_cycle.py`), so
+            # two surfaces publishing the same metric cannot end up covering
+            # windows offset from each other. `None` means this is a lone
+            # refresh and owns its own anchor.
+            until = _as_anchor(until) or utcnow()
             since = until - timedelta(days=effective_window_days)
             conn = getattr(db, "conn", None)
             # Persona decides which cost analyzers are worth running at all —
@@ -2775,6 +2795,11 @@ def recompute_cost_proposals(
             relearn_store.write_cost_proposals(
                 proposals, config=config,
                 window_days=effective_window_days,
+                # The RESOLVED bounds, not just the length. A day count alone
+                # cannot be compared against the analyzer report's own
+                # scan_since/scan_until, which is what made a per-analyzer
+                # disagreement between the two surfaces undiagnosable.
+                since=since.isoformat(), until=until.isoformat(),
             )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
@@ -2790,6 +2815,7 @@ def trigger_background_cost_recompute(
     *,
     config: Any | None = None,
     window_days: int | None = None,
+    until: Any | None = None,
 ) -> bool:
     """Fire-and-forget a cost-proposals recompute on a daemon thread — the
     Cost-advisories-tab equivalent of ``relearn_store.
@@ -2809,7 +2835,9 @@ def trigger_background_cost_recompute(
         backend = None
         try:
             backend = backend_factory()
-            recompute_cost_proposals(backend, config, window_days=window_days)
+            recompute_cost_proposals(
+                backend, config, window_days=window_days, until=until,
+            )
         except Exception:
             # Best-effort background job — never crash the scheduler/thread.
             pass

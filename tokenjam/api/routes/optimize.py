@@ -317,8 +317,21 @@ def rescan_optimize(request: Request) -> dict[str, Any]:
                 "reason": "rescanned too recently; showing the stored result"}
 
     from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.optimize.scan_cycle import trigger_scan_cycle
 
-    started = report_store.trigger_background_recompute(
-        lambda: DuckDBBackend(config.storage), config,
-    )
-    return {**report_store.stored_report_block(config), "started": started}
+    # EVERY analyzer store, not just the report. This endpoint used to refresh
+    # the report alone while the Review inbox's own Refresh refreshed the other
+    # two, so "Rescan" meant something different depending on which screen you
+    # pressed it from — and the Dashboard's tiles could end up hours fresher
+    # than the inbox headline they are naturally compared against. One cycle,
+    # one meaning: see `core/optimize/scan_cycle.py`.
+    started = trigger_scan_cycle(lambda: DuckDBBackend(config.storage), config)
+    return {
+        **report_store.stored_report_block(config),
+        # True when ANY pass started. A `False` per store is its own overlap
+        # guard declining because a pass is already in flight — a no-op, not a
+        # failure — so the per-store detail travels alongside rather than
+        # collapsing into a single misleading `false`.
+        "started": any(started.values()),
+        "started_by_store": started,
+    }

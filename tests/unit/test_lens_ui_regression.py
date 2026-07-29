@@ -4977,20 +4977,39 @@ def test_review_inbox_rescan_reuses_the_shared_hook_and_surfaces_failure(html):
     fn_start = html.index("function ReviewInboxView({ params })")
     fn_end = html.index("\nfunction ", fn_start + 1)
     fn = html[fn_start:fn_end]
-    assert "apiPostOrDetail('/relearn/refresh', {})" in fn
-    assert "apiPostOrDetail('/relearn/cost-proposals/refresh', {})" in fn
-    assert "Promise.allSettled" in fn
+    # ONE endpoint, not two. This used to POST relearn's and the cost-advisory's
+    # own refresh endpoints — two of the three analyzer stores — while the
+    # Dashboard's Rescan hit `/optimize/rescan` for the third. So "Rescan" meant
+    # a different thing on each screen and the stores could age apart. The
+    # server now fans one request out to all three (core/optimize/scan_cycle.py).
+    assert "apiPostOrDetail('/optimize/rescan', {})" in fn
+    assert "apiPostOrDetail('/relearn/refresh', {})" not in fn
+    assert "apiPostOrDetail('/relearn/cost-proposals/refresh', {})" not in fn
+    # The failure still has to reach the shared ScanBar's error prop.
     assert "setRefreshError(" in fn
     assert "error=${refreshError}" in fn
 
 
-def test_auto_rescan_is_visibility_gated_and_killable(html):
-    fn_start = html.index("function useAutoRescan(scan, rescan)")
+def test_the_ui_poll_re_reads_and_never_drives_a_scan(html):
+    """`[optimize] scan_ui_poll_seconds` defines itself as "how often a UI
+    surface re-reads the stored result (NOT how often the scan runs)", and the
+    hook behind it used to contradict that by firing a rescan every tick. At the
+    default cadence that put a full-corpus analyzer pass on a five-minute timer,
+    driven by nothing but a browser tab being open."""
+    fn_start = html.index("function useAutoRefresh(scan, reload)")
     fn_end = html.index("\nfunction recoverableTiles", fn_start)
     fn = html[fn_start:fn_end]
     assert "document.visibilityState === 'visible'" in fn
-    assert "scan.scanEnabled ? scan.pollSeconds : 0" in fn
     assert "if (!seconds || seconds <= 0) return undefined;" in fn
+    # It calls the caller's RELOAD, never a rescan.
+    assert "reload()" in fn
+    assert "rescan" not in fn.lower().replace("rescan press", "")
+    # And it no longer gates reads on the scan kill switch: a surface with
+    # automatic scanning off must still notice a scan a human just triggered.
+    assert "scanEnabled" not in fn
+    # No call site may hand it a rescan action.
+    assert "useAutoRescan(" not in html
+    assert "useAutoRefresh(scan, doRescan)" not in html
 
 
 def test_optimize_is_not_in_the_client_response_cache(html):

@@ -116,6 +116,9 @@ def write_cache(
         # producer wrote the cache last.
         if "cost_window_days" in existing:
             payload["cost_window_days"] = existing["cost_window_days"]
+        for key in ("cost_since", "cost_until"):
+            if key in existing:
+                payload[key] = existing[key]
         if "cost_excluded" in existing:
             payload["cost_excluded"] = existing["cost_excluded"]
     _atomic_write(p, payload)
@@ -172,6 +175,11 @@ def read_cost_proposals(
         "cost_proposals_error": raw.get("cost_proposals_error"),
         "cost_proposals_error_at": raw.get("cost_proposals_error_at"),
         "cost_window_days": raw.get("cost_window_days") or 0,
+        # The bounds the recompute ran over. `None` on a cache written before
+        # they were recorded — absent, never guessed from the day count, since
+        # deriving them would invent the very provenance this exists to supply.
+        "cost_since": raw.get("cost_since"),
+        "cost_until": raw.get("cost_until"),
         "cost_excluded": raw.get("cost_excluded") or {},
     }
 
@@ -215,6 +223,7 @@ def clear_cost_proposals_error(
 def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
     window_days: int | None = None, excluded: dict[str, Any] | None = None,
+    since: str | None = None, until: str | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
@@ -228,6 +237,16 @@ def write_cost_proposals(
     doesn't track it yet (a legacy call site) doesn't silently zero out a real
     prior value. It is a LABEL, never a divisor: nothing rescales a stored
     figure by it.
+
+    ``since``/``until`` are the RESOLVED BOUNDS that recompute actually ran
+    over, stored beside the length. A length alone is not provenance: the
+    stored analyzer report records ``scan_since``/``scan_until``, and while
+    this store recorded only a day count the two surfaces' windows could not
+    be compared from the artifacts at all — so a per-analyzer disagreement
+    between them was undiagnosable without instrumenting a live daemon, and
+    two successive explanations for one were asserted on that missing evidence
+    and were wrong. Same "leave untouched when ``None``" rule as
+    ``window_days``, for the same legacy-call-site reason.
 
     ``excluded`` is the rollup's cross-reference block for waste a caller
     deliberately did not fold in as a peer card — generic infrastructure with
@@ -253,6 +272,10 @@ def write_cost_proposals(
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
     if window_days is not None:
         payload["cost_window_days"] = window_days
+    if since is not None:
+        payload["cost_since"] = since
+    if until is not None:
+        payload["cost_until"] = until
     payload["cost_excluded"] = excluded or {}
     _atomic_write(p, payload)
     return payload
