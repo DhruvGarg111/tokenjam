@@ -14,6 +14,7 @@ exactly how the codebase ended up with two persona vocabularies once already.
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -25,6 +26,8 @@ from tokenjam.core.framing import (
     config_declared_plan,
     dominant_persona,
 )
+from tokenjam.core.optimize.report_window import report_window_days
+from tokenjam.utils.time_parse import utcnow
 
 router = APIRouter()
 
@@ -69,11 +72,31 @@ async def get_persona(request: Request) -> dict:
             "counts": {},
             "available": [],
         }
+    config = request.app.state.config
     try:
-        mix = agent_persona_mix(conn)
+        # TWO QUESTIONS, TWO BASES — and they are deliberately different.
+        #
+        # `detected` is a CLASSIFICATION, and classification gates which
+        # analyzers run (`PERSONA_DISABLED_ANALYZERS`) and whether relearn may
+        # offer a workspace write. Every surface must resolve that gate over the
+        # same window or two screens disagree about which findings exist, so it
+        # goes through the one window seam (`core/optimize/report_window`) that
+        # the Dashboard and the Review inbox already share.
+        window_days = report_window_days(config, conn)
+        until = utcnow()
+        since = until - timedelta(days=window_days)
         detected = dominant_persona(
-            mix, declared_plan=config_declared_plan(request.app.state.config)
+            agent_persona_mix(conn, since, until),
+            declared_plan=config_declared_plan(config),
         )
+        # `counts`/`available` answer a different question — "has this machine
+        # ever ingested anything for this persona" — and the UI renders it as
+        # "No SDK workflows on this machine. Nothing has been ingested for this
+        # persona." That claim is about the corpus, not about a window, so it is
+        # derived over ALL history on purpose: windowing it would report "never
+        # ingested" for a persona whose sessions are merely older than the
+        # window, which is a surface asserting more than its data supports.
+        mix = agent_persona_mix(conn, None, None)
     except Exception:
         return {
             "known": False,
@@ -94,6 +117,10 @@ async def get_persona(request: Request) -> dict:
     return {
         "known": True,
         "detected": detected,
+        # The window `detected` was classified over. Published rather than
+        # implied, because the two figures on this payload sit on different
+        # bases and a reader must be able to see which is which.
+        "detected_window_days": window_days,
         "selectable": list(SELECTABLE_PERSONAS),
         "personas": list(PERSONAS),
         "counts": counts,

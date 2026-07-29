@@ -543,23 +543,77 @@ def test_a_pass_with_no_relearn_finding_falls_back_rather_than_leaving_it_stale(
     assert recomputed == [1]
 
 
+def _mix_call_is_windowed(call: "ast.Call") -> bool:
+    """Was this ``agent_persona_mix(...)`` call given an explicit window?
+
+    Windowed means since/until were supplied as something other than ``None`` —
+    positionally (``mix(conn, since, until)``) or by keyword. Passing literal
+    ``None`` is how a caller says "all history on purpose", so it counts as
+    unwindowed and must not reach a classifier.
+    """
+    import ast as _ast
+
+    supplied = list(call.args[1:3])
+    supplied += [kw.value for kw in call.keywords if kw.arg in ("since", "until")]
+    if len(supplied) < 2:
+        return False
+    return all(not (isinstance(a, _ast.Constant) and a.value is None) for a in supplied)
+
+
 def test_no_surface_classifies_persona_over_all_history():
-    # Persona gates WHICH ANALYZERS RUN (`PERSONA_DISABLED_ANALYZERS`) and
-    # whether relearn may offer a workspace write. `agent_persona_mix`'s
-    # since/until are optional, and two callers omitted them — so a corpus whose
-    # recent window is claude-code dominant but whose full history is mixed
-    # resolved a different gate on the Dashboard than in the Review inbox. That
-    # is two surfaces disagreeing about which findings EXIST.
-    import subprocess
+    """A persona GATE may never be resolved over all history.
+
+    Persona gates which analyzers run (``PERSONA_DISABLED_ANALYZERS``) and
+    whether relearn may offer a workspace write. ``agent_persona_mix``'s
+    since/until are optional, and callers omitted them — so a corpus whose
+    recent window is claude-code dominant but whose full history is mixed
+    resolved a different gate on the Dashboard than in the Review inbox. That is
+    two surfaces disagreeing about which findings EXIST.
+
+    The property is about CLASSIFICATION, not about the query: an unwindowed
+    ``agent_persona_mix`` is legitimate for a question that is genuinely about
+    the whole corpus (``/persona``'s ``counts`` answers "has this machine ever
+    ingested anything for this persona", which the UI renders as "Nothing has
+    been ingested for this persona" — windowing that would make the claim
+    false). So this walks the AST and fails only when an unwindowed mix reaches
+    ``dominant_persona``, directly or through a local variable. A substring grep
+    for ``agent_persona_mix(conn)`` cannot draw that line.
+    """
+    import ast
 
     import tokenjam as _pkg
 
     root = pathlib.Path(_pkg.__file__).parent
-    hits = subprocess.run(
-        ["grep", "-rn", "agent_persona_mix(conn)", str(root)],
-        capture_output=True, text=True,
-    ).stdout.strip()
-    assert not hits, f"unwindowed persona classification reintroduced:\n{hits}"
+    offenders: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Names bound to an UNWINDOWED mix, anywhere in the module.
+        unwindowed_names = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) == "agent_persona_mix"
+            and not _mix_call_is_windowed(node.value)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if getattr(node.func, "id", None) != "dominant_persona":
+                continue
+            for arg in node.args:
+                bad = (
+                    isinstance(arg, ast.Call)
+                    and getattr(arg.func, "id", None) == "agent_persona_mix"
+                    and not _mix_call_is_windowed(arg)
+                ) or (isinstance(arg, ast.Name) and arg.id in unwindowed_names)
+                if bad:
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not offenders, (
+        "persona classified over all history at:\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_the_apply_target_and_the_write_guard_share_one_derivation():
