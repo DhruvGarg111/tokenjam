@@ -124,20 +124,42 @@ def test_an_older_server_sending_neither_field_still_reads_correctly(html: str):
 # 2. A declined rescan is not a successful one
 # --------------------------------------------------------------------------- #
 @_node
-def test_declined_rescan_is_surfaced_with_the_servers_reason(html: str):
-    """`started: false` + a reason — the overlap guard refusing, which is what
-    the daemon's own startup kick does to an impatient first-run press."""
+def test_declined_rescan_is_surfaced(html: str):
+    """`started: false` — the overlap guard refusing, which is what the daemon's
+    own startup kick does to an impatient first-run press."""
     src = _fn_source(html, "declinedReason")
-    assert _run_js(src, (
+    out = _run_js(src, (
         "declinedReason({started:false, reason:'a scan is already running'})"
-    )) == "a scan is already running"
+    ))
+    assert out
+    assert "not started" in out
 
 
 @_node
-def test_declined_rescan_without_a_reason_still_says_something(html: str):
+def test_the_declined_notice_cannot_go_stale(html: str):
+    """It stays on screen until the next press, so it must describe the PRESS,
+    not the world. The server's own reasons are present tense ("a scan IS
+    already running") and stop being true the moment that scan lands — rendering
+    them verbatim would leave this control asserting a running scan after it
+    finished, which is the defect the control is being fixed for.
+    """
     src = _fn_source(html, "declinedReason")
-    assert _run_js(src, "declinedReason({started:false})")
-    assert _run_js(src, "declinedReason({started:false, throttled:true})")
+    for res in ("{started:false}",
+                "{started:false, throttled:true}",
+                "{started:false, reason:'a scan is already running'}"):
+        out = _run_js(src, f"declinedReason({res})")
+        assert out, res
+        assert " is " not in out, (
+            f"present-tense claim in a notice that outlives its truth: {out!r}"
+        )
+
+
+@_node
+def test_declined_distinguishes_a_throttle_from_an_overlap(html: str):
+    src = _fn_source(html, "declinedReason")
+    throttled = _run_js(src, "declinedReason({started:false, throttled:true})")
+    overlap = _run_js(src, "declinedReason({started:false})")
+    assert throttled != overlap
 
 
 @_node
@@ -226,3 +248,39 @@ def test_nothing_computed_yet_has_no_freshness_claim_to_qualify(html: str):
     assert _run_js(src, (
         "buildQualifier({computedAt:'2026-07-29T10:00:00Z', build:null})"
     )) is None
+
+
+# --------------------------------------------------------------------------- #
+# 4. A control that is wrong AND unpressable
+# --------------------------------------------------------------------------- #
+def test_an_in_flight_pass_is_polled_faster_than_the_idle_cadence(html: str):
+    """The Rescan button is disabled for as long as the surface believes a scan
+    is running, and the stored read cadence defaults to five minutes. So a pass
+    that finished in twenty seconds left the control disabled and asserting
+    "Scanning…" for the rest of that window, with no way for the user to act and
+    nothing telling them it had landed.
+
+    Source-level because the cadence lives in a hook (`useAutoRefresh`) whose
+    body is an effect, not a pure decider. What is pinned is the property that
+    matters: the in-flight branch cannot resolve to the idle cadence, and it
+    cannot resolve to "never".
+    """
+    start = html.index("function useAutoRefresh(")
+    body = html[start:html.index("\n}\n", start)]
+    assert "scan.computing" in body, (
+        "useAutoRefresh no longer distinguishes an in-flight pass"
+    )
+    assert "SCAN_INFLIGHT_POLL_SECONDS" in body
+    # `Math.min` against the constant is what makes the in-flight cadence an
+    # upper bound rather than a replacement: a surface configured to poll FASTER
+    # than the in-flight floor keeps its own cadence.
+    assert "Math.min" in body
+
+
+def test_the_in_flight_cadence_is_short_enough_to_unstick_the_button(html: str):
+    marker = "const SCAN_INFLIGHT_POLL_SECONDS = "
+    assert marker in html, "the in-flight poll constant moved; update this test"
+    value = int(html[html.index(marker) + len(marker):].split(";")[0].strip())
+    assert 0 < value <= 15, (
+        f"an in-flight cadence of {value}s leaves the disabled button stuck too long"
+    )

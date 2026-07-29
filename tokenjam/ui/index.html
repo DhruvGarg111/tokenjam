@@ -7488,6 +7488,12 @@ function scanState(opt) {
   };
 }
 
+// How often a surface re-READS the stored result while a pass is in flight. The
+// stored cadence (`[optimize] scan_ui_poll_seconds`) is sized for idle watching;
+// this one exists so the control stops saying "Scanning…" promptly once the pass
+// lands, since the button stays disabled until it does.
+const SCAN_INFLIGHT_POLL_SECONDS = 5;
+
 // Start a background scan. The server owns the rails — an overlap guard (a
 // second press while one runs is a no-op) and a rate limit — so this is safe
 // to call freely, including from the auto-rescan below. `apiPostOrDetail`
@@ -7528,7 +7534,7 @@ function buildQualifier(scan) {
   return 'computed by ' + scan.computedBuild + ', you are on ' + scan.build;
 }
 
-function ScanBar({ scan, busy, error, declined, onRescan }) {
+function ScanBar({ scan, busy, error, declined, declinedDetail, onRescan }) {
   const scanning = !!(busy || scan.computing);
   const when = scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
@@ -7549,7 +7555,7 @@ function ScanBar({ scan, busy, error, declined, onRescan }) {
           provenance line \u2014 the server said "I did not start" and the control
           dropped it. Rendered here as its own state, distinct from both a
           success and a thrown error. */
-      !error && declined ? html`<span class="scan-declined">${declined}</span>` : null}
+      !error && declined ? html`<span class="scan-declined" title=${declinedDetail || ''}>${declined}</span>` : null}
     ${scan.degraded ? html`<span class="scan-degraded" title=${scan.lastError || ''}>last refresh failed</span>` : null}
   </span>`;
 }
@@ -7576,22 +7582,38 @@ function ScanBar({ scan, busy, error, declined, onRescan }) {
 // the field (an older server, a surface whose action is not this endpoint) is
 // not evidence of a refusal, and inventing one would put a permanent "already
 // running" on a control that works.
+//
+// PAST TENSE, AND CLIENT-OWNED. This notice describes the OUTCOME OF A PRESS,
+// and it stays on screen until the next one. The server's own reason strings are
+// present tense ("a scan is already running"), which stops being true the moment
+// that scan lands — so rendering them verbatim would leave the control asserting
+// a running scan long after it finished, which is the very defect this control is
+// being fixed for. A past-tense statement about a press the user just made cannot
+// go stale. The server's wording is kept as the tooltip, where it is evidence
+// rather than a claim about now.
 function declinedReason(res) {
   if (!res || res.started !== false) return null;
-  if (res.reason) return res.reason;
-  return res.throttled ? 'rescanned too recently' : 'a scan is already running';
+  return res.throttled
+    ? 'refresh not started: rescanned too recently'
+    : 'refresh not started: a scan was already in flight';
 }
 
 function useRescan(reload, action = rescanAnalyzers) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [declined, setDeclined] = useState(null);
+  // The server's own words, shown as the notice's tooltip rather than as the
+  // notice — see `declinedReason` on why the visible copy is ours and past tense.
+  const [declinedDetail, setDeclinedDetail] = useState(null);
   const rescan = useCallback(async () => {
     setBusy(true);
     setError(null);
     setDeclined(null);
+    setDeclinedDetail(null);
     try {
-      setDeclined(declinedReason(await action()));
+      const res = await action();
+      setDeclined(declinedReason(res));
+      setDeclinedDetail((res && res.reason) || null);
     } catch (e) {
       setError(e.message || String(e));
     }
@@ -7605,7 +7627,7 @@ function useRescan(reload, action = rescanAnalyzers) {
     setBusy(false);
     reload();
   }, [reload, action]);
-  return { busy, error, declined, rescan };
+  return { busy, error, declined, declinedDetail, rescan };
 }
 
 // Re-READ the stored result on the server-published cadence, visibility-gated so
@@ -7625,7 +7647,22 @@ function useRescan(reload, action = rescanAnalyzers) {
 // for automatic SCANNING, and gating reads on it left a surface that had turned
 // scanning off unable to notice a scan a human had just triggered by hand.
 function useAutoRefresh(scan, reload) {
-  const seconds = scan.pollSeconds;
+  // WHILE A PASS IS IN FLIGHT, LOOK MORE OFTEN. The stored cadence defaults to
+  // five minutes, and the Rescan button is disabled for as long as the surface
+  // believes a scan is running — so a pass that finishes in twenty seconds left
+  // the control disabled and asserting "Scanning…" for the rest of that window,
+  // with no way for the user to act and nothing telling them it had landed. A
+  // control that is wrong AND unpressable is worse than a stale figure.
+  //
+  // This is still only a READ of the stored result; no surface may drive a scan
+  // from a timer (see this hook's note above and `core/optimize/scan_cycle.py`).
+  // The in-flight cadence deliberately overrides a `0` too: zero means "do not
+  // poll", but honouring it here would leave a user who pressed Rescan with a
+  // permanently disabled button and no path out short of reloading the page.
+  const inFlight = !!scan.computing;
+  const seconds = inFlight
+    ? Math.min(scan.pollSeconds || SCAN_INFLIGHT_POLL_SECONDS, SCAN_INFLIGHT_POLL_SECONDS)
+    : scan.pollSeconds;
   useEffect(() => {
     if (!seconds || seconds <= 0) return undefined;
     const timer = setInterval(() => {
@@ -8129,7 +8166,10 @@ function OptimizeView({ params }) {
   // `st.opt` is deliberately kept across a reload (`loading: !s.opt` above), so
   // a rescan in flight keeps the last completed findings on screen.
   const scan = scanState(st.opt);
-  const { busy: rescanning, error: rescanError, declined: rescanDeclined, rescan: doRescan } = useRescan(load);
+  const {
+    busy: rescanning, error: rescanError, declined: rescanDeclined,
+    declinedDetail: rescanDeclinedDetail, rescan: doRescan,
+  } = useRescan(load);
   useAutoRefresh(scan, load);
 
   // Scroll the focused finding into view + highlight it (deep-link from Overview).
@@ -8192,7 +8232,7 @@ function OptimizeView({ params }) {
         Optimize <${PlanBadge} framing=${framing} />
       </div>
       <${PersonaPicker} />
-      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} onRescan=${doRescan} />
+      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
@@ -11729,7 +11769,8 @@ function ReviewInboxView({ params }) {
   // of one derivation are free to disagree the moment only one is touched.
   const reloadInbox = useCallback(() => { load(); loadCost(); }, [load, loadCost]);
   const {
-    busy: refreshing, error: refreshError, declined: refreshDeclined, rescan: doRefresh,
+    busy: refreshing, error: refreshError, declined: refreshDeclined,
+    declinedDetail: refreshDeclinedDetail, rescan: doRefresh,
   } = useRescan(reloadInbox);
 
   // A scan-state shape ScanBar can render, built from the inbox's own two
@@ -11968,7 +12009,7 @@ function ReviewInboxView({ params }) {
       <span style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
         ${d.sessionsScanned != null ? html`<span class="scan-provenance">${d.sessionsScanned} sessions scanned</span>` : null}
         <${PersonaPicker} />
-      <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} declined=${refreshDeclined} onRescan=${doRefresh} />
+      <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} declined=${refreshDeclined} declinedDetail=${refreshDeclinedDetail} onRescan=${doRefresh} />
       </span>
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
@@ -12476,7 +12517,10 @@ function DashboardView({ params, persona }) {
   // below cannot disagree about how fresh their figures are or whether anything
   // has been computed at all.
   const scan = scanState(optData);
-  const { busy: rescanning, error: rescanError, declined: rescanDeclined, rescan: doRescan } = useRescan(loadOptimize);
+  const {
+    busy: rescanning, error: rescanError, declined: rescanDeclined,
+    declinedDetail: rescanDeclinedDetail, rescan: doRescan,
+  } = useRescan(loadOptimize);
   useAutoRefresh(scan, loadOptimize);
 
   // Budgets ride on the same /optimize payload, so the "Budgets at risk" tile
@@ -12523,7 +12567,7 @@ function DashboardView({ params, persona }) {
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <${PersonaPicker} />
         <div class="filters" style="margin:0">${winPicker}</div>
-        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} onRescan=${doRescan} />
+        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
       </div>
     </div>
     ${/* A past-overspend hero band rendered here once. Removed: it read as heavy
