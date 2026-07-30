@@ -100,7 +100,7 @@ subset with `tj optimize downsize resend relearn`.
 | `resend` | ✅ | ✅ | How much of each turn's prompt is context you already sent, whether or not caching is on |
 | `summarize` | ✅ | ✅ | Instruction files large enough to tax every session, scanned from disk |
 | `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence |
-| `subagent` | ✅ | — | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
+| `subagent` | ✅ | ✅ | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
 | `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called |
 | `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling |
 | `cache` | — | ✅ | Your caching ratio per (provider, model), and where it is worst |
@@ -114,10 +114,10 @@ subset with `tj optimize downsize resend relearn`.
 **Why a row is dashed matters.** For a coding-agent user, `cache` / `cache-recommend` / `trim` /
 `script` / `reuse` / `verbosity` / `stream-usage` are skipped before they ever query: the harness builds
 the request and owns the prompt template, so the lever lives on the other side of the line, and a
-finding with no fix is a diagnostic rather than a product. For an SDK user, `subagent` and `deadweight` are
-skipped because the data they read (Claude Code transcripts, `Task`-tool subagent dispatch) doesn't
-exist in a generic SDK process. The gate is one map in `core/optimize/runner.py`; the reasoning for
-each entry is in the comment beside it.
+finding with no fix is a diagnostic rather than a product. For an SDK user, `deadweight` is skipped
+because the data it reads (project `.mcp.json`, `.claude/settings*.json`, on-disk Claude Code
+transcripts) doesn't exist in a generic SDK process. The gate is one map in
+`core/optimize/runner.py`; the reasoning for each entry is in the comment beside it.
 
 `verbosity` is the one dash that is a product decision rather than a missing lever: its only remedy
 for a coding agent is a global "be concise" instruction, which buys tokens by making the agent
