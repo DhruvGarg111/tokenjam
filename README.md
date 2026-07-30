@@ -2,7 +2,7 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-Cut your agent's token spend by up to 40%. TokenJam reads your agent's telemetry, finds overspending, and suggests fixes. Works with Claude Code, Codex, and your own SDK or API agents. Shows it all in a local browser dashboard. Runs entirely on your machine.
+Reduce by up to 40% fewer tokens. TokenJam reads your agent's telemetry, finds overspending, and suggests fixes. Works with Claude Code, Codex, and your own SDK or API agents. Shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -18,8 +18,6 @@ Cut your agent's token spend by up to 40%. TokenJam reads your agent's telemetry
 
 ---
 
-## Get started
-
 TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
 <div align="center">
@@ -27,6 +25,10 @@ TokenJam ingests telemetry data about your agents from a multitude of sources an
 <img src="docs/assets/tokenjam-dashboard.png" alt="TokenJam Lens dashboard: past overspend by category, spend and token totals, and sessions by model over the last 30 days." width="900">
 
 </div>
+
+---
+
+## Get started
 
 One command sets up live capture:
 
