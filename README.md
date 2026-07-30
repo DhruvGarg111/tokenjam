@@ -47,7 +47,7 @@ tj rules list        # the fixes that came out of it, and the files they'd land 
 
 **Just looking?** `npx tokenjam` prints a read-only report over the logs you already have. No install, nothing kept.
 
-<div align="center"><img src="docs/assets/tokenjam-token-flow.png" alt="Token flow: telemetry from Claude Code, Codex, Google, AWS, the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which decomposes where every token goes: 94% re-reads of history and context, 5.1% tool output, 0.9% net-new work, measured over a 61-session history" width="830"></div>
+<div align="center"><img src="docs/assets/tokenjam-2d.png" alt="Same output, fewer tokens: measured spend from Claude Code, Codex, Google (Gemini, ADK), AWS (Bedrock, Strands), the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which analyzes it and shows how much you are overspending: today's spend against the same work with tokenjam applied, 34% fewer tokens per month, from 14 checks each with a concrete fix" width="830"></div>
 
 ---
 
