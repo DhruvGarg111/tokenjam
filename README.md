@@ -28,30 +28,24 @@ One command sets up live capture:
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents and wires that path: live capture, the analyzers your setup can act on, and Lens. Coding-agent users (Claude Code, Codex) also get their recent history backfilled and a zero-token status line wired in; restart the agent and you're live. SDK and API users add @watch() to their own code, or point an OTLP exporter at tj serve.
-
-```bash
-tj optimize          # cost-saving candidates from your actual usage
-tj rules list        # the fixes on offer, and the files they'd be written into
-tj serve             # open the dashboard at http://127.0.0.1:7391/
-```
+`tj onboard` asks how you use AI agents and wires that path: live capture, the analyzers your setup can act on, and Lens. Coding-agent users (Claude Code, Codex) also get their recent history backfilled and a zero-token status line wired in; restart the agent and you're live. SDK and API users add `@watch()` to their own code, or point an OTLP exporter at `tj serve`.
 
 Then open the dashboard:
 
-```
+```bash
 tj serve   # Lens, at http://127.0.0.1:7391/
 ```
 
 It opens on your spend so far: which models, which sessions, where it went and proposed fixes. Prefer the terminal?
 
-```
+```bash
 tj optimize          # what your usage is costing, and where it is recoverable
 tj rules list        # the fixes that came out of it, and the files they'd land in
 ```
 
-`tj rules` list reads the last analysis, so run it after `tj optimize` or after the daemon's first cycle. Not sure what to do next? Bare `tj` always points at the next useful command.
+`tj rules list` reads the last analysis, so run it after `tj optimize` or after the daemon's first cycle. Not sure what to do next? Bare `tj` always points at the next useful command.
 
-Just looking? `npx tokenjam` prints a read-only report over the logs you already have. No install, nothing kept.
+**Just looking?** `npx tokenjam` prints a read-only report over the logs you already have. No install, nothing kept.
 
 <div align="center"><img src="docs/assets/tokenjam-token-flow.png" alt="Token flow: telemetry from Claude Code, Codex, Google, AWS, the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which decomposes where every token goes: 94% re-reads of history and context, 5.1% tool output, 0.9% net-new work, measured over a 61-session history" width="830"></div>
 
@@ -59,33 +53,27 @@ Just looking? `npx tokenjam` prints a read-only report over the logs you already
 
 ## Which path are you?
 
-`pipx install tokenjam && tj onboard` is the entry point for everyone: it's an interactive wizard
-that asks how you use AI agents and wires the right path for you. `--claude-code` / `--codex` just
-pre-answer the wizard's first question (skip it in scripts/CI); they're shortcuts, not separate setups.
-
-Your answer also decides **which analyzers run**. TokenJam sorts users into two personas: you're
-driving a **coding agent** (Claude Code, Codex), or you're driving your **own SDK/API code**. Each can
-change a different set of things, so each gets a different set of analyzers. Most run for both.
-[The analyzers](#the-analyzers) below has the full split and the reasoning.
+`tj onboard` is the entry point for everyone; the table is what it wires for each answer. Your answer
+also picks your analyzer set, since a coding agent and your own SDK code can change different things.
+Most analyzers run for both: [the full split](#the-analyzers) is below.
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `tj onboard` (or `tj onboard --claude-code` to skip the first question) | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks the coding-agent analyzers + Lens |
-| **Codex CLI user** | `tj onboard` (or `tj onboard --codex`) | Same onboarding flow, wired for Codex's session logs |
-| **Python SDK / API agent dev** | `tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
-| **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
-| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
-| **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
+| **Claude Code user** | `tj onboard` | Backfills your recent history, wires a zero-token status line, unlocks the coding-agent analyzers and Lens |
+| **Codex CLI user** | `tj onboard` | Same flow, wired for Codex's session logs |
+| **Python SDK / API dev** | `tj onboard`, then `@watch()` in your code ([docs](docs/python-sdk.md)) | Live capture from your own process; no CLI backfill |
+| **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` and one `patch_*()` call | Framework-level spans, no manual instrumentation |
+| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>` (or `helicone`) | One-time import of your existing traces |
+| **Any OTel-emitting agent** | Point your OTLP exporter at `http://127.0.0.1:7391/v1/traces` | Zero-code ingestion: no SDK, no patch |
 
-**Working across multiple projects?** Run `tj onboard` once inside each one — sessions and cost
-proposals group per project in Lens, keyed on the project name each onboard run captures. Already
-onboarded elsewhere? `tj onboard --add-project` registers just the current repo's namespace against
-your existing setup, skipping the plan/budget prompts and backfill.
+`--claude-code` and `--codex` pre-answer the wizard's first question for scripts and CI; they are
+shortcuts, not separate setups. Run `tj onboard` once inside each project you work in, since sessions
+and proposals group per project in Lens, or `tj onboard --add-project` to register another repo
+against a setup you already have.
 
-LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
-
-A single page walks every path, each ending with a verify step: see
-[docs/getting-started.md](docs/getting-started.md).
+LlamaIndex and the OpenAI Agents SDK ship native OTel support; point their exporter at `tj serve`
+instead of installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
+Every path, each ending with a verify step: [docs/getting-started.md](docs/getting-started.md).
 
 ---
 
