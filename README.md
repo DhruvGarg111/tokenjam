@@ -101,7 +101,7 @@ subset with `tj optimize downsize resend relearn`.
 |---|:--:|:--:|---|---|
 | `relearn` | ✅ | ✅ | A blocker your agent keeps silently re-hitting across sessions | Rule, skill, or hook — written for you |
 | `resend` | ✅ | ✅ | Token-weighted repeat-context share across turns, whether or not caching is on | A subagent-offload rule in the right `CLAUDE.md` |
-| `summarize` | ✅ | ⚪ | Instruction files large enough to tax every session, scanned from disk | An in-place rewrite, structure-verified and reversible |
+| `summarize` | ✅ | ✅ | Instruction files large enough to tax every session, scanned from disk | An in-place rewrite, structure-verified and reversible |
 | `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence | A sizing rule, or a routing config to export |
 | `subagent` | ✅ | — | Premium-model or over-contexted `Task` calls hidden inside the parent's total | The `model:` key in `.claude/agents/<name>.md` |
 | `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called | Remove or project-scope the server |
@@ -126,8 +126,9 @@ each entry is in the comment beside it.
 for a coding agent is a global "be concise" instruction, which buys tokens by making the agent
 terser everywhere. That is a quality tax, and it is not a trade this product makes.
 
-⚪ = not gated off, but it reads your workspace's instruction files from disk, so a deployed SDK
-service typically has nothing for it to scan.
+A tick means the analyzer runs and its fix is reachable for that persona — not that it will fire on
+your data. `script` and `reuse` in particular hold deliberately strict thresholds and stay quiet
+unless your workload really does repeat itself.
 
 Deep dives: [docs/optimize/](docs/optimize/).
 
