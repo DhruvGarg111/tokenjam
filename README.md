@@ -2,7 +2,7 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-TokenJam reads your agent's telemetry, finds where the tokens actually go, and hands you the fix, not just the finding. Works with Claude Code, Codex, and your own SDK or API agents. Shows it all in a local browser dashboard. Runs entirely on your machine.
+Cut your agent's token spend by up to 40%. TokenJam reads your agent's telemetry, finds overspending, and suggests fixes. Works with Claude Code, Codex, and your own SDK or API agents. Shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -94,14 +94,12 @@ subset with `tj optimize downsize resend relearn`.
 | `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence |
 | `subagent` | ✅ | ✅ | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
 | `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called |
-| `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling |
 | `cache` | — | ✅ | Your caching ratio per (provider, model), and where it is worst |
 | `cache-recommend` | — | ✅ | Where to place prompt-cache breakpoints, from the prefixes you actually repeat |
 | `trim` | — | ✅ | Prompt regions the model gives little weight to |
 | `verbosity` | — | ✅ | Sessions whose output runs long against a per-(tool, task-shape) baseline |
 | `script` | — | ✅ | Deterministic tool sequences a plain script could replace |
 | `reuse` | — | ✅ | Sessions where your agent re-plans work it has already planned |
-| `stream-usage` | — | ✅ | Streamed calls that closed before the provider reported usage, so their spend went unrecorded |
 
 They find where your agents are overspending. They also tell you where they are not, so you don't spend a week optimizing something that was never costing you anything.
 
