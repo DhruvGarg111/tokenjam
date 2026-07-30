@@ -28,7 +28,7 @@ One command sets up live capture:
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live. Then run:
+`tj onboard` asks how you use AI agents and wires that path: live capture, the analyzers your setup can act on, and Lens. Coding-agent users (Claude Code, Codex) also get their recent history backfilled and a zero-token status line wired in; restart the agent and you're live. SDK and API users add @watch() to their own code, or point an OTLP exporter at tj serve.
 
 ```bash
 tj optimize          # cost-saving candidates from your actual usage
@@ -36,15 +36,22 @@ tj rules list        # the fixes on offer, and the files they'd be written into
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
-The statusline is **zero-token**; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn).
+Then open the dashboard:
 
-Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
+```
+tj serve   # Lens, at http://127.0.0.1:7391/
+```
 
-**Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have: no install, nothing kept.
+It opens on your spend so far: which models, which sessions, where it went and proposed fixes. Prefer the terminal?
 
-Building your own agent with the SDK: install *in your project* (`pip install tokenjam` + `tj onboard`); see the table below.
+```
+tj optimize          # what your usage is costing, and where it is recoverable
+tj rules list        # the fixes that came out of it, and the files they'd land in
+```
 
-<sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood; see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
+`tj rules` list reads the last analysis, so run it after `tj optimize` or after the daemon's first cycle. Not sure what to do next? Bare `tj` always points at the next useful command.
+
+Just looking? `npx tokenjam` prints a read-only report over the logs you already have. No install, nothing kept.
 
 <div align="center"><img src="docs/assets/tokenjam-token-flow.png" alt="Token flow: telemetry from Claude Code, Codex, Google, AWS, the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which decomposes where every token goes: 94% re-reads of history and context, 5.1% tool output, 0.9% net-new work, measured over a 61-session history" width="830"></div>
 
