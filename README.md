@@ -22,6 +22,12 @@ Cut your agent's token spend by up to 40%. TokenJam reads your agent's telemetry
 
 TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
+<div align="center">
+
+<img src="docs/assets/tokenjam-dashboard.png" alt="TokenJam Lens dashboard: past overspend by category, spend and token totals, and sessions by model over the last 30 days." width="900">
+
+</div>
+
 One command sets up live capture:
 
 ```bash
