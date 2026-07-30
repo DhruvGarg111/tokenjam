@@ -2,7 +2,7 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-TokenJam reads your agent's telemetry, finds where the tokens actually go, and then writes the fix — a rule into the right `CLAUDE.md`, an unused MCP server scoped down, a subagent pinned to a cheaper model. It shows it all in a local browser dashboard. Runs entirely on your machine.
+TokenJam reads your agent's telemetry, finds where the tokens actually go, and hands you the fix, not just the finding. Works with Claude Code, Codex, and your own SDK or API agents. Shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -22,7 +22,7 @@ TokenJam reads your agent's telemetry, finds where the tokens actually go, and t
 
 TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
-It no longer stops at telling you where the money went. Every analyzer ends in a **fix you can apply** — a rule written into the right `CLAUDE.md`, an MCP server scoped down, a subagent pinned to a cheaper model, an oversized instruction file rewritten — staged as a diff, applied on your say-so, undoable.
+It no longer stops at telling you where the money went. Every analyzer ends in a **fix you can apply**: a rule written into the right instruction file, an unused MCP server scoped down, a subagent pinned to a cheaper model, a cache breakpoint placed in the request your code builds. Each one is staged as a diff, applied on your say-so, and undoable.
 
 One command sets up live capture, the analyzers that fit how you work, Lens (the local dashboard), and the zero-token statusline:
 
@@ -58,13 +58,10 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 that asks how you use AI agents and wires the right path for you. `--claude-code` / `--codex` just
 pre-answer the wizard's first question (skip it in scripts/CI); they're shortcuts, not separate setups.
 
-Your answer also decides **which analyzers run**. TokenJam sorts users into two personas — you're
-driving a **coding agent** (Claude Code, Codex) or you're driving your **own SDK/API code** — and each
-persona has a different set of things it can actually change. A coding agent's harness builds the API
-request and owns the prompt template, so a request-shaped fix is unreachable; an SDK process has no
-on-disk transcript and no subagent dispatch, so a workspace-shaped fix has nothing to read. Rather than
-show you a finding you can't act on, TokenJam skips those analyzers entirely for your persona. Most
-analyzers run for both. See the table below for which.
+Your answer also decides **which analyzers run**. TokenJam sorts users into two personas: you're
+driving a **coding agent** (Claude Code, Codex), or you're driving your **own SDK/API code**. Each can
+change a different set of things, so each gets a different set of analyzers. Most run for both.
+[The analyzers](#the-analyzers) below has the full split and the reasoning.
 
 | You are | Run this | What you get |
 |---|---|---|
@@ -99,13 +96,13 @@ subset with `tj optimize downsize resend relearn`.
 
 | Analyzer | CC | SDK | What it finds | Fix it produces |
 |---|:--:|:--:|---|---|
-| `relearn` | ✅ | ✅ | A blocker your agent keeps silently re-hitting across sessions | Rule, skill, or hook — written for you |
+| `relearn` | ✅ | ✅ | A blocker your agent keeps silently re-hitting across sessions | A rule, skill, or hook, written for you |
 | `resend` | ✅ | ✅ | Token-weighted repeat-context share across turns, whether or not caching is on | A subagent-offload rule in the right `CLAUDE.md` |
-| `summarize` | ✅ | ✅ | Instruction files large enough to tax every session, scanned from disk | An in-place rewrite, structure-verified and reversible |
+| `summarize` | ✅ | ⚪ | Instruction files large enough to tax every session, scanned from disk | An in-place rewrite, structure-verified and reversible |
 | `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence | A sizing rule, or a routing config to export |
 | `subagent` | ✅ | — | Premium-model or over-contexted `Task` calls hidden inside the parent's total | The `model:` key in `.claude/agents/<name>.md` |
 | `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called | Remove or project-scope the server |
-| `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling | Informational — powers Lens's Budget screen |
+| `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling | Informational; powers Lens's Budget screen |
 | `cache` | — | ✅ | Your caching ratio per (provider, model) | Set `cache_control` on the request you build |
 | `cache-recommend` | — | ✅ | Where to put Anthropic prompt-cache breakpoints, from your real prefixes | Concrete breakpoint placement |
 | `trim` | — | ✅ | Prompt regions the model gives little weight to | Shorten your prompt template |
@@ -116,8 +113,8 @@ subset with `tj optimize downsize resend relearn`.
 
 **Why a row is dashed matters.** For a coding-agent user, `cache` / `cache-recommend` / `trim` /
 `script` / `reuse` / `verbosity` / `stream-usage` are skipped before they ever query: the harness builds
-the request and owns the prompt template, so the lever lives on the other side of the line — and a
-finding with no fix is a diagnostic, not a product. For an SDK user, `subagent` and `deadweight` are
+the request and owns the prompt template, so the lever lives on the other side of the line, and a
+finding with no fix is a diagnostic rather than a product. For an SDK user, `subagent` and `deadweight` are
 skipped because the data they read (Claude Code transcripts, `Task`-tool subagent dispatch) doesn't
 exist in a generic SDK process. The gate is one map in `core/optimize/runner.py`; the reasoning for
 each entry is in the comment beside it.
@@ -126,9 +123,8 @@ each entry is in the comment beside it.
 for a coding agent is a global "be concise" instruction, which buys tokens by making the agent
 terser everywhere. That is a quality tax, and it is not a trade this product makes.
 
-A tick means the analyzer runs and its fix is reachable for that persona — not that it will fire on
-your data. `script` and `reuse` in particular hold deliberately strict thresholds and stay quiet
-unless your workload really does repeat itself.
+⚪ = not gated off, but it reads your workspace's instruction files from disk, so a deployed SDK
+service typically has nothing for it to scan.
 
 Deep dives: [docs/optimize/](docs/optimize/).
 
@@ -139,7 +135,7 @@ Deep dives: [docs/optimize/](docs/optimize/).
 <div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
 
 TokenJam used to stop at the left column: here is what's costing you. Now every analyzer terminates in
-a concrete diff to a file on your machine, and one lifecycle drives all of them — **list → stage →
+a concrete diff to a file on your machine, and one lifecycle drives all of them: **list → stage →
 check → apply → undo**, dry-run by default, nothing written until you say so.
 
 ```bash
@@ -171,7 +167,7 @@ Everything also appears in Lens's **Review** inbox if you'd rather click than ty
 
 ## Lens: the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart), and a **Review inbox** where every proposed fix waits for an approve or a dismiss. Around them: Optimize (with its Summarize and Rules sub-screens), Sessions, Traces, Cost, Alerts, Drift, and Budget. The nav is persona-aware — it hides screens your persona has no data for. Fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart), and a **Review inbox** where every proposed fix waits for an approve or a dismiss. Around them: Optimize (with its Summarize and Rules sub-screens), Sessions, Traces, Cost, Alerts, Drift, and Budget. The nav is persona-aware: it hides screens your persona has no data for. Fully offline, no signup.
 
 <table>
 <tr>
@@ -197,7 +193,7 @@ Everything also appears in Lens's **Review** inbox if you'd rather click than ty
 TokenJam is also a full observability stack. The analyzers and Lens ride on top.
 
 - **Real-time cost tracking**: every LLM call priced as it happens
-- **Session replay**: `tj session-story` reconstructs a session's *method* turn by turn — its ordered moves, and for each delegation the subagent's mandate and what it did; `tj resume-brief` recaps where a session left off
+- **Session replay**: `tj session-story` reconstructs a session's *method* turn by turn: its ordered moves, and for each delegation the subagent's mandate and what it did; `tj resume-brief` recaps where a session left off
 - **Shareable efficiency card**: `tj tokenmaxx`
 - **Safety alerts**: 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)
 - **Behavioral drift detection**: Z-score baselines, no LLM required

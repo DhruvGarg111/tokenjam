@@ -23,7 +23,7 @@ npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 
 Your answer also decides **which analyzers run**. A coding-agent user (Claude Code, Codex) and an SDK/API user can change different things: the coding agent's harness builds the request and owns the prompt template, while an SDK process has no on-disk transcript and no subagent dispatch. Most analyzers run for both; the ones whose fix your persona can't reach are skipped rather than shown as advice you can't act on.
 
-And it doesn't stop at advice. Every analyzer ends in a fix you can apply — a rule written into the right `CLAUDE.md`, an MCP server scoped down, a subagent pinned to a cheaper model, an oversized instruction file rewritten — staged as a diff, dry-run by default, undoable.
+And it doesn't stop at advice. Every analyzer ends in a fix you can apply: a rule written into the right instruction file, an unused MCP server scoped down, a subagent pinned to a cheaper model, a cache breakpoint placed in the request your code builds. Each one is staged as a diff, dry-run by default, and undoable.
 
 ## Commands
 
