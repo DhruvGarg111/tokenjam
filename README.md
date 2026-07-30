@@ -118,43 +118,7 @@ A tick means the analyzer runs and its fix is reachable for that persona, not th
 your data. `script` and `reuse` in particular hold deliberately strict thresholds and stay quiet
 unless your workload really does repeat itself.
 
-Lens's FAQ screen carries the same list for *your* setup: the checks that are live, then the ones
-turned off, each with its reason. Deep dives: [docs/optimize/](docs/optimize/).
-
----
-
-## From advice to applied fixes
-
 <div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
-
-TokenJam used to stop at the left column: here is what's costing you. Now every analyzer terminates in
-a concrete diff to a file on your machine, and one lifecycle drives all of them: **list → stage →
-check → apply → undo**, dry-run by default, nothing written until you say so.
-
-```bash
-tj rules list           # every fix on offer, and the files it would be written into
-tj rules show <id>      # the rule text, its destinations, and why each was chosen
-tj rules stage <id>     # render one diff per destination, staged for review
-tj rules check          # re-verify staged diffs against the files as they stand now
-tj rules apply          # write them
-tj rules undo <id>      # revert, per destination
-```
-
-Three properties worth knowing:
-
-- **Placement is derived, not assumed.** A rule lands in the project that actually exhibited the
-  problem, chosen from the working directories your sessions recorded, rather than defaulting to the
-  global `~/.claude/CLAUDE.md` that every session of every project pays for.
-- **Every write is netted against its own standing cost.** A `CLAUDE.md` rule is re-sent for the rest
-  of the file's life, so a rule that merely breaks even is refused rather than offered. TokenJam caps
-  how many permanent writes it will propose at once and ranks them by net value.
-- **Reversible by construction.** Applied writes snapshot the pre-image and commit when the target is
-  in a repo; `tj rules undo` and `tj relearn revert` restore it.
-
-Fixes that aren't rules have their own verbs: `tj relearn apply` handles the skill and hook rungs,
-`tj summarize` rewrites an oversized instruction file in place with its protected structure
-hash-guarded, and `tj optimize --export-config` emits a routing config instead of editing anything.
-Everything also appears in Lens's **Review** inbox if you'd rather click than type.
 
 ---
 
