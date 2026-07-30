@@ -2,7 +2,7 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
+TokenJam reads your agent's telemetry, finds where the tokens actually go, and then writes the fix — a rule into the right `CLAUDE.md`, an unused MCP server scoped down, a subagent pinned to a cheaper model. It shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -14,12 +14,6 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 **No cloud · No signup · No vendor lock-in**
 
-
-<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
-<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
-
-
-
 </div>
 
 ---
@@ -28,7 +22,9 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
-One command sets up live capture, all thirteen analyzers, Lens (the local dashboard), and the zero-token statusline:
+It no longer stops at telling you where the money went. Every analyzer ends in a **fix you can apply** — a rule written into the right `CLAUDE.md`, an MCP server scoped down, a subagent pinned to a cheaper model, an oversized instruction file rewritten — staged as a diff, applied on your say-so, undoable.
+
+One command sets up live capture, the analyzers that fit how you work, Lens (the local dashboard), and the zero-token statusline:
 
 ```bash
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
@@ -38,6 +34,7 @@ npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 
 ```bash
 tj optimize          # cost-saving candidates from your actual usage
+tj rules list        # the fixes on offer, and the files they'd be written into
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
@@ -61,9 +58,17 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 that asks how you use AI agents and wires the right path for you. `--claude-code` / `--codex` just
 pre-answer the wizard's first question (skip it in scripts/CI); they're shortcuts, not separate setups.
 
+Your answer also decides **which analyzers run**. TokenJam sorts users into two personas — you're
+driving a **coding agent** (Claude Code, Codex) or you're driving your **own SDK/API code** — and each
+persona has a different set of things it can actually change. A coding agent's harness builds the API
+request and owns the prompt template, so a request-shaped fix is unreachable; an SDK process has no
+on-disk transcript and no subagent dispatch, so a workspace-shaped fix has nothing to read. Rather than
+show you a finding you can't act on, TokenJam skips those analyzers entirely for your persona. Most
+analyzers run for both. See the table below for which.
+
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `tj onboard` (or `tj onboard --claude-code` to skip the first question) | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all thirteen analyzers + Lens |
+| **Claude Code user** | `tj onboard` (or `tj onboard --claude-code` to skip the first question) | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks the coding-agent analyzers + Lens |
 | **Codex CLI user** | `tj onboard` (or `tj onboard --codex`) | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
@@ -82,107 +87,90 @@ A single page walks every path, each ending with a verify step: see
 
 ---
 
-## Thirteen analyzers + Lens. One install.
+## The analyzers
 
-TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces cost-savings advisories across thirteen areas, then brings them together in a local browser dashboard.
+<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
 
-<table>
-<tr>
-<td width="50%" valign="top">
+TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools,
+then runs a suite of analyzers over it. Most run for everyone. A few are persona-scoped, because the
+fix they produce is only reachable from one side of the line: **CC** = coding agent (Claude Code,
+Codex), **SDK** = your own SDK/API code. `tj optimize` runs everything your persona can act on; name a
+subset with `tj optimize downsize resend relearn`.
 
-### Downsize
+| Analyzer | CC | SDK | What it finds | Fix it produces |
+|---|:--:|:--:|---|---|
+| `relearn` | ✅ | ✅ | A blocker your agent keeps silently re-hitting across sessions | Rule, skill, or hook — written for you |
+| `resend` | ✅ | ✅ | Token-weighted repeat-context share across turns, whether or not caching is on | A subagent-offload rule in the right `CLAUDE.md` |
+| `summarize` | ✅ | ⚪ | Instruction files large enough to tax every session, scanned from disk | An in-place rewrite, structure-verified and reversible |
+| `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence | A sizing rule, or a routing config to export |
+| `subagent` | ✅ | — | Premium-model or over-contexted `Task` calls hidden inside the parent's total | The `model:` key in `.claude/agents/<name>.md` |
+| `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called | Remove or project-scope the server |
+| `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling | Informational — powers Lens's Budget screen |
+| `cache` | — | ✅ | Your caching ratio per (provider, model) | Set `cache_control` on the request you build |
+| `cache-recommend` | — | ✅ | Where to put Anthropic prompt-cache breakpoints, from your real prefixes | Concrete breakpoint placement |
+| `trim` | — | ✅ | Prompt regions the model gives little weight to | Shorten your prompt template |
+| `verbosity` | — | ✅ | Sessions whose output runs long against a per-(tool, task-shape) baseline | A response-length constraint |
+| `script` | — | ✅ | Deterministic `(tool_name, arg_shape)` sequences a plain script could replace | Replace the loop with code |
+| `reuse` | — | ✅ | Sessions where your agent re-plans the same work | Reviewable skeleton templates |
+| `stream-usage` | — | ✅ | Streamed calls that closed before the provider reported usage, so their spend went unrecorded | `stream_options={"include_usage": true}`, or drain the stream. Corrects the figure; doesn't shrink it |
 
-`tj optimize downsize`
+**Why a row is dashed matters.** For a coding-agent user, `cache` / `cache-recommend` / `trim` /
+`script` / `reuse` / `verbosity` / `stream-usage` are skipped before they ever query: the harness builds
+the request and owns the prompt template, so the lever lives on the other side of the line — and a
+finding with no fix is a diagnostic, not a product. For an SDK user, `subagent` and `deadweight` are
+skipped because the data they read (Claude Code transcripts, `Task`-tool subagent dispatch) doesn't
+exist in a generic SDK process. The gate is one map in `core/optimize/runner.py`; the reasoning for
+each entry is in the comment beside it.
 
-Flags sessions where a cheaper same-family model is a downsize candidate. Never claims quality equivalence.
+`verbosity` is the one dash that is a product decision rather than a missing lever: its only remedy
+for a coding agent is a global "be concise" instruction, which buys tokens by making the agent
+terser everywhere. That is a quality tax, and it is not a trade this product makes.
 
-[Details →](docs/optimize/downsize.md)
+⚪ = not gated off, but it reads your workspace's instruction files from disk, so a deployed SDK
+service typically has nothing for it to scan.
 
-</td>
-<td width="50%" valign="top">
+Deep dives: [docs/optimize/](docs/optimize/).
 
-### Cache
+---
 
-`tj optimize cache`
+## From advice to applied fixes
 
-Your caching ratio per (provider, model), plus suggested Anthropic prompt-cache breakpoints from your real usage.
+<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
 
-[Details →](docs/optimize/cache.md)
+TokenJam used to stop at the left column: here is what's costing you. Now every analyzer terminates in
+a concrete diff to a file on your machine, and one lifecycle drives all of them — **list → stage →
+check → apply → undo**, dry-run by default, nothing written until you say so.
 
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
+```bash
+tj rules list           # every fix on offer, and the files it would be written into
+tj rules show <id>      # the rule text, its destinations, and why each was chosen
+tj rules stage <id>     # render one diff per destination, staged for review
+tj rules check          # re-verify staged diffs against the files as they stand now
+tj rules apply          # write them
+tj rules undo <id>      # revert, per destination
+```
 
-### Script
+Three properties worth knowing:
 
-`tj optimize script`
+- **Placement is derived, not assumed.** A rule lands in the project that actually exhibited the
+  problem, chosen from the working directories your sessions recorded, rather than defaulting to the
+  global `~/.claude/CLAUDE.md` that every session of every project pays for.
+- **Every write is netted against its own standing cost.** A `CLAUDE.md` rule is re-sent for the rest
+  of the file's life, so a rule that merely breaks even is refused rather than offered. TokenJam caps
+  how many permanent writes it will propose at once and ranks them by net value.
+- **Reversible by construction.** Applied writes snapshot the pre-image and commit when the target is
+  in a repo; `tj rules undo` and `tj relearn revert` restore it.
 
-Deterministic `(tool_name, arg_shape)` sequences that match work a plain script could replace.
-
-[Details →](docs/optimize/script.md)
-
-</td>
-<td width="50%" valign="top">
-
-### Trim
-
-`tj optimize trim`
-
-Prompt regions the model gives little weight to. Surfaces what's safe to cut.
-
-[Details →](docs/optimize/trim.md)
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### Reuse
-
-`tj optimize reuse`
-
-Sessions where your agent re-plans the same work, exported as reviewable skeleton templates.
-
-[Details →](docs/optimize/reuse.md)
-
-</td>
-<td width="50%" valign="top">
-
-### Subagent right-sizing
-
-`tj optimize subagent`
-
-Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls hidden in the parent total.
-
-[Details →](docs/optimize/subagent.md)
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-### Verbosity
-
-`tj optimize verbosity`
-
-Flags sessions whose output runs long against a per-(tool, task-shape) baseline. Predicted high-verbosity output — review before constraining a response.
-
-[Details →](docs/optimize/verbosity.md)
-
-</td>
-<td width="50%" valign="top">
-</td>
-</tr>
-</table>
-
-`tj optimize` (no args) runs all thirteen analyzers: the seven above, plus `relearn` (a blocker your agent keeps silently re-hitting across sessions), `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen), `cache-recommend` (the Cache card's breakpoint-suggestion half, above), `resend` (token-weighted repeat-context share across turns, independent of whether caching is enabled), `summarize` (prompt files worth summarizing, scanned from disk), and `deadweight` (MCP servers whose schemas load into every session and are never called). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
+Fixes that aren't rules have their own verbs: `tj relearn apply` handles the skill and hook rungs,
+`tj summarize` rewrites an oversized instruction file in place with its protected structure
+hash-guarded, and `tj optimize --export-config` emits a routing config instead of editing anything.
+Everything also appears in Lens's **Review** inbox if you'd rather click than type.
 
 ---
 
 ## Lens: the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart), and a **Review inbox** where every proposed fix waits for an approve or a dismiss. Around them: Optimize (with its Summarize and Rules sub-screens), Sessions, Traces, Cost, Alerts, Drift, and Budget. The nav is persona-aware — it hides screens your persona has no data for. Fully offline, no signup.
 
 <table>
 <tr>
@@ -191,7 +179,7 @@ Flags sessions whose output runs long against a per-(tool, task-shape) baseline.
 </tr>
 <tr>
 <td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Trace waterfall: session-level spans with cost annotations" /></td>
-<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status: per-agent cards" /></td>
+<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Sessions: per-agent cards" /></td>
 </tr>
 <tr>
 <td width="50%"><img src="docs/screenshots/tj-dashboard-tools.png" alt="Analytics explorer: tool-usage leaderboard" /></td>
@@ -205,15 +193,17 @@ Flags sessions whose output runs long against a per-(tool, task-shape) baseline.
 
 ## Beyond optimization
 
-TokenJam is also a full observability stack. The thirteen analyzers and Lens ride on top.
+TokenJam is also a full observability stack. The analyzers and Lens ride on top.
 
 - **Real-time cost tracking**: every LLM call priced as it happens
+- **Session replay**: `tj session-story` reconstructs a session's *method* turn by turn — its ordered moves, and for each delegation the subagent's mandate and what it did; `tj resume-brief` recaps where a session left off
+- **Shareable efficiency card**: `tj tokenmaxx`
 - **Safety alerts**: 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)
 - **Behavioral drift detection**: Z-score baselines, no LLM required
 - **Schema validation**: declare or infer JSON Schema for tool outputs
 - **Context & quota audits**: `tj context` (re-read vs. net-new split) and `tj quota-audit` (retroactive Opus usage check) over your Claude Code sessions
 - **Close the loop**: `tj loop` annotates a run with a verdict, promotes a bad run into a stored expectation, and tracks whether later runs pass or regress against it
-- **Prompt summarization (advisory)**: `tj summarize` finds prompt files worth condensing and estimates the per-call saving
+- **Instruction-file summarization**: `tj summarize` finds files worth condensing, estimates the per-session saving, and rewrites them in place with protected structure hash-guarded and reversible
 - **Enforcement-plane proxy (suggest mode)**: `tj proxy` surfaces routing suggestions locally, without rewriting requests
 - **OTel-native**: point any OTLP exporter at `tj serve` and you're done
 - **Statusline**: a zero-token Claude Code status line (`tj statusline`, wired by `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
@@ -265,7 +255,7 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 
 ## Roadmap
 
-**Shipped:** Downsize · Cache · Script · Trim · Reuse · Subagent right-sizing · Claude Code + Codex onboarding · MCP server · Lens web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & quota audits · Close-the-loop annotations/expectations · Prompt summarization (advisory) · Enforcement-plane proxy (suggest mode)
+**Shipped:** The analyzer suite (Downsize · Cache · Cache-recommend · Script · Trim · Reuse · Verbosity · Subagent right-sizing · Deadweight · Resend · Relearn · Summarize · Budget projection · Stream-usage) · Persona-scoped analyzer gating · The `tj rules` write lifecycle (stage / check / apply / undo, with derived placement and net-of-cost budgeting) · Review inbox · Claude Code + Codex onboarding · MCP server · Lens web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & quota audits · Session replay & resume briefs · Close-the-loop annotations/expectations · Enforcement-plane proxy (suggest mode)
 
 **Up next** (roughly):
 - [ ] Continued Lens polish + per-product visual branding
