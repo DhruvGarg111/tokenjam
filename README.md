@@ -22,9 +22,7 @@ TokenJam reads your agent's telemetry, finds where the tokens actually go, and h
 
 TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
-It no longer stops at telling you where the money went. Every analyzer ends in a **fix you can apply**: a rule written into the right instruction file, an unused MCP server scoped down, a subagent pinned to a cheaper model, a cache breakpoint placed in the request your code builds. Each one is staged as a diff, applied on your say-so, and undoable.
-
-One command sets up live capture, the analyzers that fit how you work, Lens (the local dashboard), and the zero-token statusline:
+One command sets up live capture:
 
 ```bash
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
@@ -85,8 +83,6 @@ A single page walks every path, each ending with a verify step: see
 ---
 
 ## The analyzers
-
-<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
 
 TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools,
 then runs a suite of analyzers over it. Most run for everyone. A few are persona-scoped, because the
@@ -249,23 +245,6 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 | Export to Grafana / Datadog / NDJSON | [docs/export.md](docs/export.md) |
 | NemoClaw sandbox observer | [docs/nemoclaw-integration.md](docs/nemoclaw-integration.md) |
 | Release notes | [GitHub Releases](https://github.com/Metabuilder-Labs/tokenjam/releases) |
-
----
-
-## Roadmap
-
-**Shipped:** The analyzer suite (Downsize · Cache · Cache-recommend · Script · Trim · Reuse · Verbosity · Subagent right-sizing · Deadweight · Resend · Relearn · Summarize · Budget projection · Stream-usage) · Persona-scoped analyzer gating · The `tj rules` write lifecycle (stage / check / apply / undo, with derived placement and net-of-cost budgeting) · Review inbox · Claude Code + Codex onboarding · MCP server · Lens web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & quota audits · Session replay & resume briefs · Close-the-loop annotations/expectations · Enforcement-plane proxy (suggest mode)
-
-**Up next** (roughly):
-- [ ] Continued Lens polish + per-product visual branding
-- [ ] `tj policy add | edit | apply`: unified rule surface (today: `tj policy list` / `tj policy decisions`)
-- [ ] `tj replay`: replay captured sessions against new model versions
-- [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)
-- [ ] Vercel AI SDK & Mastra integrations
-- [ ] Published Docker image
-- [ ] GitHub Actions for CI drift/cost checks
-
-Full version-by-version history: [GitHub Releases](https://github.com/Metabuilder-Labs/tokenjam/releases).
 
 ---
 
