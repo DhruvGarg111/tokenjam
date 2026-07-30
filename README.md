@@ -94,22 +94,22 @@ fix they produce is only reachable from one side of the line: **CC** = coding ag
 Codex), **SDK** = your own SDK/API code. `tj optimize` runs everything your persona can act on; name a
 subset with `tj optimize downsize resend relearn`.
 
-| Analyzer | CC | SDK | What it finds | Fix it produces |
-|---|:--:|:--:|---|---|
-| `relearn` | ✅ | ✅ | A blocker your agent keeps silently re-hitting across sessions | A rule, skill, or hook, written for you |
-| `resend` | ✅ | ✅ | Token-weighted repeat-context share across turns, whether or not caching is on | A subagent-offload rule in the right `CLAUDE.md` |
-| `summarize` | ✅ | ✅ | Instruction files large enough to tax every session, scanned from disk | An in-place rewrite, structure-verified and reversible |
-| `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence | A sizing rule, or a routing config to export |
-| `subagent` | ✅ | — | Premium-model or over-contexted `Task` calls hidden inside the parent's total | The `model:` key in `.claude/agents/<name>.md` |
-| `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called | Remove or project-scope the server |
-| `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling | Informational; powers Lens's Budget screen |
-| `cache` | — | ✅ | Your caching ratio per (provider, model) | Set `cache_control` on the request you build |
-| `cache-recommend` | — | ✅ | Where to put Anthropic prompt-cache breakpoints, from your real prefixes | Concrete breakpoint placement |
-| `trim` | — | ✅ | Prompt regions the model gives little weight to | Shorten your prompt template |
-| `verbosity` | — | ✅ | Sessions whose output runs long against a per-(tool, task-shape) baseline | A response-length constraint |
-| `script` | — | ✅ | Deterministic `(tool_name, arg_shape)` sequences a plain script could replace | Replace the loop with code |
-| `reuse` | — | ✅ | Sessions where your agent re-plans the same work | Reviewable skeleton templates |
-| `stream-usage` | — | ✅ | Streamed calls that closed before the provider reported usage, so their spend went unrecorded | `stream_options={"include_usage": true}`, or drain the stream. Corrects the figure; doesn't shrink it |
+| Analyzer | CC | SDK | Description |
+|---|:--:|:--:|---|
+| `relearn` | ✅ | ✅ | Blockers your agent keeps re-hitting across sessions, and what the repeated recovery costs |
+| `resend` | ✅ | ✅ | How much of each turn's prompt is context you already sent, whether or not caching is on |
+| `summarize` | ✅ | ✅ | Instruction files large enough to tax every session, scanned from disk |
+| `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence |
+| `subagent` | ✅ | — | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
+| `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called |
+| `budget-projection` | ✅ | ✅ | Your run-rate against a configured `[budget.<provider>]` ceiling |
+| `cache` | — | ✅ | Your caching ratio per (provider, model), and where it is worst |
+| `cache-recommend` | — | ✅ | Where to place prompt-cache breakpoints, from the prefixes you actually repeat |
+| `trim` | — | ✅ | Prompt regions the model gives little weight to |
+| `verbosity` | — | ✅ | Sessions whose output runs long against a per-(tool, task-shape) baseline |
+| `script` | — | ✅ | Deterministic tool sequences a plain script could replace |
+| `reuse` | — | ✅ | Sessions where your agent re-plans work it has already planned |
+| `stream-usage` | — | ✅ | Streamed calls that closed before the provider reported usage, so their spend went unrecorded |
 
 **Why a row is dashed matters.** For a coding-agent user, `cache` / `cache-recommend` / `trim` /
 `script` / `reuse` / `verbosity` / `stream-usage` are skipped before they ever query: the harness builds
@@ -127,7 +127,8 @@ A tick means the analyzer runs and its fix is reachable for that persona, not th
 your data. `script` and `reuse` in particular hold deliberately strict thresholds and stay quiet
 unless your workload really does repeat itself.
 
-Deep dives: [docs/optimize/](docs/optimize/).
+Lens's FAQ screen carries the same list for *your* setup: the checks that are live, then the ones
+turned off, each with its reason. Deep dives: [docs/optimize/](docs/optimize/).
 
 ---
 
