@@ -1,11 +1,12 @@
 ---
 description: Analyzer authoring, registry naming, persona gating, gate measurement, environment sensitivity, pipeline-order pitfalls, plus the summarize and rulewrite lifecycles.
 paths:
-  - "tokenjam/core/optimize/**"
+  - "tokenjam/core/optimize/analyzers/**"
+  - "tokenjam/core/optimize/registry.py"
+  - "tokenjam/core/optimize/runner.py"
+  - "tokenjam/core/optimize/cost_proposals.py"
   - "tokenjam/core/summarize/**"
   - "tokenjam/core/rulewrite/**"
-  - "tokenjam/core/fixes/**"
-  - "tokenjam/cli/cmd_optimize.py"
 ---
 
 # Analyzer rules (`core/optimize/`)
