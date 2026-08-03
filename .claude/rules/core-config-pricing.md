@@ -1,9 +1,9 @@
 ---
 description: Core config resolution and the pricing engine — precedence, env overrides, plan tiers, subscription vs API pricing modes.
 paths:
-  - "tokenjam/core/**"
   - "tokenjam/core/config.py"
   - "tokenjam/core/pricing.py"
+  - "tokenjam/pricing/models.toml"
 ---
 
 # `tokenjam/core/` — config and pricing
