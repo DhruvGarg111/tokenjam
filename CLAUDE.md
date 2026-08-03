@@ -154,8 +154,8 @@ inside the file. Rows with no rule number are architecture-only.
 
 | Rules | File | Covers · loads when you touch |
 |---|---|---|
-| — | `core-architecture.md` | data flow, post-ingest hooks, session continuity, every core module, `StorageBackend` parity · `tokenjam/core/**` |
-| — | `core-config-pricing.md` | config discovery + precedence, the pricing engine, plan tiers, pricing modes · `tokenjam/core/**` |
+| — | `core-architecture.md` | data flow, post-ingest hooks, session continuity, the top-level core modules, `StorageBackend` parity · the `tokenjam/core/*.py` modules it documents, plus `core/export/**`, `core/ingest_adapters/**` |
+| — | `core-config-pricing.md` | config discovery + precedence, the pricing engine, plan tiers, pricing modes · `core/config.py`, `core/pricing.py`, `tokenjam/pricing/models.toml` |
 | 2 | `config-toml.md` | TOML read/write discipline · `core/config.py`, `core/pricing.py`, onboarding/policy/pricing CLI, any `*.toml` |
 | 3, 12 | `sdk.md` | `@watch()`, attribution, transport, bootstrap, provider/framework integrations · `tokenjam/sdk/**`, `examples/single_{provider,framework}/**` |
 | 4 | `api.md` | app factory, auth layers, per-route behaviour, concurrency, and the MCP stdio server (an SDK/API surface, not a Claude Code one) · `tokenjam/api/**`, `tokenjam/mcp/**`, `cli/cmd_serve.py` |
@@ -163,8 +163,8 @@ inside the file. Rows with no rule number are architecture-only.
 | 8, 11 | `tests.md` | span factories, OTel provider setup, `~/.tj` isolation, `FORCE_COLOR` · `tests/**` |
 | 10 | `otel.md` | exporter, OTLP parsing (one home), semconv constants · `tokenjam/otel/**`, ingest + span/log routes, `sdk/integrations/**` |
 | 15 | `release.md` | release, packaging and CI detail · `pyproject.toml`, `sdk-ts/package.json`, `npm-wrapper/**`, `scripts/release.sh`, `Makefile`, `.github/workflows/**` |
-| — | `optimize-architecture.md` | the analyzer package, registry strings vs file names, the dollar-field contract, write budget, rule placement, product pages · `core/optimize/**`, `core/summarize/**`, `core/rulewrite/**`, `core/fixes/**`, `cli/cmd_optimize.py` |
-| 16, 19, 26, 29, 31, 39, 40 | `optimize-analyzers.md` | analyzer authoring + gating, the prompt-summarization lifecycle and load semantics, the shared rule-write stage/apply/undo lifecycle · same globs as `optimize-architecture.md` |
+| — | `optimize-architecture.md` | the analyzer package, registry strings vs file names, the dollar-field contract, write budget, rule placement, product pages · `core/optimize/**`, `core/fixes/**`, `cli/cmd_optimize.py` |
+| 16, 19, 26, 29, 31, 39, 40 | `optimize-analyzers.md` | analyzer authoring + gating, the prompt-summarization lifecycle and load semantics, the shared rule-write stage/apply/undo lifecycle · `core/optimize/analyzers/**`, `core/optimize/{registry,runner,cost_proposals}.py`, `core/summarize/**`, `core/rulewrite/**` |
 | 18 | `web-ui.md` | the Lens single-file SPA, spacing tokens, charts, polling, UI testing · `tokenjam/ui/**`, `api/app.py`, `tests/unit/test_ui_offline.py` |
 | 21 | `onboarding-dotfiles.md` | managed-block dotfile writes · `cli/cmd_{onboard,uninstall,stop,statusline}.py` |
 | 22, 27, 28, 30, 32, 41 | `optimize-cost-figures.md` | dollar/token figure discipline · `core/optimize/**`, `core/framing.py`, `core/cost.py`, `core/fixes/**`, cost/optimize routes + CLI |
