@@ -1,5 +1,5 @@
 ---
-description: Analyzer authoring, registry naming, persona gating, gate measurement, environment sensitivity, and pipeline-order pitfalls.
+description: Analyzer authoring, registry naming, persona gating, gate measurement, environment sensitivity, pipeline-order pitfalls, plus the summarize and rulewrite lifecycles.
 paths:
   - "tokenjam/core/optimize/**"
   - "tokenjam/core/summarize/**"
@@ -10,7 +10,7 @@ paths:
 
 # Analyzer rules (`core/optimize/`)
 
-Read `tokenjam/core/optimize/CLAUDE.md` for the package walkthrough and the dollar-field contract,
+Read `.claude/rules/optimize-architecture.md` for the package walkthrough and the dollar-field contract,
 and `.claude/rules/optimize-cost-figures.md` for the figure-discipline rules (22, 27, 28, 30, 32, 41).
 
 ### Critical Rule 16 — New optimize analyzers self-register
@@ -140,3 +140,54 @@ if it stopped qualifying* — assert the precondition explicitly (`assert cluste
 asserting the behaviour, so the vehicle's own validity is pinned rather than assumed. *(c) When you
 do have to swap the fixture, say in the docstring which object it replaced and why the old one
 stopped qualifying* — that note is what stops the next reader from "restoring" it.
+
+## `tokenjam/core/summarize/`
+
+Structure-aware prompt summarization (advisory). Pure domain logic — no `tokenjam.cli` /
+`tokenjam.api` imports (delivery's API path lazily imports `httpx`, its lone outbound dependency).
+
+- `detect.py` classifies prose vs. structure (fenced/inline code, tags, templates, tables).
+- `candidates.py` (+ `catalog.py` / `estimate.py`) powers the `tj summarize list` scan.
+- `wrap.py` is the pure protect→restore algorithm: wrap each structured span behind an id'd
+  `<tj-keep>` marker, restore verbatim by id — structure is a hard guarantee.
+- `session.py` is the no-scratch `prepare`/`check` lifecycle + staging (re-derives the wrap from the
+  live file + a content hash; persists nothing but the staged result).
+- `apply.py` writes a staged rewrite back to the file (default dry-run; `--go` writes) behind an
+  owner + content-hash + symlink guard, with a gzip backup and `undo`.
+- `backup.py` stores the gzipped original + metadata under `~/.tj/summary/backups/`.
+- `delivery.py` is the CLI's automated rewrite step — `claude -p` (subprocess, timeout-guarded) or
+  the Anthropic API (lazy `httpx` + the user's own `TJ_ANTHROPIC_API_KEY`) — plus the "pays for
+  itself" amortization.
+- `load_semantics.py` is the single source of truth for how an agent-config file loads (always
+  resident vs. frontmatter-now / body-on-invocation); `invocations.py` observes the invocation
+  multiplier from Claude Code transcripts. Both are consumed by `core/optimize/write_budget` — see
+  `.claude/rules/optimize-architecture.md`.
+- `repo_roots.py` resolves recorded session cwds to repo roots for `core/optimize/rule_placement`.
+
+**Environment sensitivity (Critical Rule 31):** `candidates.list_candidates` takes no session CWD.
+With no explicit `path` it scans the catalog **globals** plus `Path.cwd()` — the tj PROCESS's own
+working directory, never the corpus's recorded session paths. Its floor is therefore the globals, so
+moving the CWD barely moves the figure; it collapses only when the GLOBALS vanish too, which is what
+repointing `HOME` does. Any measurement of its dollar figure must run against the real `HOME`.
+
+## `tokenjam/core/rulewrite/`
+
+The ONE rule-write lifecycle every rule-writing analyzer shares: `plan.py` (list), `apply.py`
+(stage/check/apply/undo), `store.py` (staging + gzip backups), `types.py` (shapes),
+`delivery.py` (the `DeliveryKind` seam). Pure domain — no `tokenjam.cli` / `tokenjam.api` imports.
+
+Reuses `core/summarize/apply`'s guard model and `relearn_apply`'s block renderer rather than
+reimplementing either; the store persists rendered OUTPUT, never a recipe, so what a reviewer
+approved in the diff is byte-for-byte what apply writes.
+
+Surfaced by `tj rules` (`cli/cmd_rules.py`) and `/api/v1/rules/*`.
+
+`core/optimize/rule_placement.py` is the WHERE half — named that, not `placement`, because
+`placement` is already a registered analyzer name for an unrelated question (the Batch API lane,
+`analyzers/batch_placement.py`; Critical Rule 19).
+
+`delivery.py` is the delivery-mechanism seam: a `DeliveryKind` owns its own renderer AND its own
+pricer, and adding a mechanism is a registration plus two functions — never an edit to the staging,
+diff, apply, undo or budget machinery, none of which may name a CLAUDE.md. See
+`.claude/rules/optimize-architecture.md` for the full delivery-kind, hook-rails and path-scoped-rule
+contracts.

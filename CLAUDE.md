@@ -2,10 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**This file is deliberately small.** Only what governs *every* file lives here. Architecture detail
-lives in per-directory `CLAUDE.md` files that load when you read that directory, and path-scoped
-Critical Rules live in `.claude/rules/*.md` that load when you touch the files they govern. Both
-indexes are at the bottom of this file — if you are looking for a rule by number, go there first.
+**This file is deliberately small.** Only what governs *every* file lives here. Everything else —
+architecture detail and path-scoped Critical Rules alike — lives in `.claude/rules/*.md`, each of
+which loads only when you touch a file its `paths:` frontmatter matches. The single index is at the
+bottom of this file — if you are looking for a rule by number, or for an area's architecture notes,
+go there first.
 
 ## Project Overview
 
@@ -123,20 +124,9 @@ alerts and schema validation run as post-ingest hooks; the optimize analyzers ru
 a background daemon pass and their reports are read from storage by the CLI, the REST API, the Lens
 web UI and the MCP server.
 
-Each directory below carries its own `CLAUDE.md`, which loads only when you read files there:
-
-| File | Covers |
-|---|---|
-| [`tokenjam/core/CLAUDE.md`](tokenjam/core/CLAUDE.md) | data flow, hooks, session continuity, every core module, `StorageBackend` parity, config, pricing |
-| [`tokenjam/core/optimize/CLAUDE.md`](tokenjam/core/optimize/CLAUDE.md) | the analyzer registry, every analyzer, the dollar-field contract, write budget, rule placement |
-| [`tokenjam/core/summarize/CLAUDE.md`](tokenjam/core/summarize/CLAUDE.md) | prompt summarization lifecycle, load semantics |
-| [`tokenjam/core/rulewrite/CLAUDE.md`](tokenjam/core/rulewrite/CLAUDE.md) | the shared rule-write stage/apply/undo lifecycle |
-| [`tokenjam/sdk/CLAUDE.md`](tokenjam/sdk/CLAUDE.md) | `@watch()`, attribution, transport, bootstrap, provider/framework integrations |
-| [`tokenjam/otel/CLAUDE.md`](tokenjam/otel/CLAUDE.md) | exporter, OTLP parsing (one home), semconv constants |
-| [`tokenjam/api/CLAUDE.md`](tokenjam/api/CLAUDE.md) | app factory, auth layers, per-route behaviour, concurrency |
-| [`tokenjam/cli/CLAUDE.md`](tokenjam/cli/CLAUDE.md) | every non-obvious command, `no_db_commands`, the data-access seam, the daemon, Codex |
-| [`tokenjam/ui/CLAUDE.md`](tokenjam/ui/CLAUDE.md) | the Lens single-file SPA, spacing tokens, charts, polling, UI testing |
-| [`tokenjam/mcp/CLAUDE.md`](tokenjam/mcp/CLAUDE.md) | the stdio server and why it is an SDK/API surface, not a Claude Code one |
+There are no per-directory `CLAUDE.md` files. Each area's architecture notes live in that area's
+`.claude/rules/*.md`, alongside the Critical Rules governing it, and load on the same `paths:`
+trigger — see the index at the bottom of this file.
 
 ## Critical Rules
 
@@ -155,38 +145,42 @@ Each directory below carries its own `CLAUDE.md`, which loads only when you read
 24. **A surface is reachable only if a USER has a path to it — "the component mounts", "the route resolves", "the code is invoked" and "it is deliberate" each prove nothing.** Static analysis cannot find this class; ruff and mypy stay green through every instance. Four checks, all required. **(a) Check the INVERSE direction:** not "does this nav item resolve to a view" but "does anything link TO this view". **(b) Does the path carry data:** a status literal missing from a hand-written WHERE clause emptied `/api/v1/status` and every surface downstream of it. **(c) Does the destination resolve:** transcript-filename links 404 for un-ingested sessions, so render one only when the session resolves, checked at READ time so cached findings self-correct. **(d) Does the capability have a name a user can type:** an analyzer producing a cost card is invisible while absent from `tj optimize`'s Click choices. Deliberate design and documentation are no defense against invisibility. **The inverse trap is equally real:** a missing `@register` decorator is not evidence of death — `batch_placement` and `downsize_agents` are invoked by `model_downgrade.py`. Ask both directions before deleting anything or declaring anything fine: what can a user actually do?
 25. **Removing a feature strands its helper modules — grep every function in the modules it used, not just the files that named it.** When the output-cap hook, its `tj savings` CLI, `core/output_cap.py`, and their tests were deleted, `core/savings_log.py` was left behind untouched: 8 of its 9 functions had zero callers anywhere in the repo, including tests, and its docstring still described `tj hook cap-output`, `tj savings`, and an A/B harness that no longer existed. Only `hooks_dir` was still consumed (by `core/recommendations.py`). The durable rule: after deleting a feature, grep every function in its supporting modules for callers before deciding what happens to the module, and treat a docstring that still describes deleted commands as a live defect, not a stale comment — it actively misleads the next reader. A helper module can legitimately outlive the feature it was built for, but only if it's trimmed to what's still consumed and re-documented for its remaining consumer.
 
-### Where the other Critical Rules live
+### The `.claude/rules/` index — every other rule, and every area's architecture
 
-Each file below loads only when you touch a file its `paths:` frontmatter matches. **If you are
-chasing a rule by number, this table is the index** — the rule keeps its number inside the file.
+Each file below (paths relative to `.claude/rules/`) loads only when you touch a file its `paths:`
+frontmatter matches, and carries both that area's architecture notes and the Critical Rules governing
+it. **If you are chasing a rule by number, this table is the index** — the rule keeps its number
+inside the file. Rows with no rule number are architecture-only.
 
-| Rules | File | Loads when you touch |
+| Rules | File | Covers · loads when you touch |
 |---|---|---|
-| 2 | `.claude/rules/config-toml.md` | `core/config.py`, `core/pricing.py`, onboarding/policy/pricing CLI, any `*.toml` |
-| 3, 12 | `.claude/rules/sdk.md` | `tokenjam/sdk/**`, `examples/single_{provider,framework}/**` |
-| 4 | `.claude/rules/api.md` | `tokenjam/api/**`, `cli/cmd_serve.py` |
-| 5 | `.claude/rules/alerts.md` | `core/alerts.py`, `core/ingest.py`, `core/drift.py`, `core/schema_validator.py`, `api/routes/alerts.py` |
-| 8, 11 | `.claude/rules/tests.md` | `tests/**` |
-| 10 | `.claude/rules/otel.md` | `tokenjam/otel/**`, ingest + span/log routes, `sdk/integrations/**` |
-| 15 | `.claude/rules/release.md` | `pyproject.toml`, `sdk-ts/package.json`, `npm-wrapper/**`, `scripts/release.sh`, `Makefile`, `.github/workflows/**` |
-| 16, 19, 26, 29, 31, 39, 40 | `.claude/rules/optimize-analyzers.md` | `core/optimize/**`, `core/summarize/**`, `core/rulewrite/**`, `core/fixes/**`, `cli/cmd_optimize.py` |
-| 18 | `.claude/rules/web-ui.md` | `tokenjam/ui/**`, `api/app.py`, `tests/unit/test_ui_offline.py` |
-| 21 | `.claude/rules/onboarding-dotfiles.md` | `cli/cmd_{onboard,uninstall,stop,statusline}.py` |
-| 22, 27, 28, 30, 32, 41 | `.claude/rules/optimize-cost-figures.md` | `core/optimize/**`, `core/framing.py`, `core/cost.py`, `core/fixes/**`, cost/optimize routes + CLI |
-| 33, 34, 36, 37, 38 | `.claude/rules/ingest-accounting.md` | `core/backfill.py`, `core/transcript*.py`, `core/ingest*`, `core/db.py`, `core/optimize/accounting.py`, `cli/cmd_{backfill,doctor}.py` |
-| 35 | `.claude/rules/cli-output.md` | `tokenjam/cli/**`, `utils/formatting.py`, `utils/theme.py`, `tokenjam/demo/**` |
+| — | `core-architecture.md` | data flow, post-ingest hooks, session continuity, every core module, `StorageBackend` parity · `tokenjam/core/**` |
+| — | `core-config-pricing.md` | config discovery + precedence, the pricing engine, plan tiers, pricing modes · `tokenjam/core/**` |
+| 2 | `config-toml.md` | TOML read/write discipline · `core/config.py`, `core/pricing.py`, onboarding/policy/pricing CLI, any `*.toml` |
+| 3, 12 | `sdk.md` | `@watch()`, attribution, transport, bootstrap, provider/framework integrations · `tokenjam/sdk/**`, `examples/single_{provider,framework}/**` |
+| 4 | `api.md` | app factory, auth layers, per-route behaviour, concurrency, and the MCP stdio server (an SDK/API surface, not a Claude Code one) · `tokenjam/api/**`, `tokenjam/mcp/**`, `cli/cmd_serve.py` |
+| 5 | `alerts.md` | alert dispatch, captured-content stripping · `core/alerts.py`, `core/ingest.py`, `core/drift.py`, `core/schema_validator.py`, `api/routes/alerts.py` |
+| 8, 11 | `tests.md` | span factories, OTel provider setup, `~/.tj` isolation, `FORCE_COLOR` · `tests/**` |
+| 10 | `otel.md` | exporter, OTLP parsing (one home), semconv constants · `tokenjam/otel/**`, ingest + span/log routes, `sdk/integrations/**` |
+| 15 | `release.md` | release, packaging and CI detail · `pyproject.toml`, `sdk-ts/package.json`, `npm-wrapper/**`, `scripts/release.sh`, `Makefile`, `.github/workflows/**` |
+| — | `optimize-architecture.md` | the analyzer package, registry strings vs file names, the dollar-field contract, write budget, rule placement, product pages · `core/optimize/**`, `core/summarize/**`, `core/rulewrite/**`, `core/fixes/**`, `cli/cmd_optimize.py` |
+| 16, 19, 26, 29, 31, 39, 40 | `optimize-analyzers.md` | analyzer authoring + gating, the prompt-summarization lifecycle and load semantics, the shared rule-write stage/apply/undo lifecycle · same globs as `optimize-architecture.md` |
+| 18 | `web-ui.md` | the Lens single-file SPA, spacing tokens, charts, polling, UI testing · `tokenjam/ui/**`, `api/app.py`, `tests/unit/test_ui_offline.py` |
+| 21 | `onboarding-dotfiles.md` | managed-block dotfile writes · `cli/cmd_{onboard,uninstall,stop,statusline}.py` |
+| 22, 27, 28, 30, 32, 41 | `optimize-cost-figures.md` | dollar/token figure discipline · `core/optimize/**`, `core/framing.py`, `core/cost.py`, `core/fixes/**`, cost/optimize routes + CLI |
+| 33, 34, 36, 37, 38 | `ingest-accounting.md` | `core/backfill.py`, `core/transcript*.py`, `core/ingest*`, `core/db.py`, `core/optimize/accounting.py`, `cli/cmd_{backfill,doctor}.py` |
+| 35 | `cli-output.md` | every non-obvious command, `no_db_commands`, the data-access seam, the daemon, Codex, terminal-output discipline · `tokenjam/cli/**`, `utils/formatting.py`, `utils/theme.py`, `tokenjam/demo/**` |
 
-Two more path-scoped notes with no rule number: `.claude/rules/growth-instrumentation.md` (the weekly
-traffic archive, `.github/workflows/traffic-archive.yml` + `growth/**`) and
-`.claude/rules/examples-and-incidents.md` (`examples/**`, `incidents/**`). Release, packaging and CI
-detail all live in `.claude/rules/release.md` alongside Critical Rule 15.
+Two more path-scoped notes with no rule number: `growth-instrumentation.md` (the weekly traffic
+archive, `.github/workflows/traffic-archive.yml` + `growth/**`) and `examples-and-incidents.md`
+(`examples/**`, `incidents/**`).
 
 ## Further Reading
 
 - [`docs/architecture.md`](docs/architecture.md) — design principles, system overview, SDK internals, alerts, drift, MCP, budget, testing architecture, and the **OTel semconv extensions** section (`tokenjam.billing_account`, `tokenjam.plan_tier`, the `pricing_mode` derivation rules, and why `plan_tier` lives on `SessionRecord` rather than each span).
 - [`docs/installation.md`](docs/installation.md) — base install vs optional extras matrix.
 - [`docs/configuration.md`](docs/configuration.md) — full TOML config surface, the four `[capture]` toggles, and pricing overrides.
-- [`docs/optimize/`](docs/optimize/) — one product page per user-facing analyzer; indexed from `tokenjam/core/optimize/CLAUDE.md`.
+- [`docs/optimize/`](docs/optimize/) — one product page per user-facing analyzer; indexed from `.claude/rules/optimize-architecture.md`.
 - [`docs/backfill/overview.md`](docs/backfill/overview.md) — backfill sources with per-adapter modes, field mapping, idempotency, limitations. [`docs/policy/overview.md`](docs/policy/overview.md) — `tj policy list`.
 - [`AGENTS.md`](AGENTS.md) — codebase conventions for contributors (referenced from the README).
 - `docs/internal/specs/` — canonical specs that production code references long-term; add new ones here when a feature needs a stable, code-referenced source of truth.

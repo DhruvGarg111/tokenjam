@@ -13,7 +13,7 @@ paths:
 
 # Cost-figure rules
 
-The canonical per-analyzer dollar-field contract lives in `tokenjam/core/optimize/CLAUDE.md`.
+The canonical per-analyzer dollar-field contract lives in `.claude/rules/optimize-architecture.md`.
 Analyzer authoring / gating rules are in `.claude/rules/optimize-analyzers.md`.
 
 ### Critical Rule 22 — Never show a figure the user cannot act on; suppress it and say why

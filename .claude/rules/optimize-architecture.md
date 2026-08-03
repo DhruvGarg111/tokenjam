@@ -1,3 +1,13 @@
+---
+description: The tokenjam/core/optimize/ analyzer package — layout, registry-string vs file-name mapping, the per-analyzer dollar-field contract, write budget, rule placement, product pages.
+paths:
+  - "tokenjam/core/optimize/**"
+  - "tokenjam/core/summarize/**"
+  - "tokenjam/core/rulewrite/**"
+  - "tokenjam/core/fixes/**"
+  - "tokenjam/cli/cmd_optimize.py"
+---
+
 # `tokenjam/core/optimize/` — the analyzer package
 
 Powers `tj optimize` and the `get_optimize_report` MCP tool. Public API re-exported from
