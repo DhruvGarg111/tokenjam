@@ -1101,25 +1101,19 @@ def test_the_rollup_can_only_be_reached_through_gather_rollup_population():
 
     Tests are exempt (they legitimately pin the raw function's own behaviour,
     e.g. this file) — this walks only the shipped package.
+
+    THE WALK ITSELF now lives in ``core/optimize/single_derivation.py``
+    (the "rollup population" entry), shared with every other
+    single-derivation seam in the product instead of being reimplemented
+    per value — see that module's docstring. This test keeps its own name
+    and account of the incident because both are still the most useful
+    place for a reader to find them; it no longer owns a second copy of the
+    AST walk.
     """
-    import ast
-    import pathlib
+    from tokenjam.core.optimize.single_derivation import SEAMS, offenders_for
 
-    import tokenjam as _pkg
-
-    root = pathlib.Path(_pkg.__file__).parent
-    allowed_path = root / "core" / "optimize" / "inbox_contribution.py"
-    offenders: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        if path == allowed_path:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-            if name == "past_overspend_rollup":
-                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    seam = next(s for s in SEAMS if s.name == "rollup population")
+    offenders = offenders_for(seam)
     assert not offenders, (
         "past_overspend_rollup called outside inbox_contribution."
         "gather_rollup_population at:\n  " + "\n  ".join(offenders)
