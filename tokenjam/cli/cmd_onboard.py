@@ -12,8 +12,10 @@ from typing import cast
 import click
 from rich.markup import escape
 
+from tokenjam.cli.backfill_progress import transient_status
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import resolve_config_path
 from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
@@ -376,7 +378,13 @@ def _print_instrument_agent_snippet() -> None:
         )
 
 
-@click.command("onboard")
+#: No class-level `status_message`: onboard is heavily interactive (usage-path
+#: choice, plan-tier prompts, an optional `--verify` confirm) for most of its
+#: body, and a live spinner colliding with a blocking stdin read corrupts
+#: both. `transient_status` is called directly around its two genuinely
+#: silent stretches instead — see `_try_backfill_codex` and
+#: `_run_onboard_verification`.
+@click.command("onboard", cls=TjCommand)
 @click.option("--claude-code", "claude_code", is_flag=True, default=False,
               help="Configure Claude Code telemetry to flow into tj")
 @click.option("--codex", "codex", is_flag=True, default=False,
@@ -837,10 +845,10 @@ def _run_onboard_verification(
                 "\n[bold]Verifying\u2026[/bold] waiting for the first telemetry. If you "
                 "haven't yet, [bold]restart[/bold] the agent runtime now."
             )
-        console.print(f"[dim]Polling for up to {int(timeout_s)}s\u2026[/dim]")
-        result = poll_for_first_span(
-            cast(_ReadBackend, backend), since, timeout_s=timeout_s
-        )
+        with transient_status(f"Polling for up to {int(timeout_s)}s\u2026"):
+            result = poll_for_first_span(
+                cast(_ReadBackend, backend), since, timeout_s=timeout_s
+            )
     finally:
         close = getattr(backend, "close", None)
         if callable(close):
@@ -1091,7 +1099,8 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
         from tokenjam.core.db import open_db
         db = open_db(config.storage)
         try:
-            result = ingest_codex(db, config=config)
+            with transient_status("Backfilling Codex sessions…"):
+                result = ingest_codex(db, config=config)
         finally:
             db.close()
     except Exception as exc:

@@ -21,6 +21,7 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjGroup, tj_status_stream
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import apply_staged, undo
 from tokenjam.core.summarize.calibrate import (
@@ -102,12 +103,12 @@ def _print_amortization(amort: Amortization) -> None:
     console.print(line + "[/dim]")
 
 
-@click.group("summarize", invoke_without_command=False)
+@click.group("summarize", cls=TjGroup, invoke_without_command=False)
 def cmd_summarize() -> None:
     """Summarize prompts (structure-aware, advisory)."""
 
 
-@cmd_summarize.command("list")
+@cmd_summarize.command("list", status_message="Scanning for summarize candidates…")
 @click.argument("path", required=False, default=None)
 @click.option("-r", "--recursive", is_flag=True,
               help="Walk the repo subtree (or PATH) — opens to all .md.")
@@ -240,10 +241,18 @@ def cmd_summarize_prep(
     output_json = resolve_output_json(ctx, output_json_flag)
 
     if via is not None:                             # automated: wrap → rewrite → check → stage
-        on_progress = None if output_json else (
-            lambda m: console.print(f"[dim]{escape(m)}…[/dim]"))
+        # One live status line across the three phases `summarize_via` calls
+        # `on_progress` for (wrap / rewrite / verify), rather than the static
+        # print-per-phase this used to do — the rewrite phase in particular
+        # can run for several seconds with nothing else on screen.
         try:
-            outcome = summarize_via(config, path, via, ratio=ratio, on_progress=on_progress)
+            if output_json:
+                outcome = summarize_via(config, path, via, ratio=ratio)
+            else:
+                with tj_status_stream("Wrapping structure…", ctx) as update:
+                    on_progress = lambda m: update(f"{escape(m)}…")  # noqa: E731
+                    outcome = summarize_via(
+                        config, path, via, ratio=ratio, on_progress=on_progress)
         except (DeliveryError, SummarizeRefused) as e:
             raise click.ClickException(str(e)) from e
         if outcome.verdict is None:                 # below the worth-it prose gate (note from the one prep)
@@ -355,10 +364,18 @@ def cmd_summarize_calibrate(
     """
     config: TjConfig = ctx.obj["config"]
     output_json = resolve_output_json(ctx, output_json_flag)
-    on_progress = None if output_json else (lambda m: console.print(f"[dim]{escape(m)}…[/dim]"))
     try:
-        report = run_calibration(
-            config, via=via, limit=limit, go=go, path=path, on_progress=on_progress)
+        if output_json:
+            report = run_calibration(config, via=via, limit=limit, go=go, path=path)
+        else:
+            # One live status line across the per-file samples `run_calibration`
+            # reports through `on_progress`, rather than one static print per
+            # file — each sample is a billed model call and can run for seconds.
+            with tj_status_stream("Calibrating…", ctx) as update:
+                on_progress = lambda m: update(f"{escape(m)}…")  # noqa: E731
+                report = run_calibration(
+                    config, via=via, limit=limit, go=go, path=path,
+                    on_progress=on_progress)
     except (DeliveryError, SummarizeRefused) as e:
         raise click.ClickException(str(e)) from e
     if output_json:
