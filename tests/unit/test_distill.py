@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
+from pathlib import Path
 
 from tokenjam.core import distill
 
@@ -97,7 +99,9 @@ def test_distill_invocation_uses_pinned_recipe(monkeypatch):
     assert "did a thing in detail" in kwargs["input"]
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
-    assert kwargs["cwd"]  # neutral temp dir, non-empty
+    # Neutral AND positively identifiable — see INVOKE_CWD_DIRNAME.
+    assert kwargs["cwd"]
+    assert distill.is_tokenjam_invoke_cwd(kwargs["cwd"])
 
 
 def test_distill_parses_unfenced_result(monkeypatch):
@@ -340,6 +344,33 @@ def test_default_cache_dir_with_config_never_resolves_to_real_home(monkeypatch, 
 
     assert not str(cache_dir).startswith(str(fake_home))
     assert (fake_home / ".tj").exists() is False
+
+
+def test_invoke_cwd_marker_is_positively_identified():
+    marker_cwd = f"/private/var/folders/xx/yyyy/T/{distill.INVOKE_CWD_DIRNAME}"
+    assert distill.is_tokenjam_invoke_cwd(marker_cwd) is True
+
+
+def test_a_real_users_bare_tmp_cwd_is_not_flagged():
+    """The whole point of the dedicated marker directory, not a bare
+    'under the temp root' match: a user genuinely working out of /tmp must
+    never be excluded."""
+    assert distill.is_tokenjam_invoke_cwd("/tmp") is False
+    assert distill.is_tokenjam_invoke_cwd("/tmp/my-project") is False
+    assert distill.is_tokenjam_invoke_cwd(None) is False
+    assert distill.is_tokenjam_invoke_cwd("") is False
+
+
+def test_invoke_cwd_resolves_under_the_temp_root(monkeypatch, tmp_path):
+    """`_invoke_cwd` (what `_invoke_claude` actually passes as `cwd=`) always
+    resolves to a directory whose basename `is_tokenjam_invoke_cwd` accepts —
+    the two halves of this fix must agree with each other."""
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    resolved = distill._invoke_cwd()
+
+    assert distill.is_tokenjam_invoke_cwd(resolved) is True
+    assert Path(resolved).is_dir()
 
 
 def test_default_cache_dir_without_config_keeps_legacy_home_path(monkeypatch, tmp_path):

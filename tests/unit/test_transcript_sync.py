@@ -135,6 +135,33 @@ def test_scan_counts_a_file_with_no_session_id_as_unreadable(tmp_path: Path) -> 
     assert sessions == {}
 
 
+def test_scan_excludes_tokenjams_own_internal_invoke_cwd(tmp_path: Path) -> None:
+    """core.distill/core.rulewrite.presence shell out to the same `claude`
+    CLI as any user session, from a private marker cwd
+    (`core.distill.INVOKE_CWD_DIRNAME`). The disk scan that feeds the
+    reconciliation gap report must never surface one of these as a
+    "missing" session — see also core.backfill's exclusion in the parse
+    loop, which this mirrors at the ingest boundary's OTHER read path."""
+    from tokenjam.core.distill import INVOKE_CWD_DIRNAME
+
+    root = tmp_path / "projects"
+    marker_cwd = f"/private/var/folders/xx/yyyy/T/{INVOKE_CWD_DIRNAME}"
+    _write_transcript(
+        root, "-internal", "sess-internal",
+        [_assistant_record("sess-internal", marker_cwd, "u1", "msg1",
+                           _DEFAULT_RECENT_TS)],
+    )
+    # A real session, so the exclusion is proven to be SPECIFIC, not a
+    # blanket "scan found nothing" false negative.
+    _write_session(root, "sess-real")
+
+    sessions, scanned, unreadable = scan_disk_sessions(root)
+
+    assert scanned == 2
+    assert unreadable == 0
+    assert list(sessions) == ["sess-real"]
+
+
 def test_scan_honours_the_since_mtime_prefilter(tmp_path: Path) -> None:
     root = tmp_path / "projects"
     old = _write_session(root, "sess-old")
