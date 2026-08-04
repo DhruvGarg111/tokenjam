@@ -157,9 +157,10 @@ verification actually happened* — here the model must echo back a per-call non
 was asked for; markers that merely SURVIVE prove nothing when there were none. *(b) It must FAIL
 CLOSED: "nothing to verify against" is a refusal, never a pass.* When adding a check, ask what its
 predicate reads and what happens when that is empty; if the answer is "it passes", the check does not
-exist for the inputs you care about. Same family as root anti-pattern 29(a) (a record failing a
-filter's FORMAT is invisible to it rather than rejected by it), inverted: there the record escapes the
-filter, here the filter escapes having anything to check.
+exist for the inputs you care about. The inverted twin is a filter that reads structured fields out of
+prose: a record whose FORMAT does not match is invisible to that filter rather than rejected by it,
+and is indistinguishable from one correctly excluded. Both failures are silent, and both are found by
+asking what the predicate reads rather than what it returns.
 
 ## `tokenjam/core/summarize/`
 
