@@ -142,6 +142,25 @@ asserting the behaviour, so the vehicle's own validity is pinned rather than ass
 do have to swap the fixture, say in the docstring which object it replaced and why the old one
 stopped qualifying* — that note is what stops the next reader from "restoring" it.
 
+### Critical Rule 42 — A gate whose predicate is computed over a set passes VACUOUSLY when that set is empty
+
+`not (missing or duplicated or extra or reordered or malformed)` reads as "structure intact", but
+every one of those is derived from the protected-block list, so on an input carrying no protected
+blocks each is trivially empty and the gate returns intact having verified NOTHING. It is silent and
+indistinguishable from a genuine pass: same return value, same downstream path, no warning. The
+asymmetry is what makes it dangerous — **the population least able to satisfy a gate's premise is
+routinely the one that most needs the check**, so the vacuous case and the high-risk case are the
+same case. A plain-prose instruction file has nothing to protect and is also the input most likely to
+hijack its own rewrite. Two requirements. *(a) A gate must demand an AFFIRMATIVE signal that
+verification actually happened* — here the model must echo back a per-call nonce envelope
+(`wrap.envelope`), which is a thing that can only be present if the response came from the rewrite it
+was asked for; markers that merely SURVIVE prove nothing when there were none. *(b) It must FAIL
+CLOSED: "nothing to verify against" is a refusal, never a pass.* When adding a check, ask what its
+predicate reads and what happens when that is empty; if the answer is "it passes", the check does not
+exist for the inputs you care about. Same family as root anti-pattern 29(a) (a record failing a
+filter's FORMAT is invisible to it rather than rejected by it), inverted: there the record escapes the
+filter, here the filter escapes having anything to check.
+
 ## `tokenjam/core/summarize/`
 
 Structure-aware prompt summarization (advisory). Pure domain logic — no `tokenjam.cli` /
