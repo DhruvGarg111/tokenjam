@@ -33,7 +33,29 @@ MAX_FIX_LINES = 200
 
 #: Below this a "fix" is a label, not an instruction an agent can follow. Same
 #: floor the write budget's quality gate applies.
+#:
+#: THIS IS NOT THE GUARD'S FLOOR, and using it as one was a hole. The question
+#: here is "is this catalogued text long enough to be an instruction". The
+#: question the structural guard asks is "is this hardcoded text a policy that
+#: should have been catalogued" — a different question, and a threshold is only
+#: valid for the question it was written for. Reusing this one meant any prose
+#: written as short interpolated fragments was automatically exempt, whatever it
+#: added up to. See :data:`MIN_GUARD_STATIC_RUN` below.
 MIN_FIX_CHARS = 40
+
+#: The structural guard's own single-run floor: one uninterrupted stretch of
+#: literal text this long is a rule however it is quoted, so an f-string cannot
+#: hide it.
+MIN_GUARD_STATIC_RUN = 40
+
+#: The guard's SECOND detector, for prose that never has a long run because it
+#: is stitched around interpolated evidence. Length alone genuinely cannot
+#: separate those two cases — a grounded sentence's longest fragment and a
+#: rule's shortest are the same size — so this pairs total literal volume with
+#: SENTENCE COUNT. Grounding is one sentence about one row; a policy that spans
+#: several sentences is a policy no matter how many holes are punched in it.
+MIN_GUARD_STATIC_TOTAL = 120
+MIN_GUARD_SENTENCES = 2
 
 #: An escape hatch the agent grades ITSELF against. "Unless the subtask
 #: genuinely needs deep reasoning" asks the dispatching agent to rate its own
@@ -396,6 +418,9 @@ __all__ = [
     "MAX_FIX_LINES",
     "MIN_COMPARABLE_WORDS",
     "MIN_FIX_CHARS",
+    "MIN_GUARD_SENTENCES",
+    "MIN_GUARD_STATIC_RUN",
+    "MIN_GUARD_STATIC_TOTAL",
     "NEAR_DUPLICATE_OVERLAP",
     "composable_groups",
     "lint_catalog",

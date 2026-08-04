@@ -177,11 +177,16 @@ def test_prepare_aims_at_the_published_line_target_for_an_oversized_claude_md(tm
     # Compression must NOT be presented as the only or default route.
     assert "only ONE of four routes" not in res.target_basis   # (that phrasing is the analyzer's)
     assert "four routes" in res.target_basis
-    assert "summarize only performs the last" in res.target_basis
+    # Prune and expire PERFORM now (quarantined, behind the same approve step),
+    # so the basis must not still claim compression is the only route the tool
+    # can take — a self-description that lags the code is a live defect.
+    assert "summarize only performs the last" not in res.target_basis
+    assert "tj summarize prune" in res.target_basis
+    assert "tj summarize restore" in res.target_basis
     assert PRUNE_TEST_QUOTE in res.target_basis
     assert PATH_SCOPE_QUOTE in res.target_basis
     assert HOOK_QUOTE in res.target_basis
-    assert "does not write them for you" in res.target_basis
+    assert "does not write them for you" in res.target_basis  # ...but hooks/path-scoping still do not
     # ...and the quality tax that makes compression the worst route here.
     assert "trades adherence for tokens" in res.target_basis
 
