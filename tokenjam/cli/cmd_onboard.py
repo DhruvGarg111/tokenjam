@@ -386,8 +386,8 @@ def _print_instrument_agent_snippet() -> None:
                    "existing global config, without re-running the full "
                    "wizard (no plan/budget prompt, no backfill, no daemon "
                    "restart). Requires `tj onboard` to have already run once "
-                   "(anywhere). Pair with --project to skip even the "
-                   "namespace prompt.")
+                   "(anywhere). The project name is always derived from the "
+                   "repo/folder name.")
 @click.option("--budget", type=float, default=None,
               help="Daily budget in USD per agent (0 = no limit)")
 @click.option("--install-daemon", "install_daemon", is_flag=True, default=False,
@@ -412,11 +412,9 @@ def _print_instrument_agent_snippet() -> None:
                    "derived from this — 'all' disables deletion entirely — so "
                    "history the analyzers use can never be deleted underneath "
                    "them. Skips the interactive span prompt when set.")
-@click.option("--project", "project_override", default=None,
-              help="Project name to group this repo under in the dashboard "
-                   "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
-                   "'aquanode'). Defaults to the git org. Used with "
-                   "--claude-code or --add-project.")
+@click.option("--project", "removed_project_flag", default=None, hidden=True,
+              help="Removed — the project name is always derived from the "
+                   "repo/folder name now.")
 @click.option("--backfill-days", "backfill_days", type=int, default=None,
               help=f"Backfill only the last N days of Claude Code history "
                    f"(default {DEFAULT_BACKFILL_DAYS} when neither this nor "
@@ -444,11 +442,23 @@ def _print_instrument_agent_snippet() -> None:
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
                 reconfigure: bool, plan: str | None, analysis_span: str | None,
-                project_override: str | None,
+                removed_project_flag: str | None,
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool,
                 verbose: bool) -> None:
     """Set up tj (interactive)."""
+    # --project was removed: the project name is now ALWAYS derived from the
+    # repo/folder name (see _derive_project_name) — the flag and the prompt
+    # it fed were ceremony that only ever created divergence from what nearly
+    # everyone already ended up with. Fail loudly and specifically rather
+    # than letting a script that still passes it hit Click's generic
+    # "no such option" (the flag stays declared, hidden, purely so we can
+    # catch this and say why).
+    if removed_project_flag is not None:
+        raise click.UsageError(
+            "--project has been removed. The project name is now taken "
+            "from the repo/folder name automatically."
+        )
     # --add-project is the lightweight "register another repo" path: a fresh
     # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
     # the entire Claude Code history just to set one config key
@@ -456,7 +466,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # ephemeral-runner guard, and every other prompt — this path writes
     # nothing but the namespace mapping.
     if add_project:
-        _onboard_add_project(ctx, project_override)
+        _onboard_add_project(ctx)
         return
     # --verify-only is the documented post-restart re-check: config already
     # exists, the user just restarted the agent, and re-running the whole wizard
@@ -482,7 +492,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     print_welcome_banner()
     if claude_code:
         _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
-                             project_override, verify=verify,
+                             verify=verify,
                              backfill_days=backfill_days, backfill_all=backfill_all,
                              analysis_span=analysis_span, verbose=verbose)
         return
@@ -504,7 +514,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         choice = _prompt_usage_path()
         if choice == "claude-code":
             _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
-                                 project_override, verify=verify,
+                                 verify=verify,
                                  backfill_days=backfill_days,
                                  backfill_all=backfill_all,
                                  analysis_span=analysis_span, verbose=verbose)
@@ -515,7 +525,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
             return
         if choice == "combination":
             _onboard_combination(ctx, budget, no_daemon, force, plan,
-                                  project_override, verify=verify,
+                                  verify=verify,
                                   backfill_days=backfill_days,
                                   backfill_all=backfill_all,
                                   analysis_span=analysis_span)
@@ -1620,7 +1630,6 @@ def _onboard_claude_code(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
-    project_override: str | None = None,
     verify: bool = False,
     standalone: bool = True,
     backfill_days: int | None = None,
@@ -1661,12 +1670,10 @@ def _onboard_claude_code(
 
     # Plan-first (#240): resolve the plan tier before prompting for the daily
     # budget — "How do you pay?" is the more important, more natural opener.
-    # The project-name prompt comes after BOTH agent questions (usage path,
-    # plan): it's dashboard bookkeeping, and wedging it between the two broke
-    # their natural grouping.
     if global_config_path.exists() and not force:
         config = load_config(str(global_config_path))
-        if agent_id not in config.agents:
+        is_new_agent = agent_id not in config.agents
+        if is_new_agent:
             config.agents[agent_id] = AgentConfig()
 
         # A config written before prompt/tool-input capture defaulted on has
@@ -1721,10 +1728,15 @@ def _onboard_claude_code(
         budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
-        namespace = _prompt_project_name(project_override, project_name)
         # Server-side project mapping so already-running sessions group by
         # project without restarting the agent (see AgentConfig.project).
-        config.agents[agent_id].project = namespace
+        # Only set it for a genuinely NEW agent — an existing one may carry a
+        # hand-entered name that differs from the derived one (the prompt
+        # this replaced let a user type anything), and silently overwriting
+        # that would orphan its dashboard history under a new identity, a
+        # data-loss-shaped bug even though no rows are deleted.
+        if is_new_agent or not config.agents[agent_id].project:
+            config.agents[agent_id].project = project_name
         config_path = global_config_path
         _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
@@ -1746,8 +1758,8 @@ def _onboard_claude_code(
                 usd = ceiling
         budget = _prompt_daily_budget(budget, plan)
         daily_usd = budget if budget and budget > 0 else None
-        namespace = _prompt_project_name(project_override, project_name)
-        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=namespace)}
+        # No existing config at all — nothing stored to respect.
+        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=project_name)}
         config = TjConfig(
             version="1",
             agents=agents,
@@ -2554,7 +2566,6 @@ def _onboard_combination(
     no_daemon: bool,
     force: bool,
     plan_override: str | None = None,
-    project_override: str | None = None,
     verify: bool = False,
     backfill_days: int | None = None,
     backfill_all: bool = False,
@@ -2625,7 +2636,6 @@ def _onboard_combination(
         _onboard_claude_code(
             ctx, cc_budget, no_daemon, force, reconfigure=False,
             plan_override=cc_plan, plan_usd_override=cc_usd,
-            project_override=project_override,
             verify=False, standalone=False,
             backfill_days=backfill_days, backfill_all=backfill_all,
             analysis_span=analysis_span,
@@ -3332,24 +3342,7 @@ def _derive_project_name() -> str:
     return Path.cwd().name.lower()
 
 
-def _prompt_project_name(project_override: str | None, default: str) -> str:
-    """Resolve the dashboard project name (the OTel ``service.namespace`` the
-    dashboard groups by).
-
-    A meta-repo (e.g. git repo "harness" holding all of "aquanode") wants a
-    human project name, so prompt with the repo name as default. ``--project``
-    skips the prompt for non-interactive use. Asked AFTER the two agent
-    questions (usage path, plan) — see the ordering note at the call sites.
-    """
-    if project_override:
-        return project_override
-    return click.prompt(
-        "Project name (groups related repos under one dashboard tile)",
-        default=default, show_default=True,
-    ).strip() or default
-
-
-def _onboard_add_project(ctx: click.Context, project_override: str | None) -> None:
+def _onboard_add_project(ctx: click.Context) -> None:
     """Register the current repo's Claude Code agent under a project
     namespace, without running any of the rest of the onboarding wizard.
 
@@ -3392,11 +3385,16 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
 
-    if agent_id not in config.agents:
+    is_new_agent = agent_id not in config.agents
+    if is_new_agent:
         config.agents[agent_id] = AgentConfig()
 
-    namespace = _prompt_project_name(project_override, project_name)
-    config.agents[agent_id].project = namespace
+    # Only set it for a genuinely NEW agent — an existing one may carry a
+    # hand-entered name from before --project was removed; respect it rather
+    # than silently overwriting (would orphan its dashboard history).
+    if is_new_agent or not config.agents[agent_id].project:
+        config.agents[agent_id].project = project_name
+    namespace = config.agents[agent_id].project
     # Not a fresh onboard, so no span question — but the clamp still runs,
     # so a config hand-edited to a shorter retention is corrected here too.
     _apply_analysis_span(config)

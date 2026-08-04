@@ -820,7 +820,7 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     assert settings_path.exists()
@@ -844,7 +844,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     data = json.loads(settings_path.read_text())
     # Original top-level key preserved
@@ -864,7 +864,7 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
@@ -887,7 +887,7 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
         # --plan api skips both the plan-tier prompt and the API-spend-ceiling
         # prompt (that one only fires without --plan); "7.0\n" answers the
         # daily-budget prompt.
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "api", "--project", "aquanode"], input="7.0\n")
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "api"], input="7.0\n")
 
     assert result.exit_code == 0
     assert mock_write.called
@@ -907,7 +907,7 @@ def test_onboard_claude_code_skips_budget_prompt_for_subscription_plan(runner, t
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x"])
 
     assert result.exit_code == 0, result.output
     assert "Daily budget in USD" not in result.output
@@ -917,9 +917,11 @@ def test_onboard_claude_code_skips_budget_prompt_for_subscription_plan(runner, t
     assert saved_config.agents[agent_id].budget.daily_usd is None
 
 
-def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
-    """--project sets [agents.<id>].project in config and does NOT write
-    OTEL_RESOURCE_ATTRIBUTES into project settings (the claude wrapper owns it)."""
+def test_onboard_claude_code_derives_config_project_from_repo_name(runner, tmp_path):
+    """--project was removed: the project name is now ALWAYS derived from the
+    repo (git remote) or folder name — never prompted for, never passed as a
+    flag — and does NOT write OTEL_RESOURCE_ATTRIBUTES into project settings
+    (the claude wrapper owns it)."""
     from tokenjam.core.config import load_config
 
     fake_home = tmp_path / "home"
@@ -928,12 +930,13 @@ def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
     with runner.isolated_filesystem() as cwd, \
          patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tokenjam.cli.cmd_onboard._derive_project_name", return_value="aquanode"):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         env = json.loads(
             (Path(cwd) / ".claude" / "settings.json").read_text()
         ).get("env", {})
@@ -944,9 +947,9 @@ def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
     assert cfg.agents[agent_id].project == "aquanode"
 
 
-def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
-    """Without --project, onboard prompts for a project name and stores it as
-    the agent's configured project (not in project settings.json)."""
+def test_onboard_claude_code_never_prompts_for_project_name(runner, tmp_path):
+    """No interactive project-name question exists anymore — onboard must
+    complete with no stdin needed for it at all."""
     from tokenjam.core.config import load_config
 
     fake_home = tmp_path / "home"
@@ -955,13 +958,14 @@ def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
     with runner.isolated_filesystem() as cwd, \
          patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        # First prompt is the project name; budget is supplied via flag.
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tokenjam.cli.cmd_onboard._derive_project_name", return_value="myproject"):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
             "--plan", "max_20x",
-        ], input="myproject\n")
-        assert result.exit_code == 0
+        ])
+        assert result.exit_code == 0, result.output
+        assert "Project name" not in result.output
         env = json.loads(
             (Path(cwd) / ".claude" / "settings.json").read_text()
         ).get("env", {})
@@ -990,7 +994,7 @@ def test_onboard_claude_code_removes_existing_resource_attrs(runner, tmp_path):
 
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
         assert result.exit_code == 0
         env = json.loads(proj_settings.read_text())["env"]
@@ -1039,7 +1043,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -1085,7 +1089,7 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -1894,7 +1898,7 @@ def test_onboard_claude_code_installs_claude_wrapper(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
 
     assert result.exit_code == 0
@@ -1928,7 +1932,7 @@ def test_onboard_claude_code_wrapper_is_idempotent(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         args = [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ]
         first = runner.invoke(cli, args)
         second = runner.invoke(cli, args)
@@ -1953,7 +1957,7 @@ def test_onboard_claude_code_wrapper_writes_bashrc_when_present(runner, tmp_path
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
 
     assert result.exit_code == 0
@@ -1994,7 +1998,7 @@ def test_onboard_claude_code_replaces_legacy_zshrc_otel_markers(runner, tmp_path
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
-            "--plan", "max_20x", "--project", "aquanode",
+            "--plan", "max_20x",
         ])
 
     assert result.exit_code == 0, result.output

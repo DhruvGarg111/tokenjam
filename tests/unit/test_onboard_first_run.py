@@ -234,10 +234,10 @@ def _isolated_claude_code(monkeypatch, tmp_path):
 def _run_claude_code(tmp_path, plan_choice: str):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # --project skips the interactive project-name prompt; then plan_choice
-        # then daily budget "0".
+        # The project name is derived automatically (no prompt); the input
+        # sequence is just plan_choice then daily budget "0".
         return runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon", "--project", "testproj"],
+            cmd_onboard, ["--claude-code", "--no-daemon"],
             input=f"{plan_choice}\n0\n", obj={},
         )
 
@@ -249,7 +249,7 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
         res = runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon", "--project", "testproj"],
+            cmd_onboard, ["--claude-code", "--no-daemon"],
             input="1\n0\n0\n", obj={},
         )
     assert res.exit_code == 0, res.output
@@ -303,7 +303,7 @@ def test_verbose_shows_connection_details(_isolated_claude_code, tmp_path):
     with runner.isolated_filesystem(temp_dir=tmp_path):
         res = runner.invoke(
             cmd_onboard,
-            ["--claude-code", "--no-daemon", "--project", "testproj", "--verbose"],
+            ["--claude-code", "--no-daemon", "--verbose"],
             input="3\n0\n", obj={},
         )
     assert res.exit_code == 0, res.output
@@ -342,23 +342,22 @@ def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_pat
     assert "Verify after restarting:" not in out
 
 
-def test_claude_code_asks_project_name_after_agent_questions(
+def test_claude_code_never_prompts_for_a_project_name(
     _isolated_claude_code, tmp_path,
 ):
-    """Prompt order: usage/plan questions first, THEN project name (2026-07
-    direction — the project-name question wedged between the two agent
-    questions broke their grouping)."""
+    """--project (and the interactive prompt it fed) were removed — the
+    project/dashboard-namespace name is now always derived from the repo/
+    folder name, never asked for."""
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # plan(3=max_5x, no ceiling/budget prompts) → project name (default).
+        # plan(3=max_5x, no ceiling/budget prompts) — nothing else to answer.
         res = runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon"], input="3\n\n", obj={},
+            cmd_onboard, ["--claude-code", "--no-daemon"], input="3\n", obj={},
         )
     assert res.exit_code == 0, res.output
     out = res.output
     assert "How do you pay for Claude?" in out
-    assert "Project name" in out
-    assert out.index("How do you pay for Claude?") < out.index("Project name"), out
+    assert "Project name" not in out
 
 
 def test_claude_code_shows_welcome_banner(_isolated_claude_code, tmp_path):
