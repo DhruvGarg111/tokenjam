@@ -316,6 +316,30 @@ def build_report(
         if name in selected and name not in ANALYZER_ORDER:
             analyzer(ctx)
 
+    # THE write allocation, after every analyzer and before anyone reads the
+    # report. This is the only place in the tree that decides which permanent
+    # writes are OFFERED, and it is here because here is the first moment both
+    # producers' candidates exist: relearn's clusters are a finding, and the
+    # cost lane's cards are a pure transformation of the findings beside them.
+    #
+    # It has to be inside `build_report` rather than in any one caller. This is
+    # the choke point every surface funnels through (the same argument the
+    # persona skip gate above is made on), so a caller cannot forget to
+    # allocate and publish a report that offers more writes than one budget
+    # allows. Costs one pure adapter pass over findings already computed; it
+    # runs no query and re-measures nothing.
+    #
+    # Never raises: an allocation that fails leaves the decisions empty, and an
+    # empty allocation withdraws offers rather than inventing them.
+    try:
+        from tokenjam.core.optimize import write_allocation
+
+        write_allocation.allocate_report_writes(
+            report, config=config, window_days=window_days,
+        )
+    except Exception:  # noqa: BLE001 - see above
+        pass
+
     return report
 
 
@@ -584,6 +608,12 @@ def report_from_dict(d: dict) -> OptimizeReport:
         # analyzers never scanned, or a served surface silently reads an
         # unscanned report as a scanned-and-empty one.
         filesystem_scan_skipped_reason=d.get("filesystem_scan_skipped_reason") or None,
+        # Round-tripped because the cost half of the write allocation is
+        # applied by a LATER pass, on the other side of the report store — a
+        # rehydrated report that lost these would re-allocate against a
+        # candidate set the first pass has already edited. See
+        # `core/optimize/write_allocation.py`.
+        write_decisions=dict(d.get("write_decisions") or {}),
     )
 
 

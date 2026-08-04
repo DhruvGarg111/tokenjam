@@ -18,6 +18,7 @@ from tokenjam.core.rulewrite.kinds import (
     MAX_NUDGES_PER_SESSION,
 )
 
+from tests.write_allocation_helpers import allocate_relearn
 from tokenjam.core.optimize import write_budget as wb
 from tokenjam.core.optimize.projection import (
     MAX_PROJECTION_RATIO,
@@ -190,7 +191,7 @@ def test_saving_is_reported_net_of_the_rules_standing_cost():
     # Act
     decision = wb.allocate_writes(
         [_candidate("a", tokens=1_000_000, usd=10.0)],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5), basis,
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5), basis,
     )["a"]
     # Assert
     assert decision.offered is True
@@ -207,7 +208,7 @@ def test_a_net_negative_rule_is_suppressed_and_claims_nothing():
     basis = _basis(sessions=100)
     decision = wb.allocate_writes(
         [_candidate("a", tokens=1_500, usd=0.02)],       # < 34 tok/session x 100
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5), basis,
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5), basis,
     )["a"]
     assert decision.net_negative is True
     assert decision.offered is False
@@ -220,7 +221,7 @@ def test_a_net_negative_rule_is_suppressed_and_claims_nothing():
 def test_a_placeholder_never_becomes_a_permanent_rule():
     decision = wb.allocate_writes(
         [_candidate("a", text="Review examples — no known fix template matched.")],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5), _basis(),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5), _basis(),
     )["a"]
     assert decision.offered is False
     assert decision.claimed_tokens == 0
@@ -238,7 +239,7 @@ def test_same_family_clusters_collapse_onto_one_block():
             _candidate("big", tokens=900_000),
             _candidate("mid", tokens=500_000),
         ],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5), basis,
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5), basis,
     )
     assert decisions["big"].offered is True
     assert [decisions[k].offered for k in ("small", "mid")] == [False, False]
@@ -266,7 +267,7 @@ def test_unpriceable_family_still_offers_only_one_block():
             _candidate("sib1", tokens=0),
             _candidate("sib2", tokens=0),
         ],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5), basis,
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5), basis,
     )
     assert [d.offered for d in decisions.values()].count(True) == 1
     assert decisions["rep"].offered is True
@@ -286,7 +287,7 @@ def test_writes_are_ranked_by_net_value_and_bounded():
             _candidate("high", family="f2", tokens=900_000),
             _candidate("mid", family="f3", tokens=600_000),
         ],
-        wb.build_write_budget(lane_budget_tokens=10_000, lane_max_writes=2), basis,
+        wb.build_write_budget(budget_tokens=10_000, max_writes=2), basis,
     )
     assert decisions["high"].offered is True
     assert decisions["mid"].offered is True
@@ -305,7 +306,7 @@ def test_the_token_budget_binds_independently_of_the_write_count():
             _candidate("b", family="f2", tokens=800_000),
         ],
         # Room for exactly one rule's per-session cost.
-        wb.build_write_budget(lane_budget_tokens=per_rule, lane_max_writes=99), basis,
+        wb.build_write_budget(budget_tokens=per_rule, max_writes=99), basis,
     )
     assert [decisions["a"].offered, decisions["b"].offered] == [True, False]
 
@@ -340,20 +341,20 @@ def test_the_budget_is_a_share_of_what_is_already_there():
     """Relative, not absolute: one 107-token rule on a 25k-token CLAUDE.md is
     fine, forty-one of them are not, and a small file still gets a floor."""
     big = wb.build_write_budget(
-        lane_budget_tokens=1_000, lane_max_writes=5,
+        budget_tokens=1_000, max_writes=5,
         existing_agent_file_tokens=25_000,
     )
     assert big.budget_tokens == 1_000       # 10% of 25k, clamped by the lane cap
     assert big.ceiling_reached is False
 
     mid = wb.build_write_budget(
-        lane_budget_tokens=1_000, lane_max_writes=5,
+        budget_tokens=1_000, max_writes=5,
         existing_agent_file_tokens=6_000,
     )
     assert mid.budget_tokens == 600         # 10% of 6k, under the lane cap
 
     tiny = wb.build_write_budget(
-        lane_budget_tokens=1_000, lane_max_writes=5,
+        budget_tokens=1_000, max_writes=5,
         existing_agent_file_tokens=200,
     )
     assert tiny.budget_tokens == wb.MIN_WRITE_BUDGET_TOKENS   # the floor holds
@@ -368,7 +369,7 @@ def test_no_new_rules_are_offered_once_the_agent_files_are_pathological():
     )
     assert existing >= wb.AGENT_FILE_STANDING_CEILING_TOKENS
     budget = wb.build_write_budget(
-        lane_budget_tokens=1_000, lane_max_writes=5,
+        budget_tokens=1_000, max_writes=5,
         existing_agent_file_tokens=existing,
     )
     assert budget.ceiling_reached is True
@@ -382,7 +383,7 @@ def test_an_unmeasured_footprint_leaves_the_lane_cap_intact():
     """None means "the analyzer did not run", never "the file is empty"."""
     assert wb.measured_agent_file_tokens(None) is None
     assert wb.measured_agent_file_tokens(_SummarizeFinding()) is None
-    budget = wb.build_write_budget(lane_budget_tokens=750, lane_max_writes=4)
+    budget = wb.build_write_budget(budget_tokens=750, max_writes=4)
     assert (budget.budget_tokens, budget.max_writes) == (750, 4)
     assert budget.ceiling_reached is False
 
@@ -425,7 +426,7 @@ def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
         persona="claude-code",
     )
     assert len(proposals) == 1
-    p = proposals[0]
+    p = allocate_relearn(proposals)[0]
     assert p.write_offered is False
     assert p.suggested_target == ""
     assert p.advise_only is True
@@ -467,7 +468,7 @@ def test_relearn_nets_by_mechanism_not_by_whether_it_is_a_hook():
         repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=80, active_days=10, window_days=30.0),
     )
-    by_family = {p.family_key: p for p in proposals}
+    by_family = {p.family_key: p for p in allocate_relearn(proposals)}
     guard = by_family["sleep_chain"]
     nudge = by_family["cwd_confusion"]
     note = by_family["read_too_large"]
@@ -501,9 +502,10 @@ def test_relearn_bounds_how_many_permanent_rules_a_run_offers():
         clusters, repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=40, active_days=10),
     )
+    proposals = allocate_relearn(proposals)
     offered = [p for p in proposals if p.write_offered]
     assert len(proposals) == 12
-    assert len(offered) <= wb.RELEARN_MAX_OFFERED_WRITES
+    assert len(offered) <= wb.MAX_OFFERED_WRITES
     # Ranked: nothing suppressed outranks anything offered, on the pre-net
     # observation the budget itself ranks by (no forward field is rendered
     # any more to check this against).
@@ -666,7 +668,7 @@ def test_a_rule_returning_less_than_the_floor_is_not_offered():
     # Arrange: comfortably net-POSITIVE in tokens, but worth only $2.
     decision = wb.allocate_writes(
         [_candidate("a", tokens=1_000_000, usd=2.0)],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5),
         _basis(sessions=100),
     )["a"]
 
@@ -685,7 +687,7 @@ def test_the_floor_defers_the_write_but_never_suppresses_the_claim():
     """
     decision = wb.allocate_writes(
         [_candidate("a", tokens=1_000_000, usd=2.0)],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5),
         _basis(sessions=100),
     )["a"]
 
@@ -697,7 +699,7 @@ def test_the_floor_defers_the_write_but_never_suppresses_the_claim():
 def test_a_rule_at_or_above_the_floor_is_offered():
     decision = wb.allocate_writes(
         [_candidate("a", tokens=1_000_000, usd=wb.MIN_NET_WRITE_USD * 3)],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5),
         _basis(sessions=100),
     )["a"]
     assert decision.offered is True
@@ -710,7 +712,7 @@ def test_an_unpriced_family_is_never_held_to_a_dollar_floor():
     `BASIS_NOT_PRICEABLE` exists."""
     decision = wb.allocate_writes(
         [_candidate("a", tokens=1_000_000, usd=None)],
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5),
         _basis(sessions=100),
     )["a"]
     assert decision.offered is True
@@ -726,7 +728,7 @@ def test_a_below_floor_family_does_not_consume_a_write_slot():
     ]
     decisions = wb.allocate_writes(
         candidates,
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=1),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=1),
         _basis(sessions=100),
     )
     assert decisions["small"].offered is False
@@ -751,9 +753,185 @@ def test_the_floor_applies_to_the_combined_family_value_not_one_members_share():
     ]
     decisions = wb.allocate_writes(
         candidates,
-        wb.build_write_budget(lane_budget_tokens=1_000, lane_max_writes=5),
+        wb.build_write_budget(budget_tokens=1_000, max_writes=5),
         _basis(sessions=100),
     )
     rep_decision = next(d for d in decisions.values() if d.reason != wb.REASON_FAMILY_MERGED)
     assert rep_decision.offered is True
     assert rep_decision.net_usd is not None and rep_decision.net_usd > wb.MIN_NET_WRITE_USD
+
+
+# --- ONE allocation across BOTH lanes -------------------------------------------
+# The budget used to be allocated TWICE: relearn sized and spent its own pool
+# inside the analyzer, the cost adapter sized and spent a second one inside
+# itself, and neither could see the other's candidates. So the bound a user was
+# subject to was the SUM of the two caps, the summarize-measured headroom was
+# spent twice, and a high-net card in one lane could never outrank a low-net one
+# in the other because they never entered the same ranked list. These pin the
+# single allocation (`core/optimize/write_allocation.py`) that replaced both.
+
+#: Five real CLAUDE.md-rule families, so every cluster below is a genuine write
+#: candidate: family-matched (no placeholder), non-advisory (Critical Rule 39
+#: keeps those out of the budget entirely), and rule-delivered (an executing
+#: hook costs zero standing tokens and so can never demonstrate a budget bind).
+_RULE_FAMILIES = (
+    "read_too_large", "read_directory", "command_not_found",
+    "bash_timeout", "git_branch_exists",
+)
+
+
+def _relearn_clusters(persona="mixed", occurrences=40):
+    """Five relearn write candidates, built through the real detector path."""
+    from tokenjam.core.optimize.analyzers.relearn import build_proposals
+
+    raws = [
+        _raw(family, family, family.replace("_", " "), _episodes(family[:2], occurrences))
+        for family in _RULE_FAMILIES
+    ]
+    proposals, _ = build_proposals(
+        raws, repo_cwd_map={"repo": "/tmp/repo"}, persona=persona,
+        projection=_basis(sessions=occurrences, active_days=10),
+    )
+    return proposals
+
+
+def _tight_summarize():
+    """A small measured footprint, so the shared budget lands on its floor
+    (`MIN_WRITE_BUDGET_TOKENS`) and a handful of rules is enough to exhaust it.
+    Without this the pool is roomy and no allocation decision is observable."""
+    from tokenjam.core.optimize.analyzers.summarize import (
+        SummarizeCandidate,
+        SummarizeFinding,
+    )
+
+    return SummarizeFinding(candidates=[
+        SummarizeCandidate(path="CLAUDE.md", kind="prompt", scope="project",
+                           est_tokens_saved=10, total_chars=2_000),
+    ])
+
+
+def _both_lanes(reuse_tokens, reuse_usd, *, with_relearn=True, persona="mixed"):
+    """Allocate over a report carrying BOTH producers' candidates.
+
+    Returns ``(report, decisions)`` where ``decisions`` is the report's own
+    ``write_decisions`` map — one map for both lanes, which is the whole point:
+    before this there were two maps that never met.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    report = _cost_report(persona=persona, summarize=_tight_summarize())
+    report.findings["reuse"] = _reuse_finding(reuse_tokens, reuse_usd)
+    if with_relearn:
+        report.findings["relearn"] = RelearnFinding(clusters=_relearn_clusters(persona))
+    cost_proposals_from_report(report)
+    return report, report.write_decisions
+
+
+def _offered(decisions, lane):
+    return {
+        key for key, d in decisions.items()
+        if key.startswith(f"{lane}:") and d["offered"]
+    }
+
+
+def test_the_two_lanes_share_one_budget_and_not_the_sum_of_two():
+    """The SAME cost write, offered on its own and deferred once relearn's
+    candidates exist — because they now compete for one pool.
+
+    This is the case that used to pass. With a per-lane pool the cost lane had
+    its own tokens and its own slots, so nothing relearn proposed could ever
+    change a cost card's verdict; the card was offered in both reports and the
+    user's real bound was both caps added together.
+    """
+    _, alone = _both_lanes(50_000, 20.0, with_relearn=False)
+    _, shared = _both_lanes(50_000, 20.0)
+
+    assert _offered(alone, "cost"), "precondition: this card fits on its own"
+    assert not _offered(shared, "cost"), (
+        "with relearn's higher-net writes in the same pool it must defer"
+    )
+    deferred = next(d for k, d in shared.items() if k.startswith("cost:"))
+    assert deferred["reason"] == wb.REASON_BUDGET_FULL
+
+    # And the pool really is ONE pool: everything offered, from either lane,
+    # fits inside a single budget and a single write count.
+    offered = [d for d in shared.values() if d["offered"]]
+    assert sum(d["footprint_tokens"] for d in offered) <= wb.WRITE_BUDGET_TOKENS
+    assert len(offered) <= wb.MAX_OFFERED_WRITES
+
+
+def test_a_high_net_cost_write_outranks_a_low_net_relearn_write():
+    """Ranking is global, so the cost card takes a slot off relearn."""
+    _, decisions = _both_lanes(5_000_000, 200.0)
+
+    cost = next(d for k, d in decisions.items() if k.startswith("cost:"))
+    assert cost["offered"] is True
+    relearn_deferred = [
+        d for k, d in decisions.items()
+        if k.startswith("relearn:") and not d["offered"]
+    ]
+    assert relearn_deferred, "a lower-net relearn write must lose the comparison"
+    assert all(d["net_tokens"] < cost["net_tokens"] for d in relearn_deferred)
+
+
+def test_a_high_net_relearn_write_outranks_a_low_net_cost_write():
+    """The same comparison in the other direction — the lane a candidate came
+    from decides nothing, its net value decides everything."""
+    _, decisions = _both_lanes(50_000, 20.0)
+
+    cost = next(d for k, d in decisions.items() if k.startswith("cost:"))
+    assert cost["offered"] is False
+    relearn_offered = [
+        d for k, d in decisions.items()
+        if k.startswith("relearn:") and d["offered"]
+    ]
+    assert relearn_offered
+    assert all(d["net_tokens"] > cost["net_tokens"] for d in relearn_offered)
+
+
+def test_the_value_floor_still_gates_only_the_offer_under_one_allocation():
+    """A card returning less than the floor loses its WRITE and keeps its
+    figure — unchanged by the lanes being merged."""
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    report = _cost_report(persona="mixed", summarize=_tight_summarize())
+    report.findings["reuse"] = _reuse_finding(50_000, 6.0)
+    proposal = next(
+        p for p in cost_proposals_from_report(report) if p.analyzer == "reuse"
+    )
+    decision = next(d for k, d in report.write_decisions.items() if k.startswith("cost:"))
+
+    assert decision["reason"] == wb.REASON_BELOW_VALUE_FLOOR
+    assert decision["offered"] is False
+    assert decision["claim_suppressed"] is False
+    # The observation survives the withdrawn offer, and so does the snippet.
+    assert proposal.past_overspend_tokens > 0
+    assert proposal.suggestion
+
+
+def test_a_candidate_with_no_dollar_figure_is_still_exempt_from_the_floor():
+    """relearn clusters priced without a rate carry no ``net_usd``, so the
+    floor comparison cannot be made — and none is invented. The check is
+    SKIPPED, not passed: assert the missing figure, not just the offer."""
+    _, decisions = _both_lanes(50_000, 20.0)
+
+    unpriced = [
+        d for k, d in decisions.items()
+        if k.startswith("relearn:") and d["net_usd"] is None
+    ]
+    assert unpriced, "precondition: these clusters have no blended rate"
+    assert any(d["offered"] for d in unpriced)
+    assert all(d["reason"] != wb.REASON_BELOW_VALUE_FLOOR for d in unpriced)
+
+
+def test_an_sdk_window_allocates_nothing_and_never_raises():
+    """Nothing in an SDK-only service's request path reads a CLAUDE.md, so
+    `write_offered` is False for every relearn cluster and the reuse card is
+    persona-gated out. Both lanes' candidate sets are empty, which the single
+    allocation has to handle without error and without offering anything."""
+    report, decisions = _both_lanes(50_000, 20.0, persona="sdk")
+
+    assert decisions == {}
+    assert report.findings["relearn"].clusters
+    assert not any(c.write_offered for c in report.findings["relearn"].clusters)

@@ -58,7 +58,10 @@ already spent. The net-of-standing-cost arithmetic in
 ``core/optimize/write_budget.py`` still runs — it decides whether a
 PERMANENT artifact is worth OFFERING at all (``write_offered`` /
 ``advise_only`` / ``write_blocked_reason`` / ``payback_ratio``) — but its
-output is never rendered as a savings figure.
+output is never rendered as a savings figure. It does NOT run inside this
+analyzer: this module produces write CANDIDATES, and one pass over every
+producer's candidates decides what is offered (``core/optimize/
+write_allocation.py``). A budget spent here would be a second pool.
 
 Never raises: a single unreadable transcript, a distill failure, or a missing
 CLAUDE.md is skipped, not fatal — this runs unattended on a schedule.
@@ -1341,6 +1344,13 @@ class RelearnCluster:
     # lane renders it with this reason in place of the generic OTel one.
     write_offered:                    bool = True
     write_blocked_reason:             str = ""
+    #: How many of the run's sessions would actually re-send this cluster's
+    #: artifact — resolved HERE, where the per-repo session counts exist, and
+    #: carried so the single allocation pass
+    #: (`core/optimize/write_allocation.py`) can price the rule without being
+    #: handed the detector's internals. ``None`` means "charge it against every
+    #: session", the user-global case. See `_write_exposure_sessions`.
+    write_exposure_sessions:          int | None = None
     #: The same verdict as a short label, for a dense list where the sentence
     #: above would be a paragraph per row. Derived from the reason by
     #: `write_budget.short_reason`, never phrased locally, so the CLI list and
@@ -1754,7 +1764,6 @@ def build_proposals(
     window_days: float | None = None,
     persona: str = "unknown",
     projection: Any | None = None,
-    existing_agent_file_tokens: int | None = None,
     sessions_by_repo: dict[str, int] | None = None,
     window_labels: Sequence[str] | None = None,
     window_anchor: Any | None = None,
@@ -1762,13 +1771,15 @@ def build_proposals(
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
 
-    ``projection`` (a ``core.optimize.projection.ProjectionBasis``) and
-    ``existing_agent_file_tokens`` drive the write budget: how many permanent
-    rules may be offered at all, and what each one costs to keep. Omitting
-    ``projection`` leaves the netting inert (a zero session count charges a
-    rule nothing) while the quality floor and the write count cap still apply,
-    so a caller that only wants clustering is never silently given a budget it
-    did not ask for.
+    **No write budget is applied here.** This pass decides what a cluster IS —
+    its fix, its scope, its target, what it cost — and resolves the exposure a
+    permanent rule for it would be charged against (``projection`` plus
+    ``sessions_by_repo``, the only place per-repo session counts exist). What
+    is actually OFFERED is decided once, later, over this producer's candidates
+    and the cost lane's TOGETHER — see
+    :mod:`tokenjam.core.optimize.write_allocation`. A cluster leaving this
+    function still carries its construction-time verdict only (no derived fix,
+    or an advisory family), never a budget verdict.
 
     ``repo_cwd_map`` (repo label -> a representative cwd) is optional,
     best-effort enrichment used only to pre-fill the Apply stage's suggested
@@ -1797,6 +1808,8 @@ def build_proposals(
     the unbounded fields are byte-identical either way, which they must be,
     since the write budget nets against them as its pre-net gross.
     """
+    from dataclasses import replace
+
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
     from tokenjam.core.optimize.write_budget import (
         REASON_ADVISORY_ONLY,
@@ -1986,8 +1999,8 @@ def build_proposals(
             advise_only=advise_only,
             tail_calls_median=median_tail,
             tail_multiplier=round(multiplier, 4),
-            # The one observation. `_apply_write_budget` consults it (via
-            # `WriteCandidate.gross_tokens`) to decide whether a permanent
+            # The one observation. The single write allocation consults it
+            # (via `WriteCandidate.gross_tokens`) to decide whether a permanent
             # write is offered at all — the netting disclosure only, never a
             # headline.
             past_overspend_tokens=gross_tokens,
@@ -2010,12 +2023,29 @@ def build_proposals(
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
-    proposals = _apply_write_budget(
-        proposals, projection=projection,
-        existing_agent_file_tokens=existing_agent_file_tokens,
-        sessions_by_repo=sessions_by_repo,
-    )
-    return proposals, dropped
+    # Exposure is resolved HERE and the budget is NOT applied here. The
+    # per-repo session counts only exist inside this detector, so the exposure
+    # each rule would be charged against has to be computed while they are in
+    # scope; the ALLOCATION that spends a budget against it happens once, later,
+    # over both producers' candidates at the same time
+    # (`core/optimize/write_allocation.py`). Splitting the two is the whole
+    # point: this pass can no longer decide on its own what is offered.
+    #
+    # Resolved to an EXPLICIT number, never left as `None`. `None` means "fall
+    # back to whatever basis the allocator was handed", and the allocator is
+    # now shared with the cost lane, whose basis is the report window's session
+    # count — a different quantity from this detector's own unbounded corpus
+    # pace. Pinning it here keeps each producer's rule priced against the
+    # sessions it was actually measured over.
+    basis = projection or build_projection_basis(0.0, 0, 0)
+    exposed: list[RelearnCluster] = []
+    for p in proposals:
+        scoped = _write_exposure_sessions(p, sessions_by_repo, basis.sessions)
+        exposed.append(replace(
+            p,
+            write_exposure_sessions=basis.sessions if scoped is None else scoped,
+        ))
+    return exposed, dropped
 
 
 def _write_exposure_sessions(
@@ -2039,46 +2069,35 @@ def _write_exposure_sessions(
     return min(scoped, total) if scoped > 0 else None
 
 
-def _apply_write_budget(
-    proposals: list[RelearnCluster],
-    *,
-    projection: Any | None,
-    existing_agent_file_tokens: int | None,
-    sessions_by_repo: dict[str, int] | None = None,
-) -> list[RelearnCluster]:
-    """Net every proposal's saving against what its fix costs to KEEP, and cap
-    how many permanent rules are offered at all.
+def write_candidates(proposals: list[RelearnCluster]) -> list["Any"]:
+    """This producer's proposed permanent writes, as the ONE allocation pass
+    needs to see them.
 
-    Three things happen here and nowhere else:
+    Formerly the first half of a local budget pass that also sized
+    its own budget and spent it. It no longer does either: the budget is one
+    pool shared with the cost lane and is spent exactly once, in
+    :mod:`tokenjam.core.optimize.write_allocation`, over both producers'
+    candidates ranked together. Splitting the pass in two is what makes that
+    possible — this half is pure and can run before anything has been decided.
 
-    * A cluster whose fix is the generic "Review examples" placeholder never
-      becomes a permanent rule, and claims nothing. There is no fix to claim.
-    * Same-family clusters collapse onto ONE block. They share a single fix
-      template, so N clusters used to mean N identical CLAUDE.md blocks; now
-      the family's largest cluster carries the write and its siblings say so.
-    * What survives is ranked by net value and offered until the budget runs
-      out. Anything past that is deferred, not deleted: its recommendation is
-      still on the card, so its net claim stands.
-
-    A cluster with no apply path at all (the workspace-less OTel lane) is
-    skipped entirely: nothing is written for it, so it has no standing cost and
-    its figures pass through untouched.
+    THREE POPULATIONS NEVER BECOME CANDIDATES, and the exclusion is the point
+    rather than a filter applied afterwards. A workspace-less (OTel) cluster
+    has nowhere to write. A cluster with no resolved target has no destination.
+    And an ADVISORY family must never enter the budget at all: its
+    ``write_offered`` is already False from construction, and letting it become
+    a candidate would have the allocator's own verdict overwrite that — a flag
+    set upstream of a pass that rewrites the same field is not a flag, it is a
+    suggestion (Critical Rule 39). The fix shape is to withhold the row from
+    the pass's INPUT, so no decision exists to overwrite; do not "improve" this
+    into a second guard downstream.
     """
-    from dataclasses import asdict, replace
+    from dataclasses import asdict
 
     from tokenjam.core.optimize import write_budget as wb
-    from tokenjam.core.optimize.projection import build_projection_basis
     from tokenjam.core.optimize.relearn_apply import artifact_for_delivery, slugify
 
-    basis = projection or build_projection_basis(0.0, 0, 0)
     candidates: list[wb.WriteCandidate] = []
     for p in proposals:
-        # An ADVISORY family never enters the budget. Its `write_offered` was
-        # already set False at construction, and letting it become a candidate
-        # here would have `decision.offered` overwrite that a few lines below —
-        # which is exactly how the withdrawal was reaching the unit test and
-        # NOT the live report. A flag set upstream of a pass that rewrites the
-        # same field is not a flag, it is a suggestion.
         family = _FAMILY_BY_KEY.get(p.family_key or "")
         if p.advise_only or not p.suggested_target or (
             family is not None and family.get("advisory_only")
@@ -2109,26 +2128,38 @@ def _apply_write_budget(
             # against. Without this the budget netted tokens-only and the
             # floor could never fire.
             gross_usd=p.past_overspend_usd,
-            exposure_sessions=_write_exposure_sessions(
-                p, sessions_by_repo, basis.sessions,
-            ),
+            # Resolved in `build_proposals`, where the per-repo session counts
+            # live. `None` charges the rule against every session, which is
+            # exactly right for a user-global one.
+            exposure_sessions=p.write_exposure_sessions,
         ))
+    return candidates
 
-    budget = wb.build_write_budget(
-        lane_budget_tokens=wb.RELEARN_WRITE_BUDGET_TOKENS,
-        lane_max_writes=wb.RELEARN_MAX_OFFERED_WRITES,
-        existing_agent_file_tokens=existing_agent_file_tokens,
-    )
-    decisions = wb.allocate_writes(candidates, budget, basis)
+
+def apply_write_decisions(
+    proposals: list[RelearnCluster], decisions: dict[str, "Any"],
+) -> list[RelearnCluster]:
+    """Stamp the single allocation pass's verdicts back onto the clusters.
+
+    The second half of that old local budget pass, unchanged in what it
+    writes. ``decisions`` is keyed by cluster signature and comes from
+    :mod:`tokenjam.core.optimize.write_allocation`, which ranked these
+    candidates against the cost lane's in one list and spent one budget.
+
+    A cluster missing from ``decisions`` never entered the budget at all —
+    advise-only, no target, or an advisory family (see :func:`write_candidates`)
+    — so nothing is on offer for it and it is said plainly, rather than letting
+    the dataclass default (``write_offered=True``) stand and claim a write that
+    does not exist.
+    """
+    from dataclasses import replace
+
+    from tokenjam.core.optimize import write_budget as wb
 
     out: list[RelearnCluster] = []
     for p in proposals:
         decision = decisions.get(p.signature)
         if decision is None:
-            # Never entered the budget at all — advise-only, or no target to
-            # write into. Nothing is on offer, so say so rather than letting
-            # the dataclass default (`write_offered=True`) stand and claim a
-            # write that does not exist.
             out.append(replace(p, write_offered=False))
             continue
         out.append(replace(
@@ -2171,7 +2202,6 @@ def analyze_relearns(
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
     persona: str = "unknown",
-    existing_agent_file_tokens: int | None = None,
     window_labels: Sequence[str] | None = None,
     window_anchor: Any | None = None,
 ) -> RelearnFinding:
@@ -2276,7 +2306,6 @@ def analyze_relearns(
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
         conn=conn, window_days=corpus_window_days, persona=persona,
         projection=projection,
-        existing_agent_file_tokens=existing_agent_file_tokens,
         sessions_by_repo=sessions_by_repo,
         window_labels=window_labels, window_anchor=anchor,
     )
@@ -2457,7 +2486,6 @@ def compute_relearn_finding(
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
     persona: str = "unknown",
-    existing_agent_file_tokens: int | None = None,
     retention_days: int | None = None,
     window_labels: Sequence[str] | None = RELEARN_WINDOW_LABELS,
 ) -> RelearnFinding:
@@ -2595,7 +2623,6 @@ def compute_relearn_finding(
         advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
         conn=conn, persona=persona,
-        existing_agent_file_tokens=existing_agent_file_tokens,
         window_labels=window_labels,
     )
     archived_sessions = len({f.session_id for f in archived_failures})
@@ -2655,15 +2682,14 @@ def run(ctx: AnalyzerContext) -> None:
     retention_days = (
         retention_days_for(storage_cfg) if storage_cfg is not None else None
     )
-    # The write budget's headroom comes from the `summarize` analyzer's own
-    # measurement of the agent files these proposals would append to. It runs
-    # ahead of relearn in ANALYZER_ORDER, so its finding is already on the
-    # report; when it wasn't selected this is None and the lane cap stands
-    # alone. This is the cross-reference the two halves of the loop were
-    # missing: relearn can no longer offer rules for a file the same report
-    # is recommending the user compress.
-    from tokenjam.core.optimize.write_budget import measured_agent_file_tokens
-
+    # The write budget's headroom is NOT read here. It comes from the
+    # `summarize` analyzer's own measurement of the agent files these proposals
+    # would append to, and it is read exactly once, by the single allocation
+    # pass at the end of the report build
+    # (`core/optimize/write_allocation.py`). This analyzer used to read it for
+    # itself and size a relearn-only budget with it, while the cost lane read
+    # the SAME measurement and sized a second budget with it — so one window's
+    # headroom was spent twice over. Do not reintroduce a read here.
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
         retention_days=retention_days,
@@ -2688,7 +2714,4 @@ def run(ctx: AnalyzerContext) -> None:
         distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
         persona=ctx.persona,
-        existing_agent_file_tokens=measured_agent_file_tokens(
-            ctx.report.findings.get("summarize"),
-        ),
     )

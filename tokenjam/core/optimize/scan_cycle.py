@@ -348,10 +348,12 @@ def _write_relearn_from(
     minutes, plus a distill pass that makes LLM calls — so that alone was the
     largest piece of wasted compute per cycle. The correctness half mattered
     more: the two calls passed DIFFERENT parameters (``min_sessions`` from
-    config versus the function default, the resolved report window versus the
-    fixed label vocabulary, and the write budget's ``existing_agent_file_tokens``
-    versus nothing), so the Dashboard and the Review inbox could disagree about
-    which clusters to offer, not merely about a figure's size.
+    config versus the function default, and the resolved report window versus
+    the fixed label vocabulary), so the Dashboard and the Review inbox could
+    disagree about which clusters to offer, not merely about a figure's size.
+    Which clusters are OFFERED a permanent rule is no longer decided in this
+    pass at all — see ``core/optimize/write_allocation.py``, which allocates
+    once over both producers at the end of the report build.
 
     The registered analyzer's version is the richer of the two on every one of
     those axes, so this is a merge toward it rather than a choice between them.

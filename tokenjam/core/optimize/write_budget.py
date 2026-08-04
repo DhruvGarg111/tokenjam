@@ -99,16 +99,29 @@ MIN_WRITE_BUDGET_TOKENS = 300
 #: permanent rule is offered at all above this line.
 AGENT_FILE_STANDING_CEILING_TOKENS = 50_000
 
-#: Per-lane hard caps. The two write lanes (relearn clusters, cost proposals)
-#: are built in separate passes that never see each other's output, so each
-#: carries its own explicit ceiling rather than sharing a pool one lane could
-#: silently drain. relearn gets the larger share: it is the write-analyzer by
-#: design and routinely produces tens of candidate clusters, while the cost
-#: lane has at most a handful of write-bearing families.
-RELEARN_WRITE_BUDGET_TOKENS = 1_000
-RELEARN_MAX_OFFERED_WRITES = 5
-COST_WRITE_BUDGET_TOKENS = 500
-COST_MAX_OFFERED_WRITES = 3
+#: THE hard cap — one pool for every proposed permanent write, whichever
+#: producer derived it.
+#:
+#: This used to be two pairs, one per producer (relearn clusters, cost
+#: proposals), each sized and spent by its own pass. Three things followed, all
+#: of them wrong. The bound a user was actually subject to was the SUM of the
+#: two, so one window could grow an agent file by their combined total. Each
+#: pass sized its share against the WHOLE summarize-measured footprint as
+#: though it were the only writer, so the same headroom was spent twice. And
+#: ranking was per-producer, so a high-net cost write and a low-net relearn
+#: write never entered one ``ranked`` list and the comparison that decides
+#: which of them is worth a permanent block simply never happened.
+#:
+#: One pool fixes all three, and the value is the LARGER of the two former
+#: caps, never their sum: the sum is the defect restated as a constant. What a
+#: window may add to an always-re-sent file is a property of the file, not of
+#: how many analyzers happen to want to write to it.
+#:
+#: Sized against ``AGENT_FILE_GROWTH_SHARE_PER_WINDOW`` in
+#: :func:`build_write_budget` — this is the ceiling that bounds the whole
+#: thing regardless of how roomy the measured footprint looks.
+WRITE_BUDGET_TOKENS = 1_000
+MAX_OFFERED_WRITES = 5
 
 # --- Value floor ---------------------------------------------------------------
 
@@ -533,29 +546,35 @@ class WriteBudget:
 
 def build_write_budget(
     *,
-    lane_budget_tokens: int,
-    lane_max_writes: int,
+    budget_tokens: int = WRITE_BUDGET_TOKENS,
+    max_writes: int = MAX_OFFERED_WRITES,
     existing_agent_file_tokens: int | None = None,
     existing_by_path: dict[str, int] | None = None,
 ) -> WriteBudget:
-    """Size this lane's write budget against the measured agent-file footprint.
+    """Size THE window's one write budget against the measured agent-file
+    footprint.
 
     ``existing_agent_file_tokens`` is the standing per-session cost the user's
     agent files ALREADY carry, as measured by the ``summarize`` analyzer.
-    ``None`` (analyzer not run, scan failed) leaves the lane cap intact rather
+    ``None`` (analyzer not run, scan failed) leaves the hard cap intact rather
     than inventing a footprint, which is the only honest default: an unmeasured
     file is not evidence of a full one.
 
     Three terms, in order of who wins: the absolute ceiling zeroes the budget
     outright; otherwise the growth share caps it relative to what is already
     there; the floor keeps a nearly-empty file from being budgeted to nothing;
-    and the lane cap bounds the whole thing regardless.
+    and the hard cap bounds the whole thing regardless.
+
+    Called ONCE per report, by :mod:`tokenjam.core.optimize.write_allocation`.
+    Two callers each building one of these is the two-pools defect the
+    ``WRITE_BUDGET_TOKENS`` comment describes; the arguments default so a
+    caller cannot accidentally re-introduce a second, differently-sized pool.
     """
-    lane_cap = max(0, lane_budget_tokens)
+    hard_cap = max(0, budget_tokens)
     by_path = dict(existing_by_path or {})
     if existing_agent_file_tokens is None:
         return WriteBudget(
-            budget_tokens=lane_cap, max_writes=max(0, lane_max_writes),
+            budget_tokens=hard_cap, max_writes=max(0, max_writes),
             existing_tokens=0, ceiling_reached=False, existing_by_path=by_path,
         )
     existing = max(0, int(existing_agent_file_tokens))
@@ -568,8 +587,8 @@ def build_write_budget(
         MIN_WRITE_BUDGET_TOKENS, int(existing * AGENT_FILE_GROWTH_SHARE_PER_WINDOW),
     )
     return WriteBudget(
-        budget_tokens=min(lane_cap, allowed_growth),
-        max_writes=max(0, lane_max_writes),
+        budget_tokens=min(hard_cap, allowed_growth),
+        max_writes=max(0, max_writes),
         existing_tokens=existing,
         ceiling_reached=False,
         existing_by_path=by_path,

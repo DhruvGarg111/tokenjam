@@ -89,7 +89,7 @@ COST_CORRELATIONAL_CAVEAT = (
 #: no ``apply_kind``): unlike a model-id swap or an MCP-server removal, the fix
 #: is a reviewed rewrite (structure kept, prose compressed), not a value this
 #: adapter can safely one-click. The write-budget coupling that motivated the
-#: old exclusion is unaffected: ``_apply_write_budget`` reads
+#: old exclusion is unaffected: ``core/optimize/write_allocation`` reads
 #: ``report.findings["summarize"]`` directly (not this proposal list) to size
 #: every OTHER analyzer's rule-writing budget, and this card is never
 #: ``apply_capable`` so it never enters that netting pass itself.
@@ -3006,6 +3006,30 @@ def cost_proposals_from_report(
     projection step here any more (see the block comment above
     ``_write_budget_basis``).
     """
+    proposals = _adapt_report(
+        report, config=config, pricing_mode=pricing_mode,
+        on_adapter_error=on_adapter_error,
+    )
+    proposals = _apply_write_decisions(proposals, report, window_days, config)
+    # Order matters: the write allocation can NET a proposal's figure down
+    # against what its rule costs to keep, and the past-overspend basis stamp
+    # must describe the netted figure, never the gross.
+    return [_with_past_overspend(p) for p in proposals]
+
+
+def _adapt_report(
+    report: Any, *, config: Any = None, pricing_mode: str = "api",
+    on_adapter_error: Any = None,
+) -> list[CostProposal]:
+    """Run every cost adapter over one report. PURE, and no write decision.
+
+    Split out of :func:`cost_proposals_from_report` because the single write
+    allocation (:mod:`tokenjam.core.optimize.write_allocation`) needs this
+    producer's write-bearing cards BEFORE anything has been decided — it ranks
+    them against relearn's clusters in one list — while the public function
+    needs the finished, decided proposals. Same adapters, same report, so the
+    two callers cannot see different cards.
+    """
     findings = getattr(report, "findings", {}) or {}
     persona = str(getattr(report, "persona", "") or "unknown")
     proposals: list[CostProposal] = []
@@ -3076,11 +3100,7 @@ def cost_proposals_from_report(
                 except Exception:
                     pass   # a broken reporter must not sink the inbox either
             continue
-    proposals = _apply_write_budget(proposals, report, window_days, config)
-    # Order matters: the write budget can NET a proposal's figure down against
-    # what its rule costs to keep, and the past-overspend basis stamp must
-    # describe the netted figure, never the gross.
-    return [_with_past_overspend(p) for p in proposals]
+    return proposals
 
 
 def _write_budget_basis(report: Any, window_days: float) -> Any:
@@ -3251,66 +3271,19 @@ def _placement_for(
     )
 
 
-def _apply_write_budget(
-    proposals: list[CostProposal], report: Any, window_days: float,
-    config: Any = None,
-) -> list[CostProposal]:
-    """Net every write-bearing card against what its rule costs to KEEP, and
-    bound how many permanent rules the window may offer.
-
-    Only cards that actually write something enter the budget: ``apply_capable``
-    with a write-bearing ``proposed_fix``. Everything else (the advise-only
-    majority, the model-id swaps, the MCP-server removals) writes no standing
-    prompt text and passes through with its figures untouched.
-
-    Candidates are grouped by ``(analyzer, delivery)`` because that is genuinely one
-    block: every ``reuse`` cluster writes the same skeleton note, every
-    ``script`` cluster the same script note. Nine clusters used to mean nine
-    identical appended blocks; now the family's largest carries the write and
-    its siblings say they are covered by it. A suppressed write degrades the
-    same way the persona gate already degrades one: advise-only, with the
-    identical text still carried as a copyable ``suggestion``.
+def _placements_for(
+    writers: list[CostProposal], report: Any, config: Any,
+) -> dict[str, Any]:
+    """WHERE each rule goes, decided before HOW MUCH it may cost — placement is
+    an input to the netting, not a presentation of it. A rule confined to the
+    three projects that actually exhibited the behaviour is re-sent in those
+    projects only, so its standing cost falls by the ratio of their sessions
+    to the window's, and a rule that reads net-negative against the
+    user-global file can legitimately flip to net-positive purely by landing
+    in the right place.
     """
     from tokenjam.core.optimize import rule_placement, write_budget as wb
 
-    basis = _write_budget_basis(report, window_days)
-    findings = getattr(report, "findings", {}) or {}
-    budget = wb.build_write_budget(
-        lane_budget_tokens=wb.COST_WRITE_BUDGET_TOKENS,
-        lane_max_writes=wb.COST_MAX_OFFERED_WRITES,
-        # The summarize analyzer's own measurement of the files these rules
-        # append to. `summarize` IS a COST_ANALYZER (see that tuple's own
-        # docstring), so a normal recompute carries the finding and this
-        # resolves to a real footprint. The absent case is the exception, not
-        # the rule: a report built without summarize (a scoped `tj optimize
-        # <analyzer>` run, or an older cache) leaves the lane cap standing
-        # alone.
-        existing_agent_file_tokens=wb.measured_agent_file_tokens(
-            findings.get("summarize"),
-        ),
-        # Per-FILE sizes from the same scan, so each destination's growth
-        # allowance is sized against its OWN file rather than against the
-        # corpus-wide aggregate — a distinction that did not exist while there
-        # was one destination, and that decides whether two rules may converge
-        # on one small project CLAUDE.md.
-        existing_by_path=wb.measured_agent_file_tokens_by_path(
-            findings.get("summarize"),
-        ),
-    )
-
-    writers = [
-        p for p in proposals if p.apply_capable and p.delivery and p.proposed_fix
-    ]
-    if not writers:
-        return proposals
-
-    # WHERE each rule goes, decided before HOW MUCH it may cost — placement is
-    # an input to the netting, not a presentation of it. A rule confined to the
-    # three projects that actually exhibited the behaviour is re-sent in those
-    # projects only, so its standing cost falls by the ratio of their sessions
-    # to the window's, and a rule that reads net-negative against the
-    # user-global file can legitimately flip to net-positive purely by landing
-    # in the right place.
     placements: dict[str, Any] = {}
     for p in writers:
         try:
@@ -3327,7 +3300,42 @@ def _apply_write_budget(
             total_sessions=int(getattr(getattr(report, "window", None), "sessions", 0) or 0),
         )
         placements[p.signature] = (plan, choice)
+    return placements
 
+
+def write_bearing(proposals: list[CostProposal]) -> list[CostProposal]:
+    """The cards that actually write something: ``apply_capable`` with a
+    write-bearing ``proposed_fix``. Everything else (the advise-only majority,
+    the model-id swaps, the MCP-server removals) writes no standing prompt text
+    and is never priced, ranked or charged against the budget."""
+    return [p for p in proposals if p.apply_capable and p.delivery and p.proposed_fix]
+
+
+def write_candidates_from_report(
+    report: Any, *, config: Any = None, pricing_mode: str = "api",
+) -> tuple[list[Any], dict[str, Any]]:
+    """This producer's proposed permanent writes, for the ONE allocation pass.
+
+    Returns ``(candidates, placements)``. Peer of
+    ``analyzers.relearn.write_candidates`` — both hand their candidates to
+    :mod:`tokenjam.core.optimize.write_allocation`, which sizes one budget and
+    ranks the union. Neither may size or spend a budget of its own; that split
+    is exactly the defect this shape removes.
+
+    Candidates are grouped by ``(analyzer, delivery)`` because that is
+    genuinely one block: every ``reuse`` cluster writes the same skeleton note,
+    every ``script`` cluster the same script note. Nine clusters used to mean
+    nine identical appended blocks; now the family's largest carries the write
+    and its siblings say they are covered by it.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+
+    writers = write_bearing(_adapt_report(
+        report, config=config, pricing_mode=pricing_mode,
+    ))
+    if not writers:
+        return [], {}
+    placements = _placements_for(writers, report, config)
     candidates = [
         wb.WriteCandidate(
             key=p.signature,
@@ -3346,7 +3354,42 @@ def _apply_write_budget(
         )
         for p in writers
     ]
-    decisions = wb.allocate_writes(candidates, budget, basis)
+    return candidates, placements
+
+
+def _apply_write_decisions(
+    proposals: list[CostProposal], report: Any, window_days: float,
+    config: Any = None,
+) -> list[CostProposal]:
+    """Stamp the single allocation pass's verdicts onto this producer's cards.
+
+    It no longer decides anything. The budget is one pool shared with relearn
+    and is sized and spent once, over both producers' candidates ranked
+    together — see :mod:`tokenjam.core.optimize.write_allocation`. This pass
+    reads that answer and applies it, plus the placement fields the same
+    candidate build resolved.
+
+    A suppressed write degrades the same way the persona gate already degrades
+    one: advise-only, with the identical text still carried as a copyable
+    ``suggestion``.
+    """
+    from tokenjam.core.optimize import write_allocation
+
+    # ASKED BEFORE the no-writers early return, deliberately. This call is what
+    # allocates when nobody has yet, and the OTHER lane's candidates do not
+    # depend on this one having any: a window with zero write-bearing cost
+    # cards can still hold relearn clusters, and returning early would leave
+    # them carrying their construction-time `write_offered=True` — every one of
+    # them offered, by a budget that never ran.
+    decisions = write_allocation.decisions_for(
+        report, write_allocation.LANE_COST,
+        config=config, window_days=window_days,
+    )
+    writers = write_bearing(proposals)
+    if not writers:
+        return proposals
+
+    placements = _placements_for(writers, report, config)
 
     out: list[CostProposal] = []
     for p in proposals:
@@ -3399,6 +3442,7 @@ def _apply_write_budget(
             )
         out.append(replace(p, **updates))
     return out
+
 
 
 #: Suffix appended to every stamped ``past_overspend_basis`` so the figure can
