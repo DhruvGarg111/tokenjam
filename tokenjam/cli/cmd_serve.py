@@ -112,7 +112,13 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
 
     def _scan_cycle_job() -> None:
         # Resolved through the module (not a from-import) so the scheduled and
-        # startup passes share one patchable seam.
+        # startup passes share one patchable seam. `force` defaults False here
+        # deliberately: this is a SCHEDULED trigger (interval job and the
+        # startup kick both call this same function), so it is subject to the
+        # ingestion-watermark gate in `scan_cycle._should_run_scheduled_pass`
+        # — an idle machine with no new spans since the last pass is a no-op.
+        # The startup kick's own first call still always proceeds: this
+        # process has no prior watermark to compare against yet.
         scan_cycle.trigger_scan_cycle(
             lambda: _DuckDBBackend(config.storage), config,
         )
