@@ -304,7 +304,7 @@ def test_placement_weights_are_a_breakdown_of_the_analyzers_own_claim(db):
 def test_the_rollup_is_unchanged_by_the_placement_pass(db):
     """The end-to-end guard, re-asserted after placement.
 
-    Placement runs inside `_apply_write_budget`, i.e. between the adapters and
+    Placement runs inside `cost_proposals._apply_write_decisions`, i.e. between the adapters and
     the rollup. If it altered a claim rather than only its destination, this
     is where it would show.
     """

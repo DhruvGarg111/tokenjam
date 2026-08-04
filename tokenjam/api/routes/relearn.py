@@ -199,37 +199,27 @@ def _resolvable_session_ids(conn: Any | None, session_ids: list[str]) -> set[str
     return {str(r[0]) for r in rows}
 
 
-def _scan_provenance(computed_build: Any) -> dict[str, Any]:
-    """The three provenance keys every analyzer-fed payload carries.
+def _scan_provenance(
+    stored: dict[str, Any] | None, *, prefix: str = "",
+) -> dict[str, Any]:
+    """The provenance keys every analyzer-fed payload carries.
 
-    ``cycle_computing`` is the WHOLE pass, not this store: one cycle refreshes
-    the report, then relearn, then the cost proposals on one thread, and each
-    store's own in-flight flag goes false as its leg lands. A surface reading
-    only its own store therefore stops saying "Scanning…" while the figures
-    beside it are still the previous pass's. It is the OR of the two that is
-    true, which is why both travel.
+    A thin alias for ``cycle_provenance.provenance_block`` — which
+    ``report_store.stored_report_block`` also calls, so the three feeds one
+    ``ScanBar`` reads cannot spell a key differently or resolve staleness
+    differently. This function used to build the keys BY HAND from a
+    caller-supplied build string, mirroring the report envelope's list "on
+    purpose"; two hand-maintained copies of one key set is the same
+    two-derivations-of-one-truth defect, one layer up in the payload.
 
-    ``computed_build`` / ``build`` are the build that PRODUCED the stored
-    figures and the one SERVING them. They differ across an upgrade, because
-    these stores are caches and nothing invalidates them on one — see
-    ``core/optimize/build_stamp``. ``None`` for ``computed_build`` means the
-    result predates the stamp, which is not the same as agreement and must not
-    render as it.
-
-    Mirrors ``report_store.stored_report_block``'s keys exactly. The relearn and
-    cost payloads are assembled by hand rather than from that envelope, so the
-    names are kept identical on purpose: one ``ScanBar`` reads all three
-    surfaces, and a key that is spelled differently per feed is a surface that
-    silently loses the qualification.
+    ``stored`` is the artifact this payload is built from — the relearn cache,
+    or the cost block (``prefix="cost_"``, since the cost proposals namespace
+    their keys inside the relearn cache file). ``None`` is a cold store: every
+    key still travels, with nothing claimed about a result that does not exist.
     """
-    from tokenjam.core.optimize import scan_cycle
-    from tokenjam.core.optimize.build_stamp import tj_build
+    from tokenjam.core.optimize.cycle_provenance import provenance_block
 
-    return {
-        "cycle_computing": scan_cycle.is_cycle_computing(),
-        "computed_build": computed_build,
-        "build": tj_build(),
-    }
+    return provenance_block(stored, prefix=prefix)
 
 
 def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
@@ -470,7 +460,7 @@ def get_relearn_proposals(
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        **_scan_provenance(cached.get("tj_version")),
+        **_scan_provenance(cached),
         "finding": _with_example_resolvability(finding, conn),
         "framing": _framing(request),
         "persona": _persona(request),
@@ -814,38 +804,22 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # is one list fed by two endpoints; a headline summed over one of them left
     # the other's rows outside it, which made the collapsed tail's combined
     # figure and the below-floor "still counted in the total above" note false
-    # for the money they described. Each open cluster arrives here as an
-    # ORDINARY row on the one canonical field — no parameter on the rollup, no
-    # second aggregate, no second key — carrying the detector's own bounded
-    # figure for THIS window, net of the re-read share the resend proposal
-    # already prices in full. `core/optimize/inbox_contribution.py` owns that
-    # design and why it is neither of the two mechanisms this repo retired.
+    # for the money they described. `gather_rollup_population` is the ONE
+    # function allowed to reach `past_overspend_rollup` (see its docstring):
+    # it always folds in relearn's clusters as ordinary rows on the one
+    # canonical field — no parameter on the rollup, no second aggregate, no
+    # second key — carrying the detector's own bounded figure for THIS
+    # window, net of the re-read share the resend proposal already prices in
+    # full, and discloses any cluster it could not place through `excluded`.
+    # `core/optimize/inbox_contribution.py` owns that design and why it is
+    # neither of the two mechanisms this repo retired.
     relearn_cache = relearn_store.read_cache(config=config)
     relearn_finding = (relearn_cache or {}).get("finding")
-    relearn_label = inbox_contribution.contribution_window_label(
-        relearn_finding, window_days,
-    )
     relearn_applied_sigs = relearn_apply.applied_signatures(config)
-    relearn_rows = inbox_contribution.relearn_contribution_rows(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    # Clusters whose money could NOT be put on this window's basis (a cache
-    # written before bounded figures, or occurrences with no parseable
-    # timestamp). Absent is never zero: stated through the rollup's `excluded`
-    # channel, summed into nothing.
-    unrepresented = inbox_contribution.unrepresented_relearn(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    excluded = {
-        **((block.get("cost_excluded") or {}) if block else {}),
-        **inbox_contribution.relearn_excluded_entry(
-            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
-        ),
-    }
-    past_overspend = cost_proposals_mod.past_overspend_rollup(
-        open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
+    past_overspend = inbox_contribution.gather_rollup_population(
+        open_proposals, relearn_finding, window_days=window_days,
+        relearn_applied_signatures=relearn_applied_sigs,
+        cost_excluded=(block.get("cost_excluded") or {}) if block else None,
     )
     # Every row a reader sees carries what it contributed, cost and relearn
     # alike, so the noise floor and the tail's combined figure read the SAME
@@ -871,7 +845,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     return {
         "status": status,
         "computed_at": block.get("cost_computed_at") if block else None,
-        **_scan_provenance(block.get("cost_tj_version") if block else None),
+        **_scan_provenance(block, prefix="cost_"),
         "proposals": proposals,
         "past_overspend": past_overspend,
         "framing": framing,

@@ -158,36 +158,21 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
     # inbox_contribution.py` -- never a second aggregate, never re-derived
     # per surface. This terminal rollup used to cover cost proposals only,
     # which made it a smaller, disagreeing number for the same underlying
-    # data. Reuse the exact same shared-module calls the API route makes
-    # rather than re-deriving the rollup logic here.
-    from tokenjam.core.optimize.cost_proposals import past_overspend_rollup
-
+    # data. `gather_rollup_population` is the ONE function allowed to reach
+    # `past_overspend_rollup` (see its docstring): it always gathers both
+    # feeds, so this call site cannot regress back to a cost-proposals-only
+    # sum by forgetting the relearn half the way this file once did.
     window_days = inbox_contribution.headline_window_days(block)
     relearn_cache = relearn_store.read_cache(config=config)
     relearn_finding = (relearn_cache or {}).get("finding")
-    relearn_label = inbox_contribution.contribution_window_label(
-        relearn_finding, window_days,
-    )
     relearn_applied_sigs = relearn_apply.applied_signatures(config)
-    relearn_rows = inbox_contribution.relearn_contribution_rows(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
+    rollup = inbox_contribution.gather_rollup_population(
+        open_proposals, relearn_finding, window_days=window_days,
+        relearn_applied_signatures=relearn_applied_sigs,
+        cost_excluded=(block.get("cost_excluded") or {}) if block else None,
     )
-    unrepresented = inbox_contribution.unrepresented_relearn(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    excluded = {
-        **((block.get("cost_excluded") or {}) if block else {}),
-        **inbox_contribution.relearn_excluded_entry(
-            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
-        ),
-    }
 
-    if open_proposals or relearn_rows:
-        rollup = past_overspend_rollup(
-            open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
-        )
+    if rollup.get("deduplicated_proposal_count"):
         headline = render_savings(
             rollup.get("past_overspend_usd"),
             rollup.get("past_overspend_tokens"),

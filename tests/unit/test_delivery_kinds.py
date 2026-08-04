@@ -181,7 +181,7 @@ def test_path_scoped_pricing_makes_a_write_offerable_that_claude_md_could_not():
     recommendation — it makes one possible that was net-negative before."""
     rule = _rule()
     basis = build_projection_basis(30.0, 20, 400)
-    budget = wb.build_write_budget(lane_budget_tokens=500, lane_max_writes=3)
+    budget = wb.build_write_budget(budget_tokens=500, max_writes=3)
 
     decisions = {}
     for kind_name in (DELIVERY_CLAUDE_MD_RULE, DELIVERY_PATH_SCOPED_RULE):

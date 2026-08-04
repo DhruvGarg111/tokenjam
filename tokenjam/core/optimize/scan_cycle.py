@@ -48,15 +48,29 @@ a real basis divergence, so the cycle resolves ONE ``until`` and hands it to
 every pass. A store refreshed on its own (a lone trigger, a test) still owns
 its own anchor: ``None`` means "you decide".
 
-WHAT THIS DOES NOT DO. It does not run the passes sequentially. Each still
-fires on its own daemon thread with its own connection, because they have very
-different durations (relearn is a full-corpus scan with a distill pass; the
-report is an analyzer sweep) and serialising them would make the slowest one
-decide when the fastest one is allowed to be fresh. Each recompute keeps its
-own overlap guard, so a cycle landing on top of a still-running pass costs
-nothing. Nor does it give relearn the shared anchor: relearn's figure is
-unbounded and its precomputed buckets are trailing windows from its OWN run
-instant, which the inbox selects against by label rather than by bound.
+ONE RECORD, CARRYING THAT ANCHOR AND EVERYTHING ELSE ABOUT THE PASS. The anchor
+was the first of several facts each store was resolving for itself: which build
+produced the figures (three independent ``tj_build()`` calls, never once
+compared against the running one), which window they cover (two different key
+spellings), and which pass they belong to (nothing at all — there was no cycle
+id, so a report-derived panel could serve cycle N figures beside inbox figures
+from cycle N-1 with no consumer able to tell). ``core/optimize/
+cycle_provenance.py`` is that one record; this module mints it and threads it
+into every store the pass writes.
+
+ONE THREAD, IN ORDER. The three legs run SEQUENTIALLY on the single
+``analyzer-scan-cycle`` thread — report, then relearn, then the cost proposals —
+because the last two are pure transformations of the report the first one built
+and cannot start before it exists. Each store still keeps its own overlap guard,
+so a cycle landing on top of a still-running pass costs nothing, and the cycle
+keeps its OWN in-flight flag because the per-store ones go false one leg at a
+time (see ``_CYCLE_COMPUTING`` below). What the cycle does NOT do is bound
+relearn: its figure is deliberately unbounded (it is the write budget's pre-net
+gross) and its precomputed buckets are trailing windows from its OWN run
+instant, which the inbox selects against by label rather than by bound. The
+cycle's shared record travels with the relearn cache all the same — it says
+which pass and which build produced those clusters, not what they are bounded
+to.
 
 NOT A POLLING HOOK. ``[optimize] scan_ui_poll_seconds`` is documented as "how
 often a UI surface re-reads the stored result (NOT how often the scan runs)".
@@ -246,10 +260,26 @@ def _trigger_analyzer_pass(
     become the relearn cache and the cost proposals — see this module's
     docstring on why that has to be one measurement rather than three.
 
+    ONE PROVENANCE RECORD, TOO. The pass mints a
+    :class:`~tokenjam.core.optimize.cycle_provenance.CycleProvenance` before the
+    report leg and threads it into all three stores, so every artifact this
+    cycle writes carries the same ``cycle_id``, anchor, window and producing
+    build. Without it the stores were only ever as consistent as three
+    independent ``tj_build()`` calls and two different spellings of the window,
+    and no surface could tell a cycle-N figure from a cycle-(N-1) one sitting
+    beside it. The report leg SEALS the persona onto the record (``build_report``
+    is the one place the window is classified), which is why the record is
+    re-read from the report store's own payload before the later legs get it.
+
     Returns ``False`` when the report store's own overlap guard declined, which
     means a pass is already in flight and this cycle is a no-op.
     """
-    from tokenjam.core.optimize import cost_proposals, ingest_watermark, report_store
+    from tokenjam.core.optimize import (
+        cost_proposals,
+        cycle_provenance,
+        ingest_watermark,
+        report_store,
+    )
 
     if report_store.is_computing() or is_cycle_computing():
         return False
@@ -263,10 +293,24 @@ def _trigger_analyzer_pass(
         backend = None
         try:
             backend = backend_factory()
-            stored = report_store.recompute_now(backend, config, until=anchor)
+            # THE record for this cycle. Minted once, here, before anything is
+            # written — the anchor it carries is the one resolved before the
+            # dispatch, so the window every leg observes is identical by
+            # construction rather than by three threads calling `utcnow()`
+            # close together.
+            record = cycle_provenance.begin_cycle(
+                config, conn=getattr(backend, "conn", None), anchor=anchor,
+            )
+            stored = report_store.recompute_now(backend, config, provenance=record)
             if stored is None:
                 # The overlap guard declined between the check above and here.
                 return
+            # The SEALED record the report leg actually stored — same cycle id
+            # and window, now carrying the persona `build_report` resolved. Read
+            # back rather than re-derived; if the store wrote something this
+            # build cannot rehydrate, the unsealed record is still the right
+            # identity for the remaining legs.
+            record = cycle_provenance.from_stored(stored) or record
             _record_pass_watermark(watermark_at_start)
             # The typed report the pass just wrote. `None` when the stored
             # payload cannot be rehydrated (corrupt, or written by a newer
@@ -274,9 +318,9 @@ def _trigger_analyzer_pass(
             # their own, which is the old behaviour and strictly better than
             # publishing nothing.
             report = report_store.stored_report(config)
-            _write_relearn_from(report, config, backend_factory)
+            _write_relearn_from(report, config, backend_factory, provenance=record)
             cost_proposals.recompute_cost_proposals(
-                backend, config, until=anchor, report=report,
+                backend, config, report=report, provenance=record,
             )
             _refresh_rule_presence(config)
         except Exception:  # noqa: BLE001 - background job, never crash a thread
@@ -339,6 +383,7 @@ def _refresh_rule_presence(config: Any) -> None:
 
 def _write_relearn_from(
     report: Any, config: Any, backend_factory: Callable[[], Any],
+    *, provenance: Any = None,
 ) -> None:
     """Publish the relearn cache from the pass's OWN relearn finding.
 
@@ -348,10 +393,12 @@ def _write_relearn_from(
     minutes, plus a distill pass that makes LLM calls — so that alone was the
     largest piece of wasted compute per cycle. The correctness half mattered
     more: the two calls passed DIFFERENT parameters (``min_sessions`` from
-    config versus the function default, the resolved report window versus the
-    fixed label vocabulary, and the write budget's ``existing_agent_file_tokens``
-    versus nothing), so the Dashboard and the Review inbox could disagree about
-    which clusters to offer, not merely about a figure's size.
+    config versus the function default, and the resolved report window versus
+    the fixed label vocabulary), so the Dashboard and the Review inbox could
+    disagree about which clusters to offer, not merely about a figure's size.
+    Which clusters are OFFERED a permanent rule is no longer decided in this
+    pass at all — see ``core/optimize/write_allocation.py``, which allocates
+    once over both producers at the end of the report build.
 
     The registered analyzer's version is the richer of the two on every one of
     those axes, so this is a merge toward it rather than a choice between them.
@@ -371,6 +418,6 @@ def _write_relearn_from(
         relearn_store.trigger_background_recompute(backend_factory, config=config)
         return
     try:
-        relearn_store.write_cache(finding, config=config)
+        relearn_store.write_cache(finding, config=config, provenance=provenance)
     except Exception:  # noqa: BLE001 - a cache write must not sink the pass
         pass

@@ -99,16 +99,29 @@ MIN_WRITE_BUDGET_TOKENS = 300
 #: permanent rule is offered at all above this line.
 AGENT_FILE_STANDING_CEILING_TOKENS = 50_000
 
-#: Per-lane hard caps. The two write lanes (relearn clusters, cost proposals)
-#: are built in separate passes that never see each other's output, so each
-#: carries its own explicit ceiling rather than sharing a pool one lane could
-#: silently drain. relearn gets the larger share: it is the write-analyzer by
-#: design and routinely produces tens of candidate clusters, while the cost
-#: lane has at most a handful of write-bearing families.
-RELEARN_WRITE_BUDGET_TOKENS = 1_000
-RELEARN_MAX_OFFERED_WRITES = 5
-COST_WRITE_BUDGET_TOKENS = 500
-COST_MAX_OFFERED_WRITES = 3
+#: THE hard cap — one pool for every proposed permanent write, whichever
+#: producer derived it.
+#:
+#: This used to be two pairs, one per producer (relearn clusters, cost
+#: proposals), each sized and spent by its own pass. Three things followed, all
+#: of them wrong. The bound a user was actually subject to was the SUM of the
+#: two, so one window could grow an agent file by their combined total. Each
+#: pass sized its share against the WHOLE summarize-measured footprint as
+#: though it were the only writer, so the same headroom was spent twice. And
+#: ranking was per-producer, so a high-net cost write and a low-net relearn
+#: write never entered one ``ranked`` list and the comparison that decides
+#: which of them is worth a permanent block simply never happened.
+#:
+#: One pool fixes all three, and the value is the LARGER of the two former
+#: caps, never their sum: the sum is the defect restated as a constant. What a
+#: window may add to an always-re-sent file is a property of the file, not of
+#: how many analyzers happen to want to write to it.
+#:
+#: Sized against ``AGENT_FILE_GROWTH_SHARE_PER_WINDOW`` in
+#: :func:`build_write_budget` — this is the ceiling that bounds the whole
+#: thing regardless of how roomy the measured footprint looks.
+WRITE_BUDGET_TOKENS = 1_000
+MAX_OFFERED_WRITES = 5
 
 # --- Value floor ---------------------------------------------------------------
 
@@ -533,29 +546,35 @@ class WriteBudget:
 
 def build_write_budget(
     *,
-    lane_budget_tokens: int,
-    lane_max_writes: int,
+    budget_tokens: int = WRITE_BUDGET_TOKENS,
+    max_writes: int = MAX_OFFERED_WRITES,
     existing_agent_file_tokens: int | None = None,
     existing_by_path: dict[str, int] | None = None,
 ) -> WriteBudget:
-    """Size this lane's write budget against the measured agent-file footprint.
+    """Size THE window's one write budget against the measured agent-file
+    footprint.
 
     ``existing_agent_file_tokens`` is the standing per-session cost the user's
     agent files ALREADY carry, as measured by the ``summarize`` analyzer.
-    ``None`` (analyzer not run, scan failed) leaves the lane cap intact rather
+    ``None`` (analyzer not run, scan failed) leaves the hard cap intact rather
     than inventing a footprint, which is the only honest default: an unmeasured
     file is not evidence of a full one.
 
     Three terms, in order of who wins: the absolute ceiling zeroes the budget
     outright; otherwise the growth share caps it relative to what is already
     there; the floor keeps a nearly-empty file from being budgeted to nothing;
-    and the lane cap bounds the whole thing regardless.
+    and the hard cap bounds the whole thing regardless.
+
+    Called ONCE per report, by :mod:`tokenjam.core.optimize.write_allocation`.
+    Two callers each building one of these is the two-pools defect the
+    ``WRITE_BUDGET_TOKENS`` comment describes; the arguments default so a
+    caller cannot accidentally re-introduce a second, differently-sized pool.
     """
-    lane_cap = max(0, lane_budget_tokens)
+    hard_cap = max(0, budget_tokens)
     by_path = dict(existing_by_path or {})
     if existing_agent_file_tokens is None:
         return WriteBudget(
-            budget_tokens=lane_cap, max_writes=max(0, lane_max_writes),
+            budget_tokens=hard_cap, max_writes=max(0, max_writes),
             existing_tokens=0, ceiling_reached=False, existing_by_path=by_path,
         )
     existing = max(0, int(existing_agent_file_tokens))
@@ -568,8 +587,8 @@ def build_write_budget(
         MIN_WRITE_BUDGET_TOKENS, int(existing * AGENT_FILE_GROWTH_SHARE_PER_WINDOW),
     )
     return WriteBudget(
-        budget_tokens=min(lane_cap, allowed_growth),
-        max_writes=max(0, lane_max_writes),
+        budget_tokens=min(hard_cap, allowed_growth),
+        max_writes=max(0, max_writes),
         existing_tokens=existing,
         ceiling_reached=False,
         existing_by_path=by_path,
@@ -624,6 +643,21 @@ class WriteCandidate:
     #: the other's question is how a placement decision silently stops being
     #: arithmetic.
     destinations: tuple[str, ...] = ()
+    #: The figure to RANK this candidate against every other lane's, when it
+    #: differs from ``gross_tokens``. Exists because ``gross_tokens`` can be on
+    #: a LONGER horizon than the report's own window (relearn's detector is
+    #: deliberately unbounded — see ``analyzers/relearn.py`` — while the cost
+    #: lane's proposals are already scoped to the report window), and ranking
+    #: two candidates on figures counted over different spans systematically
+    #: favours whichever one counted longer, independent of which is actually
+    #: worth more. ``None`` means ``gross_tokens`` IS already on the report's
+    #: window basis and doubles as the ranking figure (the cost lane's case,
+    #: and the historical single-basis behaviour). Never touches
+    #: ``gross_tokens``/``gross_usd`` themselves: those remain the pre-net
+    #: GROSS the value floor and the net-negative verdict are decided on, on
+    #: purpose (see ``_decide_family``'s ``rank_net_tokens``) — only the ORDER
+    #: two families are offered in changes.
+    rank_gross_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -673,6 +707,14 @@ class WriteDecision:
     #: The files this write lands in, carried through so a caller can stage one
     #: diff per destination without re-deriving the placement.
     destinations: tuple[str, ...] = ()
+    #: The SAME netting as ``net_tokens`` (family gross minus standing cost),
+    #: computed off ``WriteCandidate.rank_gross_tokens`` instead of
+    #: ``gross_tokens`` wherever a member set one. Equals ``net_tokens`` for
+    #: any family whose members are all on the report's own window basis
+    #: already. This is what ``allocate_writes`` sorts on; ``net_tokens``
+    #: keeps deciding whether the write is worth OFFERING at all (net-negative
+    #: verdict, value floor) — see ``WriteCandidate.rank_gross_tokens``.
+    rank_net_tokens: int = 0
 
 
 def _rate_per_token(gross_usd: float | None, gross_tokens: int) -> float | None:
@@ -753,6 +795,14 @@ def _decide_family(
     # withhold the write even when the family's COMBINED return clears the
     # value floor below.
     family_gross_tokens = sum(c.gross_tokens for c in ordered)
+    # The RANKING basis — see `WriteCandidate.rank_gross_tokens`. Falls back to
+    # `gross_tokens` per member exactly like the field's own default, so a
+    # family with no lane-specific ranking figure ranks on the same number it
+    # is netted on, which is today's behaviour unchanged.
+    family_rank_gross_tokens = sum(
+        c.gross_tokens if c.rank_gross_tokens is None else c.rank_gross_tokens
+        for c in ordered
+    )
     per_session = standing_tokens_per_session(rep.delivery, rep.artifact_text)
     exposure = max(
         rep.exposure_sessions if rep.exposure_sessions is not None else basis.sessions, 0,
@@ -773,6 +823,11 @@ def _decide_family(
     payback = (family_gross_tokens / standing) if standing > 0 else None
     net_negative = net_tokens <= 0
     clamped_net_usd = None if net_usd is None else max(net_usd, 0.0)
+    # Same netting, off the ranking basis instead of the worth-decision one.
+    # Never feeds `net_negative`/the value floor/`payback` — those stay on
+    # `net_tokens`/`net_usd`, i.e. the true (possibly unbounded) gross, exactly
+    # as before this field existed.
+    rank_net_tokens = max(family_rank_gross_tokens - standing, 0)
 
     rep_decision = WriteDecision(
         key=rep.key, offered=not net_negative,
@@ -780,6 +835,7 @@ def _decide_family(
         standing_tokens_per_session=per_session,
         standing_tokens=standing, standing_usd=standing_usd,
         net_tokens=max(net_tokens, 0), net_usd=clamped_net_usd,
+        rank_net_tokens=rank_net_tokens,
         payback_ratio=payback, net_negative=net_negative, exposure_sessions=exposure,
         footprint_tokens=per_session * _destination_count(rep),
         destinations=rep.destinations,
@@ -868,7 +924,12 @@ def allocate_writes(
             continue
         ranked.append((rep, rep_decision))
 
-    ranked.sort(key=lambda pair: (-pair[1].net_tokens, pair[0].key))
+    # Ranked on `rank_net_tokens`, not `net_tokens` — see
+    # `WriteCandidate.rank_gross_tokens` for why the two can differ: a family
+    # whose `net_tokens` was counted over a longer horizon than another's must
+    # not outrank it on that account alone. Identical for any family that never
+    # set a ranking figure of its own.
+    ranked.sort(key=lambda pair: (-pair[1].rank_net_tokens, pair[0].key))
     spent_tokens = 0
     offered_count = 0
     #: Per-DESTINATION spend, so four analyzers proposing rules into the same

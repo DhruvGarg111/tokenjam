@@ -240,6 +240,42 @@ def test_an_unstamped_result_is_unknown_not_agreement(html: str):
 
 
 @_node
+def test_the_servers_verdict_decides_staleness_not_a_second_comparison(html: str):
+    """The comparison is resolved ONCE, server-side (`build_provenance` in
+    `core/optimize/cycle_provenance.py`), so this page, the CLI, `--json` and the
+    MCP server cannot give a user different answers about the same cache. The
+    page renders the verdict; it does not re-derive it."""
+    src = _fn_source(html, "buildQualifier")
+    out = _run_js(src, (
+        "buildQualifier({computedAt:'2026-07-29T10:00:00Z',"
+        " computedBuild:'0.6.2', build:'0.6.3', buildProvenance:'stale'})"
+    ))
+    assert out is not None and "0.6.2" in out
+    assert _run_js(src, (
+        "buildQualifier({computedAt:'2026-07-29T10:00:00Z',"
+        " computedBuild:'0.6.3', build:'0.6.3', buildProvenance:'match'})"
+    )) is None
+    unknown = _run_js(src, (
+        "buildQualifier({computedAt:'2026-07-29T10:00:00Z',"
+        " computedBuild:null, build:'0.6.3', buildProvenance:'unknown'})"
+    ))
+    assert unknown is not None and "unknown" in unknown.lower()
+
+
+@_node
+def test_an_older_server_without_a_verdict_still_gets_qualified(html: str):
+    """The fallback is load-bearing: a server predating the verdict sends the two
+    builds and nothing else, and going silent there would drop the qualification
+    on exactly the upgrade this whole control exists for."""
+    src = _fn_source(html, "buildQualifier")
+    out = _run_js(src, (
+        "buildQualifier({computedAt:'2026-07-29T10:00:00Z',"
+        " computedBuild:'0.6.2', build:'0.6.3'})"
+    ))
+    assert out is not None and "0.6.2" in out
+
+
+@_node
 def test_nothing_computed_yet_has_no_freshness_claim_to_qualify(html: str):
     src = _fn_source(html, "buildQualifier")
     assert _run_js(src, "buildQualifier({computedAt:null, build:'0.6.3'})") is None
