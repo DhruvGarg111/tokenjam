@@ -1156,6 +1156,16 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .tile-grid.compact .rec-amount { font-size: 15px; }
 .tile-grid.compact .rec-hint { font-size: 10px; }
 .tile-grid.compact .health-tile { padding: 8px 10px; }
+/* The opportunities row only (Total + six breakdown tiles = 7): a narrower
+   minmax than the shared .compact default so all seven fit across at the
+   normal content width instead of the 7th (Deadweight) orphaning onto a
+   second row, detaching the Total tile from what it sums. Scoped to this
+   row via .opp-grid rather than lowering .tile-grid.compact's own minmax,
+   which the health-glance row (5 tiles) and this row's own loading skeleton
+   also use and don't need narrowed. auto-fill still wraps to a second row
+   below this width, same as any other tile-grid -- narrower viewports keep
+   degrading normally rather than forcing a squashed single row. */
+.tile-grid.compact.opp-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }
 .rec-tile {
   display: block; text-decoration: none; color: inherit; position: relative;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -2247,6 +2257,14 @@ function fmtCost(usd) {
   if (usd === 0) return '$0.0000';
   return usd < 0.001 ? '$' + usd.toFixed(6) : '$' + usd.toFixed(4);
 }
+// The ONE rounding rule behind every Dashboard dollar figure's displayed
+// precision, so a caller that needs to reconcile a computed figure (e.g. the
+// Total opportunity tile summing several already-rounded tile figures) can
+// round to the exact same cent fmtDashUsd would show, instead of keeping a
+// second rounding expression that could drift from it.
+function roundToCents(n) {
+  return Math.round(n * 100) / 100;
+}
 // Dashboard-only currency formatter: at most 2 decimal places (product
 // decision, "use just two decimals at most throughout dashboard"), with
 // thousands grouping for readability -- the same 2dp convention fmtUsd
@@ -2259,7 +2277,7 @@ function fmtCost(usd) {
 function fmtDashUsd(v) {
   const n = Number(v || 0);
   if (n > 0 && n < 0.01) return '< $0.01';
-  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return '$' + roundToCents(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function fmtTokens(n) {
   if (n == null) return '-';
@@ -8050,7 +8068,14 @@ function recoverableTiles(opt) {
 function totalOpportunityFigure(tiles) {
   const known = tiles.filter(t => t.state !== 'not_ready');
   const contributors = known.filter(t => t.state === 'actionable' && t.usd != null);
-  const totalUsd = contributors.reduce((sum, t) => sum + t.usd, 0);
+  // Reconciliation: the total must equal the sum of the figures AS DISPLAYED
+  // on the six breakdown tiles, not a sum of raw values rounded once at the
+  // end -- those two disagree whenever more than one contributor's raw cents
+  // round independently. Round each contributor with roundToCents (the same
+  // helper fmtDashUsd uses to format a tile's own figure, so this can never
+  // drift from what a tile actually shows) BEFORE summing, then round the
+  // sum itself once more to clear any float drift the additions reintroduce.
+  const totalUsd = roundToCents(contributors.reduce((sum, t) => sum + roundToCents(t.usd), 0));
   const totalTokens = contributors.reduce((sum, t) => sum + (t.tokens || 0), 0);
   return {
     // 'unknown': nothing in the row has resolved yet — render a skeleton,
@@ -12814,7 +12839,10 @@ const OPTIMIZE_WAIT_MIN = Math.round(OPTIMIZE_WAIT_MS / 60000);
 // analyzers with no fix for it (measured: resend, summarize, downsize,
 // deadweight, subagent, relearn), so the grid keeps the same row count from the
 // placeholder through to the answer.
-const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];
+// 7 placeholders, matching the 7 real tiles (the Total tile plus the six
+// breakdown analyzers) so the skeleton's width and row-count match what
+// lands, and the row doesn't reflow when the real data arrives.
+const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5, 6];
 
 // Candidate windows, ascending, for every screen with a window selector. Only
 // entries whose day count fits within the store's actually-available data
@@ -13317,7 +13345,7 @@ function DashboardView({ params, persona }) {
                       to say there is nothing recoverable is 'none', which
                       requires a completed response. */ ''}
                 ${bandState === 'scanning' ? html`
-                  <div class="tile-grid compact">
+                  <div class="tile-grid compact opp-grid">
                     ${/* Mirrors the answered tile below: name line, amount line,
                           two clamped hint lines, inside the real .rec-tile box.
                           Same bar-height-tracks-font-size convention the Review
@@ -13357,7 +13385,7 @@ function DashboardView({ params, persona }) {
                     <span class="sz-link" onClick=${retryOptimize}>${optState.phase === 'timeout' ? 'keep waiting' : 'try again'}</span>
                   </div>` : null}
                 ${bandState === 'tiles' || bandState === 'none' || bandState === 'stale' ? html`
-                <div class="tile-grid compact">
+                <div class="tile-grid compact opp-grid">
                   ${tiles.length === 0 ? html`<div class="empty">No overspend found.</div>`
                     : html`<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };

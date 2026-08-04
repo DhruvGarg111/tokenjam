@@ -455,11 +455,21 @@ def test_cursor_listbox_scrolls_horizontally_and_truncates_paths(html: str) -> N
 _node = pytest.mark.skipif(shutil.which("node") is None, reason="node not available for JS evaluation")
 
 
+def _round_to_cents_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function roundToCents(n)")
+    end = src.index("\n}\n", start) + 2
+    return src[start:end]
+
+
 def _total_figure_source() -> str:
     src = _UI.read_text(encoding="utf-8")
     start = src.index("function totalOpportunityFigure")
     end = src.index("// The TOTAL tile itself", start)
-    return src[start:end]
+    # totalOpportunityFigure calls roundToCents (the same helper fmtDashUsd
+    # uses) to round each contributor before summing -- pull it in too so
+    # this extraction doesn't drift from the real dependency.
+    return _round_to_cents_source() + "\n" + src[start:end]
 
 
 def _total_figure(tiles: list[dict]):
@@ -486,6 +496,28 @@ def test_total_equals_the_plain_sum_of_actionable_contributors():
     assert round(fig["totalUsd"], 2) == round(1528.89 + 374.33 + 295.23, 2)
     assert fig["totalTokens"] == 600
     assert fig["contributorCount"] == 3
+
+
+@_node
+def test_total_reconciles_with_the_sum_of_the_displayed_per_tile_figures():
+    # The total must equal what you get from adding the SIX RENDERED figures
+    # by hand, not a sum of raw values rounded once at the end -- those two
+    # differ whenever contributors' raw cents round independently. Fixture
+    # chosen so the two strategies disagree by a whole cent, unaffected by
+    # any binary floating-point boundary ambiguity (verified directly: raw
+    # sum 3.012 rounds once to 3.01, but each 1.004 individually rounds down
+    # to 1.00, so the sum of the three DISPLAYED figures is 3.00).
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 1.004, "tokens": 1},
+        {"name": "resend", "state": "actionable", "usd": 1.004, "tokens": 1},
+        {"name": "downsize", "state": "actionable", "usd": 1.004, "tokens": 1},
+    ]
+    fig = _total_figure(tiles)
+    # The sum of the values AS DISPLAYED (each tile renders $1.00 via
+    # fmtDashUsd's 2dp rounding) is $3.00 -- not the sum-then-round-once
+    # figure of $3.01 a naive raw sum would produce.
+    assert fig["totalUsd"] == 3.00
+    assert fig["totalUsd"] != round(1.004 + 1.004 + 1.004, 2)  # != 3.01
 
 
 @_node
@@ -608,3 +640,45 @@ def test_total_tile_comment_marks_the_sum_as_deliberate_and_scoped(html: str) ->
     assert "persona-disabled" in comment
     import re
     assert not re.search(r"#\d+", comment), "no internal ticket id in a source comment"
+
+
+def test_total_matches_the_displayed_per_tile_sum(html: str) -> None:
+    # roundToCents backs fmtDashUsd's own rounding (a tile's displayed
+    # figure) AND totalOpportunityFigure's summing step, from the same
+    # helper -- never two independent rounding expressions that could drift
+    # apart. Anchors both call sites plus the shared helper's definition.
+    assert "function roundToCents(n) {" in html
+    assert "return '$' + roundToCents(n).toLocaleString(" in html  # fmtDashUsd
+    assert (
+        "const totalUsd = roundToCents(contributors.reduce((sum, t) => sum + roundToCents(t.usd), 0));"
+        in html
+    )
+
+
+def test_opportunities_row_fits_seven_tiles_without_widening_the_shared_compact_grid(html: str) -> None:
+    # The Total tile makes this a 7-tile row (was 6), which orphaned the 7th
+    # (Deadweight) onto its own row at the shared .tile-grid.compact minmax.
+    # .opp-grid narrows just this row's minmax so all seven fit across at
+    # the normal content width; it must NOT touch the shared .compact rule
+    # (the health-glance row and this row's own loading skeleton also use
+    # it, and don't need narrowing), and both the answered-tiles grid and
+    # its loading skeleton must carry the class so neither reflows against
+    # the other when the real data lands.
+    assert ".tile-grid.compact.opp-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }" in html
+    assert '.tile-grid.compact { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));' in html
+    assert 'class="tile-grid compact opp-grid"' in html
+    # Both call sites carry it: the scanning skeleton and the answered tiles.
+    assert html.count('class="tile-grid compact opp-grid"') == 2
+    # The health-glance row is a separate grid and must NOT be narrowed.
+    health = html[html.index('<div class="band-label">Health at a glance</div>'):]
+    health = health[: health.index("<!-- The HERO")]
+    assert 'class="tile-grid compact"' in health
+    assert "opp-grid" not in health
+
+
+def test_skeleton_tile_count_matches_the_seven_real_tiles(html: str) -> None:
+    # REC_SKELETON_TILES stood in for the row before the Total tile existed
+    # (6 placeholders for 6 real tiles). Left at 6 it would render one fewer
+    # skeleton box than the 7 real tiles that land, a visible reflow.
+    assert "const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5, 6];" in html
+    assert "const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];" not in html
