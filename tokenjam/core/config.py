@@ -335,6 +335,17 @@ class OptimizeConfig:
     # Default 5 (was 10) -- see MIN_SESSIONS_DEADWEIGHT's comment for the
     # false-positive-rate reasoning behind the lowered bar.
     min_sessions_deadweight: int = 5
+    # deadweight (core/optimize/mcp_probe.py): whether the analyzer may MEASURE
+    # each configured MCP server's tool schemas, which means starting that
+    # server, sending it `initialize` + `tools/list`, and terminating it. That
+    # is the only way to know what a server actually injects, and the figure it
+    # replaced was a flat assumption charged per-server. Read-only by
+    # construction — no `tools/call` is ever issued — cached against the
+    # server's own launch spec so an unchanged server is measured once, and only
+    # ever taken on the out-of-band analyzer pass. Turning it OFF does not
+    # substitute the old assumption: unmeasured servers are excluded from every
+    # priced figure and the finding says so.
+    measure_mcp_schemas: bool = True
     # cache (analyzers/cache_efficacy.py MIN_INPUT_TOKENS): minimum
     # (provider, model) input-token volume in the window before a low
     # cache-efficacy ratio is even worth surfacing.
@@ -835,6 +846,8 @@ def _parse(raw: dict) -> TjConfig:
             "min_cluster_instances", OptimizeConfig.min_cluster_instances),
         min_sessions_deadweight=optimize_raw.get(
             "min_sessions_deadweight", OptimizeConfig.min_sessions_deadweight),
+        measure_mcp_schemas=bool(optimize_raw.get(
+            "measure_mcp_schemas", OptimizeConfig.measure_mcp_schemas)),
         min_cache_input_tokens=optimize_raw.get(
             "min_cache_input_tokens", OptimizeConfig.min_cache_input_tokens),
         cache_efficacy_threshold=optimize_raw.get(

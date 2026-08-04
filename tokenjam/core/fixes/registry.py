@@ -787,8 +787,73 @@ RELEARN_WEBFETCH_DOMAIN_BLOCKED = register(FixRecord(
 ))
 
 
+#: `deadweight` and `summarize` had NO catalog record at all, which is a
+#: sharper problem than it sounds: `lint_catalog` can only report on what is
+#: catalogued, so the lint was structurally incapable of saying anything about
+#: two analyzers' user-facing prose while reporting a clean bill of health for
+#: everything. An analyzer with no record is not a clean analyzer; it is an
+#: unexamined one.
+
+#: The DURABLE half of a dead-server card. The grounded half — this server's
+#: name, its config path, how many sessions it sat in — stays at the render
+#: site, which is exactly the split the guard's docstring draws.
+#:
+#: What must be stated once, not per card, is the multi-declaration rule: the
+#: analyzer aggregates a server's tax across every file that declares it, while
+#: the apply edits ONE. A card that leaves that implicit lets a partial fix read
+#: as a whole one.
+DEADWEIGHT_REMOVE_SERVER = register(FixRecord(
+    key="deadweight.remove_unused_server",
+    text=(
+        "Remove the MCP server, or narrow a user-scoped one to the projects "
+        "that use it: its tool schemas are injected into every call of every "
+        "session it is configured for, and nothing in this window called any "
+        "of them. Editing one declaration stops the tax only for the sessions "
+        "that reach the server through that file, so a server declared in "
+        "several locations needs each one edited before the whole figure goes "
+        "away."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"deadweight"}),
+    answers="MCP servers whose schemas are injected every session and never called",
+    lever=LEVER_AWARENESS,
+    #: A low-traffic server is still a candidate for removal; the card's own
+    #: honesty caveat is what asks for review, and the fix text must not
+    #: pre-emptively excuse the exact shape the analyzer bills for.
+    must_not_relicense=frozenset({
+        "occasional use is fine",
+        "a rarely-called server is harmless",
+    }),
+))
+
+#: The DURABLE half of the oversized-instruction-file card. This is the text
+#: that used to live as a ~330-character paragraph hardcoded in
+#: `cost_proposals._summarize_to_proposals`, invisible to the guard because the
+#: slot it was assigned to was not listed, the constant check looked for a name
+#: one letter off, and the length floor answered a different question.
+SUMMARIZE_REVIEW_OVERSIZED = register(FixRecord(
+    key="summarize.review_oversized_files",
+    text=(
+        "Reduce an oversized always-loaded instruction file through the "
+        "summarize review surface rather than editing it blind: `tj summarize "
+        "list`, then `tj summarize check`, then `tj summarize apply`. Every "
+        "code block, table and tag comes back verbatim and only prose is "
+        "rewritten, one file at a time, and nothing is written until you have "
+        "read the diff and passed --go."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"summarize"}),
+    answers="always-loaded instruction files carrying compressible prose on every session",
+    lever=LEVER_AWARENESS,
+))
+
+
 __all__ = [
     "CACHE_NO_CC_LEVER",
+    "DEADWEIGHT_REMOVE_SERVER",
+    "SUMMARIZE_REVIEW_OVERSIZED",
     "COMPACTION_RELIEF",
     "DOWNSIZE_CC_LEVERS",
     "EDIT_BEFORE_READ",

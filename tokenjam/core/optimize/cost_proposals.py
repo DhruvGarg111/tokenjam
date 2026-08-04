@@ -1074,13 +1074,14 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
     )
     plural = "" if files == 1 else "s"
     headline = _money(usd) if usd is not None else f"~{tokens:,} tok"
+    # The GROUNDING (how many files, in this window) is built here; the
+    # instruction itself comes from the catalog. It used to be a ~330-character
+    # paragraph hardcoded at this line, and the guard read green over it for
+    # three independent reasons at once — see
+    # `tests/unit/test_no_fix_prose_outside_the_catalog.py`.
     advise = (
-        f"Review {files} oversized file{plural} in the summarize curate -> "
-        "diff -> apply surface (`tj summarize list` / `tj summarize check` / "
-        "`tj summarize apply`, or the Summarize screen in the web UI). This "
-        "card links there instead of applying inline: the fix is a reviewed "
-        "rewrite — structure kept verbatim, prose compressed, one file at a "
-        "time — not a one-click removal."
+        f"{files} oversized file{plural} in this window. "
+        + fixes.fix_text("summarize.review_oversized_files")
     )
     return [CostProposal(
         kind="cost",

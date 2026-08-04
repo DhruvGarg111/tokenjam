@@ -1060,6 +1060,7 @@ def run(ctx: AnalyzerContext) -> None:
         return
 
     from tokenjam.core.optimize.scope import resolve_analyzer_scope
+    from tokenjam.core.agent_config import store_for
     from tokenjam.core.summarize.candidates import list_candidates
 
     scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
@@ -1115,11 +1116,17 @@ def run(ctx: AnalyzerContext) -> None:
         # Roots are deliberately NOT passed as `path`: that widens the net to
         # every `*.md` in a directory and would price `README.md` /
         # `CHANGELOG.md` as if the harness auto-loaded them (Critical Rule 22).
+        # The scan's file population is INGESTED (`core/agent_config`) and read
+        # back from the store rather than re-globbed at analysis time — same
+        # store the deadweight and trim analyzers populate, so one pass leaves
+        # behind one description of the config surface instead of three
+        # independent walks leaving behind nothing.
         scan = list_candidates(
             config=ctx.config, home=scope.home,
             project_roots=roots.roots or None,
             project_root=_project_scan_root(scope),
             ratio=ratio,
+            store=store_for(getattr(ctx, "conn", None)),
         )
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the

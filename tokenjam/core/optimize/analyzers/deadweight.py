@@ -49,6 +49,7 @@ from json.decoder import scanstring
 from pathlib import Path
 from typing import Any
 
+from tokenjam.core.fixes import fix_text
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import blended_rates, price_span, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
@@ -82,33 +83,30 @@ MIN_SESSIONS_DEADWEIGHT = 5
 #: (mirrors relearn.py's MAX_EXAMPLE_SESSIONS convention).
 MAX_EXAMPLE_SESSIONS = 3
 
-#: Full MCP-connector schema-injection tax, PER CALL, when its tool schemas
-#: are loaded (not deferred). This is an ASSUMPTION carried into this module,
-#: not a measurement taken here or anywhere in this repo: the on-disk
-#: transcript has no per-schema token count to measure against (see
-#: core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE, the one real in-repo
-#: source for the "~25K tokens/call" figure) — and that note itself describes
-#: the tax for ALL of a session's attached MCP servers COMBINED, not for one
-#: server. This module nonetheless charges the full 25K flat to EVERY
-#: individual server, every call, regardless of how many tools that server
-#: actually exposes. Do not treat this as measured or as a per-server figure
-#: just because it is used that way below — it is neither. Do not change the
-#: value here; a re-derived, era-correct constant is tracked separately.
-#: The server's tool definitions ride in the `tools` array of EVERY call in
-#: the session, not just the first — this is the FIRST call's token count;
-#: subsequent calls in the same session re-send it too but are priced at the
-#: cache-read rate, not this rate again (see the per-session multiplier in
-#: the tax loop below).
-FULL_SCHEMA_TAX_TOKENS = 25_000
-
-#: When a session's transcript shows this server's tools in a DEFERRED
-#: listing (ToolSearch-style), its schemas are NOT loaded that call — only a
-#: short name+description line per tool appears in the listing.
-#: Conservative estimate: ~10 tools x ~40 tokens/line for a typically-sized
-#: server. Never used to claim the full tax for a deferred call. Like
-#: FULL_SCHEMA_TAX_TOKENS, this is the first call's count; the same
-#: per-session multiplier applies to later calls.
-DEFERRED_SCHEMA_TAX_TOKENS = 400
+# THE SCHEMA TAX IS MEASURED PER SERVER, AND THERE IS NO CONSTANT TO FALL BACK
+# ON. This module used to carry `FULL_SCHEMA_TAX_TOKENS = 25_000` and charge it
+# flat to EVERY individual server, every call, regardless of how many tools that
+# server exposed. Its own docstring conceded the number was an assumption, and
+# conceded worse: the only in-repo source for "~25K" (`core/context_diagnostic
+# .py`'s MCP_INJECTION_PARK_NOTE) describes the tax for ALL of a session's
+# attached servers COMBINED. So a per-server loop over an all-servers-combined
+# figure made `past_overspend_usd` — the field every surface renders — linear in
+# an unmeasured constant AND multiplied by however many servers the user had
+# configured.
+#
+# `core/optimize/mcp_probe` measures each server instead: start it, ask for its
+# tools, serialize those schemas as they are injected, count that. The
+# deferred/ToolSearch lane comes off the same response (name + description per
+# tool, no input schema), so both lanes are measured rather than one measured
+# and one assumed.
+#
+# A server that could not be measured contributes NOTHING to any priced figure
+# and says so on its own row and in the finding's coverage note. There is
+# deliberately no default: a default is what made the old figure wrong, and an
+# unmeasured server billed at a default is indistinguishable from a measured
+# one. Both lanes are still FIRST-CALL counts — the schema rides in the `tools`
+# array of every call in the session, and later calls are priced at the
+# cache-read rate by the per-session multiplier in the tax loop below.
 
 #: Chars-per-token conversion for text measured directly off transcripts
 #: (system-reminder blocks) — same convention as prompt_bloat.py's
@@ -124,10 +122,15 @@ DEADWEIGHT_HONESTY_CAVEAT = (
 
 
 # --- MCP config enumeration (read-only; never writes a config file) -------
-
-_PROJECT_CONFIG_RELPATHS = (
-    ".mcp.json", ".claude/settings.json", ".claude/settings.local.json",
-)
+#
+# WHICH config files declare a server, and where the global one lives, are
+# stated once in `core/agent_config` (`PROJECT_MCP_RELPATHS` /
+# `GLOBAL_MCP_RELPATH`) — this module used to hold a second copy of that list
+# and its own lazy `~/.claude.json` resolver. Both moved with the walk itself
+# when enumeration became an ingestion step; the lazy resolution rule did not
+# change, and `core/agent_config._settings_paths` still resolves the global
+# path against an explicit `claude_home` so a scoped run never reads the
+# operator's real file.
 
 
 def _read_json_safe(path: Path) -> dict:
@@ -145,17 +148,6 @@ def _mcp_server_names(path: Path) -> set[str]:
     return {str(name) for name in servers if str(name).strip()}
 
 
-def _global_config_path(claude_home: Path | None = None) -> Path:
-    # Resolved LAZILY (never at import time) so a test patching HOME sees the
-    # fake home, never the developer's real ~/.claude.json. `claude_home`
-    # scopes it further: under an explicit `--projects-root` the global MCP
-    # config read must stay inside the root the caller drew, or a scoped run
-    # still reports servers from the operator's real machine.
-    if claude_home is not None:
-        return claude_home / ".claude.json"
-    return Path.home() / ".claude.json"
-
-
 @dataclass
 class ConfiguredServer:
     """One MCP server as read off config, and where it reaches."""
@@ -171,67 +163,93 @@ class ConfiguredServer:
     #: these, chosen deterministically; the rest are named so a caller never
     #: silently treats the aggregate claim as fixed by editing just one.
     source_cwds: dict[str, set[str]] = field(default_factory=dict)
+    #: This server's own launch spec as declared in ``source`` (command/args/
+    #: env, or a url + transport type). Carried because the schema measurement
+    #: needs it and re-reading the config file to get it back would put the
+    #: filesystem walk back in the middle of the analysis.
+    spec: dict[str, Any] = field(default_factory=dict)
+    #: Ingested-record id of the CANONICAL source, and of every source. The
+    #: measurement is cached against these, so it survives between analysis
+    #: runs — see ``core/agent_config`` and ``core/optimize/mcp_probe``.
+    config_id: str = ""
+    config_ids: dict[str, str] = field(default_factory=dict)
 
 
 def enumerate_configured_servers(
     repo_cwds: set[str], *, claude_home: Path | None = None,
+    store: "Any | None" = None, seen_at: datetime | None = None,
 ) -> dict[str, ConfiguredServer]:
-    """Read-only enumeration of MCP servers across the three config
-    locations: project ``.mcp.json`` / ``.claude/settings*.json`` under each
-    given session cwd, plus the global ``~/.claude.json``. Never edits a
-    config file (advise-only in v1 — see the module docstring).
+    """MCP servers as INGESTED, not as re-read off disk at analysis time.
 
-    A user-scoped (global) server always wins scope over a same-named
-    project entry: the global entry already reaches every session, so
-    downgrading it to "project" would only narrow its true presence.
+    The walk still happens — nothing else can discover a config file — but it is
+    now the POPULATION step of ``core/agent_config``: it writes one record per
+    (server name, declaring config file) into the agent-config store, and this
+    function then builds its answer by reading those records back. That is what
+    lets the schema measurement in ``core/optimize/mcp_probe`` be cached against
+    a server's spec hash instead of re-taken (which means re-STARTING the
+    server) on every analysis pass.
 
-    ``repo_cwds`` is iterated in SORTED order and each project-scoped
-    server's ``source`` is chosen AFTER the full scan (most-cwds-covered
-    first, path string as the tie-break) — never "whichever cwd a raw
-    ``set`` iteration happened to visit first". The same server name
-    independently declared across several cwds (a duplicated ``.mcp.json``
-    committed into multiple worktrees, say) used to hand its ONE apply
-    target to whichever path a hash-seed-dependent set order visited first,
-    so the exact same claim's fix could stop between a sliver and nearly
-    all of the claimed tax depending on nothing but interpreter hash
-    randomization. Deterministic now, and the deterministic choice is also
-    the one that actually matters most (most sessions covered).
+    ``store`` defaults to a fresh in-memory store, so a caller with no database
+    gets exactly the enumeration the walk produced and no persistence. The
+    registered ``run(ctx)`` passes a DuckDB-backed one.
+
+    Behaviour is otherwise unchanged. A user-scoped (global) server still wins
+    scope over a same-named project entry: the global entry already reaches
+    every session, so downgrading it to "project" would only narrow its true
+    presence. Roots are still visited in SORTED order and each project-scoped
+    server's ``source`` is still chosen AFTER the full scan (most-cwds-covered
+    first, path string as the tie-break) — never "whichever cwd a raw ``set``
+    iteration happened to visit first", which used to hand the ONE apply target
+    to a hash-seed-dependent winner.
     """
+    from tokenjam.core import agent_config as ac
+
+    store = store if store is not None else ac.InMemoryAgentConfigStore()
+    at = ac.ingest_agent_config(
+        store,
+        roots=sorted(c for c in repo_cwds if c),
+        claude_home=claude_home,
+        kinds=(ac.KIND_MCP_SERVER,),
+        seen_at=seen_at,
+    )
+
     servers: dict[str, ConfiguredServer] = {}
-
-    global_path = _global_config_path(claude_home)
-    if global_path.is_file():
-        for name in _mcp_server_names(global_path):
-            servers[name] = ConfiguredServer(name=name, scope="user", source=str(global_path))
-
-    for cwd in sorted(repo_cwds):
-        if not cwd:
+    # (server name, declaring file) -> that file's own declaration of it. The
+    # canonical `source` is only settled after the whole scan, so the spec and
+    # the record id must both be resolvable per source until then — reading them
+    # off "whichever record was seen last" would attach one file's launch
+    # command to another file's chosen fix target.
+    specs: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in store.select(kind=ac.KIND_MCP_SERVER, seen_at=at):
+        spec = {k: v for k, v in record.detail.items() if k != "spec_hash"}
+        specs[(record.name, record.path)] = spec
+        if record.scope == ac.SCOPE_GLOBAL:
+            servers[record.name] = ConfiguredServer(
+                name=record.name, scope="user", source=record.path,
+                spec=spec, config_id=record.config_id,
+                config_ids={record.path: record.config_id},
+            )
             continue
-        base = Path(cwd)
-        if not base.is_dir():
-            continue
-        for rel in _PROJECT_CONFIG_RELPATHS:
-            path = base / rel
-            if not path.is_file():
-                continue
-            for name in _mcp_server_names(path):
-                existing = servers.get(name)
-                if existing is not None and existing.scope == "user":
-                    continue  # already global, broaden nothing
-                entry = servers.setdefault(
-                    name, ConfiguredServer(name=name, scope="project", source=str(path)),
-                )
-                entry.cwds.add(cwd)
-                entry.source_cwds.setdefault(str(path), set()).add(cwd)
+        existing = servers.get(record.name)
+        if existing is not None and existing.scope == "user":
+            continue  # already global, broaden nothing
+        entry = servers.setdefault(
+            record.name,
+            ConfiguredServer(name=record.name, scope="project", source=record.path),
+        )
+        entry.cwds.add(record.root)
+        entry.source_cwds.setdefault(record.path, set()).add(record.root)
+        entry.config_ids[record.path] = record.config_id
 
     for entry in servers.values():
-        if entry.scope != "project" or len(entry.source_cwds) <= 1:
-            continue
-        # Most cwds covered wins; a path-string tie-break makes the choice
-        # fully deterministic even when two sources cover the same count.
-        entry.source = min(
-            entry.source_cwds.items(), key=lambda kv: (-len(kv[1]), kv[0]),
-        )[0]
+        if entry.scope == "project" and len(entry.source_cwds) > 1:
+            # Most cwds covered wins; a path-string tie-break makes the choice
+            # fully deterministic even when two sources cover the same count.
+            entry.source = min(
+                entry.source_cwds.items(), key=lambda kv: (-len(kv[1]), kv[0]),
+            )[0]
+        entry.config_id = entry.config_ids.get(entry.source, entry.config_id)
+        entry.spec = specs.get((entry.name, entry.source), entry.spec)
     return servers
 
 
@@ -657,33 +675,67 @@ def _dominant_model(model_counts: dict[str, int]) -> str:
     return max(model_counts.items(), key=lambda kv: kv[1])[0]
 
 
+def _measurement_note(measurement: Any) -> str:
+    """How this server's per-call size was arrived at, in the card's own words.
+
+    Always states the PROVENANCE, never only the number: the whole defect this
+    replaced was a figure that read as measured because it was rendered the same
+    way a measured one would be.
+    """
+    if measurement is None:
+        return "This server's schema size was not measured, so nothing is priced for it."
+    if not getattr(measurement, "ok", False):
+        detail = str(getattr(measurement, "detail", "") or "").strip()
+        return (
+            "This server's schema size could NOT be measured"
+            + (f" ({detail})" if detail else "")
+            + " — it is excluded from every priced figure here rather than "
+            "billed a default."
+        )
+    tools = int(getattr(measurement, "tool_count", 0) or 0)
+    cached = " (re-used from the last measurement; the server's launch spec is " \
+             "unchanged since)" if getattr(measurement, "from_cache", False) else ""
+    return (
+        f"Measured from this server's OWN tools/list response: {tools} tool "
+        f"schema(s), serialized as they are injected{cached}."
+    )
+
+
 def _tax_construction_note(
     non_deferred: int, deferred_sessions: int, sessions_present: int,
     *, model: str = "", input_per_mtok: float | None = None,
     usd_per_session: float | None = None,
     avg_calls_per_session: float = 1.0,
     cache_read_ratio: float = 0.0,
+    full_tokens: int | None = None,
+    deferred_tokens: int | None = None,
+    measurement: Any = None,
 ) -> str:
     if sessions_present == 0:
         return ""
+    if full_tokens is None:
+        return _measurement_note(measurement)
+    deferred_shown = deferred_tokens if deferred_tokens is not None else 0
     if deferred_sessions == 0:
         note = (
-            f"{FULL_SCHEMA_TAX_TOKENS:,} tok on the first call (full schema "
-            f"injection), cited estimate, not a live per-call measurement."
+            f"{full_tokens:,} tok on the first call (full schema injection). "
+            f"{_measurement_note(measurement)}"
         )
     elif non_deferred == 0:
         note = (
-            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok on the first call; ToolSearch "
-            f"deferred this server's schemas in every observed session (name "
-            f"and description line only, never the full schema tax)."
+            f"{deferred_shown:,} tok on the first call; ToolSearch deferred "
+            f"this server's schemas in every observed session (name and "
+            f"description line only, never the full schema tax). "
+            f"{_measurement_note(measurement)}"
         )
     else:
         note = (
-            f"{FULL_SCHEMA_TAX_TOKENS:,} tok on the first call when fully "
-            f"loaded ({non_deferred} of {sessions_present} sessions) blended "
-            f"with {DEFERRED_SCHEMA_TAX_TOKENS:,} tok when ToolSearch defers "
-            f"this server's schemas ({deferred_sessions} of {sessions_present} "
-            f"sessions); never claims the full tax for a deferred call."
+            f"{full_tokens:,} tok on the first call when fully loaded "
+            f"({non_deferred} of {sessions_present} sessions) blended with "
+            f"{deferred_shown:,} tok when ToolSearch defers this server's "
+            f"schemas ({deferred_sessions} of {sessions_present} sessions); "
+            f"never claims the full tax for a deferred call. "
+            f"{_measurement_note(measurement)}"
         )
     if cache_read_ratio > 0:
         note += (
@@ -781,6 +833,21 @@ class ServerDeadweight:
     #: aggregated across multiple source files must not let its one fix
     #: action silently imply full coverage.
     primary_source_sessions:         int = 0
+    #: Tokens THIS server's own tool schemas were measured to inject on a call
+    #: (`core/optimize/mcp_probe`). ``None`` means the measurement did not
+    #: happen — never a default, and never a zero, because a zero here would
+    #: read as "this server costs nothing".
+    schema_tokens_measured:          int | None = None
+    #: The same measurement for the deferred/ToolSearch listing (name and
+    #: description per tool, no input schema), off the same response.
+    deferred_tokens_measured:        int | None = None
+    #: How many tool schemas that measurement covered.
+    measured_tool_count:             int = 0
+    #: ``core/agent_config``'s MEASURE_* vocabulary: which of "measured",
+    #: "unreachable", "unsupported" or "skipped" happened.
+    measurement_status:              str = ""
+    #: Why, in words, when it did not succeed.
+    measurement_detail:              str = ""
 
 
 @dataclass
@@ -836,6 +903,16 @@ class DeadweightFinding:
     #: has to infer "vanished repo" vs. "genuinely no config" from silence.
     #: Mirrors `context_resend._coverage_note` / `_relearn_coverage_note`.
     coverage_note:                    str = ""
+    #: How many configured servers had their schema size actually measured, and
+    #: how many did not. The second number is the size of this finding's blind
+    #: spot: those servers are excluded from every priced figure, so a small
+    #: total with a large `servers_unmeasured` is "we could not look", never
+    #: "there is little here".
+    servers_measured:                 int = 0
+    servers_unmeasured:               int = 0
+    #: Plain-language statement of that blind spot, empty when nothing was
+    #: unmeasured. Rendered beside the figure, never instead of it.
+    measurement_note:                 str = ""
 
 
 # --- Unresolvable-path coverage (Defect 1: silence when a cwd is gone) ----
@@ -950,6 +1027,29 @@ def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
     return " ".join(parts)
 
 
+def _measurement_coverage_note(finding: DeadweightFinding) -> str:
+    """State, in words, how much of the configured surface was actually measured.
+
+    The counterpart to ``_unresolvable_coverage_note`` for the other blind spot
+    this analyzer has. A figure built from three of eleven servers is a FLOOR,
+    and a reader who is shown only the figure has no way to know that — the same
+    class of defect as the flat constant this measurement replaced, just one
+    layer up.
+    """
+    if finding.servers_unmeasured <= 0:
+        return ""
+    total = finding.servers_measured + finding.servers_unmeasured
+    return (
+        f"MEASUREMENT COVERAGE. {finding.servers_measured:,} of {total:,} "
+        f"configured MCP server(s) had their schema size measured from the "
+        f"server's own tools/list response. The other "
+        f"{finding.servers_unmeasured:,} could not be measured and contribute "
+        f"NOTHING to any figure here — they are excluded rather than billed a "
+        f"default, so every total on this finding is a floor. Each server's "
+        f"own row says which of them it is and why."
+    )
+
+
 # --- Orchestration (pure, no ctx dependency — testable directly) ----------
 
 def compute_deadweight_finding(
@@ -960,6 +1060,9 @@ def compute_deadweight_finding(
     claude_home: Path | None = None,
     min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
     cache_dir: Path | None = None,
+    store: Any | None = None,
+    measure_schemas: bool = True,
+    schema_measurer: Any | None = None,
 ) -> DeadweightFinding:
     """Full pipeline over a window of Claude Code transcripts. Never raises —
     a missing projects root, an unreadable transcript, or a malformed config
@@ -1070,10 +1173,29 @@ def compute_deadweight_finding(
         finding.unresolvable_unpriced_sessions = unpriced_sessions
         finding.coverage_note = _unresolvable_coverage_note(finding)
 
-    configured = enumerate_configured_servers(repo_cwds, claude_home=claude_home)
+    from tokenjam.core import agent_config as ac
+    from tokenjam.core.optimize.mcp_probe import resolve_schema_measurements
+
+    config_store = store if store is not None else ac.InMemoryAgentConfigStore()
+    configured = enumerate_configured_servers(
+        repo_cwds, claude_home=claude_home, store=config_store,
+    )
     finding.configured_servers = len(configured)
     if not configured:
         return finding
+
+    # The per-server schema measurement (see `core/optimize/mcp_probe`). Cached
+    # in the same store the enumeration just populated, keyed on the server's
+    # spec hash, so an unchanged server is measured ONCE rather than started
+    # again on every analysis pass.
+    measurements = resolve_schema_measurements(
+        configured, store=config_store,
+        enabled=measure_schemas, measurer=schema_measurer,
+    )
+    finding.servers_measured = sum(
+        1 for m in measurements.values() if m.tokens is not None
+    )
+    finding.servers_unmeasured = len(measurements) - finding.servers_measured
 
     from tokenjam.core.pricing import provider_for_model
 
@@ -1185,20 +1307,40 @@ def compute_deadweight_finding(
         # answer "how many tokens were actually sent" rather than silently
         # reporting a $-shaped number through a field named `tokens`
         # (Critical Rule 28: both fields must answer the same question).
+        #
+        # BOTH per-call bases come from this server's own measurement. When it
+        # has none, every quantity below stays at zero and the row is excluded
+        # from the finding's priced totals — never billed a stand-in, which is
+        # the exact defect the flat 25K constant was.
+        measurement = measurements.get(server.name)
+        measured_full = measurement.tokens if measurement is not None else None
+        measured_deferred = (
+            measurement.deferred_tokens if measurement is not None else None
+        )
+        if measured_full is not None and measured_deferred is None:
+            # A cached measurement predating the deferred lane. The deferred
+            # size is genuinely unknown, so deferred calls are charged nothing
+            # rather than charged the full schema they demonstrably did not
+            # carry — understating a deferred session beats overstating it.
+            measured_deferred = 0
+
         tax_window = 0
         tokens_window_real = 0
         total_calls = 0
+        full_base = measured_full or 0
+        deferred_base = measured_deferred or 0
         for deferred_calls, full_calls in session_presence:
-            if deferred_calls > 0:
-                tax_window += round(
-                    DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (deferred_calls - 1) * cache_read_ratio)
-                )
-                tokens_window_real += DEFERRED_SCHEMA_TAX_TOKENS * deferred_calls
-            if full_calls > 0:
-                tax_window += round(
-                    FULL_SCHEMA_TAX_TOKENS * (1.0 + (full_calls - 1) * cache_read_ratio)
-                )
-                tokens_window_real += FULL_SCHEMA_TAX_TOKENS * full_calls
+            if measured_full is not None:
+                if deferred_calls > 0:
+                    tax_window += round(
+                        deferred_base * (1.0 + (deferred_calls - 1) * cache_read_ratio)
+                    )
+                    tokens_window_real += deferred_base * deferred_calls
+                if full_calls > 0:
+                    tax_window += round(
+                        full_base * (1.0 + (full_calls - 1) * cache_read_ratio)
+                    )
+                    tokens_window_real += full_base * full_calls
             total_calls += deferred_calls + full_calls
         tax_per_session = round(tax_window / sessions_present) if sessions_present else 0
         tokens_per_session_real = (
@@ -1208,7 +1350,7 @@ def compute_deadweight_finding(
 
         usd_per_session: float | None = None
         usd_window: float | None = None
-        if input_per_mtok is not None:
+        if input_per_mtok is not None and measured_full is not None:
             usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
             usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
 
@@ -1228,21 +1370,24 @@ def compute_deadweight_finding(
         # left to narrow: offering "project-scope it" there is a no-op that
         # would deliver $0 of the claim, not a genuine second option.
         action = "Remove or project-scope" if server.scope == "user" else "Remove"
+        # GROUNDING here, POLICY in the catalog. The rule about a server
+        # declared in several files — that editing one stops the tax only for
+        # the sessions reaching it through that file — used to be APPENDED to
+        # this string with `+=`, which the prose guard did not inspect at all.
+        # So a durable instruction lived here, unlinted, hidden behind a
+        # grounded sentence. What is left below is only this row's evidence.
         fix = (
             f"{action} the `{server.name}` MCP server ({server.source}); "
             f"zero tool calls across {sessions_present} session(s) in this "
-            f"window."
+            f"window. " + fix_text("deadweight.remove_unused_server")
         )
         if other_sources:
             plural = "" if len(other_sources) == 1 else "s"
             fix += (
-                f" `{server.name}` is ALSO independently declared in "
-                f"{len(other_sources)} other location{plural}, not touched "
-                f"by this edit: {'; '.join(other_sources)}. Removing only "
-                f"{server.source} stops the tax for {primary_source_sessions} "
-                f"of the {sessions_present} session(s) counted here; the "
-                f"remaining {sessions_present - primary_source_sessions} "
-                f"session(s) need their own location edited too."
+                f" Also declared in {len(other_sources)} other "
+                f"location{plural}: {'; '.join(other_sources)}. Editing "
+                f"{server.source} covers {primary_source_sessions} of the "
+                f"{sessions_present} session(s) counted here."
             )
 
         row = ServerDeadweight(
@@ -1261,6 +1406,9 @@ def compute_deadweight_finding(
                 usd_per_session=usd_per_session,
                 avg_calls_per_session=avg_calls_per_session,
                 cache_read_ratio=cache_read_ratio,
+                full_tokens=measured_full,
+                deferred_tokens=measured_deferred,
+                measurement=measurement,
             ),
             fix=fix,
             example_sessions=example_sessions,
@@ -1269,9 +1417,21 @@ def compute_deadweight_finding(
             estimated_tax_usd_window=usd_window,
             other_sources=other_sources,
             primary_source_sessions=primary_source_sessions,
+            schema_tokens_measured=measured_full,
+            deferred_tokens_measured=measured_deferred if measured_full is not None else None,
+            measured_tool_count=(
+                int(getattr(measurement, "tool_count", 0) or 0)
+                if measurement is not None else 0
+            ),
+            measurement_status=(
+                str(getattr(measurement, "status", "")) if measurement is not None else ""
+            ),
+            measurement_detail=(
+                str(getattr(measurement, "detail", "")) if measurement is not None else ""
+            ),
         )
         finding.servers.append(row)
-        if sessions_present > 0:
+        if sessions_present > 0 and measured_full is not None:
             tax_rows.append(ContextTaxRow(
                 source=f"MCP schema: {server.name}",
                 sessions=sessions_present,
@@ -1318,21 +1478,44 @@ def compute_deadweight_finding(
     # <name>" row for EVERY configured server (dead or alive) for visibility,
     # but that row never feeds this sum — so a server's tax is never counted
     # twice between the tax table and a dead-weight proposal.
-    if finding.dead_servers:
+    measured_dead = [
+        s for s in finding.dead_servers if s.schema_tokens_measured is not None
+    ]
+    unmeasured_dead = len(finding.dead_servers) - len(measured_dead)
+    if measured_dead:
         finding.past_overspend_tokens = sum(
-            s.estimated_tax_tokens_window for s in finding.dead_servers
+            s.estimated_tax_tokens_window for s in measured_dead
         )
         priced = [
-            s.estimated_tax_usd_window for s in finding.dead_servers
+            s.estimated_tax_usd_window for s in measured_dead
             if s.estimated_tax_usd_window is not None
         ]
+        sizes = sorted(
+            s.schema_tokens_measured for s in measured_dead
+            if s.schema_tokens_measured is not None
+        )
+        # The RANGE, not one number: each server is measured separately now, so
+        # a single figure here would recreate exactly the "one constant stands
+        # for every server" claim this measurement replaced.
+        span = (
+            f"{sizes[0]:,} tok/session" if sizes[0] == sizes[-1]
+            else f"{sizes[0]:,}-{sizes[-1]:,} tok/session"
+        )
         basis = (
             f"sum of each dead server's schema-injection tax observed over "
-            f"this window ({FULL_SCHEMA_TAX_TOKENS:,} tok/session full, "
-            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when deferred); the "
-            f"tax table's own MCP-schema rows are informational only and "
-            f"never double-count into this total."
+            f"this window, where each server's per-call size is MEASURED from "
+            f"its own tools/list response rather than assumed ({span} across "
+            f"the {len(measured_dead)} of {len(finding.dead_servers)} dead "
+            f"server(s) that could be measured); the tax table's own "
+            f"MCP-schema rows are informational only and never double-count "
+            f"into this total."
         )
+        if unmeasured_dead:
+            basis += (
+                f" {unmeasured_dead} dead server(s) could not be measured and "
+                f"contribute nothing to this figure — it is a floor, not a "
+                f"total."
+            )
         if priced:
             finding.past_overspend_usd = round(sum(priced), 6)
             basis += (
@@ -1340,14 +1523,26 @@ def compute_deadweight_finding(
                 "at the dominant model observed in that server's sessions "
                 "(never a hardcoded rate)."
             )
-            if len(priced) < len(finding.dead_servers):
+            if len(priced) < len(measured_dead):
                 basis += (
-                    f" {len(finding.dead_servers) - len(priced)} of "
-                    f"{len(finding.dead_servers)} dead server(s) had no "
+                    f" {len(measured_dead) - len(priced)} of "
+                    f"{len(measured_dead)} measured dead server(s) had no "
                     f"priced model observed and are excluded from the "
                     f"dollar sum (token figure still includes them)."
                 )
         finding.estimate_basis = basis
+    elif finding.dead_servers:
+        # Dead servers exist but not one of them could be measured. Saying
+        # "nothing cleared the bar" here would be the report asserting more
+        # than its data supports in the most misleading direction available:
+        # the servers ARE dead, the analyzer just cannot say what they cost.
+        finding.notes.append(
+            f"{len(finding.dead_servers)} configured MCP server(s) cleared the "
+            f"dead-weight bar (>= {min_sessions} sessions present, 0 "
+            f"invocations), but none of them could be measured, so no token "
+            f"or dollar figure is stated for them. See each row's own "
+            f"construction note for why."
+        )
     elif configured:
         finding.notes.append(
             f"No configured MCP server cleared the dead-weight bar "
@@ -1356,6 +1551,7 @@ def compute_deadweight_finding(
             f"present in fewer sessions."
         )
 
+    finding.measurement_note = _measurement_coverage_note(finding)
     return finding
 
 
@@ -1372,6 +1568,7 @@ def run(ctx: AnalyzerContext) -> None:
     repeat HTTP request against a live ``tj serve`` — skips re-parsing every
     session it already has a fresh cache entry for.
     """
+    from tokenjam.core.agent_config import store_for
     from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.transcript_cache import default_cache_dir
 
@@ -1388,10 +1585,19 @@ def run(ctx: AnalyzerContext) -> None:
     min_sessions = getattr(
         optimize_cfg, "min_sessions_deadweight", MIN_SESSIONS_DEADWEIGHT,
     )
+    # Measuring means STARTING each configured MCP server, so it is gated on a
+    # config flag and only ever happens on this out-of-band analyzer pass —
+    # never inline on a request. A scoped run (`--projects-root` / an explicit
+    # `--db`) never gets here at all, because the scope gate above already
+    # returned: measuring would start the operator's real servers on behalf of a
+    # run that was explicitly asked to stay out of their environment.
+    measure_schemas = bool(getattr(optimize_cfg, "measure_mcp_schemas", True))
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
         ctx.since, ctx.until,
         projects_root=scope.projects_root,
         claude_home=scope.claude_home,
         min_sessions=min_sessions,
         cache_dir=default_cache_dir(ctx.config),
+        store=store_for(getattr(ctx, "conn", None)),
+        measure_schemas=measure_schemas,
     )
