@@ -319,3 +319,37 @@ def test_cache_corrupt_file_treated_as_miss(monkeypatch, tmp_path):
     assert result == {1: "fresh"}
     cached = json.loads((tmp_path / "sess-1.json").read_text())
     assert cached["titles"] == {"1": "fresh"}
+
+
+# -- Cache-path scoping (--projects-root / --db must never leak to ~/.tj) ----
+#
+# Mirrors test_relearn_apply.py::test_memory_storage_path_never_resolves_to_real_home:
+# a fake, obviously-not-real HOME lets the test prove the resolved cache dir
+# is NOT under it. `_default_cache_dir` used to take no config at all and
+# always resolved to the real ~/.tj/distill_cache regardless of scope.
+
+def test_default_cache_dir_with_config_never_resolves_to_real_home(monkeypatch, tmp_path):
+    from tokenjam.core.config import StorageConfig, TjConfig
+
+    fake_home = tmp_path / "definitely-not-the-real-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(distill.Path, "home", classmethod(lambda cls: fake_home))
+
+    cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
+    cache_dir = distill._default_cache_dir(cfg)
+
+    assert not str(cache_dir).startswith(str(fake_home))
+    assert (fake_home / ".tj").exists() is False
+
+
+def test_default_cache_dir_without_config_keeps_legacy_home_path(monkeypatch, tmp_path):
+    """No config -> the historical hardcoded ~/.tj/distill_cache, unchanged —
+    every existing caller that never had a config to thread stays on today's
+    behaviour."""
+    fake_home = tmp_path / "some-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(distill.Path, "home", classmethod(lambda cls: fake_home))
+
+    cache_dir = distill._default_cache_dir()
+
+    assert cache_dir == fake_home / ".tj" / "distill_cache"

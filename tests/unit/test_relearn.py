@@ -703,7 +703,7 @@ def test_name_fallback_evidence_is_too_thin_even_when_the_text_looks_substantive
     assert _evidence_too_thin_for_distill(cluster) is True
 
 
-def test_name_fallback_cluster_is_never_distilled():
+def test_name_fallback_cluster_is_never_distilled(tmp_path):
     """Same treatment as any other confidence-gate suppression (see
     `test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache`):
     a cluster the gate rejects is dropped, not distilled and not passed
@@ -725,7 +725,7 @@ def test_name_fallback_cluster_is_never_distilled():
         ],
     )
 
-    result = apply_distill_to_residual([cluster], enabled=True)
+    result = apply_distill_to_residual([cluster], cache_dir=tmp_path / "distill_cache", enabled=True)
 
     assert result == []
 

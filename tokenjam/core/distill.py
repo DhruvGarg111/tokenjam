@@ -35,6 +35,10 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tokenjam.core.config import TjConfig
 
 #: Max words a distilled title may contain (instructed to the model).
 MAX_TITLE_WORDS = 6
@@ -249,8 +253,24 @@ def _cache_signature(asks: list[dict], model: str) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _default_cache_dir() -> Path:
-    """Default on-disk cache location: ``~/.tj/distill_cache``."""
+def _default_cache_dir(config: TjConfig | None = None) -> Path:
+    """Default on-disk cache location.
+
+    With a ``config`` this honors ``--projects-root`` / ``--db`` scoping the
+    same way ``relearn_store.default_cache_path``,
+    ``report_store.default_report_path`` and
+    ``transcript_cache.default_cache_dir`` already do — routed through
+    ``relearn_apply._storage_base_dir`` (an isolated ``storage.path`` resolves
+    under a scratch root, never the real ``~/.tj``). ``config=None`` (the
+    default) keeps today's hardcoded ``~/.tj/distill_cache`` so a caller with
+    no config to thread — most of this module's own callers — is unchanged.
+    Imported lazily to avoid this pure module picking up an import-time
+    dependency on the rest of the package.
+    """
+    if config is not None:
+        from tokenjam.core.optimize.relearn_apply import _storage_base_dir
+
+        return _storage_base_dir(config) / "distill_cache"
     return Path.home() / ".tj" / "distill_cache"
 
 

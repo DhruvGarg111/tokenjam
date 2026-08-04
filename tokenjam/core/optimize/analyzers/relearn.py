@@ -1093,7 +1093,7 @@ def _distill_cached(tool_name: str, cluster: _RawCluster, cache_dir: Path) -> di
 
 
 def apply_distill_to_residual(
-    clusters: list[_RawCluster], *, cache_dir: Path | None = None, enabled: bool = True,
+    clusters: list[_RawCluster], *, cache_dir: Path, enabled: bool = True,
 ) -> list[_RawCluster]:
     """Distill the top (by session count) residual clusters and merge any that
     distill assigns the same ``family_key``. Bounded by ``MAX_DISTILL_CLUSTERS``
@@ -1102,10 +1102,14 @@ def apply_distill_to_residual(
     Clusters already matched to a known family are left untouched. When
     ``enabled`` is False (no ``claude`` CLI / caller opt-out) the residual
     clusters pass through with their generic titles, unmerged.
-    """
-    if cache_dir is None:
-        cache_dir = _distill_cache_dir()
 
+    ``cache_dir`` is REQUIRED and deliberately has no default: the natural
+    default (``_distill_cache_dir()`` with no config) resolves to the real
+    ``~/.tj``, which would write outside an isolated ``--projects-root`` /
+    ``--db`` scope with no signal to the caller. Every real call site
+    resolves it from the active config (``_distill_cache_dir(ctx.config)``)
+    before calling in — pass that scoped path, not the unscoped helper.
+    """
     known = [c for c in clusters if c.family_key is not None]
     residual = [c for c in clusters if c.family_key is None]
     if not enabled or not residual:
@@ -2220,8 +2224,15 @@ def analyze_relearns(
     raw_clusters = cluster_failures(all_failures)
     recurring = _recurring(raw_clusters, min_sessions)
     residue = _below_threshold_residue(raw_clusters, recurring, conn)
+    # apply_distill_to_residual requires an explicit cache_dir (no silent
+    # unscoped default — see its docstring). A caller here with no config to
+    # scope from (standalone helpers, tests) keeps today's historical
+    # ~/.tj-backed path via the config-less resolver; a caller WITH a config
+    # threads it in through `distill_cache_dir` instead, scoped.
     distilled = apply_distill_to_residual(
-        recurring, cache_dir=distill_cache_dir, enabled=distill_enabled,
+        recurring,
+        cache_dir=distill_cache_dir if distill_cache_dir is not None else _distill_cache_dir(),
+        enabled=distill_enabled,
     )
     distilled_count = sum(1 for c in distilled if (c.family_key or "").startswith("distilled:"))
 

@@ -3255,6 +3255,37 @@ async def test_get_session_distill_reports_candidate_count(
 
 
 @pytest.mark.asyncio
+async def test_get_session_distill_threads_scoped_cache_dir(
+    config, db, tmp_path, monkeypatch
+):
+    """The route's distill calls must be scoped to the active config's
+    storage dir, never the unscoped ~/.tj default (`core.distill._default_
+    cache_dir`) — a served API route writing into the operator's real home
+    regardless of --projects-root/--db scope was a live leak."""
+    seen: dict = {}
+
+    def _capture(*_a, **k):
+        seen["cache_dir"] = k.get("cache_dir")
+        return {}
+
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached", _capture)
+    _write_story_transcript(tmp_path, "scope-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/scope-sess/distill")
+    assert resp.status_code == 200
+
+    from tokenjam.core.distill import _default_cache_dir
+
+    assert seen["cache_dir"] == _default_cache_dir(config)
+
+
+@pytest.mark.asyncio
 async def test_get_session_distill_unavailable(config, db, tmp_path):
     # No transcript on disk -> available:false with HTTP 200 (no CLI call).
     pipeline = IngestPipeline(db=db, config=config)
