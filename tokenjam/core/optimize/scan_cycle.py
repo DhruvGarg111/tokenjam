@@ -319,6 +319,17 @@ def _trigger_analyzer_pass(
             # publishing nothing.
             report = report_store.stored_report(config)
             _write_relearn_from(report, config, backend_factory, provenance=record)
+            # Passing `provenance` is what exempts this leg from the
+            # lone-refresh decline (see `recompute_cost_proposals`), so the only
+            # way it can still decline is a manual refresh holding `_COST_LOCK`
+            # right now — in which case that refresh is writing a full set and
+            # the store is not left empty. The returned `CostRecomputeResult`
+            # is not acted on here for that reason, and a declined leg is
+            # deliberately NOT stamped into the cost block's `excluded`: that
+            # channel names an ANALYZER whose money is missing from a fresh
+            # total, and a declined leg produced no fresh total to be missing
+            # from. The store keeps the previous cycle's provenance record,
+            # which is the fact a surface compares.
             cost_proposals.recompute_cost_proposals(
                 backend, config, report=report, provenance=record,
             )

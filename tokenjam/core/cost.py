@@ -24,6 +24,64 @@ logger = logging.getLogger(__name__)
 _UNKNOWN_MODEL_WARNED: set[tuple[str, str]] = set()
 
 
+def billing_rates(
+    provider: str,
+    model: str,
+    *,
+    at: datetime | None = None,
+    variant: str = STANDARD_VARIANT,
+) -> ModelRates:
+    """The rates this call is actually BILLED at — never ``None``.
+
+    The stored-cost convention, in one place. :func:`calculate_cost` prices
+    every span through this, so ``spans.cost_usd`` is by definition
+    ``tokens x these rates``; anything that has to reconcile against that
+    stored figure (``/cost/components`` splitting the same window into its four
+    token components) must resolve its rates here too, or it is pricing a
+    different quantity and calling it the same total.
+
+    That is not a hypothetical. ``_component_costs`` used to call
+    ``span_pricing.rates_at`` and ``continue`` past a ``None``, so every model
+    absent from the pricing table contributed real fallback dollars to
+    ``/cost``'s total and exactly ``$0`` to ``/cost/components``' — two
+    endpoints publishing the same window under two conventions.
+
+    The fallback is deliberately NOT the analyzers' convention. ``span_pricing``
+    returns ``None`` for an unpriced model because an analyzer that cannot price
+    a figure must not claim one. A MEASURED spend total has the opposite duty:
+    the traffic happened and cost real money, so estimating it at the default
+    rate and disclosing that through ``pricing_coverage`` beats reporting zero.
+    """
+    rates = get_rates(provider, model, at=at, variant=variant)
+    if rates is not None:
+        return rates
+    # Warn once per (provider, model) per process — see _UNKNOWN_MODEL_WARNED.
+    key = (provider, model)
+    if key not in _UNKNOWN_MODEL_WARNED:
+        _UNKNOWN_MODEL_WARNED.add(key)
+        logger.warning(
+            "No pricing data for %s/%s — using default rates, including "
+            "guessed cache rates (cost figures may be inaccurate, "
+            "especially for cache-heavy traffic). Upgrade tokenjam for "
+            "current pricing, or add an override to "
+            "~/.config/tj/pricing.toml — see `tj pricing list`.",
+            provider, model,
+        )
+    # cache_read/write_per_mtok are non-zero guesses, not 0.0: a model with
+    # NO pricing entry that is mostly cache traffic would otherwise have
+    # ~all of its real cost priced at zero, silently, rather than merely
+    # estimated (see DEFAULT_CACHE_READ_PER_MTOK). specified=False marks
+    # both as guesses, not a quoted rate for this model.
+    return ModelRates(
+        input_per_mtok=DEFAULT_INPUT_PER_MTOK,
+        output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
+        cache_read_per_mtok=DEFAULT_CACHE_READ_PER_MTOK,
+        cache_write_per_mtok=DEFAULT_CACHE_WRITE_PER_MTOK,
+        cache_read_specified=False,
+        cache_write_specified=False,
+    )
+
+
 def calculate_cost(
     provider: str,
     model: str,
@@ -66,33 +124,7 @@ def calculate_cost(
     ):
         return 0.0
 
-    rates = get_rates(provider, model, at=at, variant=variant)
-    if rates is None:
-        # Warn once per (provider, model) per process — see _UNKNOWN_MODEL_WARNED.
-        key = (provider, model)
-        if key not in _UNKNOWN_MODEL_WARNED:
-            _UNKNOWN_MODEL_WARNED.add(key)
-            logger.warning(
-                "No pricing data for %s/%s — using default rates, including "
-                "guessed cache rates (cost figures may be inaccurate, "
-                "especially for cache-heavy traffic). Upgrade tokenjam for "
-                "current pricing, or add an override to "
-                "~/.config/tj/pricing.toml — see `tj pricing list`.",
-                provider, model,
-            )
-        # cache_read/write_per_mtok are non-zero guesses, not 0.0: a model with
-        # NO pricing entry that is mostly cache traffic would otherwise have
-        # ~all of its real cost priced at zero, silently, rather than merely
-        # estimated (see DEFAULT_CACHE_READ_PER_MTOK). specified=False marks
-        # both as guesses, not a quoted rate for this model.
-        rates = ModelRates(
-            input_per_mtok=DEFAULT_INPUT_PER_MTOK,
-            output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
-            cache_read_per_mtok=DEFAULT_CACHE_READ_PER_MTOK,
-            cache_write_per_mtok=DEFAULT_CACHE_WRITE_PER_MTOK,
-            cache_read_specified=False,
-            cache_write_specified=False,
-        )
+    rates = billing_rates(provider, model, at=at, variant=variant)
 
     cost = (
         (input_tokens / 1_000_000) * rates.input_per_mtok
@@ -125,6 +157,26 @@ def rate_variant_for_span(span: NormalizedSpan) -> str:
     if isinstance(speed, str) and speed and speed.lower() != STANDARD_VARIANT:
         return speed.lower()
     return STANDARD_VARIANT
+
+
+#: :func:`rate_variant_for_span`, re-expressed over the STORED ``request_params``
+#: JSON column, for an aggregate query that has to price the way ingest priced.
+#:
+#: Kept here, beside the function it mirrors, rather than in the one route that
+#: needs it: a second spelling of "which variant billed this" living in an API
+#: module is exactly how the component split ended up pricing every span at the
+#: standard rate while ``spans.cost_usd`` carried the fast one. Group by this
+#: alongside (provider, model) and the UTC day, and a rolled-up query prices at
+#: the variant that actually billed each bucket.
+#:
+#: A NULL ``request_params`` (capture off, the common case) coalesces to
+#: ``standard``, and so does a literal ``"standard"`` — the same two cases the
+#: function folds together. ``lower()`` matches its normalisation.
+SPAN_VARIANT_SQL = (
+    "lower(COALESCE(NULLIF("
+    f"json_extract_string(request_params, '$.{_SPEED_PARAM}'), ''), "
+    f"'{STANDARD_VARIANT}'))"
+)
 
 
 class CostEngine:

@@ -326,9 +326,13 @@ def cmd_optimize(
             # relearn cost-proposals` would sit permanently empty regardless of
             # how good its renderer is. Piggyback the same recompute here so a
             # plain `tj optimize` run keeps that store warm too.
-            # `recompute_cost_proposals` already never raises (it returns [] on
-            # failure), so a broken window here degrades to a stale/empty
-            # cost-proposals list, never a broken `tj optimize`.
+            # `recompute_cost_proposals` already never raises — it returns a
+            # `CostRecomputeResult` whose `status` says whether it built anything
+            # (`ready`), stood aside for a scan cycle or a concurrent recompute
+            # (`declined`), or blew up (`failed`). This call is opportunistic
+            # upkeep of someone else's store, not a figure `tj optimize` renders,
+            # so it acts on none of those: a broken window here degrades to a
+            # stale/empty cost-proposals list, never a broken `tj optimize`.
             try:
                 from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
                 recompute_cost_proposals(db, config, agent_id=agent)

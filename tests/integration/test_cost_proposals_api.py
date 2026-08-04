@@ -79,7 +79,11 @@ async def test_cost_refresh_then_proposals_listed(app, client):
         headers={"X-TJ-Local-Token": token},
     )
     assert r.status_code == 200
-    assert r.json()["status"] == "ready"
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["fresh"] is True
+    assert body["reason"] is None
+    assert body["proposals"] >= 1
 
     r2 = await client.get("/api/v1/relearn/cost-proposals")
     body = r2.json()
@@ -90,6 +94,51 @@ async def test_cost_refresh_then_proposals_listed(app, client):
     prop = cache_props[0]
     assert prop["kind"] == "cost"
     assert prop["advise_only"] is True
+
+
+async def test_a_declined_refresh_never_reads_as_a_completed_one(app, client):
+    """The route used to answer ``{"status": "ready", "proposals": 0}`` for a
+    refresh that never ran — a decline, a held lock, a crashed build and a
+    genuinely empty result were all the same ``[]`` coming back from
+    ``recompute_cost_proposals``, and the route could not tell them apart. Its
+    own docstring claimed it returned "the unchanged last-good proposals"; it
+    never re-read the store, so a client saw a successful refresh reporting zero
+    while a full, good set was sitting there.
+
+    Both halves are pinned: the STATUS must say declined, and the COUNT must be
+    the last-good set's real size rather than a zero nobody measured.
+    """
+    from tokenjam.core.optimize import scan_cycle
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    first = (await client.post(
+        "/api/v1/relearn/cost-proposals/refresh", headers=hdr,
+    )).json()
+    assert first["status"] == "ready"
+    assert first["proposals"] >= 1, (
+        "fixture assumption broken: the decline below proves nothing unless a "
+        "good set is already stored"
+    )
+
+    scan_cycle._CYCLE_COMPUTING.set()
+    try:
+        declined = (await client.post(
+            "/api/v1/relearn/cost-proposals/refresh", headers=hdr,
+        )).json()
+    finally:
+        scan_cycle._CYCLE_COMPUTING.clear()
+
+    assert declined["status"] == "declined"
+    assert declined["fresh"] is False
+    assert declined["reason"] == "scan_cycle_in_flight"
+    assert declined["detail"]
+    assert declined["proposals"] == first["proposals"]
+    assert declined["computed_at"] is not None
+
+    # And nothing was actually rebuilt: the listing still serves the same set.
+    listed = (await client.get("/api/v1/relearn/cost-proposals")).json()
+    assert len(listed["proposals"]) >= 1
+    assert listed["status"] == "ready"
 
 
 async def test_mark_cost_applied_round_trip(app, client):
