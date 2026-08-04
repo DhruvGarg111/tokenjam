@@ -89,6 +89,12 @@ class PrepResult:
     #: Why ``target_prose_words`` is what it is, in one user-facing paragraph.
     #: Load-bearing: a reader must be able to tell a published target from ours.
     target_basis: str = ""
+    #: Per-call envelope nonce. ``wrapped_prompt`` is fenced with it and
+    #: ``system_rules`` names it, so `check` can require the rewrite to come back
+    #: inside the same envelope. Carry it from prep to check (the automated path
+    #: does so in one transaction; the manual paths pass it back explicitly).
+    #: Empty when the file was below the prose gate and no envelope was built.
+    source_nonce: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +110,7 @@ class PrepResult:
             "lines_before": self.lines_before,
             "line_target": self.line_target,
             "target_basis": self.target_basis,
+            "source_nonce": self.source_nonce,
         }
 
 
@@ -381,6 +388,12 @@ def prepare(
         rules = wrap.WRAP_SUMM_SYS.format(n=target) + wrap.WRAP_SUMM_SYS_LINE_GOAL.format(
             lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
         )
+    # Fence the source as data. The rules say what to do; the envelope says which
+    # of the two texts is the job — without it the file's own imperatives compete
+    # with the ask to rewrite them, and on a large instruction file they win.
+    nonce = wrap.new_nonce()
+    rules += wrap.WRAP_SUMM_SYS_ENVELOPE.format(tag=wrap.SOURCE_TAG, nonce=nonce)
+    wrapped = wrap.envelope(wrapped, nonce)
     # For an always-resident instruction file the basis is the ROUTE advice, not
     # a bare target: compression is one of four routes to the published size
     # target and the only one that costs specificity, so the offer must not
@@ -402,17 +415,36 @@ def prepare(
         lines_before=lines.total_lines,
         line_target=PUBLISHED_LINE_TARGET if line_budget is not None else None,
         target_basis=basis,
+        source_nonce=nonce,
     )
 
 
+#: Floor of the length band, as a fraction of the prose-word budget the rewriter was
+#: given. A hijacked call answers the file instead of compressing it, and an answer
+#: ("I am ready to help. What would you like to work on?") is orders of magnitude
+#: under any real budget — so a very loose floor separates the two while leaving an
+#: unusually eager but legitimate compression alone. Deliberately one-sided: a
+#: rewrite that under-compresses is a quality question the diff already surfaces,
+#: not a sign the model stopped rewriting.
+MIN_PROSE_FRACTION_OF_TARGET = 0.25
+
+
 def check(config: TjConfig, path: str, summary: str, source_hash: str,
-          *, produced_by: str = "manual") -> CheckVerdict:
+          *, produced_by: str = "manual", source_nonce: str | None = None,
+          target_prose_words: int | None = None) -> CheckVerdict:
     """Hash-guard the file, re-derive the map, restore the summary; stage it when structure holds.
 
     ``produced_by`` records who made the summary (manual / claude-p / api / in-session) on the staged
     result — the seam the Lens UI uses for mode-aware gating later (DEC-028). Raises
     ``SummarizeRefused`` (house-voice) if the file vanished or changed since prep — the summary was
     built against a different version, so there's nothing safe to do.
+
+    ``source_nonce`` is `prepare`'s ``source_nonce``: pass it and the rewrite must come back inside
+    the same envelope, which is the one check that works on a file with no protected blocks.
+    ``target_prose_words`` is `prepare`'s budget; pass it and a rewrite far under it is refused as a
+    non-rewrite. Both are optional so the manual and in-session paths, which don't carry a prep
+    transaction, keep working — they still cannot pass vacuously, because `wrap.is_structure_ok`
+    then requires at least one protected block.
     """
     _refuse_symlink(path)
     p = Path(path).expanduser()
@@ -435,8 +467,19 @@ def check(config: TjConfig, path: str, summary: str, source_hash: str,
     _wrapped, saved, order, _plan = wrap.protect(current)
     prose = detect.prose_text(current)        # the unprotected text the model was given to rewrite
     source_sentinels = prose.count("<tj-keep") + prose.count("</tj-keep>")
-    restored, integ = wrap.restore(summary, saved, order, source_sentinels=source_sentinels)
+    restored, integ = wrap.restore(summary, saved, order, source_sentinels=source_sentinels,
+                                   nonce=source_nonce or None)
     ok = wrap.is_structure_ok(integ)
+    reason = "" if ok else wrap.integrity_reason(integ)
+    # Length band. The envelope catches a hijack that answers in prose; this catches one that
+    # echoes the envelope but has nothing in it — a refusal, a one-line greeting, an apology.
+    if ok and target_prose_words:
+        floor = max(1, int(MIN_PROSE_FRACTION_OF_TARGET * target_prose_words))
+        got = detect.analyze(restored).prose_words
+        if got < floor:
+            ok = False
+            reason = (f"the rewrite is {got:,} prose words against a {target_prose_words:,}-word "
+                      f"budget (floor {floor:,}) — that is not a compression of this file")
     removed, added = wrap.crit_delta(current, restored)
     wb, wa = wrap.word_count(current), wrap.word_count(restored)
     # Measured on whitespace-normalized CONTENT, never raw length: a `len()`
@@ -459,7 +502,7 @@ def check(config: TjConfig, path: str, summary: str, source_hash: str,
         fromfile="original", tofile="summarized", n=2))
 
     verdict = CheckVerdict(
-        path=str(p), structure_ok=ok, reason="" if ok else wrap.integrity_reason(integ),
+        path=str(p), structure_ok=ok, reason=reason,
         integrity=integ, words_before=wb, words_after=wa, est_tokens_saved=est_saved,
         prose_words_before=detect.analyze(current).prose_words,
         must_keep_removed=removed, must_keep_added=added, diff=diff, restored=restored,
