@@ -2069,7 +2069,9 @@ def _write_exposure_sessions(
     return min(scoped, total) if scoped > 0 else None
 
 
-def write_candidates(proposals: list[RelearnCluster]) -> list["Any"]:
+def write_candidates(
+    proposals: list[RelearnCluster], *, window_label: str | None = None,
+) -> list["Any"]:
     """This producer's proposed permanent writes, as the ONE allocation pass
     needs to see them.
 
@@ -2090,6 +2092,30 @@ def write_candidates(proposals: list[RelearnCluster]) -> list["Any"]:
     suggestion (Critical Rule 39). The fix shape is to withhold the row from
     the pass's INPUT, so no decision exists to overwrite; do not "improve" this
     into a second guard downstream.
+
+    ``window_label`` names the SAME bucket the Review inbox headline matches
+    (see ``core/optimize/inbox_contribution.exact_window_label`` — the caller
+    resolves it, since only it knows the report's own window). It sets
+    ``WriteCandidate.rank_gross_tokens`` to that bucket's ALREADY-COMPUTED
+    ``past_overspend_windows[label].past_overspend_tokens`` — never a new
+    figure, the same window-bounded observation the Review inbox row already
+    publishes for this cluster. ``gross_tokens``/``gross_usd`` are left alone:
+    relearn's detector stays unbounded (``run(ctx)`` still takes no report
+    window) and the unbounded figure keeps deciding whether a rule is worth
+    OFFERING at all. Only the ORDER two lanes' candidates are ranked in moves.
+
+    A cluster with no bucket for ``window_label`` — no ``window_label`` was
+    resolved at all, an older cached cluster predating the field, or no
+    occurrence in the cluster carries a parseable timestamp — ranks at 0, the
+    same "cannot be compared, so it ranks last rather than first" convention
+    ``write_budget._unpriceable_decision`` already applies to a candidate with
+    no dollar figure at all. It is NEVER left as the dataclass default
+    (``None``) for a relearn candidate: ``None`` means "rank on
+    ``gross_tokens``", which for relearn is the unbounded figure this
+    parameter exists to keep out of the ranking pass. Falling back to it —
+    even only for the "couldn't resolve a label" case — would restore exactly
+    the systematic-overcounting bug this parameter exists to remove, for the
+    one caller that is hardest to notice doing it.
     """
     from dataclasses import asdict
 
@@ -2109,6 +2135,11 @@ def write_candidates(proposals: list[RelearnCluster]) -> list["Any"]:
             )
         except Exception:
             artifact = p.proposed_fix     # never let a render hiccup sink a proposal
+        rank_gross_tokens = 0
+        if window_label:
+            bucket = (p.past_overspend_windows or {}).get(window_label)
+            if bucket is not None:
+                rank_gross_tokens = bucket.past_overspend_tokens
         candidates.append(wb.WriteCandidate(
             key=p.signature,
             # Family-unmatched clusters have no family_key; keying them on
@@ -2132,6 +2163,13 @@ def write_candidates(proposals: list[RelearnCluster]) -> list["Any"]:
             # live. `None` charges the rule against every session, which is
             # exactly right for a user-global one.
             exposure_sessions=p.write_exposure_sessions,
+            # ALWAYS an int, NEVER `None`. `None` on
+            # `WriteCandidate.rank_gross_tokens` means "use `gross_tokens`",
+            # which for relearn is the unbounded figure this parameter exists
+            # to keep out of the ranking pass — leaving it `None` for the "no
+            # window_label at all" case would restore the exact bug for
+            # exactly the caller that forgot to resolve one.
+            rank_gross_tokens=rank_gross_tokens,
         ))
     return candidates
 

@@ -119,9 +119,27 @@ def allocate_report_writes(
     relearn_finding = findings.get("relearn")
     relearn_candidates: list[wb.WriteCandidate] = []
     if relearn_finding is not None:
+        # The SAME window the Review inbox headline matches its relearn rows
+        # against (see `inbox_contribution.exact_window_label` — no
+        # nearest-match fallback there either). Resolved off the finding's
+        # OWN precomputed vocabulary, not off the fixed label set, since
+        # `run(ctx)` widens that vocabulary to include the report's actual
+        # window (`relearn.run` -> `window_labels_including`). Ranking
+        # candidates on different horizons is exactly the defect this module
+        # exists to fix, so relearn's candidates must never rank on anything
+        # but a bucket matching this report's own window — see
+        # `relearn.write_candidates`'s `window_label` for what happens when no
+        # such bucket exists.
+        from tokenjam.core.optimize import inbox_contribution
+
+        relearn_window_label = inbox_contribution.exact_window_label(
+            window_days,
+            list(getattr(relearn_finding, "past_overspend_windows", None) or {}),
+        )
         try:
             relearn_candidates = relearn_mod.write_candidates(
                 list(getattr(relearn_finding, "clusters", None) or []),
+                window_label=relearn_window_label,
             )
         except Exception:  # noqa: BLE001 - one producer must not sink the pass
             relearn_candidates = []

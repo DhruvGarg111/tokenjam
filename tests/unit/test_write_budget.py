@@ -176,11 +176,11 @@ def test_an_honesty_caveat_is_not_mistaken_for_a_placeholder():
 
 def _candidate(
     key, family="fam", delivery=DELIVERY_CLAUDE_MD_RULE, text=_REAL_FIX,
-    tokens=1_000_000, usd=None,
+    tokens=1_000_000, usd=None, rank_tokens=None,
 ):
     return wb.WriteCandidate(
         key=key, family=family, delivery=delivery, artifact_text=text,
-        gross_tokens=tokens, gross_usd=usd,
+        gross_tokens=tokens, gross_usd=usd, rank_gross_tokens=rank_tokens,
     )
 
 
@@ -780,6 +780,69 @@ _RULE_FAMILIES = (
 )
 
 
+#: The label these fixtures' reports resolve to (`_cost_report`'s
+#: `days=30.0` default -> "30d") -- see `_both_lanes`/`write_allocation`'s
+#: `inbox_contribution.exact_window_label`.
+_TEST_WINDOW_LABEL = "30d"
+
+
+def _stamp_matching_window(cluster, label=_TEST_WINDOW_LABEL):
+    """Give a directly-`build_proposals`-built cluster a bounded bucket for
+    ``label`` equal to its own unbounded figure.
+
+    `build_proposals` only computes `past_overspend_windows` when it is
+    handed `window_labels` (the live `run(ctx)` path always passes them; the
+    unit fixtures above call `build_proposals` bare, so every cluster here
+    carries `past_overspend_windows=None` by construction). Since the write
+    allocation now ranks relearn candidates on their WINDOW-bounded figure
+    (see `analyzers/relearn.write_candidates`'s `window_label`), a cluster
+    with no bucket ranks at 0 -- correct for a genuinely unbounded/unknown
+    case, but wrong for these fixtures, whose whole point is to compare a
+    KNOWN relearn value against a KNOWN cost value. Stamping the cluster's
+    own already-computed unbounded figure onto a bucket for the report's own
+    window says "every occurrence this cluster ever saw happened inside this
+    window" -- true for a fixture built with no dated history at all beyond
+    what `_episodes` fabricates -- which is the one case where the bounded
+    and unbounded figures are legitimately identical."""
+    from dataclasses import replace
+
+    from tokenjam.core.optimize.relearn_window import RelearnWindowedObservation
+
+    observation = RelearnWindowedObservation(
+        label=label, window_days=30.0, window_start="", window_end="",
+        occurrences=cluster.occurrences, sessions=cluster.sessions,
+        detour_turns=float(cluster.occurrences), undated_occurrences=0,
+        tail_calls_median=cluster.tail_calls_median,
+        tail_multiplier=cluster.tail_multiplier,
+        past_overspend_tokens=cluster.past_overspend_tokens,
+        past_overspend_usd=cluster.past_overspend_usd,
+        past_reread_tokens=cluster.past_reread_tokens,
+        past_reread_usd=cluster.past_reread_usd,
+        capped_at_unbounded=False, basis="test fixture: same as unbounded",
+    )
+    return replace(cluster, past_overspend_windows={label: observation})
+
+
+def _relearn_window_total(clusters, label=_TEST_WINDOW_LABEL):
+    """The finding-level bucket `write_allocation` needs to resolve
+    ``label`` at all (`inbox_contribution.exact_window_label` matches against
+    the FINDING's own `past_overspend_windows` keys, not any one cluster's).
+    Values are a plain sum of the stamped per-cluster buckets above; nothing
+    here is read by the allocation pass beyond the dict's keys."""
+    from tokenjam.core.optimize.relearn_window import RelearnWindowTotal
+
+    priced = [c.past_overspend_usd for c in clusters if c.past_overspend_usd is not None]
+    return RelearnWindowTotal(
+        label=label, window_days=30.0, window_start="", window_end="",
+        clusters=len(clusters), clusters_unknown=0,
+        occurrences=sum(c.occurrences for c in clusters), undated_occurrences=0,
+        past_overspend_tokens=sum(c.past_overspend_tokens for c in clusters),
+        past_overspend_usd=round(sum(priced), 6) if priced else None,
+        past_reread_tokens=sum(c.past_reread_tokens for c in clusters),
+        past_reread_usd=None, basis="test fixture",
+    )
+
+
 def _relearn_clusters(persona="mixed", occurrences=40):
     """Five relearn write candidates, built through the real detector path."""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
@@ -792,7 +855,7 @@ def _relearn_clusters(persona="mixed", occurrences=40):
         raws, repo_cwd_map={"repo": "/tmp/repo"}, persona=persona,
         projection=_basis(sessions=occurrences, active_days=10),
     )
-    return proposals
+    return [_stamp_matching_window(p) for p in proposals]
 
 
 def _tight_summarize():
@@ -823,7 +886,13 @@ def _both_lanes(reuse_tokens, reuse_usd, *, with_relearn=True, persona="mixed"):
     report = _cost_report(persona=persona, summarize=_tight_summarize())
     report.findings["reuse"] = _reuse_finding(reuse_tokens, reuse_usd)
     if with_relearn:
-        report.findings["relearn"] = RelearnFinding(clusters=_relearn_clusters(persona))
+        clusters = _relearn_clusters(persona)
+        report.findings["relearn"] = RelearnFinding(
+            clusters=clusters,
+            past_overspend_windows={
+                _TEST_WINDOW_LABEL: _relearn_window_total(clusters),
+            },
+        )
     cost_proposals_from_report(report)
     return report, report.write_decisions
 
@@ -888,6 +957,147 @@ def test_a_high_net_relearn_write_outranks_a_low_net_cost_write():
     ]
     assert relearn_offered
     assert all(d["net_tokens"] > cost["net_tokens"] for d in relearn_offered)
+
+
+# --- Cross-lane ranking is on a LIKE-FOR-LIKE basis, not raw net_tokens --------
+# relearn's detector is deliberately unbounded (`run(ctx)` never scopes it to
+# the report window — its whole signal is recurrence across retained history),
+# while every cost-lane candidate is already scoped to the report's window.
+# Ranking the two lanes on `net_tokens` directly compares figures counted over
+# different horizons, and relearn's always wins on that account alone,
+# regardless of which is actually worth more. These pin the fix: ranking reads
+# `rank_net_tokens` (off `WriteCandidate.rank_gross_tokens`, the ALREADY
+# window-bounded `past_overspend_windows` bucket), never `net_tokens` (which
+# keeps deciding whether the write is worth OFFERING at all).
+
+def test_a_relearn_candidate_does_not_outrank_a_cost_candidate_on_its_unbounded_gross():
+    """The regression case: relearn's unbounded gross (2,000,000 tokens) is
+    huge, its window-bounded figure (1,000) is small, and it must NOT win a
+    single scarce write slot over a cost candidate whose figure (50,000) is
+    entirely on the report's own window. Fails without the fix, because
+    `net_tokens` alone (2,000,000 - standing) dwarfs the cost candidate's."""
+    basis = _basis(sessions=100, active_days=10)
+    relearn = _candidate(
+        "relearn:big_unbounded", family="relearn_fam",
+        tokens=2_000_000, rank_tokens=1_000,
+    )
+    cost = _candidate("cost:small_window", family="cost_fam", tokens=50_000)
+
+    decisions = wb.allocate_writes(
+        [relearn, cost],
+        wb.build_write_budget(budget_tokens=10_000_000, max_writes=1), basis,
+    )
+
+    # Precondition: on the OLD (unbounded) basis relearn would have won.
+    assert decisions["relearn:big_unbounded"].net_tokens > decisions["cost:small_window"].net_tokens
+    # The actual verdict: it does not, because ranking reads the bounded figure.
+    assert decisions["cost:small_window"].offered is True
+    assert decisions["relearn:big_unbounded"].offered is False
+    assert decisions["relearn:big_unbounded"].reason == wb.REASON_BUDGET_FULL
+    assert (
+        decisions["relearn:big_unbounded"].rank_net_tokens
+        < decisions["cost:small_window"].rank_net_tokens
+    )
+
+
+def test_ranking_never_touches_the_worth_decision():
+    """A relearn candidate ranked (deprioritized) to 0 still has its
+    NET-NEGATIVE verdict, value floor and claimed figures decided off the
+    real (unbounded) `gross_tokens`/`gross_usd` — never off `rank_gross_tokens`.
+    Alone (nothing to lose the ranking comparison to), it is still offered and
+    still claims its real net saving."""
+    basis = _basis(sessions=100, active_days=10)
+    relearn = _candidate(
+        "relearn:alone", family="relearn_fam",
+        tokens=2_000_000, usd=100.0, rank_tokens=0,
+    )
+
+    decision = wb.allocate_writes(
+        [relearn], wb.build_write_budget(budget_tokens=10_000_000, max_writes=5), basis,
+    )["relearn:alone"]
+
+    assert decision.offered is True
+    assert decision.net_negative is False
+    assert decision.rank_net_tokens == 0            # the ranking figure
+    assert decision.net_tokens > 0                   # the worth-decision figure
+    assert decision.net_tokens != decision.rank_net_tokens
+    assert decision.claimed_tokens == decision.net_tokens
+    assert decision.claimed_usd is not None and decision.claimed_usd > 0
+
+
+def test_relearn_write_candidates_rank_on_the_matching_window_bucket():
+    """`analyzers.relearn.write_candidates` sets `rank_gross_tokens` from the
+    cluster's OWN already-computed `past_overspend_windows[label]` bucket --
+    never a new figure, and never `gross_tokens` itself."""
+    from dataclasses import replace
+
+    from tokenjam.core.optimize.analyzers.relearn import build_proposals, write_candidates
+    from tokenjam.core.optimize.relearn_window import RelearnWindowedObservation
+
+    proposals, _ = build_proposals(
+        [_raw("read_too_large", "read_too_large", "read too large", _episodes("r", 40))],
+        repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
+        projection=_basis(sessions=40, active_days=10),
+    )
+    cluster = proposals[0]
+    assert cluster.past_overspend_tokens > 0        # precondition: real gross
+
+    bounded_tokens = min(200, cluster.past_overspend_tokens - 1)
+    bucket = RelearnWindowedObservation(
+        label="7d", window_days=7.0, window_start="", window_end="",
+        occurrences=1, sessions=1, detour_turns=1.0, undated_occurrences=0,
+        tail_calls_median=0, tail_multiplier=1.0,
+        past_overspend_tokens=bounded_tokens, past_overspend_usd=0.01,
+        past_reread_tokens=0, past_reread_usd=0.0,
+        capped_at_unbounded=False, basis="test",
+    )
+    stamped = replace(cluster, past_overspend_windows={"7d": bucket})
+
+    [matched] = write_candidates([stamped], window_label="7d")
+    assert matched.rank_gross_tokens == bounded_tokens
+    assert matched.rank_gross_tokens != matched.gross_tokens
+    assert matched.gross_tokens == cluster.past_overspend_tokens   # unbounded, untouched
+
+
+def test_relearn_write_candidates_rank_zero_when_the_window_bucket_is_missing():
+    """No matching bucket -- whether because no `window_label` was resolved at
+    all, or the cluster's own dict simply has no entry for it -- ranks the
+    candidate at 0 (deprioritized, same convention as an unpriced candidate)
+    rather than falling back to the unbounded `gross_tokens`, which would
+    silently restore the bug this parameter exists to fix."""
+    from dataclasses import replace
+
+    from tokenjam.core.optimize.analyzers.relearn import build_proposals, write_candidates
+    from tokenjam.core.optimize.relearn_window import RelearnWindowedObservation
+
+    proposals, _ = build_proposals(
+        [_raw("read_too_large", "read_too_large", "read too large", _episodes("r", 40))],
+        repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
+        projection=_basis(sessions=40, active_days=10),
+    )
+    cluster = proposals[0]
+
+    # No window_label resolved at all (the caller found no exact match).
+    [no_label] = write_candidates([cluster], window_label=None)
+    assert no_label.rank_gross_tokens == 0
+
+    # A window_label was resolved, but this cluster's own bucket dict has no
+    # entry for it (a bucket for a DIFFERENT label exists).
+    other_bucket = RelearnWindowedObservation(
+        label="7d", window_days=7.0, window_start="", window_end="",
+        occurrences=1, sessions=1, detour_turns=1.0, undated_occurrences=0,
+        tail_calls_median=0, tail_multiplier=1.0,
+        past_overspend_tokens=50, past_overspend_usd=0.01,
+        past_reread_tokens=0, past_reread_usd=0.0,
+        capped_at_unbounded=False, basis="test",
+    )
+    stamped = replace(cluster, past_overspend_windows={"7d": other_bucket})
+    [mismatched] = write_candidates([stamped], window_label="30d")
+    assert mismatched.rank_gross_tokens == 0
+
+    # Never `None`: `None` would fall back to the unbounded `gross_tokens`.
+    assert no_label.rank_gross_tokens is not None
+    assert mismatched.rank_gross_tokens is not None
 
 
 def test_the_value_floor_still_gates_only_the_offer_under_one_allocation():

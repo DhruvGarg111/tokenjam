@@ -643,6 +643,21 @@ class WriteCandidate:
     #: the other's question is how a placement decision silently stops being
     #: arithmetic.
     destinations: tuple[str, ...] = ()
+    #: The figure to RANK this candidate against every other lane's, when it
+    #: differs from ``gross_tokens``. Exists because ``gross_tokens`` can be on
+    #: a LONGER horizon than the report's own window (relearn's detector is
+    #: deliberately unbounded — see ``analyzers/relearn.py`` — while the cost
+    #: lane's proposals are already scoped to the report window), and ranking
+    #: two candidates on figures counted over different spans systematically
+    #: favours whichever one counted longer, independent of which is actually
+    #: worth more. ``None`` means ``gross_tokens`` IS already on the report's
+    #: window basis and doubles as the ranking figure (the cost lane's case,
+    #: and the historical single-basis behaviour). Never touches
+    #: ``gross_tokens``/``gross_usd`` themselves: those remain the pre-net
+    #: GROSS the value floor and the net-negative verdict are decided on, on
+    #: purpose (see ``_decide_family``'s ``rank_net_tokens``) — only the ORDER
+    #: two families are offered in changes.
+    rank_gross_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -692,6 +707,14 @@ class WriteDecision:
     #: The files this write lands in, carried through so a caller can stage one
     #: diff per destination without re-deriving the placement.
     destinations: tuple[str, ...] = ()
+    #: The SAME netting as ``net_tokens`` (family gross minus standing cost),
+    #: computed off ``WriteCandidate.rank_gross_tokens`` instead of
+    #: ``gross_tokens`` wherever a member set one. Equals ``net_tokens`` for
+    #: any family whose members are all on the report's own window basis
+    #: already. This is what ``allocate_writes`` sorts on; ``net_tokens``
+    #: keeps deciding whether the write is worth OFFERING at all (net-negative
+    #: verdict, value floor) — see ``WriteCandidate.rank_gross_tokens``.
+    rank_net_tokens: int = 0
 
 
 def _rate_per_token(gross_usd: float | None, gross_tokens: int) -> float | None:
@@ -772,6 +795,14 @@ def _decide_family(
     # withhold the write even when the family's COMBINED return clears the
     # value floor below.
     family_gross_tokens = sum(c.gross_tokens for c in ordered)
+    # The RANKING basis — see `WriteCandidate.rank_gross_tokens`. Falls back to
+    # `gross_tokens` per member exactly like the field's own default, so a
+    # family with no lane-specific ranking figure ranks on the same number it
+    # is netted on, which is today's behaviour unchanged.
+    family_rank_gross_tokens = sum(
+        c.gross_tokens if c.rank_gross_tokens is None else c.rank_gross_tokens
+        for c in ordered
+    )
     per_session = standing_tokens_per_session(rep.delivery, rep.artifact_text)
     exposure = max(
         rep.exposure_sessions if rep.exposure_sessions is not None else basis.sessions, 0,
@@ -792,6 +823,11 @@ def _decide_family(
     payback = (family_gross_tokens / standing) if standing > 0 else None
     net_negative = net_tokens <= 0
     clamped_net_usd = None if net_usd is None else max(net_usd, 0.0)
+    # Same netting, off the ranking basis instead of the worth-decision one.
+    # Never feeds `net_negative`/the value floor/`payback` — those stay on
+    # `net_tokens`/`net_usd`, i.e. the true (possibly unbounded) gross, exactly
+    # as before this field existed.
+    rank_net_tokens = max(family_rank_gross_tokens - standing, 0)
 
     rep_decision = WriteDecision(
         key=rep.key, offered=not net_negative,
@@ -799,6 +835,7 @@ def _decide_family(
         standing_tokens_per_session=per_session,
         standing_tokens=standing, standing_usd=standing_usd,
         net_tokens=max(net_tokens, 0), net_usd=clamped_net_usd,
+        rank_net_tokens=rank_net_tokens,
         payback_ratio=payback, net_negative=net_negative, exposure_sessions=exposure,
         footprint_tokens=per_session * _destination_count(rep),
         destinations=rep.destinations,
@@ -887,7 +924,12 @@ def allocate_writes(
             continue
         ranked.append((rep, rep_decision))
 
-    ranked.sort(key=lambda pair: (-pair[1].net_tokens, pair[0].key))
+    # Ranked on `rank_net_tokens`, not `net_tokens` — see
+    # `WriteCandidate.rank_gross_tokens` for why the two can differ: a family
+    # whose `net_tokens` was counted over a longer horizon than another's must
+    # not outrank it on that account alone. Identical for any family that never
+    # set a ranking figure of its own.
+    ranked.sort(key=lambda pair: (-pair[1].rank_net_tokens, pair[0].key))
     spent_tokens = 0
     offered_count = 0
     #: Per-DESTINATION spend, so four analyzers proposing rules into the same
