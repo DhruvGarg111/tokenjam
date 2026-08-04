@@ -1074,13 +1074,14 @@ def _summarize_to_proposals(finding: Any) -> list[CostProposal]:
     )
     plural = "" if files == 1 else "s"
     headline = _money(usd) if usd is not None else f"~{tokens:,} tok"
+    # The GROUNDING (how many files, in this window) is built here; the
+    # instruction itself comes from the catalog. It used to be a ~330-character
+    # paragraph hardcoded at this line, and the guard read green over it for
+    # three independent reasons at once — see
+    # `tests/unit/test_no_fix_prose_outside_the_catalog.py`.
     advise = (
-        f"Review {files} oversized file{plural} in the summarize curate -> "
-        "diff -> apply surface (`tj summarize list` / `tj summarize check` / "
-        "`tj summarize apply`, or the Summarize screen in the web UI). This "
-        "card links there instead of applying inline: the fix is a reviewed "
-        "rewrite — structure kept verbatim, prose compressed, one file at a "
-        "time — not a one-click removal."
+        f"{files} oversized file{plural} in this window. "
+        + fixes.fix_text("summarize.review_oversized_files")
     )
     return [CostProposal(
         kind="cost",
@@ -1995,7 +1996,22 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     # deadweight emits N proposals (one per dead server) rather than the
     # single card `resend`/`relearn` attach their own `coverage_note` to.
     coverage_note = str(getattr(finding, "coverage_note", "") or "")
+    # The MEASUREMENT blind spot rides on the same string. A card carrying a
+    # priced total while other servers were excluded from it is showing a floor
+    # as a total, and the Review inbox is exactly as capable of that as the
+    # terminal was.
+    measurement_note = str(getattr(finding, "measurement_note", "") or "")
+    if measurement_note:
+        coverage_note = " ".join(x for x in (coverage_note, measurement_note) if x)
     for server in getattr(finding, "dead_servers", []) or []:
+        # A server measured to cost NOTHING has nothing to recover, so it gets
+        # no card at all. This is also what keeps the two figures on one basis:
+        # `tokens or None` coerces a measured zero to None while the dollar
+        # figure stays a real 0.0, and a card with `tokens=None, usd=$0.00` is
+        # the mixed-basis defect Critical Rule 28 forbids. Reachable, not
+        # hypothetical — a server exposing zero tools measures to zero tokens.
+        if not server.estimated_tax_tokens_window:
+            continue
         evidence = (
             f"`{server.name}` MCP server ({server.scope} scope, configured at "
             f"{server.source}) made 0 tool calls across {server.sessions_present} "

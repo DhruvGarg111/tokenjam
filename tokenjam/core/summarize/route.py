@@ -32,8 +32,22 @@ owner can answer it. Where the file is too small to have a shape worth reading,
 the diagnosis is WITHHELD rather than guessed: a wrong diagnosis is worse than
 none.
 
-Nothing here writes anything. `summarize` mentions the other routes; it does not
-build path-scoped rules or hooks, and it never prunes.
+**What performs, and what only advises.** Nothing in THIS module writes; it
+diagnoses. Three of the four routes now have a write path behind them:
+
+* **compress** — `core/summarize/session` + `apply`, behind the structure gate.
+* **prune** and **expire** — `core/summarize/prune`, behind the same
+  diff-then-approve step and an on-device quarantine
+  (`core/summarize/quarantine`) that holds every removed fragment verbatim, so
+  approving a removal is recoverable rather than final. `prune` acts only on
+  sections the user names, because which rules earn their place is the one
+  question the shape measurement above explicitly cannot answer; `expire` acts
+  on dated entries older than a cutoff, which is arithmetic rather than
+  judgement.
+* **hook** is still named and not built: a hook is a different artifact with a
+  different lifecycle, and `core/rulewrite/delivery` owns that kind.
+
+Path-scoping is named here and written by `core/rulewrite`, not by summarize.
 """
 from __future__ import annotations
 
@@ -119,14 +133,18 @@ _QUALITY_TAX = (
 )
 _PRUNE_ADVICE = (
     "Pruning is the route that costs no specificity: \"{prune_test}\" "
-    "({best_practices}) Anthropic's exclude list is {exclude}. "
+    "({best_practices}) Anthropic's exclude list is {exclude}. Once you have "
+    "decided which sections go, `tj summarize prune --section` cuts them: it "
+    "shows the exact lines first and writes nothing until you pass --go, and "
+    "every fragment it removes is kept on this device so `tj summarize "
+    "restore` can put it back. "
 )
 _SCOPE_ADVICE = (
     "Path-scoping is the other: \"{path_scope}\" ({memory}) A rule moved into "
     "`.claude/rules/` with a `paths:` glob stops loading in every session "
     "without a word of it being cut. For an instruction that must run at a "
     "fixed point, a hook is stronger still: \"{hook}\" ({best_practices}) "
-    "tokenjam only names these; it does not write them for you. "
+    "tokenjam names those two and does not write them for you. "
 )
 
 _SHAPE_RULE_HEAVY = (
@@ -178,7 +196,10 @@ _TARGET_STATEMENT = (
     "Anthropic publishes a size target for an always-resident instruction file: "
     "under {lines} lines (\"{quote}\" {memory}). That target is theirs, not "
     "tokenjam's, and there are four routes to it — prune, path-scope, escalate "
-    "to a hook, and compress. summarize only performs the last. "
+    "to a hook, and compress. summarize performs three of them: `tj summarize "
+    "prune` and `tj summarize expire` remove content (quarantined first, so any "
+    "removal can be put back with `tj summarize restore`), and `tj summarize "
+    "apply` compresses. Escalating to a hook is still yours to do. "
 )
 _NOT_INSTRUCTION = (
     "This is not an always-resident instruction file, so the size guidance "
