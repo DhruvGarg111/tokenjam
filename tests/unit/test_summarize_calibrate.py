@@ -10,6 +10,7 @@ import re
 
 import pytest
 
+from tests.summarize_fakes import envelope_like
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.summarize import calibrate, estimate, session
 from tokenjam.core.summarize.delivery import DeliveryError, DeliveryResult
@@ -53,9 +54,10 @@ def _shrinking_delivery(keep_fraction: float):
     """A delivery handler that returns a structurally-valid, shorter rewrite."""
     def _deliver(config, mode, wrapped_prompt, system_rules):
         markers = _MARKER_RE.findall(wrapped_prompt)
-        words = [w for w in wrapped_prompt.split() if not w.startswith("<tj-keep")]
+        words = [w for w in wrapped_prompt.split()
+                 if not w.startswith("<tj-keep") and not w.startswith(("<tj-source", "</tj-source"))]
         kept = words[: max(1, int(len(words) * keep_fraction))]
-        return DeliveryResult(summary=" ".join(kept + markers))
+        return DeliveryResult(summary=envelope_like(wrapped_prompt, " ".join(kept + markers)))
     return _deliver
 
 

@@ -294,7 +294,8 @@ def cmd_summarize_prep(
     console.print(escape(result.wrapped_prompt))
     console.print()
     console.print("[dim]Save the rewrite to a file, then: tj summarize check "
-                  f"{escape(result.path)} --summary <file> --prepped-hash {result.source_sha256}[/dim]")
+                  f"{escape(result.path)} --summary <file> --prepped-hash {result.source_sha256} "
+                  f"--nonce {result.source_nonce}[/dim]")
 
 
 def _print_calibration(report: CalibrationReport) -> None:
@@ -372,10 +373,15 @@ def cmd_summarize_calibrate(
               help="File holding the model's summary ('-' for stdin).")
 @click.option("--prepped-hash", "prepped_hash", required=True,
               help="The source_sha256 returned by `prep`.")
+@click.option("--nonce", "source_nonce", default=None,
+              help="The source_nonce returned by `prep`. Pass it and the rewrite must come back "
+                   "inside the same <tj-source> envelope it was sent in — the one check that "
+                   "works on a file with no protected blocks.")
 @json_option
 @click.pass_context
 def cmd_summarize_check(
-    ctx: click.Context, path: str, summary_path: str, prepped_hash: str, output_json_flag: bool,
+    ctx: click.Context, path: str, summary_path: str, prepped_hash: str,
+    source_nonce: str | None, output_json_flag: bool,
 ) -> None:
     """Verify a summary (hash-guards the file) and stage it for review."""
     config: TjConfig = ctx.obj["config"]
@@ -385,7 +391,7 @@ def cmd_summarize_check(
         else Path(summary_path).expanduser().read_text(encoding="utf-8")
     )
     try:
-        verdict = check(config, path, summary_text, prepped_hash)
+        verdict = check(config, path, summary_text, prepped_hash, source_nonce=source_nonce)
     except SummarizeRefused as e:
         raise click.ClickException(str(e)) from e   # file changed/missing — house-voice refuse
     if output_json:

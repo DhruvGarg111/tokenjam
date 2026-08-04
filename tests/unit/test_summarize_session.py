@@ -23,6 +23,7 @@ from tokenjam.core.summarize.route import (
     PATH_SCOPE_QUOTE,
     PRUNE_TEST_QUOTE,
 )
+from tests.summarize_fakes import compliant_summary
 from tokenjam.core.summarize.session import (
     SummarizeRefused, check, clear, list_attempts, list_staged, prepare, read_staged,
 )
@@ -98,10 +99,12 @@ def test_check_dropped_marker_not_staged(cfg, tmp_path):
 
 
 def test_check_tracks_must_keep(cfg, tmp_path):
+    # Pure prose, no fences: zero protected blocks, so the echoed envelope is the ONLY thing the
+    # gate can verify here — hence the nonce. Without it this file passes on any output at all.
     path = _write(tmp_path, "CLAUDE.md", "You must never delete the file. " + PROSE)
     res = prepare(path=path)
-    verdict = check(cfg, path, _perfect_summary(res.wrapped_prompt, "Avoid removing the file."),
-                    res.source_sha256)
+    verdict = check(cfg, path, compliant_summary(res.wrapped_prompt, "Avoid removing the file."),
+                    res.source_sha256, source_nonce=res.source_nonce)
     assert verdict.structure_ok                          # a rephrase doesn't fail the structure gate
     assert "never" in verdict.must_keep_removed           # but the dropped word is tracked
 
