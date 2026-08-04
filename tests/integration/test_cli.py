@@ -165,11 +165,15 @@ def test_status_dedupes_duplicate_alerts_of_same_type(runner, db, config):
     `_failure_rate_fired`) resets on process restart, so the DB can
     legitimately hold two rows for the same (type, agent) pair (#96). The
     human-readable `tj status` render must collapse repeats into one line
-    with a count rather than printing the same alert line twice."""
+    with a count rather than printing the same alert line twice.
+
+    Asserted against `-v`, the card path: bare `tj status` is now the capped
+    overview, which reports an alert COUNT per agent rather than alert
+    titles."""
     _seed_agent_and_session(db)
     _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
     _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
-    result = _invoke(runner, db, config, ["status"])
+    result = _invoke(runner, db, config, ["-v", "status"])
     assert result.exit_code == 1
     assert result.output.count("failure_rate — test-agent") == 1
     assert "×2" in result.output
@@ -177,11 +181,12 @@ def test_status_dedupes_duplicate_alerts_of_same_type(runner, db, config):
 
 def test_status_distinct_alert_types_are_not_collapsed(runner, db, config):
     """Two DIFFERENT alert types for the same agent must both still render —
-    dedup is keyed on (type, agent), not agent alone."""
+    dedup is keyed on (type, agent), not agent alone. Card path (`-v`), which
+    is where alert titles live now."""
     _seed_agent_and_session(db)
     _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
     _seed_alert(db, alert_type=AlertType.RETRY_LOOP, title="retry_loop — test-agent")
-    result = _invoke(runner, db, config, ["status"])
+    result = _invoke(runner, db, config, ["-v", "status"])
     assert "failure_rate — test-agent" in result.output
     assert "retry_loop — test-agent" in result.output
     assert "×2" not in result.output
@@ -206,7 +211,7 @@ def test_status_subscription_plan_shows_raw_dollar_line_like_api(runner, db):
     db.upsert_session(session)
     sub_config = TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="max_5x")})
 
-    result = _invoke(runner, db, sub_config, ["status"])
+    result = _invoke(runner, db, sub_config, ["-v", "status"])
     assert result.exit_code == 0
     assert "Cost today:     $0.00" in result.output
     assert "% of cycle" not in result.output
@@ -215,9 +220,10 @@ def test_status_subscription_plan_shows_raw_dollar_line_like_api(runner, db):
 
 
 def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
-    """API-billed users keep the historical raw-dollar Cost today line."""
+    """API-billed users keep the historical raw-dollar Cost today line (card
+    path, `-v`)."""
     _seed_agent_and_session(db)
-    result = _invoke(runner, db, config, ["status"])
+    result = _invoke(runner, db, config, ["-v", "status"])
     assert result.exit_code == 0
     assert "Cost today:     $0.00" in result.output
     assert "Subscription plan" not in result.output
@@ -243,10 +249,80 @@ def test_status_subscription_plan_with_daily_limit_shows_literal_dollar_cap(runn
         agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
     )
 
-    result = _invoke(runner, db, sub_config, ["status"])
+    result = _invoke(runner, db, sub_config, ["-v", "status"])
     assert result.exit_code == 0
     assert "Cost today:     $0.00 / $5.00/day limit" in result.output
     assert "% of cycle" not in result.output
+
+
+def test_status_caps_the_agent_list_and_names_the_way_past_the_cap(runner, db, config):
+    """Bare `tj status` printed one ~9-line card per tracked agent_id, and the
+    agent_id set grows monotonically (roughly one per project directory tj has
+    ever seen), so the screen got longer the longer you used tj. The default
+    view is now a capped table, and the cap must name the LITERAL command that
+    reaches what it cut — a cap with no way past it is just missing data."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    flat = " ".join(result.output.split())
+
+    assert "25 agents" in flat
+    assert "AGENT" in flat and "COST TODAY" in flat and "LAST ACTIVE" in flat
+    assert "+15 more agents" in flat
+    assert "tj status --agent <id>" in flat
+    assert "tj status -v" in flat
+    # The whole point: bounded by the terminal, not by how long tj has run.
+    assert len(result.output.splitlines()) < 30
+
+
+def test_status_puts_the_totals_above_the_rows(runner, db, config):
+    """The headline used to land after every card, i.e. after the reader had
+    already scrolled past everything it summarises."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["status"])
+    lines = result.output.splitlines()
+    totals = next(i for i, ln in enumerate(lines) if "25 agents" in " ".join(ln.split()))
+    header = next(i for i, ln in enumerate(lines) if "AGENT" in ln)
+    assert totals < header
+
+
+def test_status_verbose_keeps_every_card(runner, db, config):
+    """`-v` is the unbounded view: one card per agent, byte-for-byte what a
+    bare run printed before."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["-v", "status"])
+    assert result.output.count("Cost today:") == 25
+    assert "+15 more agents" not in result.output
+
+
+def test_status_agent_filter_renders_that_agents_card(runner, db, config):
+    """The command the trailer names has to actually be the drill-down, or the
+    trailer is a dead end."""
+    for i in range(25):
+        _seed_agent_and_session(db, agent_id=f"agent-{i:02d}")
+
+    result = _invoke(runner, db, config, ["status", "--agent", "agent-07"])
+    assert "agent-07" in result.output
+    assert "Cost today:" in result.output
+    assert result.output.count("Cost today:") == 1
+    assert "agent-08" not in result.output
+
+
+def test_status_overview_never_prints_a_bare_zero_for_no_alerts(runner, db, config):
+    """`0` in an ALERTS column reads as a measured zero the same way a `$0`
+    savings figure reads as "no waste"; an agent with no alerts gets the null
+    marker instead."""
+    _seed_agent_and_session(db, agent_id="quiet-agent")
+    result = _invoke(runner, db, config, ["status"])
+    row = next(ln for ln in result.output.splitlines() if "quiet-agent" in ln)
+    assert " 0 " not in row
+    assert "-" in row
 
 
 # -- traces tests --
