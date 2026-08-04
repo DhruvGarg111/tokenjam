@@ -2,23 +2,14 @@
 config on this machine's search path agree on it? A project-local
 `.tj/config.toml` and the global `~/.config/tj/config.toml` can carry
 different secrets for one store; span pushes 401 silently with nothing else
-surfacing the mismatch (see `core/config.find_diverged_secret_config`, shared
-with the config-load-time warning `_warn_if_secrets_diverge`)."""
+surfacing the mismatch (see `core/config.find_diverged_secret_config`). Doctor
+is the ONLY place this is reported: the per-invocation load-time warning that
+used to duplicate it is gone (see tests/unit/test_config_secret_divergence.py)."""
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from tokenjam.core.config import (
-    _reset_secret_divergence_warning,
-    load_config,
-)
-
-
-@pytest.fixture(autouse=True)
-def _reset_warning_state():
-    _reset_secret_divergence_warning()
+from tokenjam.core.config import load_config
 
 
 def _write_config(path: Path, *, secret: str) -> None:

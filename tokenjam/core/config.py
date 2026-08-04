@@ -540,14 +540,114 @@ SEARCH_PATHS = [
 ]
 
 
+def global_config_path() -> Path:
+    """The user-scoped config file: the single source of truth for the ingest
+    secret.
+
+    Resolved at call time rather than import time, because ``SEARCH_PATHS``
+    bakes ``Path.home()`` in at import and a test (or a sandboxed run) that
+    moves ``HOME`` afterwards would otherwise still be pointed at the real
+    user's file.
+
+    Why this file and no other: the daemon is launched from a unit file that
+    names this path explicitly, so the daemon ALWAYS authenticates with the
+    secret stored here, whatever directory anything else runs from. A secret
+    minted into a project-local ``.tj/config.toml`` is therefore a secret the
+    daemon will never accept, and every span pushed with it 401s silently.
+    """
+    return Path.home() / ".config" / "tj" / "config.toml"
+
+
+def global_ingest_secret() -> str:
+    """The ingest secret recorded in the global config, or "" when there is
+    no global config or it carries none. Never raises."""
+    path = global_config_path()
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    secret = (raw.get("security") or {}).get("ingest_secret")
+    return secret if isinstance(secret, str) else ""
+
+
+def ensure_global_ingest_secret() -> tuple[str, bool]:
+    """Return ``(secret, minted)`` for the machine-wide ingest secret.
+
+    Adopts the secret already in the global config when there is one, and only
+    mints (and stores) a fresh one when the global config has none. Every
+    onboarding path routes its secret through here, so no flow can create a
+    second, divergent secret: the shell block that every already-configured
+    integration carries holds the GLOBAL secret, and overwriting that would
+    break every working integration.
+    """
+    import secrets as _secrets
+
+    existing = global_ingest_secret()
+    if existing:
+        return existing, False
+
+    path = global_config_path()
+    config = load_config(str(path)) if path.exists() else TjConfig(version="1")
+    secret = _secrets.token_hex(32)
+    config.security.ingest_secret = secret
+    write_config(config, path)
+    return secret, True
+
+
+def align_project_secret_to_global(secret: str, path: Path | None = None) -> Path | None:
+    """Rewrite a project-local config's ``ingest_secret`` to the global one.
+
+    The global secret is always the survivor: the managed shell block, the
+    daemon unit file, and therefore every already-working integration carry
+    it. Returns the path repaired, or None when there was nothing to repair
+    (no project-local config, or it already agrees).
+    """
+    target = path if path is not None else Path(".tj/config.toml")
+    if not secret or not target.exists():
+        return None
+    try:
+        with open(target, "rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    current = (raw.get("security") or {}).get("ingest_secret")
+    if not isinstance(current, str) or not current or current == secret:
+        return None
+    # Textual edit of the one key, not a `write_config` round-trip: the plain
+    # onboarding path writes this file as commented TOML by hand, and
+    # re-serialising it would silently delete every one of those comments as a
+    # side effect of a secret repair.
+    import re as _re
+
+    try:
+        text = target.read_text()
+    except OSError:
+        return None
+    patched, count = _re.subn(
+        r'(?m)^(\s*ingest_secret\s*=\s*)"[^"]*"',
+        lambda m: m.group(1) + f'"{secret}"',
+        text,
+        count=1,
+    )
+    if not count:
+        return None
+    try:
+        target.write_text(patched)
+    except OSError:
+        return None
+    # Resolved, not relative: the caller prints this, and ".tj/config.toml" on
+    # its own does not say WHICH project directory was just edited.
+    return target.resolve()
+
+
 def find_diverged_secret_config(active_path: Path, active_raw: dict) -> tuple[Path, str, str] | None:
     """Return `(other_path, active_secret, other_secret)` for the first
     shadowed config on `SEARCH_PATHS` that carries a DIFFERENT non-empty
     `ingest_secret` than `active_raw`'s, or None when none diverges.
 
-    The single source of truth for the footgun both `_warn_if_secrets_diverge`
-    (fires once, at load time, stderr) and `tj doctor`'s ingest-secret check
-    (queryable, repeatable) report: project-local `.tj/config.toml` has
+    The single source of truth for the footgun `tj doctor`'s ingest-secret
+    check reports: project-local `.tj/config.toml` has
     secret A; global `~/.config/tj/config.toml` has secret B; the SDK uses A;
     the daemon (started with global config) uses B; span pushes 401 silently.
     Best-effort — an unreadable/unparseable candidate is skipped, never raised.
@@ -580,41 +680,14 @@ def find_diverged_secret_config(active_path: Path, active_raw: dict) -> tuple[Pa
     return None
 
 
-def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
-    """
-    Emit a stderr warning if a shadowed config exists with a different
-    ingest_secret (see `find_diverged_secret_config`).
-
-    Fires at most once per process via the module-level guard so this
-    doesn't spam multi-call test environments.
-    """
-    global _SECRET_DIVERGENCE_WARNED
-    if _SECRET_DIVERGENCE_WARNED:
-        return
-    diverged = find_diverged_secret_config(active_path, active_raw)
-    if diverged is None:
-        return
-    candidate, _active_secret, _other_secret = diverged
-    print(
-        f"warning: ingest_secret differs between {active_path} "
-        f"and {candidate}. The SDK will use the secret from "
-        f"{active_path} but a daemon launched from a different cwd "
-        f"may use the other one — span pushes will 401 silently. "
-        f"Align them (copy one secret into the other config) or "
-        f"delete the unused config.",
-        file=sys.stderr,
-    )
-    _SECRET_DIVERGENCE_WARNED = True
-
-
-# Module-level guard. Reset for tests via the helper exposed below.
-_SECRET_DIVERGENCE_WARNED = False
-
-
-def _reset_secret_divergence_warning() -> None:
-    """Test helper — reset the once-per-process warning guard."""
-    global _SECRET_DIVERGENCE_WARNED
-    _SECRET_DIVERGENCE_WARNED = False
+# `load_config` deliberately does NOT warn about a diverged secret. It used to
+# print one to stderr on every invocation, in front of every command, which is
+# noise on a fault the user cannot act on from there and trains people to read
+# past warnings. The divergence is now reported where a verdict belongs and can
+# be re-checked on demand: `tj doctor`'s ingest-secret check (which calls
+# `find_diverged_secret_config` directly) alongside its live endpoint probe, and
+# onboarding no longer creates the divergence in the first place
+# (`ensure_global_ingest_secret` / `align_project_secret_to_global`).
 
 
 def find_config_file(override: str | None = None) -> Path | None:
@@ -695,13 +768,6 @@ def load_config(path: str | None = None) -> TjConfig:
 
     with open(config_path, "rb") as f:   # "rb" is REQUIRED
         raw = tomllib.load(f)
-
-    # Diverged-secret detection (#68 §5). When a project-local config
-    # shadows a global one with a different ingest_secret, the SDK and
-    # daemon end up with different secrets and span pushes silently 401.
-    # Warn at config-load time so the user gets a chance to align them
-    # before debugging mysterious 401s.
-    _warn_if_secrets_diverge(config_path, raw)
 
     cfg = _parse(raw)
     cfg.config_path = config_path.resolve()
