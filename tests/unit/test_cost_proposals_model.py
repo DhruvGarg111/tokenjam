@@ -496,7 +496,9 @@ def test_recompute_cost_proposals_resolves_pricing_mode_from_sessions(tmp_path):
                 started_at=start, ended_at=start + timedelta(minutes=1),
             ))
 
-        proposals = cp.recompute_cost_proposals(db, _cfg(tmp_path), window_days=30)
+        proposals = cp.recompute_cost_proposals(
+            db, _cfg(tmp_path), window_days=30,
+        ).proposals
         placement = [p for p in proposals if p.analyzer == "placement"]
         assert placement, "expected a placement card from the cadence-regular sessions"
         assert placement[0].past_overspend_usd is None

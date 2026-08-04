@@ -866,16 +866,48 @@ def refresh_cost_proposals(request: Request) -> dict[str, Any]:
     ``cost_proposals.recompute_cost_proposals`` — both by its own lock and by
     the scan-cycle-in-flight check that covers the gap the lock cannot (the
     cycle writes the report store and the relearn cache before its cost leg
-    ever takes that lock). This request either runs the recompute or returns
-    the unchanged last-good proposals; it never races a cycle's cache write,
-    and never writes a cost store under a cycle id the report store does not
-    share."""
+    ever takes that lock).
+
+    ``status`` IS THE POINT OF THIS PAYLOAD, and it is one of:
+
+    ``ready``
+        this request built a fresh set; ``proposals`` is its size.
+    ``declined``
+        something else is already measuring this window (a scan cycle mid-pass,
+        or another recompute holding the lock), so nothing was rebuilt. The
+        store is untouched and ``proposals`` is the size of the LAST-GOOD set
+        still up, with ``fresh: false`` and ``computed_at`` naming when it was
+        built. A decline is normal, not an error.
+    ``failed``
+        the build raised. Same last-good reporting as ``declined``, but this
+        one is abnormal and the tab renders degraded.
+    ``unavailable``
+        no direct database connection to recompute through.
+
+    It used to return ``{"status": "ready", "proposals": len(...)}``
+    unconditionally, and all four of the callee's ``[]`` outcomes therefore read
+    as "a refresh completed and found nothing" — while the store still held a
+    full, good set. The docstring even claimed it "returns the unchanged
+    last-good proposals"; it never re-read the store. The signal now comes back
+    FROM the call rather than from a pre-call ``is_cycle_computing()`` probe,
+    which would be racy in exactly the window it claims to cover.
+    """
     config = _config(request)
     db = getattr(request.app.state, "db", None)
     if db is None or getattr(db, "conn", None) is None:
         return {"status": "unavailable", "reason": "no direct database connection"}
-    proposals = cost_proposals_mod.recompute_cost_proposals(db, config)
-    return {"status": "ready", "proposals": len(proposals)}
+    result = cost_proposals_mod.recompute_cost_proposals(db, config)
+    return {
+        "status": result.status,
+        # Kept as a COUNT, the shape this key always had — an older client
+        # reading only `status`/`proposals` now sees a truthful status and the
+        # store's real size instead of a fabricated zero.
+        "proposals": result.served_count,
+        "fresh": result.fresh,
+        "computed_at": result.served_computed_at,
+        "reason": result.reason,
+        "detail": result.detail,
+    }
 
 
 def _stored_cost_proposal(request: Request, proposal_id: str) -> dict[str, Any]:
