@@ -77,8 +77,10 @@ ANALYZER_ORDER: list[str] = [
 # An analyzer that misses any one of those has no business spending query
 # time for that persona. Each entry below records which one it misses.
 #
-# `mixed` / `sdk` / `unknown` disable nothing: the conservative default is to
-# run everything, so an unclassified window never silently loses a finding.
+# `mixed` / `unknown` disable nothing: the conservative default is to run
+# everything, so an unclassified window never silently loses a finding.
+# `sdk` has its own key below, gating analyzers whose data source doesn't
+# exist for that persona.
 PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
     # An interactive coding agent's harness constructs the API request, picks
     # the model for its own main thread, and owns the prompt template. The
