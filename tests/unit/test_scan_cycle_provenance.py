@@ -25,7 +25,7 @@ import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.optimize import cost_apply, report_store, scan_cycle
-from tokenjam.core.optimize.build_stamp import UNKNOWN, tj_build
+from tokenjam.core.optimize.cycle_provenance import UNKNOWN, tj_build
 
 
 @pytest.fixture(autouse=True)
@@ -35,10 +35,23 @@ def _no_leaked_cycle_flag():
     running. Cleared on both sides: before, so a leak from elsewhere cannot make a
     test here pass or fail for the wrong reason; after, so nothing this module does
     escapes it. The individual tests still clear it in their own `finally`; this is
-    the backstop for the ones that fail before reaching it."""
+    the backstop for the ones that fail before reaching it.
+
+    THE WATERMARK IS THE SECOND ONE, and it leaks ACROSS FILES rather than within
+    this one. Any test here that runs `_job` inline reaches
+    `_record_pass_watermark`, which is module-global and never reset — so the
+    ingestion-watermark gate in `_should_run_scheduled_pass` then declines the
+    next SCHEDULED `trigger_scan_cycle` anywhere in the process, and
+    `tests/unit/test_report_window.py`'s cycle tests fail with "the cycle never
+    reached the cost half". They pass alone and fail in a full run, which is the
+    worst shape a failure can have. Reset for the same reason and on both sides."""
     scan_cycle._CYCLE_COMPUTING.clear()
+    scan_cycle._last_pass_watermark = None
+    scan_cycle._last_pass_at = None
     yield
     scan_cycle._CYCLE_COMPUTING.clear()
+    scan_cycle._last_pass_watermark = None
+    scan_cycle._last_pass_at = None
 
 
 @pytest.fixture
@@ -82,10 +95,10 @@ def test_cycle_flag_outlives_the_report_leg(monkeypatch, cfg):
     report as computing at that instant."""
     seen: dict[str, bool] = {}
 
-    def _recompute_now(backend, config, until=None):
+    def _recompute_now(backend, config, until=None, provenance=None):
         return {"computed_at": "now"}
 
-    def _write_relearn(report, config, factory):
+    def _write_relearn(report, config, factory, provenance=None):
         # Mid-pass: the report's leg is done, relearn's is not.
         seen["report_flag"] = report_store.is_computing()
         seen["cycle_flag"] = scan_cycle.is_cycle_computing()
@@ -99,7 +112,7 @@ def test_cycle_flag_outlives_the_report_leg(monkeypatch, cfg):
 
     monkeypatch.setattr(
         cp, "recompute_cost_proposals",
-        lambda backend, config, until=None, report=None: None,
+        lambda backend, config, until=None, report=None, provenance=None: None,
     )
     # Run the job body inline instead of on a thread, so the mid-pass instant is
     # observable at all.
@@ -190,11 +203,33 @@ def test_a_report_written_by_another_build_is_visibly_not_this_one(cfg):
     p = report_store.default_report_path(cfg)
     stored = json.loads(p.read_text(encoding="utf-8"))
     stored["tj_version"] = "0.0.1-previous"
+    stored["provenance"]["build"] = "0.0.1-previous"
     p.write_text(json.dumps(stored), encoding="utf-8")
 
     block = report_store.stored_report_block(cfg)
     assert block["computed_build"] == "0.0.1-previous"
     assert block["build"] != "0.0.1-previous"
+    assert block["build_provenance"] == "stale"
+
+
+def test_a_report_from_a_previous_build_that_only_stamped_the_legacy_key_is_stale(cfg):
+    """The upgrade case arriving from an artifact written BEFORE the provenance
+    record existed: it carries only the flat `tj_version` stamp. The legacy key
+    is still the whole answer for that artifact, and the verdict has to be the
+    same `stale` a recorded one gets."""
+    report_store.write_report({"findings": {}}, config=cfg, window_days=30)
+    p = report_store.default_report_path(cfg)
+    stored = json.loads(p.read_text(encoding="utf-8"))
+    del stored["provenance"]
+    stored["tj_version"] = "0.0.1-previous"
+    p.write_text(json.dumps(stored), encoding="utf-8")
+
+    block = report_store.stored_report_block(cfg)
+    assert block["computed_build"] == "0.0.1-previous"
+    assert block["build_provenance"] == "stale"
+    # No record, so no cycle identity — and `None` is not "the same cycle as
+    # everything else on screen".
+    assert block["cycle_id"] is None
 
 
 def test_a_report_predating_the_stamp_reports_unknown_not_agreement(cfg):
@@ -202,11 +237,13 @@ def test_a_report_predating_the_stamp_reports_unknown_not_agreement(cfg):
     p = report_store.default_report_path(cfg)
     stored = json.loads(p.read_text(encoding="utf-8"))
     del stored["tj_version"]
+    del stored["provenance"]
     p.write_text(json.dumps(stored), encoding="utf-8")
 
     block = report_store.stored_report_block(cfg)
     assert block["computed_build"] is None
     assert block["build"] == tj_build()
+    assert block["build_provenance"] == "unknown"
 
 
 def test_the_build_stamp_never_raises_and_never_returns_empty(monkeypatch):

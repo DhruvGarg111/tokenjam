@@ -180,6 +180,33 @@ SEAMS: tuple[SingleSeam, ...] = (
         ),
     ),
     SingleSeam(
+        name="cycle provenance",
+        description=(
+            "what produced a stored analyzer artifact — the cycle id, the "
+            "anchor, the observed window, the persona and the producing "
+            "build — minted ONCE per pass and carried by every store that "
+            "pass writes."
+        ),
+        symbol="CycleProvenance",
+        kind="call",
+        allowed_modules=frozenset({"core/optimize/cycle_provenance.py"}),
+        reason=(
+            "the three provenance facts were three ad-hoc conventions. "
+            "`tj_build()` was called independently at every write site and "
+            "again at every read site, and nothing ever COMPARED a stored "
+            "stamp against the running build, so an upgrade served the "
+            "previous build's cards under a fresh timestamp. The window had "
+            "two spellings (`scan_since`/`scan_until` on the report, "
+            "`cost_since`/`cost_until` on the cost block) with no shared type "
+            "forcing them to describe the same span. And the cycle had no "
+            "identity at all, so a report-derived panel could serve cycle N "
+            "figures beside inbox figures from cycle N-1 with nothing able to "
+            "tell them apart. `cycle_provenance.begin_cycle()` is now the one "
+            "place the record is constructed; every store takes one it was "
+            "handed."
+        ),
+    ),
+    SingleSeam(
         name="rate profile",
         description=(
             "the blended $/token rate an analyzer prices its findings "
@@ -258,17 +285,19 @@ BESPOKE_SEAMS: tuple[BespokeSeam, ...] = (
     BespokeSeam(
         name="scan-cycle anchor",
         description=(
-            "one `utcnow()` timestamp per scan cycle, threaded into BOTH "
-            "the report pass and the cost-proposal pass, so they measure "
-            "the same instant instead of two instants seconds apart."
+            "one provenance record per scan cycle — carrying one anchor, one "
+            "window and one producing build — threaded into BOTH the report "
+            "pass and the cost-proposal pass, so they measure the same "
+            "instant instead of two instants seconds apart."
         ),
         reason_not_mechanized=(
-            "report_store.recompute_now and cost_proposals."
-            "recompute_cost_proposals BOTH legitimately fall back to their "
-            "own utcnow() when called standalone outside a cycle (`until` "
-            "is optional by design) — the invariant is that scan_cycle "
-            "threads ONE value through both calls in the same cycle, which "
-            "is a data-flow property a reachability guard cannot express."
+            "the CONSTRUCTION of the record is mechanized (see the "
+            "'cycle provenance' SingleSeam above); what a reachability guard "
+            "cannot express is that scan_cycle threads ONE instance through "
+            "both calls in the SAME cycle. Both recomputes legitimately mint "
+            "their own when called standalone outside a cycle (`provenance` "
+            "is optional by design), so the invariant is a data-flow "
+            "property, not a call-site one."
         ),
         test_module="tests.unit.test_report_window",
         test_name="test_the_report_and_cost_stores_come_from_ONE_analyzer_pass",

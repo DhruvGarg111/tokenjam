@@ -176,7 +176,7 @@ def test_a_completed_pass_advances_the_watermark_baseline(monkeypatch, cfg):
     monkeypatch.setattr(report_store, "is_computing", lambda: False)
     monkeypatch.setattr(
         report_store, "recompute_now",
-        lambda backend, config, until=None: {"computed_at": "now"},
+        lambda backend, config, until=None, provenance=None: {"computed_at": "now"},
     )
     monkeypatch.setattr(report_store, "stored_report", lambda config: object())
     monkeypatch.setattr(scan_cycle, "_write_relearn_from", lambda *a, **k: None)
@@ -184,7 +184,7 @@ def test_a_completed_pass_advances_the_watermark_baseline(monkeypatch, cfg):
     import tokenjam.core.optimize.cost_proposals as cp
     monkeypatch.setattr(
         cp, "recompute_cost_proposals",
-        lambda backend, config, until=None, report=None: None,
+        lambda backend, config, until=None, report=None, provenance=None: None,
     )
     monkeypatch.setattr(scan_cycle, "_refresh_rule_presence", lambda config: None)
 

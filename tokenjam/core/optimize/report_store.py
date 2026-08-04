@@ -46,7 +46,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from tokenjam.core.optimize.build_stamp import tj_build
+from tokenjam.core.optimize.cycle_provenance import (
+    CycleProvenance,
+    begin_cycle,
+    provenance_block,
+)
 
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
@@ -123,6 +127,7 @@ def write_report(
     window_days: int | None = None,
     since: str | None = None,
     until: str | None = None,
+    provenance: CycleProvenance | None = None,
 ) -> dict[str, Any]:
     """Store a freshly-computed report, clearing any previously-recorded error.
 
@@ -130,14 +135,28 @@ def write_report(
     surface can label the figures with the window they were OBSERVED over
     rather than the window its own picker happens to be set to. They are
     labels, never divisors — nothing rescales a stored figure by them.
+
+    THE RECORD IS THE SOURCE. ``provenance`` is the cycle's own
+    :class:`~tokenjam.core.optimize.cycle_provenance.CycleProvenance`, minted
+    once per pass and carried by every artifact that pass writes; the three
+    window keys above and the legacy ``tj_version`` stamp are all DERIVED from
+    it rather than resolved here. The explicit keyword arguments remain for
+    callers that genuinely have no cycle (a direct write in a test, a legacy
+    call site) and win over the record when both are given — but nothing in
+    this module calls ``tj_build()`` any more, because a build resolved
+    independently at each write site is two copies of "what version am I" that
+    are free to disagree.
     """
     p = path or default_report_path(config)
+    record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle(
+        since=since, until=until, window_days=window_days,
+    )
     payload: dict[str, Any] = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "report": report_dict,
-        "window_days": window_days,
-        "since": since,
-        "until": until,
+        "window_days": window_days if window_days is not None else record.window_days,
+        "since": since if since is not None else record.since,
+        "until": until if until is not None else record.until,
         # WHICH BUILD PRODUCED THIS, not just when. `computed_at` answers HOW
         # OLD and readers take it for WHICH VERSION. These stores are caches
         # with no build identity and nothing invalidates them on upgrade, so
@@ -146,7 +165,17 @@ def write_report(
         # that is precisely the user who upgraded to get a fix and will
         # conclude it did not work. A surface can only qualify the freshness
         # claim if the producing build travels with the result.
-        "tj_version": tj_build(),
+        #
+        # Kept as its own key alongside the record: every artifact written
+        # before the record existed carries this one, so the read path has to
+        # understand it regardless, and a reader that only knows the old shape
+        # keeps working.
+        "tj_version": record.build,
+        # WHICH PASS produced this — see `core/optimize/cycle_provenance.py`.
+        # The report is only one of three stores a cycle writes; the identity
+        # here is what lets a surface tell "these two figures are from the same
+        # cycle" from "one of them is a cycle behind".
+        "provenance": record.to_dict(),
     }
     _atomic_write(p, payload)
     return payload
@@ -207,8 +236,6 @@ def stored_report_block(
     One shape, computed in one place, so two surfaces reading the same store
     can never disagree about whether it is cold, stale or degraded.
     """
-    from tokenjam.core.optimize import scan_cycle
-
     stored = read_report(path, config=config)
     computing = is_computing()
     status = report_status(stored, computing=computing)
@@ -217,23 +244,17 @@ def stored_report_block(
         "status": status,
         "computed_at": (stored or {}).get("computed_at"),
         "window_days": (stored or {}).get("window_days"),
-        "scan_since": (stored or {}).get("since"),
-        "scan_until": (stored or {}).get("until"),
         "computing": computing,
-        # THE CYCLE, not this store. `computing` above goes false the instant
-        # the report lands, while the relearn cache and the cost proposals the
-        # same pass feeds are still being built — so a surface reading only it
-        # asserts freshness over figures that are still the previous pass's.
-        # `scan_cycle.is_cycle_computing` covers the whole pass; a surface's
-        # "scanning" state is the OR of the two, never either alone.
-        "cycle_computing": scan_cycle.is_cycle_computing(),
-        # Build provenance. `computed_build` is the build that PRODUCED the
-        # stored figures (absent on anything written before this stamp existed);
-        # `build` is the one serving them. When they differ, the timestamp is
-        # still honest about age and no longer sufficient on its own — see
-        # `write_report`.
-        "computed_build": (stored or {}).get("tj_version"),
-        "build": tj_build(),
+        # THE CYCLE, THE BUILD AND THE WINDOW, from the ONE record the pass
+        # wrote — `cycle_id`, `cycle_computing`, `computed_build`/`build`/
+        # `build_provenance`, `scan_since`/`scan_until`, `provenance`. The keys
+        # used to be listed here AND again, by hand, in the relearn routes'
+        # payloads; `cycle_provenance.provenance_block` is now the single
+        # assembler, so the three feeds one ScanBar reads cannot spell a key
+        # differently or resolve staleness differently. It degrades to this
+        # store's legacy `tj_version`/`since`/`until` keys on an artifact
+        # written before the record existed.
+        **provenance_block(stored),
         # `degraded` is for the case a LATER scan failed after an earlier one
         # succeeded: the surface still renders the last good result, with the
         # failure disclosed beside it rather than silently pretending the last
@@ -349,6 +370,7 @@ def recompute_now(
     path: Path | None = None,
     window_days: int | None = None,
     until: Any | None = None,
+    provenance: CycleProvenance | None = None,
 ) -> dict[str, Any] | None:
     """Run every analyzer and store the result, on the CALLING thread.
 
@@ -357,6 +379,14 @@ def recompute_now(
     triggers (boot kick landing on the interval, or a user pressing rescan
     twice) cost one scan, not two. Callers that must not block a request thread
     use :func:`trigger_background_recompute` instead.
+
+    ``provenance`` is the CYCLE's record (``core/optimize/cycle_provenance.py``)
+    — the identity, the anchor, the window and the producing build, minted once
+    for the whole pass. When it is given it OWNS all of those, and ``until`` /
+    ``window_days`` are ignored: a cycle that let one store re-resolve its own
+    window is the divergence the record exists to remove. ``None`` means a lone
+    refresh, which mints its own record from its own arguments — the same "you
+    decide" rule the bare shared anchor already used.
 
     A failure is recorded via :func:`write_report_error` and re-raised to the
     caller's discretion only as a stored error — the last good report survives.
@@ -372,31 +402,44 @@ def recompute_now(
         from tokenjam.core.optimize import build_report, report_to_dict
         from tokenjam.utils.time_parse import utcnow
 
-        days = (
-            window_days if window_days is not None
-            else _window_days(config, getattr(db, "conn", None))
+        record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle(
+            config,
+            conn=getattr(db, "conn", None),
+            # Anything that is not a datetime is discarded rather than raised
+            # on: the anchor crosses a thread boundary, and a malformed one must
+            # not sink a pass that would otherwise have succeeded.
+            anchor=until if isinstance(until, datetime) else None,
+            window_days=window_days,
         )
-        # ONE anchor across a scan cycle. When several stores are refreshed
-        # together (`core/optimize/scan_cycle.py`) they subtract their window
-        # from the SAME instant, so two surfaces publishing one metric cannot
-        # cover windows offset from each other. `None` means a lone refresh,
-        # which owns its own anchor. Anything that is not a datetime is
-        # discarded rather than raised on: the anchor crosses a thread
-        # boundary, and a malformed one must not sink a pass that would
-        # otherwise have succeeded.
-        until = until if isinstance(until, datetime) else utcnow()
-        since = until - timedelta(days=days)
+        days = record.window_days if record.window_days is not None else _window_days(
+            config, getattr(db, "conn", None),
+        )
+        until_dt = record.until_dt or utcnow()
+        since_dt = record.since_dt or (until_dt - timedelta(days=days))
+        # PUT ANY FALLBACK BACK ON THE RECORD. `begin_cycle` degrades to `None`
+        # window fields rather than raising, so on that path the window resolved
+        # just above would otherwise live only in the flat keys — and the record,
+        # which is what every read prefers, would report no window at all. One
+        # artifact describing its window two ways is the exact defect the record
+        # replaced.
+        record = record.with_window(since_dt, until_dt, days)
         try:
-            report = build_report(db=db, config=config, since=since, until=until)
+            report = build_report(db=db, config=config, since=since_dt, until=until_dt)
         except Exception as exc:  # noqa: BLE001 - stored, never propagated
             return write_report_error(f"{type(exc).__name__}: {exc}", path, config=config)
+        # SEALED, NOT RE-DERIVED. `build_report` resolves the window's dominant
+        # persona exactly once (it is the skip gate's choke point), so the cycle
+        # takes that value onto the record it then hands to the relearn and cost
+        # legs — rather than each of them classifying the same window again.
+        record = record.with_persona(getattr(report, "persona", None))
         return write_report(
             report_to_dict(report),
             path,
             config=config,
-            window_days=days,
-            since=since.isoformat(),
-            until=until.isoformat(),
+            window_days=int(days),
+            since=since_dt.isoformat(),
+            until=until_dt.isoformat(),
+            provenance=record,
         )
     finally:
         _COMPUTING.clear()

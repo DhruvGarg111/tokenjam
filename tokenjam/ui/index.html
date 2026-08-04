@@ -7775,6 +7775,17 @@ function scanState(opt) {
     // is not the same as agreement — see ScanBar.
     computedBuild: (opt && opt.computed_build) || null,
     build: (opt && opt.build) || null,
+    // The SERVER's verdict on those two, not a second comparison of them here.
+    // 'match' | 'stale' | 'unknown', resolved once in
+    // `core/optimize/cycle_provenance.py` so the CLI, `--json` and the MCP
+    // server get the same answer this page shows. Absent on an older server,
+    // which `buildQualifier` falls back from.
+    buildProvenance: (opt && opt.build_provenance) || null,
+    // Which PASS produced these figures. One cycle writes three stores in
+    // sequence, so two surfaces can legitimately be a cycle apart; equal
+    // non-null ids are the only proof they are not. `null` means the artifact
+    // predates cycle identity, which is NOT "the same cycle".
+    cycleId: (opt && opt.cycle_id) || null,
     windowDays: (opt && opt.window_days) || null,
     degraded: !!(opt && opt.degraded),
     lastError: (opt && opt.last_error) || null,
@@ -7821,12 +7832,21 @@ async function rescanAnalyzers() { return apiPostOrDetail('/optimize/rescan', {}
 // timestamp is the whole truth), DIFFERENT build (the figures predate this
 // build; say so), and UNKNOWN (the result predates the stamp, so we cannot
 // vouch either way \u2014 which is NOT agreement and must not render as it).
-// Returns null when there is nothing honest to add.
+// Returns null when there is nothing honest to add. The verdict itself is the
+// SERVER's (`build_provenance`, resolved once in
+// `core/optimize/cycle_provenance.py`), because a browser re-deriving it is a
+// second derivation of one truth and the CLI/--json/MCP consumers would each
+// need a third. This function only turns the verdict into the sentence to show.
+// An older server sends no verdict, so the local comparison stays as the
+// fallback rather than the page going silent.
 function buildQualifier(scan) {
   if (!scan.computedAt) return null;              // nothing to qualify
   if (!scan.build) return null;                   // older server: no stance either way
-  if (!scan.computedBuild) return 'producing build unknown';
-  if (scan.computedBuild === scan.build) return null;
+  const verdict = scan.buildProvenance
+    || (!scan.computedBuild ? 'unknown'
+        : (scan.computedBuild === scan.build ? 'match' : 'stale'));
+  if (verdict === 'match') return null;
+  if (verdict === 'unknown') return 'producing build unknown';
   return 'computed by ' + scan.computedBuild + ', you are on ' + scan.build;
 }
 
@@ -12192,6 +12212,8 @@ function ReviewInboxView({ params }) {
         cycleComputing: r.cycle_computing === true,
         computedBuild: r.computed_build || null,
         build: r.build || null,
+        buildProvenance: r.build_provenance || null,
+        cycleId: r.cycle_id || null,
         clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
         failuresExamined: f.failures_examined,
         // Kept on the finding state even though the per-row span caption was
@@ -12296,6 +12318,8 @@ function ReviewInboxView({ params }) {
     // provenance. Same three cases ScanBar's `buildQualifier` resolves.
     computedBuild: d.computedBuild,
     build: d.build,
+    buildProvenance: d.buildProvenance,
+    cycleId: d.cycleId,
     degraded: costDegraded,
     lastError: costLastError,
     status: (d.status === 'never_run' && costStatus === 'never_run')

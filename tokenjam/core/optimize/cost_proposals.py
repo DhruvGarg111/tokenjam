@@ -2726,6 +2726,7 @@ def recompute_cost_proposals(
     agent_id: str | None = None,
     until: Any | None = None,
     report: Any | None = None,
+    provenance: Any | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
     cost findings into proposals, and write them into the shared proposal
@@ -2745,6 +2746,16 @@ def recompute_cost_proposals(
     so the Review inbox can show a "last refresh failed" warning instead of
     reading a permanently-empty tab as "nothing to report." A SUCCESSFUL
     recompute clears any previously-recorded error.
+
+    ``provenance`` is the CYCLE's record (``core/optimize/cycle_provenance.py``).
+    When it is present — the daemon path, where the report leg already minted
+    and sealed it — the window, the anchor and the persona come OFF it instead
+    of being resolved again here, and it is stored beside the proposals so this
+    artifact and the report carry the same ``cycle_id``. ``None`` means a lone
+    refresh (``tj optimize``, a direct call), which mints its own from the
+    values it resolves itself. An ``agent_id`` scope always resolves its own
+    persona: the cycle's label is window-wide, and a per-agent recompute is a
+    different population.
     """
     from datetime import timedelta
 
@@ -2757,6 +2768,11 @@ def recompute_cost_proposals(
         pricing_mode_for,
     )
     from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize.cycle_provenance import (
+        UNKNOWN as _PERSONA_UNKNOWN,
+        CycleProvenance,
+        begin_cycle,
+    )
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
@@ -2765,11 +2781,18 @@ def recompute_cost_proposals(
     _COST_COMPUTING.set()
     try:
         try:
+            # THE CYCLE'S RECORD, when there is one. It already carries the
+            # window, the anchor and the persona this pass resolved, so taking
+            # them off it is what makes this artifact and the report describe
+            # one measurement rather than two that happen to agree.
+            record = provenance if isinstance(provenance, CycleProvenance) else None
+            cycle_days = record.window_days if record is not None else None
             # None means "derive it" — the normal path. An explicit value is
             # a caller that already knows its own window (`tj optimize --since`),
             # and is honoured as given.
             effective_window_days = (
                 max(1, window_days) if window_days is not None
+                else int(cycle_days) if cycle_days
                 else cost_window_days_for(config, getattr(db, "conn", None))
             )
             # `until` is the anchor the trailing window is subtracted from.
@@ -2778,8 +2801,18 @@ def recompute_cost_proposals(
             # two surfaces publishing the same metric cannot end up covering
             # windows offset from each other. `None` means this is a lone
             # refresh and owns its own anchor.
-            until = _as_anchor(until) or utcnow()
-            since = until - timedelta(days=effective_window_days)
+            until = _as_anchor(until) or (
+                record.until_dt if record is not None else None
+            ) or utcnow()
+            # The record's own bound, EXCEPT when this caller overrode the
+            # length — an explicit `window_days` and the cycle's `since` would
+            # otherwise describe two different spans on one artifact.
+            since = (
+                record.since_dt
+                if record is not None and window_days is None
+                and record.since_dt is not None
+                else until - timedelta(days=effective_window_days)
+            )
             conn = getattr(db, "conn", None)
             # Persona decides which cost analyzers are worth running at all —
             # one with no fix this persona can apply is dropped BEFORE the
@@ -2788,10 +2821,23 @@ def recompute_cost_proposals(
             # the choke point); selecting the persona-scoped list here keeps
             # this surface honest on its own terms rather than relying on the
             # callee to undo an over-broad request.
-            persona = dominant_persona(
-                agent_persona_mix(conn, since, until, agent_id=agent_id) if conn is not None else {},
-                declared_plan=config_declared_plan(config),
-            )
+            #
+            # THE CYCLE'S SEALED PERSONA WHEN THERE IS ONE. `build_report`
+            # already classified this window once and the record carries that
+            # verdict, so a window-wide cycle recompute reads it instead of
+            # running the classification again over the same connection and
+            # window. An `agent_id` scope is a different population and always
+            # resolves its own, and an unsealed record falls through to the
+            # derivation below rather than gating on "unknown".
+            cycle_persona = record.persona if record is not None else None
+            if agent_id is None and cycle_persona and cycle_persona != _PERSONA_UNKNOWN:
+                persona = cycle_persona
+            else:
+                persona = dominant_persona(
+                    agent_persona_mix(conn, since, until, agent_id=agent_id)
+                    if conn is not None else {},
+                    declared_plan=config_declared_plan(config),
+                )
             # A REPORT THE CALLER ALREADY BUILT, when there is one. This
             # function used to always build its own, which meant every scan
             # cycle ran `build_report` TWICE over the same window — so an
@@ -2855,8 +2901,16 @@ def recompute_cost_proposals(
                 # The RESOLVED bounds, not just the length. A day count alone
                 # cannot be compared against the analyzer report's own
                 # scan_since/scan_until, which is what made a per-analyzer
-                # disagreement between the two surfaces undiagnosable.
+                # disagreement between the two surfaces undiagnosable. Both
+                # spellings now come off ONE record — see
+                # `core/optimize/cycle_provenance.py`.
                 since=since.isoformat(), until=until.isoformat(),
+                # The cycle's record, or this lone refresh's own, so the stored
+                # proposals name the pass and the build that produced them.
+                provenance=record if record is not None else begin_cycle(
+                    config, conn=conn, anchor=until, since=since,
+                    window_days=effective_window_days, persona=persona,
+                ),
             )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
