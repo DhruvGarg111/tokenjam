@@ -582,7 +582,8 @@ def run(ctx: AnalyzerContext) -> None:
     # global catalog files always; project-scoped ones only for the repo
     # this run is being invoked from.
     provenance_index = build_provenance_index(
-        find_repo_root(Path.cwd()), store=store_for(getattr(ctx, "conn", None)),
+        find_repo_root(Path.cwd()),
+        store=store_for(getattr(ctx, "conn", None), getattr(ctx, "write_lock", None)),
     )
 
     per_prompt: list[BloatPrompt] = []

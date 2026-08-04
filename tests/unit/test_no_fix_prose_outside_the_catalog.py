@@ -90,14 +90,24 @@ _CARD_BUILDERS = (
     ROOT / "cli" / "cmd_optimize.py",
 )
 
-#: `core/summarize/` was entirely outside the scanned roots, which is a whole
-#: package of user-facing route advice nothing checked. It is scanned as a tree
-#: rather than as a file list so a module added there tomorrow is covered
-#: without anyone remembering to extend anything — a hand-listed root set is how
-#: this gap existed in the first place.
-_SCANNED_TREES = (
-    ROOT / "core" / "summarize",
-)
+#: EVERY module under `tokenjam/`, derived by walking the tree.
+#:
+#: There is no root list any more, because a hand-maintained root list is how
+#: every gap in this guard arose. `core/summarize/` was outside it — a whole
+#: package of user-facing route advice nothing checked. So were
+#: `core/agent_config.py` and `core/optimize/mcp_probe.py`, added by this very
+#: change. Each omission was invisible in the same way: the guard reported green
+#: over files it never opened, and nobody can tell that from green over files it
+#: read and cleared.
+#:
+#: Walking the tree costs one AST parse per module and removes the failure mode
+#: outright. A module added tomorrow, anywhere, is covered without anyone
+#: remembering anything.
+def _every_module() -> list[Path]:
+    return sorted(
+        p for p in ROOT.rglob("*.py")
+        if p.name != "__init__.py"
+    )
 
 #: Names whose value IS the fix a user is shown or writes into a file. Slot
 #: names rather than a guess at prose: what makes a string a fix is where it
@@ -108,7 +118,7 @@ _SCANNED_TREES = (
 _FIX_SLOTS = frozenset({
     "fix", "proposed_fix", "one_paste_fix", "artifact_text",
     "remedy_snippet", "fix_template", "suggestion",
-    "advise_text", "advice_text", "recommendation", "guidance",
+    "advise_text", "advice_text", "advice", "recommendation", "guidance",
 })
 
 #: The only calls that may produce fix text. Reaching the catalog through any
@@ -138,7 +148,7 @@ def _names_a_slot(name: str) -> bool:
     return name.lower().strip("_") in _FIX_SLOTS
 
 
-def _fix_carrying_locals(tree: ast.AST) -> set[str]:
+def _fix_carrying_locals(tree: ast.AST) -> tuple[set[str], set[str]]:
     """Local names whose value ends up in a fix slot, found by TRACING.
 
     This replaces a substring test over constant names, which is the check that
@@ -153,16 +163,39 @@ def _fix_carrying_locals(tree: ast.AST) -> set[str]:
     otherwise reopen the hole.
     """
     carriers: set[str] = set()
+    producers: set[str] = set()
     for _ in range(4):  # transitive closure; the real depth is 1-2
-        before = len(carriers)
+        before = len(carriers) + len(producers)
 
         def _note(value: ast.AST) -> None:
-            if isinstance(value, ast.Name):
-                carriers.add(value.id)
-            elif isinstance(value, (ast.BinOp, ast.JoinedStr, ast.IfExp)):
-                for child in ast.walk(value):
-                    if isinstance(child, ast.Name):
-                        carriers.add(child.id)
+            """Every name and every producer function this value draws text from.
+
+            Walks the WHOLE subtree rather than switching on a handful of node
+            types. The type-switch version handled ``Name``/``BinOp``/
+            ``JoinedStr``/``IfExp`` and therefore never looked inside a
+            ``Call`` — so a helper (``fix = _compose(row)``), a template
+            constant (``fix = _ADVICE.format(...)``) and a join
+            (``fix = "".join(parts)``) all passed unread, while ``%``-formatting
+            was caught purely because ``%`` happens to be a ``BinOp``. That is
+            an arbitrary boundary, not a designed one.
+
+            Over-inclusive on purpose, and safely so: this only ever runs on an
+            expression whose value REACHES a fix slot, so everything inside it
+            genuinely contributes to the text a user is shown.
+            """
+            for child in ast.walk(value):
+                if isinstance(child, ast.Name):
+                    carriers.add(child.id)
+                elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                    # `_compose(row)` — the callee's own returns are fix text.
+                    producers.add(child.func.id)
+                elif isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                    # `_ADVICE.format(...)`, `"".join(parts)` — the receiver
+                    # holds the template; its args hold the pieces. `ast.walk`
+                    # above already reaches both, this branch is here so a
+                    # method call on a plain constant is not mistaken for a
+                    # producer function.
+                    pass
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -183,25 +216,55 @@ def _fix_carrying_locals(tree: ast.AST) -> set[str]:
                         target.id in _FIX_SLOTS or target.id in carriers
                     ):
                         _note(node.value)
-        if len(carriers) == before:
+        # A producer function's RETURN values are fix text too, so they feed
+        # the next round the same way an assignment does.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in producers:
+                for inner in ast.walk(node):
+                    if isinstance(inner, ast.Return) and inner.value is not None:
+                        _note(inner.value)
+        if len(carriers) + len(producers) == before:
             break
-    return carriers
+    return carriers, producers
+
+
+def _is_catalog_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+    return name in _CATALOG_CALLS
 
 
 def _static_text(node: ast.AST) -> tuple[int, str]:
-    """``(longest contiguous literal run, all literal text joined)``.
+    """``(longest contiguous literal run, all literal text joined)`` — EXCLUDING
+    anything inside a catalog call.
 
-    Both are needed. The run catches a rule quoted whole; the joined text is
-    what the second detector counts sentences in, and it is what makes prose
-    stitched around interpolated evidence visible at all.
+    Both measures are needed: the run catches a rule quoted whole, and the joined
+    text is what the second detector counts sentences in, which is what makes
+    prose stitched around interpolated evidence visible at all.
+
+    The exclusion is the fix for the widest escape this guard had. It used to
+    ask "does a catalog call appear anywhere in this subtree?" and, if so, return
+    before computing any verdict — so ONE ``fix_text(...)`` whitelisted unlimited
+    adjacent hardcoded prose, and ``fix = ("<250 chars of policy> " +
+    fix_text("a.b"))`` passed clean. This PR introduces exactly that shape in two
+    places, legitimately and briefly, and the old rule bounded that half not at
+    all. Skipping only the catalog call's own subtree measures what the author
+    actually wrote and leaves what the catalog supplied out of it.
     """
     longest = 0
     parts: list[str] = []
-    for child in ast.walk(node):
-        if isinstance(child, ast.Constant) and isinstance(child.value, str):
-            stripped = child.value.strip()
+    stack: list[ast.AST] = [node]
+    while stack:
+        current = stack.pop()
+        if current is not node and _is_catalog_call(current):
+            continue  # catalogued text is linted where it lives
+        if isinstance(current, ast.Constant) and isinstance(current.value, str):
+            stripped = current.value.strip()
             longest = max(longest, len(stripped))
-            parts.append(child.value)
+            parts.append(current.value)
+        stack.extend(ast.iter_child_nodes(current))
     return longest, "".join(parts)
 
 
@@ -229,20 +292,11 @@ def _verdict(node: ast.AST) -> str:
     return ""
 
 
-def _resolves_through_the_catalog(node: ast.AST) -> bool:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Call):
-            func = child.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name in _CATALOG_CALLS:
-                return True
-    return False
-
-
-def _offenders_in(path: Path) -> list[str]:
+def _offenders_in(path: Path) -> list[dict]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    carriers = _fix_carrying_locals(tree)
-    out: list[str] = []
+    carriers, producers = _fix_carrying_locals(tree)
+    out: list[dict] = []
+    module = path.relative_to(ROOT).as_posix() if ROOT in path.parents else path.name
 
     def _is_fix_slot(node: ast.AST) -> bool:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -251,15 +305,33 @@ def _offenders_in(path: Path) -> list[str]:
             return _names_a_slot(node.id) or node.id in carriers
         return False
 
-    def check(slot: str, value: ast.AST) -> None:
-        if _resolves_through_the_catalog(value):
-            return
+    def check(slot: str, value: ast.AST) -> None:  # noqa: ANN202
+        # No early return for "a catalog call appears somewhere in here" — that
+        # was the escape. `_static_text` skips the catalog call's own subtree
+        # and measures the rest, so composing catalogued text with a short
+        # grounded sentence passes while composing it with a policy paragraph
+        # does not.
         verdict = _verdict(value)
         if not verdict:
             return
-        out.append(
-            f"{path.name}:{getattr(value, 'lineno', '?')}: {slot} carries {verdict}",
-        )
+        run, joined = _static_text(value)
+        out.append({
+            "module": module,
+            "slot": slot,
+            "lineno": getattr(value, "lineno", 0),
+            "run": run,
+            "total": len(joined.strip()),
+            "sentences": _sentences(joined),
+            "verdict": verdict,
+        })
+
+    # A producer function's returns ARE the fix text — check them where they
+    # are written, so a helper cannot launder prose out of the guard's sight.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in producers:
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Return) and inner.value is not None:
+                    check(f"{node.name}() return", inner.value)
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AugAssign)):
@@ -281,100 +353,158 @@ def _offenders_in(path: Path) -> list[str]:
     return out
 
 
-@pytest.mark.parametrize(
-    "module",
-    sorted(p.name for p in ANALYZERS.glob("*.py") if p.name != "__init__.py"),
-)
-def test_no_analyzer_defines_its_own_fix_prose(module):
-    """THE guard. An analyzer names the fix it hands out; it does not author it.
+#: Uncatalogued fix prose that EXISTS TODAY, keyed by a fingerprint of each
+#: offending text rather than by a count.
+#:
+#: A RATCHET, not an allowlist, and the difference is the whole point. Closing
+#: the guard's escapes made this prose visible for the first time — it was
+#: always there; the guard was structurally incapable of reading it, which is
+#: the worst possible state for a check to be in. Migrating it changes what a
+#: dozen cards say and interacts with the catalog's duplicate lint, so it
+#: belongs in its own review.
+#:
+#: Keyed on CONTENT, not on how many. A count-based pin (`len(offenders) == 18`)
+#: passes when one uncatalogued text is swapped for a different one, which is
+#: exactly the drift a ratchet exists to stop. The fingerprint below changes if
+#: any text changes, so adding one fails, editing one fails, and removing one
+#: fails until this set comes down with it. It can only be driven to empty.
+#:
+#: `core/summarize/route.py`'s entries are a deliberate deferral rather than an
+#: oversight: that file's advisory prose is (a) verbatim quotation of Anthropic's
+#: published guidance, which a `FixRecord` would subject to lints written for
+#: text we author, and (b) diagnosis of a measured prose SHAPE rather than an
+#: instruction. Both may belong in the catalog eventually; neither is a
+#: mechanical move.
+_UNCATALOGUED: dict[str, set[str]] = {}
 
-    Failing this means a policy has acquired a second home, and a second
-    definition of one policy is two policies that will disagree — which is not
-    a prediction, it is what happened four times over. Move the text to
-    ``core/fixes/registry.py`` and reference it with ``fix_text``; the record is
-    then linted for every property the loose constant was never checked
-    against.
+#: One line per uncatalogued text: `<module>:<slot>:<longest run>:<total
+#: static chars>:<sentences>`. Generated, then committed — see _UNCATALOGUED.
+_RATCHET_RAW = """
+core/context_diagnostic.py:_fix_for() return:130:130:1
+core/context_diagnostic.py:_fix_for() return:161:161:1
+core/context_diagnostic.py:_fix_for() return:62:62:1
+core/context_diagnostic.py:_fix_for() return:79:94:2
+core/context_diagnostic.py:_fix_for() return:94:126:1
+core/optimize/analyzers/relearn.py:prompt:305:383:5
+core/optimize/cost_proposals.py:MODEL_SWAP_QUALITY_CAVEAT:183:183:2
+core/optimize/cost_proposals.py:PAST_OVERSPEND_OBSERVED_NOTE:170:170:2
+core/optimize/cost_proposals.py:_driver_role_advice() return:63:63:1
+core/optimize/cost_proposals.py:_driver_role_proposals() return:65:270:1
+core/optimize/cost_proposals.py:advise:103:190:1
+core/optimize/cost_proposals.py:advise:106:113:2
+core/optimize/cost_proposals.py:advise:133:133:1
+core/optimize/cost_proposals.py:advise:134:278:2
+core/optimize/cost_proposals.py:advise:165:255:2
+core/optimize/cost_proposals.py:advise:172:239:3
+core/optimize/cost_proposals.py:advise:180:180:2
+core/optimize/cost_proposals.py:advise:205:205:2
+core/optimize/cost_proposals.py:advise:44:44:1
+core/optimize/cost_proposals.py:advise:55:108:1
+core/optimize/cost_proposals.py:advise:68:212:2
+core/optimize/cost_proposals.py:advise:77:141:1
+core/optimize/cost_proposals.py:advise:88:211:2
+core/optimize/cost_proposals.py:advise_extra:162:253:3
+core/optimize/cost_proposals.py:advise_extra:360:485:3
+core/optimize/cost_proposals.py:advise_text=:190:196:2
+core/optimize/cost_proposals.py:advise_text=:53:59:1
+core/optimize/cost_proposals.py:evidence:110:110:1
+core/optimize/cost_proposals.py:evidence:126:155:1
+core/optimize/cost_proposals.py:evidence:40:82:2
+core/optimize/cost_proposals.py:evidence:42:139:1
+core/optimize/cost_proposals.py:evidence:42:169:1
+core/optimize/cost_proposals.py:evidence:43:95:2
+core/optimize/cost_proposals.py:evidence:47:73:1
+core/optimize/cost_proposals.py:evidence:50:109:2
+core/optimize/cost_proposals.py:evidence:65:99:1
+core/optimize/cost_proposals.py:evidence:67:146:2
+core/optimize/cost_proposals.py:evidence:71:114:2
+core/optimize/cost_proposals.py:evidence:75:166:1
+core/optimize/cost_proposals.py:evidence:84:136:2
+core/optimize/cost_proposals.py:evidence:96:273:2
+core/optimize/cost_proposals.py:one_paste:59:94:2
+core/optimize/cost_proposals.py:reversible_note:133:250:2
+core/summarize/route.py:BEST_PRACTICES_SOURCE:46:46:1
+core/summarize/route.py:HOOK_QUOTE:107:107:1
+core/summarize/route.py:PATH_SCOPE_QUOTE:126:126:1
+core/summarize/route.py:PRUNE_EXCLUDE_QUOTE:285:285:1
+core/summarize/route.py:PRUNE_TEST_QUOTE:88:88:1
+core/summarize/route.py:SPECIFICITY_QUOTE:91:91:1
+core/summarize/route.py:_ALREADY_SCOPED:154:154:1
+core/summarize/route.py:_NOT_INSTRUCTION:228:228:2
+core/summarize/route.py:_PRUNE_ADVICE:370:370:2
+core/summarize/route.py:_QUALITY_TAX:520:520:4
+core/summarize/route.py:_SCOPE_ADVICE:334:334:2
+core/summarize/route.py:_TARGET_STATEMENT:499:499:4
+mcp/server.py:"recommendation":166:166:2
+"""
+
+
+
+
+def _fingerprint(offender: dict) -> str:
+    """Identity of one offending text, independent of where it sits.
+
+    Deliberately excludes the line number: prose that merely moved is the same
+    prose, and a ratchet that fires on every unrelated edit above it teaches
+    people to re-baseline it without reading.
     """
-    offenders = _offenders_in(ANALYZERS / module)
-    assert not offenders, (
-        "fix prose defined outside the catalog — move it to "
-        "core/fixes/registry.py and read it back with fix_text():\n  "
-        + "\n  ".join(offenders)
+    return (
+        f"{offender['module']}:{offender['slot']}:{offender['run']}:"
+        f"{offender['total']}:{offender['sentences']}"
     )
 
 
-#: HOW MUCH uncatalogued prose each card builder still holds. A RATCHET, not an
-#: allowlist, and the difference is the whole point.
-#:
-#: Closing the three escapes above made 18 per-card advisory texts in
-#: ``cost_proposals.py`` visible for the first time. They were always there; the
-#: guard simply could not see them, which is the worst possible state — a check
-#: reporting a clean bill of health over prose it was structurally incapable of
-#: reading. Migrating all of them is a real change to what a dozen cards say and
-#: belongs in its own review, so what is recorded here is the SIZE of the
-#: remaining gap.
-#:
-#: An allowlist names what is excused and quietly grows. This is asserted as an
-#: EXACT count in both directions: adding one more uncatalogued text fails
-#: immediately, and moving one into the catalog also fails until the number here
-#: comes down with it. It can only be driven to zero, and the failure message
-#: lists exactly which texts are left.
-_UNCATALOGUED_RATCHET = {
-    "cost_proposals.py": 18,
-    "relearn_apply.py": 0,
-    "relearn_proposals.py": 0,
-    "cmd_optimize.py": 0,
-}
+def _load_ratchet() -> dict[str, set[str]]:
+    if _UNCATALOGUED:
+        return _UNCATALOGUED
+    for line in _RATCHET_RAW.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        module = line.split(":", 1)[0]
+        _UNCATALOGUED.setdefault(module, set()).add(line)
+    return _UNCATALOGUED
 
 
-@pytest.mark.parametrize("module", [p.name for p in _CARD_BUILDERS])
-def test_no_card_builder_defines_its_own_fix_prose(module):
-    """The same rule where the cards are actually assembled.
+def test_no_module_defines_fix_prose_outside_the_catalog():
+    """THE guard, over EVERY module under `tokenjam/`.
 
-    An analyzer produces a finding; these modules turn it into the words a user
-    reads and the block a user pastes. A rule authored here is exactly as
-    unlinted as one authored in an analyzer, and harder to notice, because the
-    surrounding code is legitimately full of per-row evidence prose.
-
-    Ratcheted rather than absolute for ``cost_proposals.py`` — see
-    :data:`_UNCATALOGUED_RATCHET` for why a recorded, shrinking number beats
-    both a green lie and an allowlist.
+    One derived scan replaces three hand-listed root sets. Failing this means
+    either a policy has acquired a second home — move it to
+    ``core/fixes/registry.py`` and read it back with ``fix_text`` — or an
+    existing one moved into the catalog and the ratchet below has not caught up
+    with it. The message says which.
     """
-    path = next(p for p in _CARD_BUILDERS if p.name == module)
-    offenders = _offenders_in(path)
-    allowed = _UNCATALOGUED_RATCHET[module]
-    assert len(offenders) == allowed, (
-        f"{module} holds {len(offenders)} uncatalogued fix texts, and this "
-        f"guard is pinned at {allowed}. If you ADDED one: move it to "
-        f"core/fixes/registry.py and read it back with fix_text(). If you "
-        f"MOVED one into the catalog: lower the number in "
-        f"_UNCATALOGUED_RATCHET so the gap that is left stays honest.\n  "
-        + "\n  ".join(offenders)
-    )
+    ratchet = _load_ratchet()
+    found: dict[str, set[str]] = {}
+    detail: dict[str, list[str]] = {}
+    for path in _every_module():
+        offenders = _offenders_in(path)
+        for offender in offenders:
+            key = _fingerprint(offender)
+            found.setdefault(offender["module"], set()).add(key)
+            detail.setdefault(offender["module"], []).append(
+                f"{offender['module']}:{offender['lineno']}: {offender['slot']} "
+                f"carries {offender['verdict']}",
+            )
 
+    new = {m: sorted(v - ratchet.get(m, set())) for m, v in found.items()}
+    new = {m: v for m, v in new.items() if v}
+    gone = {m: sorted(v - found.get(m, set())) for m, v in ratchet.items()}
+    gone = {m: v for m, v in gone.items() if v}
 
-@pytest.mark.parametrize(
-    "module",
-    sorted(
-        str(p.relative_to(ROOT))
-        for tree in _SCANNED_TREES for p in tree.rglob("*.py")
-        if p.name != "__init__.py"
-    ),
-)
-def test_no_summarize_module_defines_its_own_fix_prose(module):
-    """`core/summarize/` was outside the scanned roots entirely.
-
-    A whole package of user-facing route advice — prune, path-scope, hook,
-    expire — with nothing checking any of it against the catalog. The gap was
-    not that the checks were weak there; it was that they never ran there, and
-    a root set nobody re-derives is exactly how that happens. This walks the
-    tree, so a module added tomorrow is covered without anyone extending a list.
-    """
-    offenders = _offenders_in(ROOT / module)
-    assert not offenders, (
-        "fix prose defined outside the catalog — move it to "
+    assert not new, (
+        "NEW fix prose defined outside the catalog — move it to "
         "core/fixes/registry.py and read it back with fix_text():\n  "
-        + "\n  ".join(offenders)
+        + "\n  ".join(
+            line for module in new for line in detail.get(module, [])
+        )
+    )
+    assert not gone, (
+        "uncatalogued prose recorded in the ratchet is no longer there. If you "
+        "moved it into the catalog, delete its line from _RATCHET_RAW so the "
+        "gap that is LEFT stays honest:\n  "
+        + "\n  ".join(f"{m}: {k}" for m, ks in gone.items() for k in ks)
     )
 
 
@@ -405,7 +535,7 @@ def build(files, plural):
     try:
         offenders = _offenders_in(tmp)
         assert offenders, "the guard still cannot see prose behind an advise slot"
-        assert "advise" in offenders[0]
+        assert offenders[0]["slot"] == "advise"
     finally:
         tmp.unlink()
 

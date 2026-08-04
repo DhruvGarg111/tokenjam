@@ -1394,3 +1394,112 @@ def test_the_enumeration_reads_back_what_it_ingested(tmp_path):
     # The spec travels with the record, so the probe never re-reads the file.
     assert servers["apollo"].spec == {"command": "x"}
     assert servers["apollo"].config_id
+
+
+# --- One analyzer must not destroy the whole report -------------------------
+
+def test_a_raising_analyzer_is_isolated_and_disclosed(tmp_path, monkeypatch):
+    """A bare dispatch loop let one analyzer take `build_report` down with it.
+
+    Survivable while every analyzer was pure in-memory computation; not
+    survivable once one of them could hit a database write conflict. But
+    isolation ALONE would be the worse bug — an analyzer that vanishes silently
+    reads as "found nothing", a positive claim the run has no evidence for. So
+    the failure has to be recorded, not merely swallowed.
+    """
+    import duckdb
+
+    from tokenjam.core.config import TjConfig
+    from tokenjam.core.db import run_migrations
+    from tokenjam.core.optimize import runner
+    from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
+
+    conn = duckdb.connect(str(tmp_path / "t.duckdb"))
+    run_migrations(conn)
+
+    class _Db:
+        pass
+
+    db = _Db()
+    db.conn = conn
+
+    def _explode(_ctx):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(ANALYZER_REGISTRY, "deadweight", _explode)
+    report = runner.build_report(
+        db, TjConfig(version="1"), since=_SINCE, until=_UNTIL,
+        findings=["deadweight"],
+    )
+    conn.close()
+
+    # It did not take the report down...
+    assert report is not None
+    # ...and it is DISCLOSED, not silently absent.
+    assert "deadweight" in report.analyzer_errors
+    assert "kaboom" in report.analyzer_errors["deadweight"]
+    assert any("did not complete" in n for n in report.notes)
+
+
+def test_the_cli_cannot_render_the_total_without_its_measurement_disclosure(capsys):
+    """An undisclosed FLOOR rendered as a total.
+
+    The terminal showed a priced dollar figure for the servers that could be
+    measured and said nothing about the ones excluded from it. The number was
+    honest; the presentation was not.
+    """
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        DeadweightFinding,
+        ServerDeadweight,
+    )
+
+    measured = ServerDeadweight(
+        name="apollo", scope="user", source="/x/.claude.json", sessions_present=6,
+        invocations=0, deferred_sessions=0, dead=True,
+        estimated_tax_tokens_per_session=4000, estimated_tax_tokens_window=24000,
+        tax_construction="measured", fix="Remove it.",
+        estimated_tax_usd_window=1.23, priced_model="claude-sonnet-4-5",
+        schema_tokens_measured=4000,
+    )
+    finding = DeadweightFinding(
+        sessions_scanned=6, configured_servers=2, servers=[measured],
+        dead_servers=[measured], past_overspend_usd=1.23,
+        past_overspend_tokens=24000, servers_measured=1, servers_unmeasured=1,
+    )
+    finding.measurement_note = (
+        "MEASUREMENT COVERAGE. 1 of 2 configured MCP server(s) had their schema "
+        "size measured; the other 1 could not be measured and contributes "
+        "NOTHING, so every total here is a floor."
+    )
+    _render_deadweight(finding, pricing_mode="api", marker="1")
+    out = capsys.readouterr().out
+    assert "apollo" in out
+    assert "MEASUREMENT COVERAGE" in out
+    assert "floor" in out
+
+
+def test_a_server_measured_to_cost_nothing_gets_no_card(tmp_path):
+    """`tokens or None` coerces a measured ZERO to None while the dollar figure
+    stays a real 0.0 — a card reading `None tokens / $0.00`, which is the mixed
+    basis Critical Rule 28 forbids. Reachable, not hypothetical: a server
+    exposing zero tools measures to zero tokens.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        DeadweightFinding,
+        ServerDeadweight,
+    )
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+
+    empty = ServerDeadweight(
+        name="empty", scope="user", source="/x/.claude.json", sessions_present=6,
+        invocations=0, deferred_sessions=0, dead=True,
+        estimated_tax_tokens_per_session=0, estimated_tax_tokens_window=0,
+        tax_construction="measured: 0 tools", fix="Remove it.",
+        estimated_tax_usd_window=0.0, priced_model="claude-sonnet-4-5",
+        schema_tokens_measured=0, measurement_status="measured",
+    )
+    finding = DeadweightFinding(
+        sessions_scanned=6, configured_servers=1, servers=[empty], dead_servers=[empty],
+    )
+    assert _deadweight_to_proposals(finding) == []

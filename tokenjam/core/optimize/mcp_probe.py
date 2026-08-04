@@ -14,13 +14,30 @@ tools it has, serialize those schemas the way they are injected, and count that.
 **What "start it" means, and its limits.** For a stdio server this is a real
 subprocess on the user's machine. Three properties are load-bearing:
 
-* **Read-only.** Exactly two requests are ever sent — ``initialize`` and
-  ``tools/list`` — plus the ``notifications/initialized`` the protocol requires
-  between them. ``tools/call``, ``resources/read`` and ``prompts/get`` are never
-  issued, so nothing this module does can make a server act on the world.
-* **Bounded and terminated.** Every server gets one time budget covering
-  spawn, handshake and listing. stdin is closed, then the process is asked to
-  terminate, then killed if it does not. A probe never leaves a process behind.
+* **Read-only AT THE PROTOCOL LAYER, which is not the same as harmless.**
+  Exactly two requests are ever sent — ``initialize`` and ``tools/list`` — plus
+  the ``notifications/initialized`` the protocol requires between them.
+  ``tools/call``, ``resources/read`` and ``prompts/get`` are never issued, so no
+  REQUEST from this module asks a server to act on the world.
+
+  Starting the process is a different matter and this module cannot make any
+  promise about it. The command comes from the user's own config and does
+  whatever it does on startup: an ``npx -y`` spec fetches from the network, a
+  server may open connections, refresh an OAuth token, write a lock file or a
+  cache. That is inherent to "start it and ask what tools it has" — there is no
+  way to learn a server's real schema size without running it — so the honest
+  statement is that the PROTOCOL surface is read-only and process startup is the
+  user's own command, gated behind an off-by-default setting rather than
+  described as safe.
+* **Bounded and terminated, including the tree.** Every server gets one time
+  budget covering spawn, handshake and listing. stdin closes, then the child's
+  whole PROCESS GROUP is signalled, then killed if it does not go — the group
+  rather than the child because an ``npx -y <pkg>`` spec makes npx the child and
+  the real server its grandchild, so signalling the child alone leaves the
+  server running. Children are also registered for an ``atexit`` sweep, so an
+  interpreter killed between spawn and terminate (an MCP client timing out the
+  tool call that triggered the pass is the realistic case) does not orphan the
+  user's servers.
 * **Never a fabricated answer.** A server that will not start, does not respond,
   or answers something unparseable returns a measurement with ``tokens = None``
   and a status saying which of those happened. There is no default to fall back
@@ -38,10 +55,12 @@ once and re-read thereafter; changing its command, args or env invalidates it.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import queue
+import signal
 import subprocess
 import threading
 import time
@@ -244,6 +263,60 @@ def _read_response(
             return message
 
 
+#: POSIX gives a probe child its own process group so the whole tree can be
+#: signalled; Windows has no equivalent here, so the group calls degrade to
+#: signalling the direct child.
+_CAN_GROUP_SIGNAL = hasattr(os, "killpg") and hasattr(os, "getpgid")
+
+#: Probe children that have not been reaped yet. An interpreter dying between
+#: spawn and terminate — the MCP client timing out the tool call that triggered
+#: the pass is the realistic case — would otherwise leave the user's MCP servers
+#: running with nothing left to shut them down.
+_LIVE_CHILDREN: "set[subprocess.Popen]" = set()
+_LIVE_CHILDREN_LOCK = threading.Lock()
+
+
+def _register_child(proc: subprocess.Popen) -> None:
+    with _LIVE_CHILDREN_LOCK:
+        _LIVE_CHILDREN.add(proc)
+
+
+def _forget_child(proc: subprocess.Popen) -> None:
+    with _LIVE_CHILDREN_LOCK:
+        _LIVE_CHILDREN.discard(proc)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> bool:
+    """Signal the child's whole process group, falling back to the child.
+
+    A spec like ``npx -y <pkg>`` makes npx the direct child and the real server
+    its grandchild, so signalling only the child leaves the server alive.
+    """
+    if _CAN_GROUP_SIGNAL:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+    try:
+        proc.send_signal(sig)
+        return True
+    except (OSError, ProcessLookupError, ValueError):
+        return False
+
+
+def _sweep_live_children() -> None:
+    """Kill anything still running at interpreter exit. Registered with atexit."""
+    with _LIVE_CHILDREN_LOCK:
+        stragglers = list(_LIVE_CHILDREN)
+    for proc in stragglers:
+        if proc.poll() is None:
+            _signal_group(proc, signal.SIGKILL)
+
+
+atexit.register(_sweep_live_children)
+
+
 def _terminate(proc: subprocess.Popen) -> None:
     """Close the child down without leaving it behind, in escalating order.
 
@@ -260,12 +333,13 @@ def _terminate(proc: subprocess.Popen) -> None:
     except OSError:
         pass
     if proc.poll() is None:
+        # The GROUP, not just the child — see `_signal_group`.
+        _signal_group(proc, signal.SIGTERM)
         try:
-            proc.terminate()
             proc.wait(timeout=3)
         except (subprocess.TimeoutExpired, OSError):
+            _signal_group(proc, signal.SIGKILL)
             try:
-                proc.kill()
                 proc.wait(timeout=3)
             except (subprocess.TimeoutExpired, OSError):
                 log.debug("MCP probe child did not exit after kill")
@@ -274,6 +348,7 @@ def _terminate(proc: subprocess.Popen) -> None:
             proc.stdout.close()
     except (OSError, RuntimeError, ValueError):
         pass
+    _forget_child(proc)
 
 
 def probe_stdio_server(
@@ -306,7 +381,17 @@ def probe_stdio_server(
             cwd=str(spec.get("cwd")) if spec.get("cwd") else None,
             text=True,
             bufsize=1,
+            # Own process group, so the ORPHAN case is recoverable. `_terminate`
+            # signals the whole group rather than just the direct child: a spec
+            # like `npx -y <pkg>` makes npx the child and the real server its
+            # grandchild, so signalling the child alone leaves the server
+            # running. And if this process is killed outright — an MCP client
+            # timing out the tool call that triggered the pass, say — the
+            # registry below is what the atexit sweep uses to take the group
+            # down instead of leaving the user's servers running.
+            start_new_session=_CAN_GROUP_SIGNAL,
         )
+        _register_child(proc)
     except (OSError, ValueError) as exc:
         return SchemaMeasurement(
             server=name, status=ac.MEASURE_UNREACHABLE,

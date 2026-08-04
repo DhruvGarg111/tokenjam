@@ -49,7 +49,10 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
+import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +63,8 @@ from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 from tokenjam.utils.time_parse import utcnow
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from contextlib import AbstractContextManager
+
     import duckdb
 
 log = logging.getLogger(__name__)
@@ -216,6 +221,20 @@ MEASUREMENT_DETAIL_KEY = "measurement"
 class AgentConfigStore:
     """Where ingested config lives. Two implementations, one contract."""
 
+    @property
+    def degraded(self) -> bool:
+        """Whether this store failed to hold everything it was given.
+
+        Read by consumers that would otherwise turn an empty result into a
+        positive claim. An in-memory store cannot degrade; the DuckDB one can,
+        and says so rather than answering later reads as though the config
+        surface were genuinely empty.
+        """
+        return False
+
+    def mark_degraded(self, what: str, exc: BaseException) -> None:
+        """Record that persistence failed. No-op where it cannot."""
+
     def upsert(self, records: Sequence[ConfigRecord]) -> None:
         raise NotImplementedError
 
@@ -334,21 +353,119 @@ class InMemoryAgentConfigStore(AgentConfigStore):
         )
 
 
+#: How many times a conflicting write is retried before this store gives up on
+#: persistence for that row and serves the pass from its in-memory mirror.
+WRITE_RETRIES = 4
+
+#: Base sleep between retries, doubled each attempt with a little jitter. Short:
+#: the conflicting transaction is another analyzer pass writing the same handful
+#: of rows, not a long job.
+WRITE_RETRY_BACKOFF_SECONDS = 0.02
+
+#: DuckDB's write-write failures, by exception NAME rather than by class.
+#: Matching on the name keeps this working across the two shapes actually
+#: observed for the identical race — ``TransactionException`` ("Conflict on
+#: tuple deletion!") and ``ConstraintException`` ("Duplicate key ... violates
+#: primary key constraint") — without importing DuckDB's exception hierarchy
+#: into a module that must also work when the store is in-memory.
+_RETRYABLE_WRITE_ERRORS = ("TransactionException", "ConstraintException")
+
+
+def _is_write_conflict(exc: BaseException) -> bool:
+    return type(exc).__name__ in _RETRYABLE_WRITE_ERRORS
+
+
 class DuckDBAgentConfigStore(AgentConfigStore):
     """The persistent one, over ``agent_config_files`` (migration 22).
 
     Parameterised SQL only (Critical Rule 7) and ``TIMESTAMPTZ``/``JSON`` column
     types (Critical Rule 1). Never opens its own connection — the caller owns it.
+
+    **CONCURRENCY, AND WHY A LOCK ALONE IS NOT THE ANSWER.** ``ConfigRecord
+    .config_id`` is derived from the record's own identity, so it is
+    deterministic: two analyzer passes that ingest the same MCP server write the
+    SAME primary key. Measured by forcing it, that races in two different ways —
+    ``ConstraintException: Duplicate key`` and ``TransactionException: Conflict
+    on tuple deletion!`` — and it used to raise straight out through
+    ``deadweight.run`` into ``build_report``, losing every other analyzer's
+    findings with it.
+
+    Three things together, because no one of them is sufficient:
+
+    * **The backend's write lock**, when the caller can reach it (``core/db``'s
+      ``DuckDBBackend.write_lock``; ``.claude/rules/core-architecture.md``
+      requires it for a direct ``conn.execute`` write that can land on a hot
+      row). This serializes writers sharing one backend instance.
+    * **A conflict-TOLERANT write**, because that lock is an instance attribute
+      and cannot serialize two backend instances against the same database. A
+      single ``INSERT OR REPLACE`` replaces the old DELETE-then-INSERT, which
+      removes the window where a second writer sees the row deleted and inserts
+      its own; conflicts that remain are retried with backoff.
+    * **An in-memory mirror**, so persistence failing is never the analysis
+      failing. Every upsert lands in the mirror first, reads fall back to it,
+      and a pass whose writes all lost their races still returns exactly the
+      right answer — it just does not get to keep the measurement cache.
+
+    The store therefore never raises for a write-write conflict. The cost of
+    losing the race is one re-measurement next run, which is the correct thing
+    to trade away.
     """
 
-    def __init__(self, conn: "duckdb.DuckDBPyConnection") -> None:
+    def __init__(
+        self,
+        conn: "duckdb.DuckDBPyConnection",
+        lock: "AbstractContextManager[Any] | None" = None,
+    ) -> None:
         self.conn = conn
+        self._lock = lock if lock is not None else nullcontext()
+        #: Authoritative for THIS pass. The database is a cache on top of it,
+        #: never the other way around.
+        self._mirror = InMemoryAgentConfigStore()
+        self._degraded = False
 
     _COLUMNS = (
         "config_id, kind, scope, root, name, path, size_bytes, tokens, "
         "content_hash, last_seen, subkind, detail, measured_tokens, "
         "measured_at, measure_status, seq"
     )
+
+    @property
+    def degraded(self) -> bool:
+        return self._degraded
+
+    def mark_degraded(self, what: str, exc: BaseException) -> None:
+        self._degrade(what, exc)
+
+    def _degrade(self, what: str, exc: BaseException) -> None:
+        """Record that persistence failed and say so once, at warning level.
+
+        Once, because this runs on a background pass that may repeat every few
+        minutes and a per-row log line would bury the signal in its own noise.
+        """
+        if not self._degraded:
+            log.warning(
+                "agent-config %s could not be persisted (%s: %s); this pass is "
+                "using its in-memory view and the schema measurement cache will "
+                "be rebuilt next run.", what, type(exc).__name__, exc,
+            )
+        self._degraded = True
+
+    def _write(self, sql: str, params: list[Any], *, what: str) -> bool:
+        """One write, locked, retried on conflict. Returns whether it landed."""
+        for attempt in range(WRITE_RETRIES):
+            try:
+                with self._lock:
+                    self.conn.execute(sql, params)
+                return True
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if not _is_write_conflict(exc) or attempt == WRITE_RETRIES - 1:
+                    self._degrade(what, exc)
+                    return False
+                time.sleep(
+                    WRITE_RETRY_BACKOFF_SECONDS * (2 ** attempt)
+                    + random.uniform(0, WRITE_RETRY_BACKOFF_SECONDS)
+                )
+        return False
 
     def upsert(self, records: Sequence[ConfigRecord]) -> None:
         for record in records:
@@ -368,13 +485,18 @@ class DuckDBAgentConfigStore(AgentConfigStore):
                 )
                 if prior.extra:
                     detail[MEASUREMENT_DETAIL_KEY] = prior.extra
-            self.conn.execute(
-                "DELETE FROM agent_config_files WHERE config_id = $1",
-                [record.config_id],
-            )
-            self.conn.execute(
-                f"INSERT INTO agent_config_files ({self._COLUMNS}) VALUES "
-                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
+            # The mirror FIRST and unconditionally: this pass's answer must not
+            # depend on winning a race against another pass.
+            self._mirror.upsert([replace(
+                record, detail=detail, measured_tokens=measured_tokens,
+                measured_at=measured_at, measure_status=measure_status,
+            )])
+            # ONE statement, not DELETE-then-INSERT. The two-statement form left
+            # a window in which a concurrent writer saw the row deleted and
+            # inserted its own, which is the `Duplicate key` half of the race.
+            self._write(
+                f"INSERT OR REPLACE INTO agent_config_files ({self._COLUMNS}) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
                 [
                     record.config_id, record.kind, record.scope, record.root,
                     record.name, record.path, record.size_bytes, record.tokens,
@@ -382,13 +504,20 @@ class DuckDBAgentConfigStore(AgentConfigStore):
                     json.dumps(detail, sort_keys=True, default=str),
                     measured_tokens, measured_at, measure_status, record.seq,
                 ],
+                what=f"record for {record.kind}:{record.name}",
             )
 
     def _content_hash(self, config_id: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT content_hash FROM agent_config_files WHERE config_id = $1",
-            [config_id],
-        ).fetchone()
+        if self._degraded:
+            return None
+        try:
+            row = self.conn.execute(
+                "SELECT content_hash FROM agent_config_files WHERE config_id = $1",
+                [config_id],
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001 - a read failure is not fatal
+            self._degrade("content hash", exc)
+            return None
         return row[0] if row else None
 
     def select(
@@ -411,15 +540,36 @@ class DuckDBAgentConfigStore(AgentConfigStore):
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY seq, path, name"
-        return [_row_to_record(row) for row in self.conn.execute(sql, params).fetchall()]
+        if self._degraded:
+            # Persistence failed earlier in this pass, so the table no longer
+            # holds what the walk found. Answering from it would silently under-
+            # report the config surface, which is worse than the failure itself.
+            return self._mirror.select(kind=kind, scope=scope, root=root, seen_at=seen_at)
+        try:
+            return [_row_to_record(row) for row in self.conn.execute(sql, params).fetchall()]
+        except Exception as exc:  # noqa: BLE001 - degrade, never take the pass down
+            self._degrade("read-back", exc)
+            return self._mirror.select(kind=kind, scope=scope, root=root, seen_at=seen_at)
 
     def record_measurement(
         self, config_id: str, *, tokens: int | None, status: str, at: datetime,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        row = self.conn.execute(
-            "SELECT detail FROM agent_config_files WHERE config_id = $1", [config_id],
-        ).fetchone()
+        # The mirror first, for the same reason `upsert` does it: a measurement
+        # that cost us starting a server must survive a lost write race at
+        # least for the pass that took it.
+        self._mirror.record_measurement(
+            config_id, tokens=tokens, status=status, at=at, extra=extra,
+        )
+        if self._degraded:
+            return
+        try:
+            row = self.conn.execute(
+                "SELECT detail FROM agent_config_files WHERE config_id = $1", [config_id],
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001
+            self._degrade("measurement", exc)
+            return
         if not row:
             return
         try:
@@ -429,31 +579,41 @@ class DuckDBAgentConfigStore(AgentConfigStore):
         if not isinstance(detail, dict):
             detail = {}
         detail[MEASUREMENT_DETAIL_KEY] = dict(extra or {})
-        self.conn.execute(
+        self._write(
             "UPDATE agent_config_files SET measured_tokens = $1, measure_status = $2, "
             "measured_at = $3, detail = $4 WHERE config_id = $5",
             [tokens, status, at, json.dumps(detail, sort_keys=True, default=str), config_id],
+            what=f"measurement for {config_id}",
         )
 
     def measurement_for(self, config_id: str) -> MeasurementRow:
-        row = self.conn.execute(
-            "SELECT measured_tokens, measure_status, measured_at, detail "
-            "FROM agent_config_files WHERE config_id = $1",
-            [config_id],
-        ).fetchone()
-        if not row:
-            return MeasurementRow()
-        try:
-            detail = json.loads(row[3]) if row[3] else {}
-        except (TypeError, ValueError):
-            detail = {}
-        extra = detail.get(MEASUREMENT_DETAIL_KEY) if isinstance(detail, dict) else None
-        return MeasurementRow(
-            tokens=int(row[0]) if row[0] is not None else None,
-            status=str(row[1] or ""),
-            at=row[2],
-            extra=extra if isinstance(extra, dict) else {},
-        )
+        if not self._degraded:
+            try:
+                row = self.conn.execute(
+                    "SELECT measured_tokens, measure_status, measured_at, detail "
+                    "FROM agent_config_files WHERE config_id = $1",
+                    [config_id],
+                ).fetchone()
+            except Exception as exc:  # noqa: BLE001
+                self._degrade("measurement read", exc)
+                row = None
+            if row:
+                try:
+                    detail = json.loads(row[3]) if row[3] else {}
+                except (TypeError, ValueError):
+                    detail = {}
+                extra = (
+                    detail.get(MEASUREMENT_DETAIL_KEY) if isinstance(detail, dict) else None
+                )
+                return MeasurementRow(
+                    tokens=int(row[0]) if row[0] is not None else None,
+                    status=str(row[1] or ""),
+                    at=row[2],
+                    extra=extra if isinstance(extra, dict) else {},
+                )
+        # Nothing stored (or nothing readable): the mirror may still hold a
+        # measurement this same pass took.
+        return self._mirror.measurement_for(config_id)
 
 
 def _row_to_record(row: Sequence[Any]) -> ConfigRecord:
@@ -473,17 +633,27 @@ def _row_to_record(row: Sequence[Any]) -> ConfigRecord:
     )
 
 
-def store_for(conn: "duckdb.DuckDBPyConnection | None") -> AgentConfigStore:
+def store_for(
+    conn: "duckdb.DuckDBPyConnection | None",
+    lock: "AbstractContextManager[Any] | None" = None,
+) -> AgentConfigStore:
     """A DuckDB-backed store when there is a connection, else an in-memory one.
 
     The degrade is deliberate and silent-by-design in only one direction: a
     caller with no database still gets a working store and today's behaviour,
     never an error. It never fabricates the reverse — nothing here invents a
     connection.
+
+    ``lock`` should be the owning backend's ``write_lock``
+    (``core/db.DuckDBBackend.write_lock``). Passing it is what satisfies
+    ``.claude/rules/core-architecture.md``'s requirement that a direct
+    ``conn.execute`` write which can land on a hot row takes the lock; omitting
+    it is safe but leaves the store relying on its retry path alone, which is
+    slower under contention rather than incorrect.
     """
     if conn is None:
         return InMemoryAgentConfigStore()
-    return DuckDBAgentConfigStore(conn)
+    return DuckDBAgentConfigStore(conn, lock)
 
 
 # --- Population: the filesystem walk ----------------------------------------
@@ -996,7 +1166,30 @@ def ingest_agent_config(
         ))
     if KIND_PLUGIN in kinds:
         records.extend(scan_plugins(claude_dir=claude_dir, seen_at=at))
-    store.upsert(records)
+    # NEVER RAISES — `deadweight`'s module docstring promises exactly this
+    # ("a missing projects root, an unreadable transcript, or a malformed config
+    # file is skipped, not fatal"), and moving the walk behind a database is
+    # precisely what could have broken it: a transaction conflict is a failure
+    # mode the old pure-filesystem version structurally could not have. The
+    # DuckDB store already degrades to its in-memory mirror internally; this is
+    # the backstop for anything it does not classify, and it keeps the promise
+    # true for every caller rather than only the ones that pass a store.
+    try:
+        store.upsert(records)
+    except Exception as exc:  # noqa: BLE001 - see above
+        log.warning(
+            "agent-config ingest could not be stored (%s: %s); continuing with "
+            "the walk's own result.", type(exc).__name__, exc,
+        )
+        # Swallowing is not enough on its own. A store that took nothing answers
+        # every later `select` with an empty list, and an analyzer reading that
+        # reports "no MCP server is configured" — a positive claim, from a pass
+        # that never got to look. Mark the store so the analyzer can disclose it
+        # instead (root anti-pattern 22: not-yet-known is not the same as known
+        # and empty).
+        mark = getattr(store, "mark_degraded", None)
+        if callable(mark):
+            mark("ingest", exc)
     return at
 
 

@@ -75,10 +75,20 @@ you whether to touch the threshold. **(b) When a metric is summed per session, w
 with session length inverts the gate.** Check for that inversion before assuming a threshold is
 miscalibrated.
 
-### Critical Rule 31 — `summarize` and `deadweight` resolve the files they price off the ambient environment, not off the DB
+### Critical Rule 31 — `summarize` and `deadweight` price the files a WALK found, so the ambient environment still decides the answer
 
-Measuring them from an isolated harness silently understates, never errors. They are exposed through
-DIFFERENT mechanisms; do not treat them as one case.
+The mechanism has one more step than it used to. Both read their file population out of the ingested
+`agent_config_files` table (`core/agent_config`), but that table is populated by the same filesystem
+walk they used to run inline — the DB is where the walk's result is kept, never a substitute for it.
+So the environment the walk runs in still decides everything below, and measuring from an isolated
+harness still silently understates rather than erroring. Two things the DB step adds: a read is
+scoped to its own populating pass (`store.select(seen_at=...)`), because a persistent table holds
+every root ever scanned and an unscoped read would price a repo the current window never touched; and
+a store that cannot persist marks itself `degraded` and answers from its in-memory mirror, because a
+table that took nothing would otherwise answer "no config is present" — a positive claim from a pass
+that never got to look.
+
+They are exposed through DIFFERENT mechanisms; do not treat them as one case.
 
 - **`deadweight` really does read the session's recorded CWD** (`analyzers/deadweight.py` `_session_cwd`, fed into the per-session loop) to find each repo's MCP config, so it decays as those recorded paths go stale or disappear.
 - **`summarize` never sees a session CWD at all.** `core/summarize/candidates.list_candidates` takes no such input; with no explicit `path` it scans the catalog **globals** plus `Path.cwd()` — the tj PROCESS's own working directory, never the corpus's recorded session paths. Its floor is therefore the globals, so moving the CWD barely moves the figure — the candidates under `~/.claude/` resolve either way. It collapses only when the GLOBALS vanish too, which is what **repointing `HOME`** does (exactly what `tests/conftest.py`'s `_tj_isolated_home` does). That, and never a missing recorded CWD, is `summarize`'s real failure mode.

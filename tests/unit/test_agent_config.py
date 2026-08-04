@@ -322,3 +322,137 @@ def test_last_seen_moves_on_a_rescan(catalog, project):
     assert second > first
     assert store.select(kind=ac.KIND_INSTRUCTION, seen_at=first) == []
     assert store.select(kind=ac.KIND_INSTRUCTION, seen_at=second)
+
+
+# --- Concurrency: the store must not raise, and must not lose the pass -------
+#
+# `config_id` is content-derived and therefore DETERMINISTIC, so two analyzer
+# passes that ingest the same MCP server write the SAME primary key. Measured by
+# forcing it before the fix: 141 exceptions in 240 attempts, in two flavours —
+# `ConstraintException: Duplicate key` from the DELETE-then-INSERT window, and
+# `TransactionException: Conflict on tuple deletion!`. Both propagated out
+# through `deadweight.run` into `build_report`, taking every other analyzer's
+# findings with them.
+
+def test_concurrent_upserts_of_the_same_row_never_raise(tmp_path):
+    """THE regression test for the write-write race.
+
+    Six threads hammering one deterministic row through separate cursors — the
+    shape that produced 141 exceptions before. The store may lose a race and
+    degrade; it may not raise.
+    """
+    import threading
+
+    conn = duckdb.connect(str(tmp_path / "t.duckdb"))
+    run_migrations(conn)
+    errors: list[str] = []
+
+    def hammer() -> None:
+        store = ac.DuckDBAgentConfigStore(conn.cursor())
+        for _ in range(40):
+            try:
+                store.upsert([ac.ConfigRecord(
+                    kind=ac.KIND_MCP_SERVER, scope=ac.SCOPE_GLOBAL, root="",
+                    name="apollo", path="/x/.claude.json", content_hash="h1",
+                    last_seen=utcnow(), detail={"command": "x", "spec_hash": "h1"},
+                )])
+            except Exception as exc:  # noqa: BLE001 - the thing under test
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=hammer) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    conn.close()
+    assert errors == [], errors[:3]
+
+
+def test_a_pass_that_loses_every_write_race_still_returns_the_right_answer(tmp_path):
+    """Persistence failing must never be the analysis failing.
+
+    The mirror is what makes that true: the walk's result is authoritative for
+    this pass and the database is a cache on top of it, never the other way
+    round. A store that answered from a table it failed to write would report a
+    smaller config surface — which reads as "the user has less config", a
+    positive claim from a pass whose writes all failed.
+    """
+    conn = duckdb.connect(str(tmp_path / "t.duckdb"))
+    run_migrations(conn)
+    store = ac.DuckDBAgentConfigStore(conn)
+
+    class _Boom:
+        def execute(self, *_a, **_kw):
+            raise RuntimeError("TransactionException: Conflict on update!")
+
+    record = ac.ConfigRecord(
+        kind=ac.KIND_MCP_SERVER, scope=ac.SCOPE_GLOBAL, root="", name="apollo",
+        path="/x/.claude.json", content_hash="h1", detail={"command": "x"},
+    )
+    store.conn = _Boom()          # every write and read now fails
+    store.upsert([record])
+
+    assert store.degraded is True
+    got = store.select(kind=ac.KIND_MCP_SERVER)
+    assert [r.name for r in got] == ["apollo"], "the pass lost its own answer"
+    conn.close()
+
+
+def test_ingest_never_raises_even_when_the_store_does(tmp_path, catalog, project):
+    """`deadweight`'s module docstring promises "never raises". Moving the walk
+    behind a database is exactly what could have broken that — a transaction
+    conflict is a failure mode the pure-filesystem version could not have."""
+    class _Hostile(ac.InMemoryAgentConfigStore):
+        def upsert(self, records):
+            raise RuntimeError("nope")
+
+    store = _Hostile()
+    at = ac.ingest_agent_config(
+        store, roots=[project], kinds=(ac.KIND_INSTRUCTION,), catalog=catalog,
+    )
+    assert at is not None
+
+
+def test_a_store_that_took_nothing_says_so_rather_than_reading_as_empty(tmp_path, catalog, project):
+    """Swallowing the exception is not enough on its own.
+
+    A store that accepted nothing answers every later `select` with an empty
+    list, and an analyzer reading that reports "no config is present" — a
+    positive claim from a pass that never got to look (root anti-pattern 22).
+    """
+    marked: list[str] = []
+
+    class _Hostile(ac.InMemoryAgentConfigStore):
+        def upsert(self, records):
+            raise RuntimeError("nope")
+
+        def mark_degraded(self, what, exc):
+            marked.append(what)
+
+    ac.ingest_agent_config(
+        _Hostile(), roots=[project], kinds=(ac.KIND_INSTRUCTION,), catalog=catalog,
+    )
+    assert marked == ["ingest"]
+
+
+def test_the_write_lock_is_taken_when_one_is_supplied(tmp_path):
+    """`.claude/rules/core-architecture.md` requires a direct `conn.execute`
+    write that can land on a hot row to take the backend's lock."""
+    conn = duckdb.connect(str(tmp_path / "t.duckdb"))
+    run_migrations(conn)
+    entered: list[int] = []
+
+    class _Lock:
+        def __enter__(self):
+            entered.append(1)
+
+        def __exit__(self, *_a):
+            return False
+
+    store = ac.DuckDBAgentConfigStore(conn, _Lock())
+    store.upsert([ac.ConfigRecord(
+        kind=ac.KIND_MCP_SERVER, scope=ac.SCOPE_GLOBAL, root="", name="a",
+        path="/x", content_hash="h",
+    )])
+    assert entered, "the supplied write lock was never acquired"
+    conn.close()

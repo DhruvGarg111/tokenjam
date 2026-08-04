@@ -188,14 +188,29 @@ def plan_prune(
             "automatically."
         )
     sections = parse_sections(source_text, level=level)
-    by_title = {s.title.strip().lower(): s for s in sections}
+    # A LIST per title, not one section. `{s.title: s for s in sections}` keeps
+    # only the LAST section of any repeated heading, and a file with two
+    # `## Notes` then prunes the second while leaving the first — silently, and
+    # while reporting that "Notes" was pruned. Worse, the survivor was invisible
+    # in `declined` too, because that list was filtered by TITLE membership, so
+    # the remaining duplicate was masked by the name of the one that went. The
+    # user is told the section is gone and half of it is still there.
+    by_title: dict[str, list[Section]] = {}
+    for section in sections:
+        by_title.setdefault(section.title.strip().lower(), []).append(section)
+
     chosen: list[PrunedFragment] = []
     missing: list[str] = []
+    ambiguous: list[tuple[str, int]] = []
     for title in titles:
-        section = by_title.get(title.strip().lower())
-        if section is None:
+        matches = by_title.get(title.strip().lower(), [])
+        if not matches:
             missing.append(title)
             continue
+        if len(matches) > 1:
+            ambiguous.append((title, len(matches)))
+            continue
+        section = matches[0]
         chosen.append(_fragment(
             source_text, section,
             reason or f'section "{section.title}" selected for pruning',
@@ -206,9 +221,28 @@ def plan_prune(
             f"no level-{level} section named {', '.join(repr(m) for m in missing)} "
             f"in {source_path}. Available: {available}."
         )
+    if ambiguous:
+        # The same reasoning this function already applies to a typo'd title: a
+        # request the tool cannot satisfy exactly must be an error, never a
+        # partial success reported as a whole one. Refusing names the ambiguity
+        # so the user can disambiguate or rename; guessing removes content they
+        # did not point at, or leaves content they think is gone.
+        detail = "; ".join(
+            f"{title!r} matches {count} sections at level {level}"
+            for title, count in ambiguous
+        )
+        raise SummarizeRefused(
+            f"ambiguous --section in {source_path}: {detail}. Prune refuses "
+            f"rather than removing one of them and reporting the whole title as "
+            f"pruned. Give the duplicates distinct headings, or prune at a "
+            f"level where they are unique."
+        )
+    # Declined by IDENTITY, not by title, so a section that survives because a
+    # same-named sibling was chosen still shows up as kept.
+    picked = {(f.start, f.end) for f in chosen}
     declined = [
         (s.title, "not named on the command line")
-        for s in sections if s.title not in {f.title for f in chosen}
+        for s in sections if (s.start, s.end) not in picked
     ]
     return _build(source_path, source_text, ROUTE_PRUNE, chosen, declined)
 
@@ -342,6 +376,20 @@ def apply_prune(config: TjConfig, plan: PrunePlan, *, go: bool = False) -> dict:
 
     quarantined: list[str] = []
     if go:
+        # RE-CHECK IMMEDIATELY BEFORE THE WRITE, NOT ONLY BEFORE THE WORK.
+        #
+        # The hash check above happens, then N fsync'd quarantine writes and a
+        # gzip backup happen, and only then does the source get rewritten. An
+        # editor that touched the file during that window used to have its work
+        # destroyed three ways at once: gone from the file (overwritten by text
+        # derived from the older read), absent from the quarantine (which only
+        # holds the fragments being removed), and absent from the backup —
+        # because the backup was saved with the PLAN's text rather than a fresh
+        # read, so `undo` restored the file to a state that never contained the
+        # edit. Unrecoverable by any of the three rails.
+        #
+        # The re-check itself is below, immediately before the write — see
+        # there. This block only does the quarantine writes.
         for fragment, (before_anchor, after_anchor) in zip(
             plan.fragments, _result_anchors(plan),
         ):
@@ -359,12 +407,40 @@ def apply_prune(config: TjConfig, plan: PrunePlan, *, go: bool = False) -> dict:
                 after_anchor=after_anchor,
             )
             quarantined.append(entry.entry_id)
-        # Only now. A whole-file backup as well, so `tj summarize undo` reverses
-        # the operation in one step while the quarantine holds each fragment
-        # individually — they answer different questions and neither replaces
-        # the other.
+
+        # THE LAST-MOMENT RE-CHECK. The quarantine writes above are fsync'd, so
+        # they take real time, and an editor can land inside exactly that
+        # window. Re-read here — not only at the top — because a check that runs
+        # before the slow part does not cover the slow part.
+        current = source.read_text(encoding="utf-8")
+        if sha256(current) != sha256(plan.source_before):
+            # The entries just written describe a removal that is not going to
+            # happen. Drop them rather than leaving records of a cut nobody
+            # made, which would read as recoverable history for a file that was
+            # never touched.
+            for entry_id in quarantined:
+                quarantine.forget(config, entry_id)
+            return {
+                "applied": False, "dry_run": not go, "skipped": [{
+                    "path": str(source),
+                    "reason": (
+                        "changed while this apply was preparing the quarantine — "
+                        "re-plan it. Nothing was written, and the quarantine "
+                        "entries for this attempt were discarded."
+                    ),
+                }],
+                "tokens_freed": 0, "quarantined": [], "plan": plan.to_dict(),
+            }
+
+        # Back up WHAT WAS JUST READ, never `plan.source_before`. They are equal
+        # here by the check immediately above, and that is the point: the backup
+        # has to be a fresh read so it can never record a state the file was not
+        # actually in. `apply.apply_staged` backs up its `current` for the same
+        # reason. The whole-file backup is in addition to the quarantine — one
+        # reverses the operation in a single `tj summarize undo`, the other
+        # holds each fragment individually, and neither replaces the other.
         backup.save(
-            config, str(source), original=plan.source_before,
+            config, str(source), original=current,
             output=plan.source_after, est_tokens_saved=plan.tokens_freed,
         )
         _write(source, plan.source_after)

@@ -2601,6 +2601,14 @@ def _render_deadweight(
 
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    # The MEASUREMENT coverage note, beside the figure it qualifies. Without it
+    # the terminal showed a priced dollar total for the servers that could be
+    # measured and said nothing about the ones excluded — an undisclosed FLOOR
+    # rendered as a total. The number was honest; the presentation was not.
+    if getattr(finding, "measurement_note", ""):
+        console.print(
+            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.measurement_note)}[/dim]"
+        )
     if finding.coverage_note:
         console.print(
             f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"

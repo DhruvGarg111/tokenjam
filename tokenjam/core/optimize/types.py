@@ -390,6 +390,14 @@ class OptimizeReport:
     # Existing analyzers (downsize, budget-projection) keep their
     # typed slots above for backwards-compat with cmd_optimize and mcp.
     findings:  dict = field(default_factory=dict)
+    #: Analyzers that RAISED, keyed by name, with the exception. An analyzer
+    #: whose failure is swallowed and not recorded reads as one that found
+    #: nothing, which is a positive claim the run has no evidence for — so the
+    #: dispatch loop isolates failures (one analyzer must not destroy twelve
+    #: others' findings) and records them here rather than merely omitting them.
+    #: Every surface that renders a report must be able to say "we did not get
+    #: an answer" separately from "the answer was none".
+    analyzer_errors: dict = field(default_factory=dict)
     # Dominant user persona for the window ("claude-code" | "sdk" | "mixed" |
     # "unknown") — see `tokenjam.core.framing.dominant_persona`. Computed once
     # by `runner.build_report` (mirrors `AnalyzerContext.persona` below) and
@@ -445,6 +453,10 @@ class AnalyzerContext:
     # stops isolating it. `None` only in a hand-built context (tests): treat it
     # as the unscoped default. See `core/optimize/scope.py` for the contract.
     scope:                  Any            = None
+    # The owning `DuckDBBackend`'s re-entrant write lock, or `None`. An
+    # analyzer that writes through `conn` directly must take it — see
+    # `.claude/rules/core-architecture.md` and `core/agent_config.store_for`.
+    write_lock:             Any            = None
 
 
 # ---------------------------------------------------------------------------

@@ -1996,7 +1996,22 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     # deadweight emits N proposals (one per dead server) rather than the
     # single card `resend`/`relearn` attach their own `coverage_note` to.
     coverage_note = str(getattr(finding, "coverage_note", "") or "")
+    # The MEASUREMENT blind spot rides on the same string. A card carrying a
+    # priced total while other servers were excluded from it is showing a floor
+    # as a total, and the Review inbox is exactly as capable of that as the
+    # terminal was.
+    measurement_note = str(getattr(finding, "measurement_note", "") or "")
+    if measurement_note:
+        coverage_note = " ".join(x for x in (coverage_note, measurement_note) if x)
     for server in getattr(finding, "dead_servers", []) or []:
+        # A server measured to cost NOTHING has nothing to recover, so it gets
+        # no card at all. This is also what keeps the two figures on one basis:
+        # `tokens or None` coerces a measured zero to None while the dollar
+        # figure stays a real 0.0, and a card with `tokens=None, usd=$0.00` is
+        # the mixed-basis defect Critical Rule 28 forbids. Reachable, not
+        # hypothetical — a server exposing zero tools measures to zero tokens.
+        if not server.estimated_tax_tokens_window:
+            continue
         evidence = (
             f"`{server.name}` MCP server ({server.scope} scope, configured at "
             f"{server.source}) made 0 tool calls across {server.sessions_present} "

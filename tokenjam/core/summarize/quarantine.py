@@ -357,6 +357,15 @@ def restore(config: TjConfig, entry_id: str, *, go: bool = False) -> dict:
             "source_unchanged": unchanged,
         }
     if go:
+        # A restore is a WRITE, and it was the only write rail in this feature
+        # without a backup. `_anchor_point` can legitimately find a unique match
+        # in a heavily-edited file that is not where the fragment belongs any
+        # more; that insertion is correct by the anchor's rules and still wrong
+        # by the reader's, and without this it could not be reversed with
+        # `tj summarize undo` the way every other write here can.
+        from tokenjam.core.summarize import backup
+
+        backup.save(config, str(path), original=current, output=restored)
         _write(path, restored)
     return {
         "entry_id": entry_id, "restored": go, "dry_run": not go, "reason": "",

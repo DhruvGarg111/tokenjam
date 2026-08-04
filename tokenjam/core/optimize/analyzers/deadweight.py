@@ -1835,6 +1835,6 @@ def run(ctx: AnalyzerContext) -> None:
         claude_dir=scope.claude_home,
         min_sessions=min_sessions,
         cache_dir=default_cache_dir(ctx.config),
-        store=store_for(getattr(ctx, "conn", None)),
+        store=store_for(getattr(ctx, "conn", None), getattr(ctx, "write_lock", None)),
         measure_schemas=measure_schemas,
     )

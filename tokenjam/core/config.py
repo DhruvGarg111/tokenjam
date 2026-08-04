@@ -336,16 +336,25 @@ class OptimizeConfig:
     # false-positive-rate reasoning behind the lowered bar.
     min_sessions_deadweight: int = 5
     # deadweight (core/optimize/mcp_probe.py): whether the analyzer may MEASURE
-    # each configured MCP server's tool schemas, which means starting that
-    # server, sending it `initialize` + `tools/list`, and terminating it. That
-    # is the only way to know what a server actually injects, and the figure it
-    # replaced was a flat assumption charged per-server. Read-only by
-    # construction — no `tools/call` is ever issued — cached against the
-    # server's own launch spec so an unchanged server is measured once, and only
-    # ever taken on the out-of-band analyzer pass. Turning it OFF does not
-    # substitute the old assumption: unmeasured servers are excluded from every
-    # priced figure and the finding says so.
-    measure_mcp_schemas: bool = True
+    # each configured MCP server's tool schemas, which means STARTING that
+    # server, sending it `initialize` + `tools/list`, and terminating it. That is
+    # the only way to know what a server actually injects, and the figure it
+    # replaced was a flat assumption charged per-server.
+    #
+    # OFF BY DEFAULT, deliberately. The protocol surface is read-only (no
+    # `tools/call` is ever issued), but starting a process is not nothing: the
+    # command is the user's own, and an `npx -y` spec fetches from the network
+    # while a server may open connections or refresh a token on startup. The
+    # analyzer pass is reachable from `tj optimize`, the daemon's scheduled scan,
+    # AND tj's own MCP tool — so an agent asking tj for a report could otherwise
+    # spawn a batch of the user's servers as a side effect of a question. Making
+    # the first exposure opt-in is the difference between a user choosing that
+    # and discovering it.
+    #
+    # Leaving it off does NOT restore the old assumption. Unmeasured servers are
+    # excluded from every priced figure and the finding's own coverage note says
+    # how many were excluded and why.
+    measure_mcp_schemas: bool = False
     # cache (analyzers/cache_efficacy.py MIN_INPUT_TOKENS): minimum
     # (provider, model) input-token volume in the window before a low
     # cache-efficacy ratio is even worth surfacing.

@@ -1126,7 +1126,7 @@ def run(ctx: AnalyzerContext) -> None:
             project_roots=roots.roots or None,
             project_root=_project_scan_root(scope),
             ratio=ratio,
-            store=store_for(getattr(ctx, "conn", None)),
+            store=store_for(getattr(ctx, "conn", None), getattr(ctx, "write_lock", None)),
         )
     except Exception:
         # Empty finding on any scan failure so a filesystem hiccup never breaks the

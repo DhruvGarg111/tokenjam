@@ -404,3 +404,127 @@ def test_expire_treats_a_month_only_heading_as_the_first_of_the_month():
         now=datetime(2026, 3, 1, tzinfo=timezone.utc) + timedelta(days=200),
     )
     assert [f.title for f in gone.fragments] == ["2026-03 a month-only entry"]
+
+
+# --- The concurrent-edit window (data loss) ---------------------------------
+
+def test_an_edit_during_the_quarantine_window_is_never_destroyed(cfg, tmp_path, monkeypatch):
+    """THE data-loss regression.
+
+    The hash check ran, then N fsync'd quarantine writes and a gzip backup ran,
+    and only then was the source rewritten. An editor landing in that window had
+    its work destroyed three ways at once: overwritten in the file, absent from
+    the quarantine (which only holds the removed fragments), and absent from the
+    BACKUP — because the backup was saved with the plan's text rather than a
+    fresh read, so `undo` restored a state the file was never in. Unrecoverable
+    by any of the three rails.
+
+    The concurrent editor is simulated inside the quarantine write, which is
+    exactly where the real one lands.
+    """
+    path = _write(tmp_path, "CLAUDE.md", RULES)
+    plan = prune.plan_prune(
+        source_path=str(path), source_text=RULES, titles=["Cut this one"],
+    )
+    real_record = quarantine.record
+
+    def _record_then_someone_edits(*args, **kwargs):
+        entry = real_record(*args, **kwargs)
+        path.write_text(
+            RULES + "\n## Written by someone else\n\nMid-apply edit.\n",
+            encoding="utf-8",
+        )
+        return entry
+
+    monkeypatch.setattr(quarantine, "record", _record_then_someone_edits)
+    result = prune.apply_prune(cfg, plan, go=True)
+
+    assert result["applied"] is False
+    assert "changed while this apply was preparing" in result["skipped"][0]["reason"]
+    # The concurrent edit survived, in the file, untouched.
+    assert "Mid-apply edit." in path.read_text(encoding="utf-8")
+    assert "Cut this one" in path.read_text(encoding="utf-8")
+    # And no orphan records of a cut that never happened.
+    assert quarantine.list_entries(cfg) == []
+
+
+def test_the_backup_records_a_fresh_read_not_the_plans_text(cfg, tmp_path):
+    """`undo` must restore a state the file was ACTUALLY in."""
+    from tokenjam.core.summarize import backup
+
+    path = _write(tmp_path, "CLAUDE.md", RULES)
+    plan = prune.plan_prune(
+        source_path=str(path), source_text=RULES, titles=["Cut this one"],
+    )
+    prune.apply_prune(cfg, plan, go=True)
+    assert backup.load_original(cfg, str(path), None) == RULES
+
+
+# --- Duplicate section titles (data loss + false report) --------------------
+
+_DUPES = """# Notes file
+
+## Notes
+
+First block, and it must not vanish silently.
+
+## Other
+
+Middle.
+
+## Notes
+
+Second block with the same heading.
+"""
+
+
+def test_duplicate_section_titles_refuse_rather_than_pruning_one(cfg, tmp_path):
+    """`{s.title: s}` kept only the LAST section of a repeated heading.
+
+    So `--section Notes --go` removed the second and left the first — silently,
+    while reporting that "Notes" was pruned. The survivor was invisible in
+    `declined` too, because that list filtered by TITLE membership, so the
+    remaining duplicate was masked by the name of the one that went. The user is
+    told the section is gone and half of it is still there.
+
+    The same reasoning this function already applies to a typo'd title: a
+    request the tool cannot satisfy exactly is an error, never a partial success
+    reported as a whole one.
+    """
+    with pytest.raises(SummarizeRefused, match="ambiguous --section"):
+        prune.plan_prune(
+            source_path="x", source_text=_DUPES, titles=["Notes"],
+        )
+
+
+def test_a_unique_title_beside_duplicates_still_works(cfg, tmp_path):
+    plan = prune.plan_prune(
+        source_path="x", source_text=_DUPES, titles=["Other"],
+    )
+    assert [f.title for f in plan.fragments] == ["Other"]
+    # Both `Notes` sections are declined by IDENTITY, so neither is masked by
+    # the other's name.
+    assert [t for t, _ in plan.declined].count("Notes") == 2
+
+
+# --- Restore takes a backup -------------------------------------------------
+
+def test_restore_takes_a_backup_so_it_is_undoable(cfg, tmp_path):
+    """It was the only write rail in this feature without one.
+
+    `_anchor_point` can find a unique-but-semantically-wrong location in a
+    heavily edited file; that insertion is correct by the anchor's rules and
+    wrong by the reader's, and it must be reversible like every other write here.
+    """
+    from tokenjam.core.summarize import backup
+
+    path = _write(tmp_path, "CLAUDE.md", RULES)
+    plan = prune.plan_prune(
+        source_path=str(path), source_text=RULES, titles=["Cut this one"],
+    )
+    result = prune.apply_prune(cfg, plan, go=True)
+    pruned = path.read_text(encoding="utf-8")
+
+    quarantine.restore(cfg, result["quarantined"][0], go=True)
+    # The backup now holds the PRE-RESTORE text, so `undo` reverses the restore.
+    assert backup.load_original(cfg, str(path), None) == pruned
