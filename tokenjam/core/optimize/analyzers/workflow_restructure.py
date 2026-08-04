@@ -109,6 +109,13 @@ class WorkflowCluster:
     # `example_session_id` above), so a downstream apply artifact (a
     # skill note) can cite more than one instance. Defaulted for round-trip.
     example_session_ids: list[str] = field(default_factory=list)
+    # EVERY session in the cluster, not just the 3 examples above — see
+    # `ReuseCluster.member_session_ids`, the same field for the same reason:
+    # `reuse` clusters the identical repeated-tool-sequence shape this
+    # analyzer does, and without the full population neither adapter can tell
+    # it is pricing sessions the other already claimed (CLAUDE.md Critical
+    # Rule 27). Defaulted for round-trip with older serialized reports.
+    member_session_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -244,6 +251,7 @@ def run(ctx: AnalyzerContext) -> None:
             total_cost_usd=round(cluster_cost, 6),
             total_tokens=cluster_tokens,
             example_session_ids=list(members[:3]),
+            member_session_ids=tuple(members),
         ))
 
     # Sort by instance count desc — the most common deterministic patterns

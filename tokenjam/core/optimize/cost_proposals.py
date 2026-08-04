@@ -393,6 +393,16 @@ class CostProposal:
     #: separate from `coverage_note` above, which is about the FIGURE's
     #: population rather than the RULE's.
     placement_coverage_note:  str          = ""
+    #: EVERY session `past_overspend_*` was priced over, when the adapter
+    #: knows the exact population (today: `reuse`, `script` — both cluster on
+    #: a repeated-tool-sequence shape and can genuinely claim the same
+    #: sessions). Empty for every other analyzer, which keeps them exactly as
+    #: they behaved before this field existed: no adapter is required to
+    #: populate it, and `_net_cross_analyzer_session_overlap` only acts on the
+    #: pairs that do (CLAUDE.md Critical Rule 27's "prove no shipped analyzer
+    #: already claims those rows" made mechanical rather than hand-derived per
+    #: pair, for the analyzers that can state their own population exactly).
+    claimed_session_ids:      tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -2243,6 +2253,11 @@ def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
             past_overspend_usd=cluster.total_cost_usd or None,
             past_overspend_tokens=cluster.total_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            # `reuse` clusters this exact repeated-tool-sequence shape too
+            # (see its own adapter below); carrying the full member set lets
+            # `_net_cross_analyzer_session_overlap` catch the overlap instead
+            # of both cards claiming the same sessions' cost.
+            claimed_session_ids=tuple(cluster.member_session_ids),
             **_persona_gated_write_fields(
                 persona, advise, delivery=DELIVERY_SKILL, scope="project",
             ),
@@ -2307,6 +2322,10 @@ def _reuse_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProp
             past_overspend_usd=cluster.cache_reuse_recoverable_usd or None,
             past_overspend_tokens=cluster.cache_reuse_recoverable_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            # See the matching comment on `_script_to_proposals` — `script`
+            # clusters the identical shape, so this is what lets the two be
+            # reconciled instead of both claiming the same sessions.
+            claimed_session_ids=tuple(cluster.member_session_ids),
             **_persona_gated_write_fields(
                 persona, advise, delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
             ),
@@ -3336,7 +3355,98 @@ def _adapt_report(
                 except Exception:
                     pass   # a broken reporter must not sink the inbox either
             continue
-    return proposals
+    return _net_cross_analyzer_session_overlap(proposals)
+
+
+# Lower number wins the overlap and keeps its claim unchanged; a higher
+# number is the one netted down for whatever share of ITS sessions the
+# winner already claimed. `reuse` is listed ahead of `script` because its
+# premise is the one the product already designated conservative/canonical
+# (`_reuse_to_proposals`'s docstring: "the finding's conservative
+# cache_reuse_recoverable_* figure ... matching ReuseFinding's own
+# aggregate" — `script`'s figure is explicitly the upper-bound alternative to
+# that same number, per `ReuseCluster`'s own field comment). Analyzers not
+# listed here don't participate even if they happen to carry
+# `claimed_session_ids` in the future — adding a pair is a deliberate edit,
+# same as the per-pair fixes Critical Rule 27 already requires, but the
+# ARITHMETIC below is shared instead of hand-copied per pair.
+_SESSION_CLAIM_PRIORITY: dict[str, int] = {
+    "reuse": 0,
+    "script": 1,
+}
+
+
+def _net_cross_analyzer_session_overlap(
+    proposals: list[CostProposal],
+) -> list[CostProposal]:
+    """Net a proposal's ``past_overspend_*`` down when another, higher-
+    priority analyzer already claimed some of the SAME sessions.
+
+    CLAUDE.md Critical Rule 27 (`.claude/rules/optimize-cost-figures.md`):
+    two analyzers that both claim ``past_overspend_*`` must draw from
+    disjoint spans, and names three remedies — disjoint at the source,
+    subtract what a more specific card claimed, or partition the population
+    behind a shared predicate. This is remedy (b), made mechanical instead of
+    hand-written per pair: any analyzer whose adapter populates
+    ``claimed_session_ids`` with its cluster's FULL session population (not
+    just the 3 rendered examples) is automatically checked against every
+    other such analyzer, and the lower-priority claim is reduced by the
+    PROPORTION of its own sessions the higher-priority one already claimed —
+    proportional because a cluster is one card pricing many sessions
+    together, so a partial overlap must shrink the card partially, not zero
+    it out or leave it untouched.
+
+    Only ``reuse``/``script`` opt in today (see ``_SESSION_CLAIM_PRIORITY``);
+    every other proposal has an empty ``claimed_session_ids`` and passes
+    through completely unchanged, exactly as before this function existed.
+    """
+    eligible = [
+        p for p in proposals
+        if p.claimed_session_ids and p.analyzer in _SESSION_CLAIM_PRIORITY
+    ]
+    if len(eligible) < 2:
+        return proposals
+
+    already_claimed: set[str] = set()
+    shares: dict[int, tuple[float, str]] = {}   # id(p) -> (share, winner name)
+    for p in sorted(eligible, key=lambda p: _SESSION_CLAIM_PRIORITY[p.analyzer]):
+        own = set(p.claimed_session_ids)
+        overlap = own & already_claimed
+        if overlap:
+            shares[id(p)] = (len(overlap) / len(own), p.analyzer)
+        already_claimed |= own
+
+    if not shares:
+        return proposals
+
+    out: list[CostProposal] = []
+    for p in proposals:
+        entry = shares.get(id(p))
+        if entry is None:
+            out.append(p)
+            continue
+        share, _ = entry
+        keep = max(0.0, 1.0 - share)
+        new_usd = (
+            round(p.past_overspend_usd * keep, 6)
+            if p.past_overspend_usd is not None else None
+        )
+        new_tokens = (
+            int(round(p.past_overspend_tokens * keep))
+            if p.past_overspend_tokens is not None else None
+        )
+        note = (
+            f"{round(share * 100)}% of this cluster's sessions are already "
+            f"priced on another card pricing the identical repeated shape; "
+            f"reduced to avoid claiming them twice."
+        )
+        out.append(replace(
+            p,
+            past_overspend_usd=new_usd,
+            past_overspend_tokens=new_tokens,
+            coverage_note=(p.coverage_note + " " + note).strip(),
+        ))
+    return out
 
 
 def _write_budget_basis(report: Any, window_days: float) -> Any:

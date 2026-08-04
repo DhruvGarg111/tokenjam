@@ -326,6 +326,14 @@ class ReuseCluster:
     example_session_ids: list[str]         # top 3, ordered by recency
     skeleton_session_id: str               # which session's plan to render
     caveat:            str = REUSE_HONESTY_CAVEAT
+    # EVERY session in the cluster, not just the 3 examples above — the
+    # population `cost_proposals._net_cross_analyzer_session_overlap` needs to
+    # tell whether this cluster's claim overlaps another analyzer's (`script`
+    # clusters the identical repeated-tool-sequence shape and, absent this,
+    # claimed the same sessions a second time — see CLAUDE.md Critical Rule 27
+    # in `.claude/rules/optimize-cost-figures.md`). Defaulted for round-trip
+    # with older serialized reports.
+    member_session_ids: tuple[str, ...] = ()
 
 
 #: Capture modes whose clusters were built, wholly or partly, on tool
