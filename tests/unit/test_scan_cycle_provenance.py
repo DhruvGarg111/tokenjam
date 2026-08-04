@@ -444,3 +444,61 @@ def test_the_shared_cache_does_not_drop_the_cost_builds_stamp(cfg):
     # The keys this whitelist already carried, pinned in the same place so the
     # next addition is caught by the same test rather than by a live daemon.
     assert after["cost_window_days"] == 30
+
+
+def test_an_unnamed_cost_key_survives_the_relearn_leg(cfg):
+    """`write_cache` and `read_cost_proposals` copy `cost_*` keys through by
+    PREFIX now, not by a hand-written list — so a key neither of them has ever
+    heard of must still round-trip. Deliberately does not name any key that
+    appears in `relearn_store`'s source: naming one here would let the guard
+    pass by accident if the prefix rule ever regressed back into a whitelist
+    that happened to still include that one name.
+    """
+    from dataclasses import dataclass, field
+
+    from tokenjam.core.optimize import relearn_store
+
+    relearn_store.write_cost_proposals([], config=cfg, window_days=30)
+    p = relearn_store.default_cache_path(cfg)
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    raw["cost_zzz_never_named_anywhere_in_source"] = "sentinel"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+
+    @dataclass
+    class _Finding:
+        clusters: list = field(default_factory=list)
+
+    relearn_store.write_cache(_Finding(), config=cfg)
+    after = relearn_store.read_cost_proposals(config=cfg) or {}
+    assert after.get("cost_zzz_never_named_anywhere_in_source") == "sentinel", (
+        "the relearn write dropped a cost_* key it does not itself name"
+    )
+
+
+def test_a_recorded_cost_error_survives_the_relearn_leg(cfg):
+    """A cost-proposals recompute failure is state, not noise: it flags the
+    Review inbox as degraded until a later recompute clears it. The relearn
+    leg shares the same cache file and used to rebuild it from a whitelist
+    that never named `cost_proposals_error`/`cost_proposals_error_at`, so the
+    very next relearn recompute silently erased a recorded failure and the
+    surface read as if nothing had gone wrong.
+    """
+    from dataclasses import dataclass, field
+
+    from tokenjam.core.optimize import relearn_store
+
+    relearn_store.write_cost_proposals([], config=cfg, window_days=30)
+    relearn_store.write_cost_proposals_error("boom: recompute failed", config=cfg)
+    before = relearn_store.read_cost_proposals(config=cfg) or {}
+    assert before["cost_proposals_error"] == "boom: recompute failed"
+
+    @dataclass
+    class _Finding:
+        clusters: list = field(default_factory=list)
+
+    relearn_store.write_cache(_Finding(), config=cfg)
+    after = relearn_store.read_cost_proposals(config=cfg) or {}
+    assert after["cost_proposals_error"] == "boom: recompute failed", (
+        "the relearn write dropped a recorded cost-proposals error"
+    )
+    assert after["cost_proposals_error_at"] == before["cost_proposals_error_at"]
