@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 import click
 from rich.markup import escape
@@ -18,13 +17,19 @@ from tokenjam.utils.formatting import (
 )
 from tokenjam.utils.time_parse import utcnow
 
-#: Window the recoverable teaser looks back over, matching `tj optimize`'s
-#: own `--since` default so the figure means the same thing in both places.
-_TEASER_WINDOW_DAYS = 30
-
 #: Below this, "$X recoverable" reads as noise rather than a real pointer —
 #: stay silent instead of printing a sub-dollar figure.
 _TEASER_MIN_USD = 1.0
+
+#: What the teaser says when the analyzer report store has never been written.
+#: A COLD store is not zero and not "nothing to recover" — it carries no figure
+#: at all, so this line names the command that produces one and states no
+#: quantity. `tj optimize` runs the scan in the foreground and prints the real
+#: figures; the daemon writes the store on its own schedule.
+_COLD_TEASER = (
+    "[dim]Recoverable waste has not been scanned yet: run "
+    "[bold]tj optimize[/bold].[/dim]"
+)
 
 
 @click.command("status", cls=TjCommand, status_message="Scanning your sessions…")
@@ -164,21 +169,33 @@ def cmd_status(
                 f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
                 f"(or [bold]--codex[/bold]) to set it.[/dim]"
             )
-        teaser = _recoverable_teaser(db, ctx.obj.get("config"))
+        teaser = _recoverable_teaser(ctx.obj.get("config"))
         if teaser:
             console.print(teaser)
 
     ctx.exit(1 if has_active_alerts else 0)
 
 
-def _recoverable_teaser(db, config) -> str | None:
+def _recoverable_teaser(config) -> str | None:
     """One-line `tj optimize` pointer for `tj status` — nothing in status,
     doctor, statusline or the banner ever mentioned optimize existed.
 
+    READS THE STORE, NEVER RUNS AN ANALYZER. This used to call `build_report`
+    inline on every plain `tj status`, which dispatched the whole cost
+    analyzer set (including the deliberately unbounded `relearn` scan) over
+    the entire corpus and cost about a minute of CPU before the command
+    returned. That is the identical failure `core/optimize/report_store.py`
+    was written to end on the HTTP side ("no request path runs an analyzer");
+    a CLI command that a user types to read a status table is the same kind of
+    path. Analyzer runs happen at daemon boot, on the daemon's schedule, on a
+    user Rescan, or when the user explicitly types `tj optimize` — and they
+    all land in the store this reads.
+
     Reuses the same recoverable-savings contract every analyzer already
-    carries (`past_overspend_usd`, #111) rather than inventing a new
-    figure, scoped to `COST_ANALYZERS` — the analyzers that actually feed the
-    cost/apply rail (`cost_proposals.py`).
+    carries (`past_overspend_usd`) rather than inventing a new figure, scoped
+    to `COST_ANALYZERS` — the analyzers that actually feed the cost/apply rail
+    (`cost_proposals.py`). The store holds every analyzer's finding, so the
+    scoping is applied here on the read rather than by restricting the scan.
 
     Reports the LARGEST single analyzer's estimate rather than a sum across
     analyzers — mirroring `largest_recoverable_usd` in `api/routes/cost.py`.
@@ -187,32 +204,33 @@ def _recoverable_teaser(db, config) -> str | None:
     would double-count and print an inflated, non-additive headline; the
     single largest entry is honest standalone because it isn't a sum of
     anything (see `_recoverable_overlap_note` in `api/routes/cost.py` for the
-    full rationale). Silent (returns None) whenever the figure wouldn't mean
-    anything: no direct DB connection (daemon holds the lock), no usage, or a
-    sub-$1 figure. Dollars are shown regardless of billing mode (product
-    decision: no differentiated messaging between subscription and API
-    users).
+    full rationale).
+
+    A COLD store renders `_COLD_TEASER`: a command to run, never a number and
+    never a zero. `$0.00 recoverable` off a scan that never ran reads as "you
+    have no waste", which is a reassurance the data does not support (root
+    anti-pattern 22). Otherwise silent (returns None) whenever the figure
+    wouldn't mean anything: no config, or a sub-$1 figure. Dollars are shown
+    regardless of billing mode (product decision: no differentiated messaging
+    between subscription and API users).
     """
-    conn = getattr(db, "conn", None)
-    if conn is None or config is None:
+    if config is None:
         return None
     try:
-        from tokenjam.core.optimize import build_report
+        from tokenjam.core.optimize import report_store
         from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
 
-        since_dt = utcnow() - timedelta(days=_TEASER_WINDOW_DAYS)
-        until_dt = utcnow()
-
-        report = build_report(
-            db=db, config=config, since=since_dt, until=until_dt,
-            findings=list(COST_ANALYZERS),
-        )
+        report = report_store.stored_report(config)
+        if report is None:
+            return _COLD_TEASER
         estimates: list[tuple[float, int]] = []
         if report.downgrade is not None:
             usd = report.downgrade.past_overspend_usd
             if usd is not None:
                 estimates.append((usd, getattr(report.downgrade, "past_overspend_tokens", None) or 0))
-        for finding in (report.findings or {}).values():
+        for name, finding in (report.findings or {}).items():
+            if name not in COST_ANALYZERS:
+                continue
             usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:
                 estimates.append((usd, getattr(finding, "past_overspend_tokens", None) or 0))
