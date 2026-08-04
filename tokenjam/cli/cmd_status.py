@@ -4,11 +4,18 @@ import json
 from datetime import timedelta
 
 import click
+from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import Alert, AlertFilters
-from tokenjam.utils.formatting import console, format_cost, format_tokens, status_icon
+from tokenjam.utils.formatting import (
+    console,
+    format_cost,
+    format_tokens,
+    print_capped_table,
+    status_icon,
+)
 from tokenjam.utils.time_parse import utcnow
 
 #: Window the recoverable teaser looks back over, matching `tj optimize`'s
@@ -22,9 +29,13 @@ _TEASER_MIN_USD = 1.0
 
 @click.command("status", cls=TjCommand, status_message="Scanning your sessions…")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
+@click.option("-v", "--verbose", "verbose_flag", is_flag=True, default=False,
+              help="Print every agent's full card instead of the capped table.")
 @json_option
 @click.pass_context
-def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) -> None:
+def cmd_status(
+    ctx: click.Context, agent: str | None, verbose_flag: bool, output_json_flag: bool,
+) -> None:
     """Show agent status overview."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
@@ -51,6 +62,10 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) ->
 
     has_active_alerts = False
     agents_data = []
+    # (agent_data, active_alerts, session) per agent, collected rather than
+    # printed inside the loop: the overview ranks agents against each other,
+    # so nothing can be rendered until every agent has been read.
+    entries: list[tuple[dict, list, object | None]] = []
 
     for aid in agent_ids:
         session = None
@@ -107,9 +122,7 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) ->
             "active_seconds": active_seconds,
         }
         agents_data.append(agent_data)
-
-        if not output_json:
-            _print_agent_status(agent_data, active_alerts, session)
+        entries.append((agent_data, active_alerts, session))
 
     # Count sessions with plan_tier='unknown' so the user knows to reconfigure.
     # Informational only — exit code stays driven by alert state.
@@ -127,6 +140,24 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) ->
             "unknown_plan_tier_sessions": unknown_count,
         }, default=str))
     else:
+        # Two views over the same data. The cards are reached deliberately —
+        # by naming an agent, or by asking for all of them with -v — rather
+        # than being the default nobody chose: one ~9-line card per tracked
+        # agent_id is a screen whose length grows with every project
+        # directory tj has ever seen, with the totals stranded at the bottom.
+        # Either position turns it on. `-v` is declared on the group AND on
+        # this command because the screen advertises `tj status -v`, which is
+        # what a user types; reading only the group's copy made the advertised
+        # string exit 2 with "No such option". They cannot conflict: both are
+        # booleans meaning the same thing, so OR is the whole resolution rule
+        # and there is no precedence question to get wrong.
+        verbose = verbose_flag or bool(ctx.obj.get("verbose"))
+        if verbose or agent_filter:
+            for agent_data, active_alerts, session in entries:
+                _print_agent_status(agent_data, active_alerts, session)
+        else:
+            _print_overview(entries)
+
         if unknown_count > 0:
             console.print(
                 f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
@@ -257,12 +288,140 @@ def _dedupe_alerts(alerts: list[Alert]) -> list[tuple[Alert, int]]:
     return [(first_seen[key], counts[key]) for key in order]
 
 
+# ---------------------------------------------------------------------------
+# Overview — the default `tj status` view
+# ---------------------------------------------------------------------------
+# `_print_agent_status` below prints one ~9-line card per agent. That is the
+# right screen for ONE agent and the wrong one for all of them: the agent_id
+# set grows monotonically (roughly one per project directory tj has ever
+# seen), so the card list is a screen whose length tracks how long the user
+# has been running tj, with the only cross-agent totals stranded at the very
+# bottom, past everything the reader has already scrolled through. It is worst
+# for the heaviest user, who is exactly the one with something to find in it.
+#
+#   tj status              → the overview below: totals, capped table, trailer
+#   tj status --agent <id> → that one agent's card, in full, renderer untouched
+#   tj status -v           → byte-for-byte what a bare run printed before
+#
+# Rows are ranked by RECENCY (most recent session activity first, live
+# sessions above everything), not by cost. Cost today is $0.00 for nearly
+# every tracked agent on a normal day — a cost ranking would put the handful
+# of agents the user actually worked in today in an arbitrary order below a
+# tie of hundreds of zeroes. Recency is defined for every agent that has ever
+# run and orders the list the way the user thinks about it.
+
+
+#: Width the AGENT column is elided to. Agent ids run long (they are derived
+#: from project directories) and share a leading `claude-code-` run, so a
+#: whole screen of them truncated on the RIGHT renders as identical rows.
+_AGENT_COL_WIDTH = 34
+
+
+def _elide_left(text: str, width: int) -> str:
+    """Shorten from the LEFT, keeping the distinguishing tail."""
+    if len(text) <= width:
+        return text
+    return "…" + text[-(width - 1):]
+
+
+def _last_activity(session: object | None):
+    """When this agent was last doing something, or None if never recorded."""
+    if session is None:
+        return None
+    return getattr(session, "ended_at", None) or getattr(session, "started_at", None)
+
+
+def _fmt_age(when) -> str:
+    """Coarse relative age. `-` when unknown, never a fabricated zero."""
+    if when is None:
+        return "-"
+    try:
+        secs = int((utcnow() - when).total_seconds())
+    except TypeError:
+        return "-"
+    if secs < 0:
+        secs = 0
+    if secs < 60:
+        return "just now"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+def _print_overview(entries: list[tuple[dict, list, object | None]]) -> None:
+    """Totals first, then the top agents by recency, then the way to the rest."""
+    total_today = sum(d["cost_today"] or 0.0 for d, _a, _s in entries)
+    active = sum(1 for d, _a, _s in entries if d["status"] == "active")
+    alerting = sum(1 for d, _a, _s in entries if d["active_alerts"])
+
+    header = (
+        f"\n  [bold]{len(entries)}[/bold] agent{'' if len(entries) == 1 else 's'} · "
+        f"[bold]{active}[/bold] active · [bold]{format_cost(total_today)}[/bold] today"
+    )
+    console.print(header)
+    if alerting:
+        console.print(
+            f"  [warn]![/warn] {alerting} agent{'' if alerting == 1 else 's'} "
+            f"with active alerts."
+        )
+    console.print()
+
+    # Live sessions first, then most recent activity. An agent with no
+    # recorded session sorts last on `-inf` rather than being handed an
+    # invented timestamp.
+    def sort_key(entry: tuple[dict, list, object | None]):
+        data, _alerts, session = entry
+        when = _last_activity(session)
+        return (
+            0 if data["status"] == "active" else 1,
+            -(when.timestamp() if when is not None else float("-inf")),
+            data["agent_id"],
+        )
+
+    rows = []
+    for data, _alerts, session in sorted(entries, key=sort_key):
+        # An agent_id is user data (it is derived from a project directory),
+        # so it can carry `[...]` that Rich would eat as a style tag.
+        #
+        # `_cost_line`'s budget suffix and the token counts are deliberately
+        # NOT here: the daily-limit suffix triples the column's width, and
+        # per-session token counts cover a different population than a
+        # today-scoped dollar column sitting beside them (root anti-pattern
+        # 22b). Both live on the card, one command away.
+        rows.append((
+            escape(_elide_left(data["agent_id"], _AGENT_COL_WIDTH)),
+            data["status"],
+            format_cost(data["cost_today"]),
+            str(data["active_alerts"]) if data["active_alerts"] else "-",
+            _fmt_age(_last_activity(session)),
+        ))
+
+    hidden = print_capped_table(
+        ("AGENT", "STATUS", "COST TODAY", "ALERTS", "LAST ACTIVE"),
+        rows,
+        more_command="tj status --agent <id>",
+        more_lead="See one with",
+        noun="agent",
+        summary="Ranked by most recent activity.",
+    )
+    if hidden:
+        console.print("  [dim]All of them: [accent]tj status -v[/accent].[/dim]")
+    console.print()
+
+
 def _print_agent_status(data: dict, active_alerts: list, session: object | None) -> None:
     status = data["status"]
     icon = status_icon(status)
-    style = "green" if status == "active" else "dim"
+    # Named roles, never a raw colour (Critical Rule 35 in tokenjam/CLAUDE.md).
+    # "active" is weight, not green: a colour spent on the least surprising
+    # outcome stops meaning anything.
+    style = "ok" if status == "active" else "muted"
 
-    console.print(f"[{style}]{icon}[/] [bold]{data['agent_id']}[/bold]   "
+    console.print(f"[{style}]{icon}[/] [bold]{escape(data['agent_id'])}[/bold]   "
                   f"{status}")
     console.print()
 
@@ -298,6 +457,6 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None)
         console.print(f"  [{colour}]{alert.title}{suffix}[/]")
 
     if not active_alerts:
-        console.print("  [green]No active alerts[/green]")
+        console.print("  [muted]No active alerts[/muted]")
 
     console.print()
