@@ -31,6 +31,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.context_diagnostic import ContextDiagnostic
 from tokenjam.core.framing import Framing
 from tokenjam.utils.formatting import console, format_tokens
@@ -73,7 +74,7 @@ def _classify(overhead_share: float) -> Tier:
     return _TIERS[-1]
 
 
-@click.command("tokenmaxx")
+@click.command("tokenmaxx", cls=TjCommand, status_message="Building your efficiency card…")
 @click.option("--agent", default=None, help="Filter to a specific agent_id.")
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
 @click.option("--weekly", is_flag=True,

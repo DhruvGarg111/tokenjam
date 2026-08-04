@@ -12,11 +12,12 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.config import TjConfig
 from tokenjam.utils.formatting import console
 
 
-@click.group("relearn", invoke_without_command=False)
+@click.group("relearn", cls=TjGroup, invoke_without_command=False)
 def cmd_relearn() -> None:
     """Review & apply self-improvement suggestions."""
 

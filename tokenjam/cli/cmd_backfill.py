@@ -7,6 +7,7 @@ from pathlib import Path
 import click
 
 from tokenjam.cli.backfill_progress import backfill_progress
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
     count_claude_code_sessions_in_scope,
@@ -23,7 +24,7 @@ from tokenjam.utils.formatting import console, format_cost
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 
-@click.group("backfill")
+@click.group("backfill", cls=TjGroup)
 def cmd_backfill() -> None:
     """Import past sessions from your agents."""
 
@@ -143,7 +144,7 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
         )
 
 
-@cmd_backfill.command("status")
+@cmd_backfill.command("status", status_message="Checking backfill status…")
 @click.option("--root", "root_path", default=None,
               help=f"Override Claude Code projects root (default {CLAUDE_CODE_PROJECTS_ROOT}).")
 @click.option("--since", "since_value", default=None,
@@ -257,7 +258,7 @@ def status(ctx: click.Context, root_path: str | None, since_value: str | None,
     )
 
 
-@cmd_backfill.command("codex")
+@cmd_backfill.command("codex", status_message="Backfilling Codex sessions…")
 @click.option("--root", "root_path", default=None,
               help=f"Override Codex sessions root (default {CODEX_SESSIONS_ROOT}).")
 @click.option("--since", "since_value", default=None,
@@ -286,7 +287,6 @@ def codex(ctx: click.Context, root_path: str | None,
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
-    console.print(f"Backfilling Codex sessions from {root} …")
     try:
         result = ingest_codex(
             db, root=root, since=since, config=ctx.obj.get("config"),
@@ -314,7 +314,7 @@ def codex(ctx: click.Context, root_path: str | None,
         )
 
 
-@cmd_backfill.command("langfuse")
+@cmd_backfill.command("langfuse", status_message="Ingesting Langfuse observations…")
 @click.option("--source-url", default=None,
               help="Live Langfuse base URL (e.g. https://cloud.langfuse.com). "
                    "Reads /api/public/observations with --api-key Bearer auth.")
@@ -343,8 +343,6 @@ def langfuse(ctx: click.Context, source_url: str | None, source_file: str | None
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
-    source_label = source_url or source_file
-    console.print(f"Ingesting Langfuse observations from {source_label} …")
     try:
         result = ingest_langfuse(
             db,
@@ -364,7 +362,7 @@ def langfuse(ctx: click.Context, source_url: str | None, source_file: str | None
     )
 
 
-@cmd_backfill.command("helicone")
+@cmd_backfill.command("helicone", status_message="Ingesting Helicone records…")
 @click.option("--source-url", default=None,
               help="Live Helicone base URL (e.g. https://api.helicone.ai). "
                    "POSTs /v1/request/query with --api-key Bearer auth.")
@@ -393,8 +391,6 @@ def helicone(ctx: click.Context, source_url: str | None, source_file: str | None
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
-    source_label = source_url or source_file
-    console.print(f"Ingesting Helicone records from {source_label} …")
     try:
         result = ingest_helicone(
             db,
@@ -414,7 +410,7 @@ def helicone(ctx: click.Context, source_url: str | None, source_file: str | None
     )
 
 
-@cmd_backfill.command("otlp")
+@cmd_backfill.command("otlp", status_message="Ingesting OTLP spans…")
 @click.option("--source-url", default=None,
               help="HTTP(S) URL to an OTLP JSON dump (GET-fetched). For "
                    "live push-style OTLP ingestion, point your collector "
@@ -444,8 +440,6 @@ def otlp(ctx: click.Context, source_url: str | None, source_file: str | None,
         except ValueError as exc:
             raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
-    source_label = source_url or source_file
-    console.print(f"Ingesting OTLP spans from {source_label} …")
     try:
         result = ingest_otlp(
             db,

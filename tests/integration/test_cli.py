@@ -108,6 +108,36 @@ def _seed_agent_and_session(db, agent_id="test-agent"):
     return session
 
 
+def _force_terminal_status_consoles(monkeypatch):
+    """Force `tj_status`'s stdout/stderr consoles into terminal mode.
+
+    CliRunner's captured streams are never a tty, so without this the
+    `Progress` spinner in `TjCommand`/`tj_status` never activates at all and
+    a byte-clean-stdout test would pass trivially regardless of whether the
+    redirect-stdout fix (`backfill_progress._spinner`'s
+    `redirect_stdout=False`) is actually in place. Returns
+    ``(stdout_buf, stderr_buf)`` — inspect ``stderr_buf`` after invoking to
+    confirm the spinner really ran, which is what makes the "stdout stayed
+    clean" assertion meaningful rather than vacuous.
+    """
+    import io
+
+    from rich.console import Console
+
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    monkeypatch.setattr(
+        "tokenjam.cli.tj_status._stdout_console",
+        Console(file=stdout_buf, force_terminal=True, highlight=False, width=100),
+    )
+    monkeypatch.setattr(
+        "tokenjam.cli.tj_status._stderr_console",
+        Console(file=stderr_buf, force_terminal=True, highlight=False,
+                width=100, stderr=True),
+    )
+    return stdout_buf, stderr_buf
+
+
 def _seed_alert(db, agent_id="test-agent", acknowledged=False, suppressed=False,
                  alert_type=AlertType.COST_BUDGET_DAILY, title="Daily budget exceeded"):
     """Insert an alert into the DB."""
@@ -134,6 +164,24 @@ def test_status_exits_0_when_no_alerts(runner, db, config):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data["has_active_alerts"] is False
+
+
+def test_status_json_stdout_is_byte_clean_under_a_live_spinner(runner, db, config, monkeypatch):
+    """`status` declares a status_message (`cmd_status.py`), so `--json` must
+    route it to stderr and leave stdout as pure JSON -- see
+    `test_optimize_json_stdout_is_byte_clean_under_a_live_spinner` below for
+    why the consoles are forced into terminal mode."""
+    _seed_agent_and_session(db)
+    _, stderr_buf = _force_terminal_status_consoles(monkeypatch)
+
+    result = _invoke(runner, db, config, ["status", "--json"])
+    assert result.exit_code == 0, result.output
+
+    assert "\x1b[" not in result.output
+    data = json.loads(result.output)
+    assert data["has_active_alerts"] is False
+
+    assert "\x1b[" in stderr_buf.getvalue(), "spinner never activated -- test is vacuous"
 
 
 def test_status_exits_1_when_active_alerts(runner, db, config):
@@ -1280,6 +1328,42 @@ def test_optimize_json_output_includes_caveat(runner, db, config):
     data = json.loads(result.output)
     assert data["downgrade"] is not None
     assert "Candidate-flagging heuristic" in data["downgrade"]["caveat"]
+
+
+def test_optimize_json_stdout_is_byte_clean_under_a_live_spinner(runner, db, config, monkeypatch):
+    """`tj optimize` wraps its report fetch/build in a manual `tj_status`
+    call (see `cmd_optimize.py`). Rich's `Progress`/`Live` defaults to
+    redirecting `sys.stdout` through whichever console it renders to -- which,
+    under `--json`, is the stderr console. `click.echo()` turns out not to be
+    at risk of that in practice (it resolves the real underlying binary
+    buffer and bypasses the redirect), but `_spinner`'s
+    `redirect_stdout=False` removes the class of risk outright rather than
+    relying on that being true forever. This forces the spinner to actually
+    activate during a `--json` run and asserts stdout is still exactly the
+    JSON, nothing else.
+    """
+    from datetime import timedelta
+
+    span = make_llm_span(
+        agent_id="test-agent", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.030,
+        session_id="s", start_time=utcnow() - timedelta(days=1),
+    )
+    db.insert_span(span)
+    _, stderr_buf = _force_terminal_status_consoles(monkeypatch)
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0, result.output
+
+    # stdout is exactly one parseable JSON document -- no escape codes, no
+    # status text leaked in front of or after it.
+    assert "\x1b[" not in result.output
+    data = json.loads(result.output)
+    assert data["downgrade"] is not None
+
+    # The spinner DID activate (proves the assertion above isn't vacuous):
+    # its escape codes landed on the forced-terminal status console instead.
+    assert "\x1b[" in stderr_buf.getvalue(), "spinner never activated -- test is vacuous"
 
 
 def _seed_low_cache_efficacy_window(db, agent_id="test-agent"):

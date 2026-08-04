@@ -32,6 +32,7 @@ import json
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.optimize import relearn_apply, relearn_proposals
 from tokenjam.core.rulewrite.delivery import delivery_label
 from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
@@ -67,7 +68,7 @@ def _emit(ctx: click.Context, payload: dict) -> bool:
 # F1: list / apply / enable / revert
 # --------------------------------------------------------------------------- #
 
-@click.command("list")
+@click.command("list", cls=TjCommand)
 @click.pass_context
 def list_cmd(ctx: click.Context) -> None:
     """List the stored proposals, with the IDs `tj relearn apply` takes."""
@@ -111,7 +112,7 @@ def list_cmd(ctx: click.Context) -> None:
         console.print(f"[dim]{reason}[/dim]")
 
 
-@click.command("apply")
+@click.command("apply", cls=TjCommand)
 @click.argument("proposal_id")
 @click.option("--go", is_flag=True, help="Actually write the fix (default is a dry run).")
 @click.option("--target", "target_path", default=None,
@@ -173,7 +174,7 @@ def apply_cmd(ctx, proposal_id, go, target_path, scope, force):
     console.print(f"[dim]Undo with [bold]tj relearn revert {rec['id']}[/bold].[/dim]")
 
 
-@click.command("enable")
+@click.command("enable", cls=TjCommand)
 @click.argument("fix_id")
 @click.option("--yes", is_flag=True,
               help="Confirm wiring this hook into settings.json.")
@@ -192,7 +193,7 @@ def enable_cmd(ctx, fix_id, yes):
     )
 
 
-@click.command("revert")
+@click.command("revert", cls=TjCommand)
 @click.argument("fix_id")
 @click.pass_context
 def revert_cmd(ctx, fix_id):

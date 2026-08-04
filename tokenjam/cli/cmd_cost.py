@@ -1,13 +1,14 @@
 import click
 import json
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.cost import compute_cost_diff
 from tokenjam.core.models import CostFilters
 from tokenjam.utils.formatting import console, make_table, format_cost, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 
-@click.command("cost")
+@click.command("cost", cls=TjCommand, status_message="Computing cost breakdown…")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="7d", help="Time window (e.g. 1h, 7d, 2026-03-01)")
 @click.option("--group-by", "group_by",

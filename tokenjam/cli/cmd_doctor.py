@@ -7,13 +7,14 @@ import duckdb
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import load_config, resolve_config_path
 from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
 from tokenjam.core.db import SPANS_INDEXES
 from tokenjam.utils.formatting import console, display_path
 
 
-@click.command("doctor")
+@click.command("doctor", cls=TjCommand, status_message="Running health checks…")
 @json_option
 @click.option(
     "--repair",

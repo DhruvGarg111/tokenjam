@@ -7,12 +7,13 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import TraceFilters
 from tokenjam.utils.formatting import console
 from tokenjam.utils.time_parse import parse_since
 
 
-@click.command("export")
+@click.command("export", cls=TjCommand, status_message="Exporting spans…")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="7d", help="Time window (e.g. 1h, 7d)")
 @click.option("--format", "fmt",

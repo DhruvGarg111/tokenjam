@@ -8,6 +8,7 @@ import click
 from rich.markup import escape as _rich_escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand, tj_status
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
@@ -83,7 +84,12 @@ def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
     ))
 
 
-@click.command("optimize")
+#: No class-level `status_message`: the `--validate` branch (below) has its
+#: own confirmation prompt, and a live spinner colliding with a blocking
+#: stdin read corrupts both. `tj_status` is called manually below, scoped to
+#: just the report fetch/build — the one stretch that's actually silent and
+#: has no prompt anywhere in it.
+@click.command("optimize", cls=TjCommand)
 @click.argument(
     "findings",
     nargs=-1,
@@ -185,147 +191,153 @@ def cmd_optimize(
     requested = list(findings) if findings else None
     analyzer_findings = _resolve_analyzer_names(requested)
 
-    # Two paths depending on whether the daemon holds the DB lock.
-    #
-    # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
-    # build the report locally using db.conn directly. Fastest, no HTTP.
-    #
-    # Daemon up (main.py handed us an ApiBackend because DuckDB refused to
-    # open) → fetch the report from /api/v1/optimize. Previously this path
-    # tried to open the DB read-only, but DuckDB blocks read-only attaches
-    # while another process holds the write lock — `tj optimize` failed with
-    # "Could not set lock on file" any time the daemon was up. See issue
-    # #68 §12.
-    conn = getattr(db, "conn", None)
-    report: OptimizeReport
-    plan_mix: dict[str, int]
-    if conn is None:
-        # API-shim path
-        from tokenjam.core.api_backend import ApiBackend
-        if not isinstance(db, ApiBackend):
-            raise click.ClickException(
-                "optimize requires either a direct DuckDB connection or a "
-                "running tj serve at the configured api.{host,port}."
-            )
-        try:
-            report_dict = db.fetch_optimize_report(
-                since=since,
+    # The one truly slow, silent stretch in this command: fetching or
+    # building the report (analyzer sweep can run to a couple of minutes on
+    # a large corpus) plus the two opportunistic background passes below it.
+    # --validate (above) never reaches here, so its confirmation prompt is
+    # never live at the same time as this spinner.
+    with tj_status("Scanning your sessions…", ctx):
+        # Two paths depending on whether the daemon holds the DB lock.
+        #
+        # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
+        # build the report locally using db.conn directly. Fastest, no HTTP.
+        #
+        # Daemon up (main.py handed us an ApiBackend because DuckDB refused to
+        # open) → fetch the report from /api/v1/optimize. Previously this path
+        # tried to open the DB read-only, but DuckDB blocks read-only attaches
+        # while another process holds the write lock — `tj optimize` failed with
+        # "Could not set lock on file" any time the daemon was up. See issue
+        # #68 §12.
+        conn = getattr(db, "conn", None)
+        report: OptimizeReport
+        plan_mix: dict[str, int]
+        if conn is None:
+            # API-shim path
+            from tokenjam.core.api_backend import ApiBackend
+            if not isinstance(db, ApiBackend):
+                raise click.ClickException(
+                    "optimize requires either a direct DuckDB connection or a "
+                    "running tj serve at the configured api.{host,port}."
+                )
+            try:
+                report_dict = db.fetch_optimize_report(
+                    since=since,
+                    agent_id=agent,
+                    findings=analyzer_findings,
+                    budget_provider=budget_provider,
+                    budget_usd=budget_usd,
+                )
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to fetch optimize report from tj serve: {exc}"
+                ) from exc
+
+            # The daemon no longer runs analyzers on a request — it serves the
+            # report its background scan stored (`core.optimize.report_store`).
+            # A cold store is NOT an empty report: say "not computed yet" rather
+            # than rendering a report full of zeros that reads as "no waste".
+            if report_dict.get("report_available") is False:
+                _echo_scan_not_ready(report_dict, output_json)
+                return
+
+            if report_dict.get("error") == "no_data":
+                if output_json:
+                    click.echo(json.dumps(report_dict))
+                else:
+                    console.print(
+                        "[yellow]No usage data found.[/yellow] "
+                        "[dim]Let TokenJam run for a few days, or — if you use "
+                        "Claude Code — try [bold]tj backfill claude-code[/bold] to "
+                        "ingest historical sessions.[/dim]"
+                    )
+                return
+
+            report = report_from_dict(report_dict)
+            # Plan-tier mix is included in the /api/v1/optimize payload as of
+            # #68 §12 follow-up #29, so the CLI can render subscription /
+            # local / unknown framings correctly under daemon mode.
+            plan_mix = report_dict.get("plan_tier_mix") or {}
+            # Agent-persona mix (#97) — same daemon-mode plumbing as plan_mix
+            # above, so the downsize CTA matches persona whether or not the
+            # daemon is up.
+            agent_mix = report_dict.get("agent_persona_mix") or {}
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
+            ).fetchone()
+            if not row or not row[0]:
+                if output_json:
+                    click.echo(json.dumps({
+                        "error": "no_data",
+                        "message": "No span data available — let TokenJam run for a few "
+                                   "days, or `tj backfill claude-code` if you use Claude Code.",
+                    }))
+                else:
+                    console.print(
+                        "[yellow]No usage data found.[/yellow] "
+                        "[dim]Let TokenJam run for a few days, or — if you use "
+                        "Claude Code — try [bold]tj backfill claude-code[/bold] to "
+                        "ingest historical sessions.[/dim]"
+                    )
+                return
+
+            report = build_report(
+                db=db,
+                config=config,
+                since=since_dt,
+                until=until_dt,
                 agent_id=agent,
                 findings=analyzer_findings,
-                budget_provider=budget_provider,
-                budget_usd=budget_usd,
+                budget_provider_filter=budget_provider,
+                budget_usd_override=budget_usd,
             )
-        except Exception as exc:
-            raise click.ClickException(
-                f"Failed to fetch optimize report from tj serve: {exc}"
-            ) from exc
 
-        # The daemon no longer runs analyzers on a request — it serves the
-        # report its background scan stored (`core.optimize.report_store`).
-        # A cold store is NOT an empty report: say "not computed yet" rather
-        # than rendering a report full of zeros that reads as "no waste".
-        if report_dict.get("report_available") is False:
-            _echo_scan_not_ready(report_dict, output_json)
-            return
+            plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+            agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
-        if report_dict.get("error") == "no_data":
-            if output_json:
-                click.echo(json.dumps(report_dict))
-            else:
-                console.print(
-                    "[yellow]No usage data found.[/yellow] "
-                    "[dim]Let TokenJam run for a few days, or — if you use "
-                    "Claude Code — try [bold]tj backfill claude-code[/bold] to "
-                    "ingest historical sessions.[/dim]"
-                )
-            return
+            # Opportunistic adoption detection: with a direct DuckDB connection in
+            # hand, resolve any ripe past config exports into measured
+            # adopted/ignored outcomes — but only when the daemon is actually
+            # down. Holding a direct `conn` here means our own `open_db()` won a
+            # lock-free open; it does NOT guarantee `tj serve` isn't concurrently
+            # running (e.g. a narrow startup/shutdown window), and a daemon that
+            # *is* up already runs this same detection server-side on every
+            # /api/v1/recommendations read. Without an explicit check, both sides
+            # could race to resolve the same ripe export and each append a
+            # `downsize_adoption` record for it. Probe the daemon's HTTP API
+            # (same reachability check `main.py` uses on a DB-lock failure) and
+            # skip when it answers, so only one side ever runs detection for a
+            # given invocation. Fail-safe — never break optimize.
+            try:
+                from tokenjam.core.api_backend import probe_api
+                from tokenjam.core.recommendations import detect_downsize_adoption
+                api_key = config.api.auth.api_key if config.api.auth.enabled else None
+                daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
+                if not daemon_up:
+                    detect_downsize_adoption(conn, config)
+            except Exception:
+                pass
 
-        report = report_from_dict(report_dict)
-        # Plan-tier mix is included in the /api/v1/optimize payload as of
-        # #68 §12 follow-up #29, so the CLI can render subscription /
-        # local / unknown framings correctly under daemon mode.
-        plan_mix = report_dict.get("plan_tier_mix") or {}
-        # Agent-persona mix (#97) — same daemon-mode plumbing as plan_mix
-        # above, so the downsize CTA matches persona whether or not the
-        # daemon is up.
-        agent_mix = report_dict.get("agent_persona_mix") or {}
-    else:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
-        ).fetchone()
-        if not row or not row[0]:
-            if output_json:
-                click.echo(json.dumps({
-                    "error": "no_data",
-                    "message": "No span data available — let TokenJam run for a few "
-                               "days, or `tj backfill claude-code` if you use Claude Code.",
-                }))
-            else:
-                console.print(
-                    "[yellow]No usage data found.[/yellow] "
-                    "[dim]Let TokenJam run for a few days, or — if you use "
-                    "Claude Code — try [bold]tj backfill claude-code[/bold] to "
-                    "ingest historical sessions.[/dim]"
-                )
-            return
-
-        report = build_report(
-            db=db,
-            config=config,
-            since=since_dt,
-            until=until_dt,
-            agent_id=agent,
-            findings=analyzer_findings,
-            budget_provider_filter=budget_provider,
-            budget_usd_override=budget_usd,
-        )
-
-        plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
-        agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
-
-        # Opportunistic adoption detection: with a direct DuckDB connection in
-        # hand, resolve any ripe past config exports into measured
-        # adopted/ignored outcomes — but only when the daemon is actually
-        # down. Holding a direct `conn` here means our own `open_db()` won a
-        # lock-free open; it does NOT guarantee `tj serve` isn't concurrently
-        # running (e.g. a narrow startup/shutdown window), and a daemon that
-        # *is* up already runs this same detection server-side on every
-        # /api/v1/recommendations read. Without an explicit check, both sides
-        # could race to resolve the same ripe export and each append a
-        # `downsize_adoption` record for it. Probe the daemon's HTTP API
-        # (same reachability check `main.py` uses on a DB-lock failure) and
-        # skip when it answers, so only one side ever runs detection for a
-        # given invocation. Fail-safe — never break optimize.
-        try:
-            from tokenjam.core.api_backend import probe_api
-            from tokenjam.core.recommendations import detect_downsize_adoption
-            api_key = config.api.auth.api_key if config.api.auth.enabled else None
-            daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
-            if not daemon_up:
-                detect_downsize_adoption(conn, config)
-        except Exception:
-            pass
-
-        # Opportunistic cost-proposal refresh: until now the ONLY producer of
-        # the cost-proposal store (core.optimize.cost_proposals
-        # .recompute_cost_proposals) was the web Review inbox's manual
-        # refresh button — a pure-CLI user who never runs `tj serve` plus the
-        # web UI would never have a cost proposal computed at all, so `tj
-        # relearn cost-proposals` would sit permanently empty regardless of
-        # how good its renderer is. Piggyback the same recompute here so a
-        # plain `tj optimize` run keeps that store warm too.
-        # `recompute_cost_proposals` already never raises — it returns a
-        # `CostRecomputeResult` whose `status` says whether it built anything
-        # (`ready`), stood aside for a scan cycle or a concurrent recompute
-        # (`declined`), or blew up (`failed`). This call is opportunistic
-        # upkeep of someone else's store, not a figure `tj optimize` renders,
-        # so it acts on none of those: a broken window here degrades to a
-        # stale/empty cost-proposals list, never a broken `tj optimize`.
-        try:
-            from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
-            recompute_cost_proposals(db, config, agent_id=agent)
-        except Exception:
-            pass
+            # Opportunistic cost-proposal refresh: until now the ONLY producer of
+            # the cost-proposal store (core.optimize.cost_proposals
+            # .recompute_cost_proposals) was the web Review inbox's manual
+            # refresh button — a pure-CLI user who never runs `tj serve` plus the
+            # web UI would never have a cost proposal computed at all, so `tj
+            # relearn cost-proposals` would sit permanently empty regardless of
+            # how good its renderer is. Piggyback the same recompute here so a
+            # plain `tj optimize` run keeps that store warm too.
+            # `recompute_cost_proposals` already never raises — it returns a
+            # `CostRecomputeResult` whose `status` says whether it built anything
+            # (`ready`), stood aside for a scan cycle or a concurrent recompute
+            # (`declined`), or blew up (`failed`). This call is opportunistic
+            # upkeep of someone else's store, not a figure `tj optimize` renders,
+            # so it acts on none of those: a broken window here degrades to a
+            # stale/empty cost-proposals list, never a broken `tj optimize`.
+            try:
+                from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
+                recompute_cost_proposals(db, config, agent_id=agent)
+            except Exception:
+                pass
 
     dominant = dominant_plan(plan_mix)
     pricing_mode = pricing_mode_for(dominant)

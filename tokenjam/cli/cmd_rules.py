@@ -18,6 +18,7 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.config import TjConfig
 from tokenjam.core.rulewrite import (
     RuleWriteRefused,
@@ -57,7 +58,7 @@ def _print_diff(diff: str) -> None:
             console.print(f"[muted]{escape(line)}[/muted]")
 
 
-@click.group("rules", invoke_without_command=False)
+@click.group("rules", cls=TjGroup, invoke_without_command=False)
 def cmd_rules() -> None:
     """Propose permanent CLAUDE.md rules."""
 

@@ -8,6 +8,7 @@ from types import ModuleType
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.utils.formatting import console
 
 # The scenarios live at repo-root `incidents/` in the dev tree, but ship INSIDE
@@ -56,7 +57,7 @@ def _discover_scenarios() -> dict[str, ModuleType]:
     return scenarios
 
 
-@click.command("demo")
+@click.command("demo", cls=TjCommand)
 @click.argument("scenario", required=False, default=None)
 @json_option
 @click.option(

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand, tj_status
 from tokenjam.utils.formatting import console
 
 
@@ -301,7 +302,10 @@ def _uninstall_confirm_prompt(installs: list[PersistentInstall]) -> str:
     return base + ". Continue?"
 
 
-@click.command("uninstall")
+#: No class-level `status_message`: the confirmation prompt below must not
+#: run under a live spinner. `tj_status` is called manually after the
+#: prompt resolves, wrapping only the package-removal step.
+@click.command("uninstall", cls=TjCommand)
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
@@ -340,8 +344,9 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
 
     console.print()
     console.print("[dim]Removing the tokenjam package...[/dim]")
-    for install in installs:
-        _remove_persistent_install(install)
+    with tj_status("Removing the tokenjam package…", ctx):
+        for install in installs:
+            _remove_persistent_install(install)
 
 
 def _teardown_side_effects(ctx: click.Context) -> None:

@@ -39,6 +39,7 @@ import json
 
 import click
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.framing import (
     Framing,
     WindowSummary,
@@ -109,7 +110,7 @@ def _stored_cost_proposal(config, proposal_id: str) -> dict | None:
 # cost-proposals: the list/render verb.
 # --------------------------------------------------------------------------- #
 
-@click.command("cost-proposals")
+@click.command("cost-proposals", cls=TjCommand)
 @click.pass_context
 def cost_proposals_cmd(ctx: click.Context) -> None:
     """List cost-saving fixes (downsize/cache/trim/subagent/deadweight/
@@ -266,7 +267,7 @@ def _render_cost_proposal(
 # cost-apply: the workspace-write verb, apply_capable proposals only.
 # --------------------------------------------------------------------------- #
 
-@click.command("cost-apply")
+@click.command("cost-apply", cls=TjCommand)
 @click.argument("proposal_id")
 @click.option("--go", is_flag=True, help="Actually write the fix (default is a dry run).")
 @click.option("--target", "target_path", default=None,
@@ -378,7 +379,7 @@ def cost_apply_cmd(
 # cost-mark-applied / cost-revert: the advise-only bookkeeping verbs.
 # --------------------------------------------------------------------------- #
 
-@click.command("cost-mark-applied")
+@click.command("cost-mark-applied", cls=TjCommand)
 @click.argument("proposal_id")
 @click.pass_context
 def cost_mark_applied_cmd(ctx: click.Context, proposal_id: str) -> None:
@@ -414,7 +415,7 @@ def cost_mark_applied_cmd(ctx: click.Context, proposal_id: str) -> None:
     console.print(f"[dim]Undo with `tj relearn cost-revert {rec['id']}`.[/dim]")
 
 
-@click.command("cost-revert")
+@click.command("cost-revert", cls=TjCommand)
 @click.argument("record_id")
 @click.pass_context
 def cost_revert_cmd(ctx: click.Context, record_id: str) -> None:
