@@ -84,9 +84,22 @@ def cmd_mcp(ctx: click.Context) -> None:
         else:
             # Could not reach or start tj serve — fall back to read-only DuckDB
             # so MCP read tools still work, though live ingest won't be available.
+            #
+            # A read-only connection bypasses `DuckDBBackend.__init__` and its
+            # `run_migrations`/schema-self-heal call entirely (this file never
+            # calls either), so a store last written by an older `tj` build —
+            # missing a column or table a newer analyzer/tool depends on —
+            # would otherwise surface as a raw duckdb BinderError/
+            # CatalogException the first time a tool touches it. Detect the
+            # gap up front (both checks are pure SELECTs against
+            # information_schema, safe on a read-only connection) and hand it
+            # to `init()` so every tool degrades to one clear message instead.
+            from tokenjam.core.db import missing_expected_columns, missing_expected_tables
+
             db_path = str(Path(config.storage.path).expanduser())
             ro_conn = duckdb.connect(db_path, read_only=True)
-            init(ro_conn=ro_conn, config=config, serve_url=None)
+            schema_gap = missing_expected_tables(ro_conn) + missing_expected_columns(ro_conn)
+            init(ro_conn=ro_conn, config=config, serve_url=None, schema_gap=schema_gap)
     # If no config: init is not called; tools return the no-config sentinel.
 
     mcp.run()

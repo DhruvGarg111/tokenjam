@@ -96,7 +96,7 @@ def _invoke(tmp_path, *args, input_text: str = ""):
 
 def test_claude_code_fresh_onboard_captures_prompts_by_default(_isolated_home, tmp_path):
     res, cfg_path = _invoke(
-        tmp_path, "--claude-code", "--project", "testproj", "--plan", "max_5x",
+        tmp_path, "--claude-code", "--plan", "max_5x",
     )
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
@@ -129,7 +129,7 @@ def _seed_stale_config(tmp_path, *, provider: str, plan: str):
 def test_claude_code_reconfigure_upgrades_stale_prompts_false(_isolated_home, tmp_path):
     _seed_stale_config(tmp_path, provider="anthropic", plan="max_20x")
     res, cfg_path = _invoke(
-        tmp_path, "--claude-code", "--project", "testproj",
+        tmp_path, "--claude-code",
         "--reconfigure", "--plan", "max_20x",
     )
     assert res.exit_code == 0, res.output
@@ -153,7 +153,7 @@ def test_claude_code_plain_rerun_leaves_explicit_false_alone(_isolated_home, tmp
     up the new default (see the comment at the call site in
     `_onboard_claude_code`)."""
     _seed_stale_config(tmp_path, provider="anthropic", plan="max_20x")
-    res, cfg_path = _invoke(tmp_path, "--claude-code", "--project", "testproj")
+    res, cfg_path = _invoke(tmp_path, "--claude-code")
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.prompts is False

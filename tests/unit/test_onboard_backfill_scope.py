@@ -91,7 +91,7 @@ def _run_claude_code(tmp_path, *extra_args, input_str="3\n0\n"):
     with runner.isolated_filesystem(temp_dir=tmp_path):
         return runner.invoke(
             cmd_onboard,
-            ["--claude-code", "--no-daemon", "--project", "testproj", *extra_args],
+            ["--claude-code", "--no-daemon", *extra_args],
             input=input_str, obj={},
         )
 

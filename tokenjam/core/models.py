@@ -205,6 +205,22 @@ class SessionRecord:
     # it to render a parent tree (flat list when no parent edges exist).
     run_id:           str | None    = None
     parent_session_id: str | None   = None
+    # What PRODUCED this session — 'claude-code' / 'codex' / 'sdk' — recorded
+    # at ingest from the strongest signal the writing path has (migration 21).
+    # None for a row written before this column existed, or a live-path
+    # session whose agent_id classifies as neither known coding tool (a
+    # genuine SDK workflow already reads as "sdk", so a bare None here really
+    # does mean "not yet backfilled" — see core/agent_kind.py, which this
+    # value is derived from at write time but never re-derives at read time).
+    source:           str | None    = None
+    # Masked/hashed first-user-prompt identity + the model that ran the bulk
+    # of the session (migration 21) — the "did this repeat prior work" signal
+    # `core.optimize.repeat_task` needs, persisted so it survives Claude
+    # Code's ~30-day transcript rotation instead of requiring the raw prompt
+    # be re-read from a transcript that may already be gone. Never the raw
+    # prompt text itself.
+    task_statement_hash: str | None = None
+    dominant_model:   str | None    = None
 
     @property
     def duration_seconds(self) -> float | None:

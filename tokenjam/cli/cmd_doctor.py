@@ -100,6 +100,15 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     the fact, not inferable by diffing two measurements days apart.
     checks.append(_check_retention(config, ctx.obj["db"]))
 
+    # 20. Subagent type linkage — sub_agent_id spans with no resolved
+    #     sub_agent_type, the join key `subagent_rightsizing` and cost
+    #     attribution need.
+    checks.append(_check_unresolved_subagent_type(ctx.obj["db"]))
+
+    # 21. Captured content backfill gap — [capture] is on, but a slice of
+    #     backfilled history predates that and never got the content.
+    checks.append(_check_content_capture_backfill_gap(config, ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -108,7 +117,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # --repair: attempt fixes for any check that exposed a repair_action
     if repair:
-        _attempt_repairs(checks, ctx.obj["db"], output_json)
+        _attempt_repairs(checks, ctx.obj["db"], output_json, config)
 
     has_errors = any(c["level"] == "error" for c in checks)
     has_warnings = any(c["level"] == "warning" for c in checks)
@@ -176,11 +185,55 @@ def _check_db(config: object) -> dict:
 
 
 def _check_ingest_secret(config: object) -> dict:
-    if config.security.ingest_secret:
-        return {"name": "Ingest secret", "level": "ok",
-                "message": "Ingest secret is configured."}
-    return {"name": "Ingest secret", "level": "warning",
-            "message": "No ingest secret set. API ingest endpoint is unprotected."}
+    if not config.security.ingest_secret:
+        return {"name": "Ingest secret", "level": "warning",
+                "message": "No ingest secret set. API ingest endpoint is unprotected."}
+
+    # Beyond "is a secret set": is it the SAME secret every config on this
+    # machine's search path would resolve to? A project-local .tj/config.toml
+    # and the global ~/.config/tj/config.toml can carry different secrets for
+    # one store — the SDK reads one, a daemon started from a different cwd
+    # reads the other, and span pushes 401 silently with no error surfaced
+    # anywhere else (see `core/config.find_diverged_secret_config`).
+    import sys
+    from typing import cast
+
+    # tomllib is stdlib only from 3.11+; pyproject.toml declares >=3.10, and
+    # this file already carries this exact guard at `_check_mcp_wiring`
+    # (~:1247) for the same reason — matching it here, not inventing a
+    # second spelling.
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    from tokenjam.core.config import TjConfig, active_config_path, find_diverged_secret_config
+
+    active_path = active_config_path(cast("TjConfig", config))
+    if active_path is not None:
+        try:
+            with open(active_path, "rb") as f:
+                active_raw = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            active_raw = None
+        if active_raw is not None:
+            diverged = find_diverged_secret_config(active_path, active_raw)
+            if diverged is not None:
+                other_path, _active_secret, _other_secret = diverged
+                return {
+                    "name": "Ingest secret",
+                    "level": "warning",
+                    "message": (
+                        f"ingest_secret differs between {active_path} and "
+                        f"{other_path} — whichever process reads the other "
+                        f"file will 401 every span it tries to push. Align "
+                        f"them (copy one secret into the other config) or "
+                        f"delete the unused config."
+                    ),
+                }
+
+    return {"name": "Ingest secret", "level": "ok",
+            "message": "Ingest secret is configured."}
 
 
 def _check_prometheus(config: object) -> dict:
@@ -640,6 +693,111 @@ def _check_duplicate_call_ingest(db: object) -> dict:
     }
 
 
+def _check_unresolved_subagent_type(db: object) -> dict:
+    """Flag Claude Code subagent spans with no resolved `sub_agent_type`.
+
+    `sub_agent_id` (migration 14) and `sub_agent_type` (migration 19, the
+    stable per-dispatch-agent-definition identity `subagent_rightsizing` and
+    the cost-attribution proposals key on) are both derived from the on-disk
+    transcript by `core/backfill.py`. A span tagged with the former but not
+    the latter is one of: a row inserted before migration 19 shipped (the
+    common case, and the one this check's repair actually fixes — a normal
+    `tj backfill claude-code` re-derives it from the sidecar and overlays it
+    onto the existing row), a dispatch whose transcript/sidecar Claude Code has
+    since pruned (unrecoverable), or a deliberate `_PER_DISPATCH_TASK_KINDS`
+    carve-out (not a gap — see that constant's docstring). The count here
+    can't tell those apart; the repair narrows it to whatever the first case
+    still leaves.
+    """
+    from tokenjam.core.db import unresolved_subagent_type_stats
+
+    name = "Subagent type linkage"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        spans, cost_usd = unresolved_subagent_type_stats(conn)
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not inspect subagent spans: {e}"}
+    if not spans:
+        return {"name": name, "level": "ok",
+                "message": "Every subagent-dispatch span has a resolved type."}
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{spans} subagent span(s) (${cost_usd:,.2f}) carry a "
+            f"sub_agent_id with no resolved sub_agent_type — per-agent-type "
+            f"cost breakdowns undercount them. Run `tj doctor --repair` to "
+            f"re-derive what the on-disk transcripts still support; some may "
+            f"remain unresolved because Claude Code has since pruned the "
+            f"transcript or sidecar."
+        ),
+        "repair_action": "resolve_subagent_types",
+    }
+
+
+def _check_content_capture_backfill_gap(config: object, db: object) -> dict:
+    """Warn loudly when `[capture]` is ON but backfilled spans still have no
+    content — the other side of `_check_capture_prompts` above, which only
+    flags capture being OFF. A row backfilled BEFORE the user turned capture
+    on never gets the content on its own (a plain re-run only ever inserted
+    NEW spans until `bulk_overlay_span_attrs` grew a content-merge half), so
+    silently having neither check cover this case reads as "capture is on,
+    so it must be working" when in fact a slice of history never got it.
+    """
+    capture = getattr(config, "capture", None)
+    prompts_on = bool(getattr(capture, "prompts", False))
+    completions_on = bool(getattr(capture, "completions", False))
+    tool_inputs_on = bool(getattr(capture, "tool_inputs", False))
+    name = "Captured content backfill"
+    if not (prompts_on or completions_on or tool_inputs_on):
+        return {"name": name, "level": "info",
+                "message": "Skipped — no [capture] toggle is on."}
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        from tokenjam.core.db import (
+            missing_captured_content_stats,
+            missing_captured_tool_input_stats,
+        )
+
+        llm_missing = missing_captured_content_stats(
+            conn, prompts=prompts_on, completions=completions_on,
+        )
+        tool_missing = missing_captured_tool_input_stats(conn) if tool_inputs_on else 0
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not inspect span content: {e}"}
+    total_missing = llm_missing + tool_missing
+    if not total_missing:
+        return {"name": name, "level": "ok",
+                "message": "Every backfilled span has the content [capture] "
+                           "toggles say it should."}
+    parts = []
+    if llm_missing:
+        parts.append(f"{llm_missing} LLM span(s) missing prompt/completion content")
+    if tool_missing:
+        parts.append(f"{tool_missing} tool span(s) missing tool_input")
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{'; '.join(parts)} — likely backfilled before [capture] was "
+            f"turned on. Run `tj doctor --repair` to re-derive it from the "
+            f"on-disk transcripts still present; some may remain unresolved "
+            f"if Claude Code has since pruned them."
+        ),
+        "repair_action": "backfill_missing_content",
+    }
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -768,7 +926,7 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     }
 
 
-def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
+def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: object = None) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
         SESSION_COST_DRIFT_TOLERANCE_USD,
@@ -889,6 +1047,111 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"  [green]Dropped {deleted} restated observation(s) across "
                     f"{len(sessions)} session(s); their totals were "
                     f"reconciled.[/green]"
+                )
+            continue
+        if action == "resolve_subagent_types":
+            from tokenjam.core.backfill import (
+                CLAUDE_CODE_PROJECTS_ROOT,
+                ingest_claude_code,
+            )
+            from tokenjam.core.db import unresolved_subagent_type_stats
+
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # A normal (non-`--reingest`) backfill: it inserts anything
+                # newly on disk AND, as of this repair, overlays
+                # sub_agent_id/sub_agent_type onto existing rows it can now
+                # resolve (see `_dedup_new_spans`'s overlay_candidates /
+                # `bulk_overlay_span_attrs`). Unbounded (no `--since`) so
+                # it reaches every row this check counted, matching how the
+                # transcript-ingest-gap repair above is also unbounded.
+                subagent_repair_result = ingest_claude_code(
+                    db, root=CLAUDE_CODE_PROJECTS_ROOT, config=config,
+                )
+                still_unresolved, still_unresolved_usd = unresolved_subagent_type_stats(conn)
+            except Exception as e:  # backfill can raise for many reasons (OS, JSON, DB)
+                if not output_json:
+                    console.print(
+                        f"  [red]Subagent-type repair failed — {e}.[/red]"
+                    )
+                continue
+            if not output_json:
+                tail = (
+                    f" {still_unresolved} span(s) (${still_unresolved_usd:,.2f}) "
+                    "remain unresolved — their transcript or sidecar has likely "
+                    "been pruned by Claude Code, or they're a per-dispatch "
+                    "label that's correctly untyped."
+                    if still_unresolved else " None remain unresolved."
+                )
+                console.print(
+                    f"  [green]Resolved sub_agent_type on "
+                    f"{subagent_repair_result.spans_retagged} existing "
+                    f"span(s).[/green]{tail}"
+                )
+            continue
+        if action == "backfill_missing_content":
+            from tokenjam.core.backfill import (
+                CLAUDE_CODE_PROJECTS_ROOT,
+                ingest_claude_code,
+            )
+            from tokenjam.core.db import (
+                missing_captured_content_stats,
+                missing_captured_tool_input_stats,
+            )
+
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            capture = getattr(config, "capture", None)
+            prompts_on = bool(getattr(capture, "prompts", False))
+            completions_on = bool(getattr(capture, "completions", False))
+            tool_inputs_on = bool(getattr(capture, "tool_inputs", False))
+            try:
+                # Same underlying mechanism as "resolve_subagent_types" — a
+                # normal (non-`--reingest`) backfill, unbounded — the
+                # content-overlay half of `bulk_overlay_span_attrs` is
+                # capture-config-aware (see `_dedup_new_spans`'s
+                # `capture_on` gate), so this one pass re-derives content
+                # from the transcripts still on disk using whatever
+                # [capture] toggles are ACTUALLY on right now.
+                content_repair_result = ingest_claude_code(
+                    db, root=CLAUDE_CODE_PROJECTS_ROOT, config=config,
+                )
+                still_missing = missing_captured_content_stats(
+                    conn, prompts=prompts_on, completions=completions_on,
+                ) + (missing_captured_tool_input_stats(conn) if tool_inputs_on else 0)
+            except Exception as e:  # backfill can raise for many reasons (OS, JSON, DB)
+                if not output_json:
+                    console.print(
+                        f"  [red]Content-backfill repair failed — {e}.[/red]"
+                    )
+                continue
+            if not output_json:
+                tail = (
+                    f" {still_missing} span(s) remain missing content — "
+                    "their transcript has likely been pruned by Claude Code."
+                    if still_missing else " None remain missing."
+                )
+                # spans_retagged counts every overlay this pass made (content
+                # AND any newly-resolvable sub_agent_type together — one
+                # shared counter), so it is an upper bound on the content
+                # portion specifically, not an exact count of it.
+                console.print(
+                    f"  [green]Overlaid {content_repair_result.spans_retagged} "
+                    f"existing span(s) (content and/or subagent type)."
+                    f"[/green]{tail}"
                 )
             continue
         if action == "purge_timestamp_sentinels":
