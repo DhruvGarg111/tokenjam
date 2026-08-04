@@ -17,6 +17,7 @@ from pathlib import Path
 import click
 import duckdb
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import load_config, resolve_config_path
 
 
@@ -57,7 +58,10 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
     return False
 
 
-@click.command("mcp")
+#: Structural opt-out: mcp speaks stdio JSON-RPC, and ANY stray write to
+#: stdout (a spinner line included) corrupts the protocol stream — this file
+#: has no print statement at all, deliberately. Never wire a status here.
+@click.command("mcp", cls=TjCommand, no_status=True)
 @click.pass_context
 def cmd_mcp(ctx: click.Context) -> None:
     """Start the MCP server for SDK/API integrations.

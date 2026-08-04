@@ -31,6 +31,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.context_diagnostic import (
     INCLUSION_FILE_READ,
     INCLUSION_PROMPT,
@@ -52,7 +53,7 @@ _INCLUSION_LABELS = {
 }
 
 
-@click.command("context")
+@click.command("context", cls=TjCommand, status_message="Computing context composition…")
 @click.option("--agent", default=None, help="Filter to a specific agent_id.")
 @click.option("--since", default="30d",
               help="Window for analysis (e.g. 7d, 30d, 2026-03-01). Default 30d.")
