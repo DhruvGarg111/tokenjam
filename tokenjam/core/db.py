@@ -1952,6 +1952,8 @@ class DuckDBBackend:
         # Named-column INSERT so future migrations adding columns don't break
         # positional-arg ordering (migration 4 added billing_account at the
         # end of the table, but we don't want to silently rely on that).
+        from tokenjam.core.optimize import ingest_watermark
+
         with self._write_lock:
             self.conn.execute(
                 "INSERT INTO spans ("
@@ -1983,6 +1985,7 @@ class DuckDBBackend:
                     span.pricing_source, span.sub_agent_type,
                 ],
             )
+        ingest_watermark.bump(1)
 
     def bulk_insert_spans(self, spans: Sequence[NormalizedSpan]) -> None:
         """Columnar bulk-append of many spans in a single vectorized statement.
@@ -2001,6 +2004,8 @@ class DuckDBBackend:
         """
         if not spans:
             return
+        from tokenjam.core.optimize import ingest_watermark
+
         # Write the NDJSON payload OUTSIDE the write lock (pure CPU/IO, no DB),
         # then hold the lock only for the single vectorized INSERT..SELECT.
         fd, path = tempfile.mkstemp(prefix="tj-spans-", suffix=".ndjson")
@@ -2016,6 +2021,12 @@ class DuckDBBackend:
                 os.remove(path)
             except OSError:
                 pass
+        # Upper bound, not the exact post-anti-join insert count: the
+        # anti-join can skip already-present span_ids, and counting precisely
+        # would mean a second query on the hot path for a signal that only
+        # needs "did anything happen". Overcounting only makes the watermark
+        # gate marginally more willing to fire — never less safe.
+        ingest_watermark.bump(len(spans))
 
     def insert_alert(self, alert: Alert) -> None:
         with self._write_lock:

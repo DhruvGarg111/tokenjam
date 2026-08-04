@@ -102,6 +102,13 @@ scan_min_rescan_seconds = 60     # floor between rescans that actually re-run
                                  #   the analyzers; 0 disables the limit
 scan_ui_poll_seconds    = 300    # how often an open page asks for a rescan;
                                  #   0 turns the browser's auto-rescan off
+scan_watermark_min_new_spans        = 1   # a scheduled tick (never an explicit
+                                 #   rescan) skips the pass unless at least
+                                 #   this many new spans landed since the last
+                                 #   one; 0 always runs
+scan_watermark_max_staleness_hours  = 24.0 # a scheduled tick always runs once
+                                 #   this long has passed since the last pass,
+                                 #   even with zero new spans
 ```
 
 Overlapping scans never stack: a rescan pressed while one is already running is

@@ -405,6 +405,18 @@ class OptimizeConfig:
     # How often a UI surface re-reads the stored result (NOT how often the scan
     # runs). Zero disables the UI's auto-refresh entirely.
     scan_ui_poll_seconds: int = 300
+    # Ingestion watermark that gates a SCHEDULED tick (never an explicit
+    # rescan — see `core/optimize/scan_cycle.py`). A tick only re-runs the
+    # expensive analyzer pass when at least this many new spans have landed
+    # since the last pass; below it, the tick is a no-op on an idle machine.
+    # 1 preserves today's "scan on every tick" behaviour for any machine that
+    # saw ANY telemetry; only a genuinely idle tick is skipped.
+    scan_watermark_min_new_spans: int = 1
+    # Ceiling on the above: a scheduled tick re-runs the pass regardless of
+    # the watermark once this many hours have passed since the last one, so a
+    # quiet machine still refreshes eventually rather than never rescanning
+    # again.
+    scan_watermark_max_staleness_hours: float = 24.0
 
 
 @dataclass
@@ -842,6 +854,11 @@ def _parse(raw: dict) -> TjConfig:
             "scan_min_rescan_seconds", OptimizeConfig.scan_min_rescan_seconds)),
         scan_ui_poll_seconds=int(optimize_raw.get(
             "scan_ui_poll_seconds", OptimizeConfig.scan_ui_poll_seconds)),
+        scan_watermark_min_new_spans=int(optimize_raw.get(
+            "scan_watermark_min_new_spans", OptimizeConfig.scan_watermark_min_new_spans)),
+        scan_watermark_max_staleness_hours=float(optimize_raw.get(
+            "scan_watermark_max_staleness_hours",
+            OptimizeConfig.scan_watermark_max_staleness_hours)),
         projects_root=optimize_raw.get("projects_root") or None,
     )
 
