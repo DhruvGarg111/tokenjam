@@ -39,6 +39,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 3. Ingest secret set
     checks.append(_check_ingest_secret(config))
 
+    # 3b. OTLP endpoint reachability — resolve, connect, authenticate. Replaces
+    #     the per-invocation stderr warning that used to fire on a static file
+    #     diff while nothing was listening at all.
+    checks.append(_check_otlp_endpoint(config))
+
     # 4. Prometheus configured
     checks.append(_check_prometheus(config))
 
@@ -235,6 +240,153 @@ def _check_ingest_secret(config: object) -> dict:
 
     return {"name": "Ingest secret", "level": "ok",
             "message": "Ingest secret is configured."}
+
+
+#: How long a reachability probe waits before calling the endpoint dead. Short
+#: on purpose: doctor is interactive, and a hung TCP connect is the failure
+#: mode being diagnosed, not something to sit through.
+OTLP_PROBE_TIMEOUT_S = 2.0
+
+
+def _configured_otlp_endpoint() -> tuple[str | None, str, str | None]:
+    """The OTLP endpoint an agent session on this machine actually exports to.
+
+    Returns ``(endpoint, source, secret)``. The authority is the tj-managed
+    block in ``~/.zshrc``, because that is what a Claude Code session inherits;
+    reading only the config would report the endpoint tj INTENDED rather than
+    the one already written to the user's shell profile, which is precisely the
+    fault this check exists to catch. ``endpoint`` is None when no managed block
+    is installed.
+    """
+    import re
+    from pathlib import Path
+
+    from tokenjam.cli.cmd_onboard import _ZSHRC_OTEL_END, _ZSHRC_OTEL_START
+
+    try:
+        text = (Path.home() / ".zshrc").read_text()
+    except OSError:
+        return None, "shell profile", None
+    block = re.search(
+        rf"{re.escape(_ZSHRC_OTEL_START)}\n(.*?){re.escape(_ZSHRC_OTEL_END)}",
+        text,
+        flags=re.DOTALL,
+    )
+    if block is None:
+        return None, "shell profile", None
+    body = block.group(1)
+    endpoint = re.search(r"^export OTEL_EXPORTER_OTLP_ENDPOINT=(\S+)$", body, re.M)
+    secret = re.search(
+        r'^export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ([^"]+)"$', body, re.M
+    )
+    return (
+        endpoint.group(1) if endpoint else None,
+        "~/.zshrc",
+        secret.group(1) if secret else None,
+    )
+
+
+def _check_otlp_endpoint(config: object) -> dict:
+    """Does the OTLP endpoint agents export to actually answer?
+
+    A telemetry pipeline that drops spans silently is the defect this replaces
+    a per-invocation static warning with: the endpoint written to the shell
+    profile was a container-only hostname that does not resolve on a host, so
+    every span failed at DNS and only the delayed transcript backfill survived.
+    Nothing anywhere reported it.
+
+    So this resolves the host, opens a TCP connection, and — when something
+    answers — authenticates with the secret that block carries, reporting a
+    real verdict at each layer rather than a claim derived from file contents.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    name = "OTLP endpoint"
+    endpoint, source, block_secret = _configured_otlp_endpoint()
+    if endpoint is None:
+        return {"name": name, "level": "info",
+                "message": "No tj-managed OTel block in ~/.zshrc. Run "
+                           "`tj onboard --claude-code` to configure Claude Code "
+                           "telemetry."}
+
+    parsed = urlparse(endpoint)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not host:
+        return {"name": name, "level": "error",
+                "message": f"Endpoint in {source} is not a usable URL: "
+                           f"{endpoint}. Re-run `tj onboard --claude-code` to "
+                           f"rewrite it."}
+
+    try:
+        socket.getaddrinfo(host, port)
+    except OSError:
+        return {
+            "name": name, "level": "error",
+            "message": (
+                f"{endpoint} ({source}) does not resolve: the hostname "
+                f"{host} has no address on this machine, so every span an "
+                f"agent session emits is dropped before it leaves the "
+                f"process. Re-run `tj onboard --claude-code` to rewrite the "
+                f"endpoint."
+            ),
+        }
+
+    try:
+        with socket.create_connection((host, port), timeout=OTLP_PROBE_TIMEOUT_S):
+            pass
+    except OSError as e:
+        expected = config.api.port
+        mismatch = (
+            f" The daemon binds port {expected}, and this endpoint names "
+            f"{port}."
+            if port != expected else ""
+        )
+        return {
+            "name": name, "level": "warning",
+            "message": (
+                f"{endpoint} ({source}) resolves but nothing is listening "
+                f"({e.strerror or e}).{mismatch} Start the daemon with "
+                f"`tj serve`, then re-run `tj doctor`."
+            ),
+        }
+
+    # Something answers. Does it accept the secret the shell block signs with?
+    if not block_secret:
+        return {"name": name, "level": "ok",
+                "message": f"{endpoint} ({source}) is reachable."}
+
+    import httpx
+
+    try:
+        resp = httpx.get(
+            f"{parsed.scheme}://{host}:{port}/api/v1/status",
+            headers={"Authorization": f"Bearer {block_secret}"},
+            timeout=OTLP_PROBE_TIMEOUT_S,
+        )
+    except httpx.RequestError as e:
+        return {"name": name, "level": "warning",
+                "message": f"{endpoint} ({source}) accepted a connection but "
+                           f"the status probe failed: {e}."}
+
+    if resp.status_code == 401:
+        return {
+            "name": name, "level": "error",
+            "message": (
+                f"{endpoint} ({source}) is reachable but rejected the ingest "
+                f"secret in that block (401), so every span it pushes is "
+                f"discarded. Re-run `tj onboard --claude-code` to rewrite the "
+                f"block with the secret the daemon uses."
+            ),
+        }
+    if resp.status_code >= 400:
+        return {"name": name, "level": "warning",
+                "message": f"{endpoint} ({source}) answered HTTP "
+                           f"{resp.status_code} to the status probe."}
+    return {"name": name, "level": "ok",
+            "message": f"{endpoint} ({source}) is reachable and accepted the "
+                       f"configured ingest secret."}
 
 
 def _check_prometheus(config: object) -> dict:

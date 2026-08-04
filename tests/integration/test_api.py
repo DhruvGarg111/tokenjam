@@ -1306,8 +1306,8 @@ async def test_post_provider_budget_zero_clears_ceiling_but_keeps_cycle(db):
 
 async def test_post_budget_writes_to_tj_config_file_not_search_path(db, tmp_path, monkeypatch):
     """POST /budget must write to the file `TJ_CONFIG` points at, not a
-    search-path config — the split-brain hazard `_warn_if_secrets_diverge`
-    already warns about, but for budget writes rather than ingest_secret."""
+    search-path config — the split-brain hazard `tj doctor`'s ingest-secret
+    check reports, but for budget writes rather than ingest_secret."""
     tj_config_file = tmp_path / "tj_config" / "custom.toml"
     tj_config_file.parent.mkdir(parents=True)
     tj_config_file.write_text("")
