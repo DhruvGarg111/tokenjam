@@ -39,6 +39,7 @@ GROUPS = {
     "cli loop",
     "cli relearn",
     "cli summarize",
+    "cli summarize quarantine",
     "cli rules",
 }
 
@@ -131,6 +132,11 @@ FAST_NO_STATUS = {
     "cli summarize apply",
     "cli summarize undo",
     "cli summarize relocate",
+    "cli summarize prune",
+    "cli summarize expire",
+    "cli summarize quarantine list",
+    "cli summarize quarantine show",
+    "cli summarize restore",
     "cli rules list",
     "cli rules show",
     "cli rules stage",
