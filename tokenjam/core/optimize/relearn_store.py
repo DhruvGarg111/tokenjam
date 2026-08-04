@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from tokenjam.core.analysis_span import retention_days_for
-from tokenjam.core.optimize.build_stamp import tj_build
+from tokenjam.core.optimize.cycle_provenance import CycleProvenance, begin_cycle
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding, compute_relearn_finding
 
 if TYPE_CHECKING:
@@ -74,6 +74,7 @@ def read_cache(
 
 def write_cache(
     finding: RelearnFinding, path: Path | None = None, *, config: TjConfig | None = None,
+    provenance: CycleProvenance | None = None,
 ) -> dict[str, Any]:
     """Atomically write the finding (temp file + rename), never a partial file
     a concurrent reader could observe.
@@ -88,10 +89,24 @@ def write_cache(
     (``relearn_proposals.stamp_proposal_ids``): the apply paths accept a stored
     proposal ID and nothing else, so the IDs have to exist on the record the
     detector itself wrote.
+
+    ``provenance`` is the CYCLE's record (``core/optimize/cycle_provenance.py``),
+    identical to the one on the report and the cost proposals that same pass
+    wrote — which is what lets a surface tell "these rows and that tile are one
+    cycle" from "one of them is a cycle behind". Its window fields describe the
+    span the CYCLE read the corpus over; they are NOT a claim that these
+    clusters are bounded to it, because relearn's detector is deliberately
+    unbounded and the relearn payload publishes its own ``window`` block for
+    what its rows are bounded to.
     """
     from tokenjam.core.optimize.relearn_proposals import stamp_proposal_ids
 
     p = path or default_cache_path(config)
+    # No cycle: an identity-only record (no ``config``, so no window is
+    # resolved). This cache carries no window keys of its own, so a window
+    # stamped here would be decoration at best and a claim relearn's unbounded
+    # figures cannot support at worst.
+    record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle()
     existing = read_cache(p, config=config) or {}
     # Explicit annotation: without it mypy infers the dict-literal's value
     # type from the two initial values (str, dict[str, Any]) and joins them
@@ -102,8 +117,11 @@ def write_cache(
         "finding": stamp_proposal_ids(asdict(finding)),
         # The build that produced these clusters — see `report_store.write_report`
         # on why a timestamp alone lets a previous build's figures read as merely
-        # recent across an upgrade.
-        "tj_version": tj_build(),
+        # recent across an upgrade. Taken off the cycle's record rather than
+        # resolved here: two stores each calling `tj_build()` for themselves is
+        # two copies of "what version am I" that are free to disagree.
+        "tj_version": record.build,
+        "provenance": record.to_dict(),
     }
     if "cost_proposals" in existing:
         # THE WHITELIST WAS THE TRAP. This used to copy forward a hand-picked
@@ -118,7 +136,10 @@ def write_cache(
         # if nothing had failed). Copy forward by PREFIX instead: this branch
         # (unlike `write_cost_proposals_error`/`clear_cost_proposals_error`,
         # which preserve the WHOLE existing payload) only ever originates
-        # `computed_at`/`finding`/`tj_version` above, so every `cost_`-prefixed
+        # `computed_at`/`finding`/`tj_version`/`provenance` above — the cost
+        # producer's own record is `cost_provenance`, so it copies forward here
+        # like every other `cost_` key rather than needing to be named — so
+        # every `cost_`-prefixed
         # key in `existing` belongs to the cost-proposal producer and none of
         # them can collide with a key this branch means to set itself.
         for key, value in existing.items():
@@ -191,7 +212,7 @@ def read_cost_proposals(
     # written before the field existed, same as before prefix-projection.
     for key in (
         "cost_computed_at", "cost_proposals_error", "cost_proposals_error_at",
-        "cost_since", "cost_until", "cost_tj_version",
+        "cost_since", "cost_until", "cost_tj_version", "cost_provenance",
     ):
         block.setdefault(key, None)
     return block
@@ -237,6 +258,7 @@ def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
     window_days: int | None = None, excluded: dict[str, Any] | None = None,
     since: str | None = None, until: str | None = None,
+    provenance: CycleProvenance | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
@@ -261,6 +283,16 @@ def write_cost_proposals(
     and were wrong. Same "leave untouched when ``None``" rule as
     ``window_days``, for the same legacy-call-site reason.
 
+    THOSE TWO SPELLINGS ARE NOW ONE TYPE. ``cost_since``/``cost_until`` here and
+    ``scan_since``/``scan_until`` on the report were two raw-dict conventions
+    for one fact, with nothing forcing them to describe the same span. Both are
+    now DERIVED from ``provenance`` — the cycle's own
+    :class:`~tokenjam.core.optimize.cycle_provenance.CycleProvenance`, minted
+    once per pass — and stored under ``cost_provenance`` so a reader can compare
+    the two artifacts' windows, builds and cycle ids directly. The two
+    string keyword arguments stay for callers with no cycle and win over the
+    record when given, exactly as ``window_days`` does.
+
     ``excluded`` is the rollup's cross-reference block for waste a caller
     deliberately did not fold in as a peer card — generic infrastructure with
     no current occupant (see ``read_cost_proposals``) — always written when
@@ -280,16 +312,23 @@ def write_cost_proposals(
         asdict(pr) if is_dataclass(pr) and not isinstance(pr, type) else dict(pr)
         for pr in proposals
     ]
+    record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle(
+        config, since=since, until=until, window_days=window_days,
+    )
     payload = dict(existing)
     payload["cost_proposals"] = serialised
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
-    payload["cost_tj_version"] = tj_build()
-    if window_days is not None:
-        payload["cost_window_days"] = window_days
-    if since is not None:
-        payload["cost_since"] = since
-    if until is not None:
-        payload["cost_until"] = until
+    payload["cost_tj_version"] = record.build
+    payload["cost_provenance"] = record.to_dict()
+    effective_days = window_days if window_days is not None else record.window_days
+    if effective_days is not None:
+        payload["cost_window_days"] = effective_days
+    effective_since = since if since is not None else record.since
+    if effective_since is not None:
+        payload["cost_since"] = effective_since
+    effective_until = until if until is not None else record.until
+    if effective_until is not None:
+        payload["cost_until"] = effective_until
     payload["cost_excluded"] = excluded or {}
     _atomic_write(p, payload)
     return payload
@@ -411,10 +450,46 @@ def recompute_now(
                 getattr(config, "storage", None)
             ) if getattr(config, "storage", None) is not None else None,
         )
+        # WHICH OF THOSE CLUSTERS IS ACTUALLY OFFERED A PERMANENT RULE is not
+        # this detector's call, and is no longer decided inside it. It is one
+        # allocation over every candidate in a report — see
+        # `core/optimize/write_allocation.py`. A STANDALONE recompute has no
+        # cost lane to rank against, so it allocates over a report carrying
+        # just this finding: fewer candidates, the same single budget, the same
+        # code path. Skipping it here would cache clusters still carrying their
+        # construction-time `write_offered=True` and offer every one of them.
+        from tokenjam.core.optimize import write_allocation
+        from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+        from tokenjam.utils.time_parse import utcnow as _utcnow
+
+        try:
+            write_allocation.allocate_report_writes(
+                OptimizeReport(
+                    window=WindowSummary(
+                        since=_utcnow(), until=_utcnow(), days=0.0, sessions=0,
+                        spans=0, total_tokens=0, total_cost_usd=0.0,
+                        thin_data=True,
+                    ),
+                    persona=persona,
+                    findings={"relearn": finding},
+                ),
+                config=config,
+            )
+        except Exception:  # noqa: BLE001 - a cache write must not sink on this
+            pass
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).
-        result = write_cache(finding, cache_path, config=config)
+        #
+        # A STANDALONE pass is still a cycle of one, so it mints its own record
+        # rather than leaving the cache unattributed — carrying the persona this
+        # run resolved above, so the record never classifies the window a second
+        # time. The daemon's normal path does not reach here: `scan_cycle` hands
+        # `write_cache` the record the whole pass shares.
+        result = write_cache(
+            finding, cache_path, config=config,
+            provenance=begin_cycle(config, conn=conn, persona=persona),
+        )
         return result
     finally:
         _COMPUTING.clear()

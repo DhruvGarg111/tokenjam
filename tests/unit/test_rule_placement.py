@@ -268,7 +268,7 @@ def test_placement_flips_a_write_the_global_destination_would_have_suppressed():
     offered. Nothing about the finding changed — only where the rule lands.
     """
     basis = build_projection_basis(30.0, 20, 400)
-    budget = wb.build_write_budget(lane_budget_tokens=500, lane_max_writes=3)
+    budget = wb.build_write_budget(budget_tokens=500, max_writes=3)
 
     global_only = wb.allocate_writes([_candidate()], budget, basis)["k"]
     assert global_only.net_negative is True
@@ -295,7 +295,7 @@ def test_a_multi_destination_write_is_charged_for_every_file_it_grows():
     follows the files. Collapsing them would make a three-project split look
     free to the budget."""
     basis = build_projection_basis(30.0, 20, 400)
-    budget = wb.build_write_budget(lane_budget_tokens=10_000, lane_max_writes=3)
+    budget = wb.build_write_budget(budget_tokens=10_000, max_writes=3)
     decision = wb.allocate_writes(
         [_candidate(
             exposure_sessions=30,
@@ -347,7 +347,7 @@ def test_a_small_project_file_gets_a_small_growth_allowance_of_its_own(tmp_path)
     assert by_path[str(small)] < by_path[str(large)]
 
     budget = wb.build_write_budget(
-        lane_budget_tokens=100_000, lane_max_writes=9,
+        budget_tokens=100_000, max_writes=9,
         existing_agent_file_tokens=wb.measured_agent_file_tokens(finding),
         existing_by_path=by_path,
     )
@@ -379,7 +379,7 @@ def test_two_rules_cannot_both_land_in_one_file_past_its_own_allowance(tmp_path)
         _Cand(str(tmp_path / "root" / "CLAUDE.md"), total_chars=160_000),
     )
     budget = wb.build_write_budget(
-        lane_budget_tokens=100_000, lane_max_writes=9,
+        budget_tokens=100_000, max_writes=9,
         existing_agent_file_tokens=wb.measured_agent_file_tokens(finding),
         existing_by_path=wb.measured_agent_file_tokens_by_path(finding),
     )

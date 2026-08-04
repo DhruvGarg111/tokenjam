@@ -13,10 +13,14 @@ Design (what makes it "zero-setup"):
     contacted. Each run re-reads the JSONL fresh.
   * It backfills the on-disk Claude Code sessions into that transient DB via the
     existing :func:`tokenjam.core.backfill.ingest_claude_code` parser, then runs
-    the same ``build_report`` / ``COST_ANALYZERS`` / ``past_overspend_rollup``
-    path the Review inbox and the dashboard use, and reports ONE number: the
-    avoidable dollars summed across every analyzer this window's persona can
-    actually act on.
+    the same ``build_report`` / ``COST_ANALYZERS`` /
+    ``inbox_contribution.gather_rollup_population`` path the Review inbox and
+    the dashboard use, and reports ONE number: the avoidable dollars summed
+    across every analyzer this window's persona can actually act on — minus
+    ``relearn``, deliberately dropped here on runtime-cost grounds (see
+    ``_OVERSPEND_SKIP_ANALYZERS``), so this screen is a declared LOWER BOUND
+    on what the Review inbox can show after ``tj onboard``, never a
+    guaranteed match.
 
 **The screen is deliberately minimal, and its shape is a founder decision.** It
 is three things and nothing else: what tj read, one avoidable-dollars sentence,
@@ -256,11 +260,15 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
 #   * `None` means "not measured", never `$0`. A `None` return here renders no
 #     sentence at all, NOT an empty state: "we could not compute it" and "we
 #     computed it and it is zero" are different claims and must read that way.
-#   * The sum goes through `cost_proposals.past_overspend_rollup` — THE one
-#     aggregate every other surface reads (Review inbox, dashboard, CLI). It
-#     dedupes by proposal `signature`, so this screen can never disagree with
-#     the number the user sees after onboarding. Do not hand-roll a second sum
-#     here; the module docstring records what happened last time there were two.
+#   * The sum goes through `inbox_contribution.gather_rollup_population` — the
+#     one gatherer every other surface (Review inbox, dashboard, CLI) reaches
+#     `cost_proposals.past_overspend_rollup` through, deduped by proposal
+#     `signature`. That makes this screen a LOWER BOUND on the number the user
+#     sees after onboarding, not a guaranteed match: see
+#     `_OVERSPEND_SKIP_ANALYZERS` for the one analyzer (`relearn`) this screen
+#     deliberately omits and why. Do not hand-roll a second sum here; the
+#     `inbox_contribution` module docstring records what happened last time
+#     there were two.
 #
 # Analyzer selection is NOT re-implemented here, and there is no second
 # persona filter. `build_report` is handed `COST_ANALYZERS` and does the
@@ -388,16 +396,32 @@ class AvoidableTotal:
 # before dispatch), which is why the full tuple is passed through this helper
 # rather than rebuilt.
 #
-# Why it is safe to drop: `_relearn_to_proposals` deliberately leaves
-# `past_overspend_usd`/`_tokens` at None and reports its figure on
-# `cost_of_waste_*`, which `_with_past_overspend` routes onto
-# `observed_cost_*` (relearn scans unbounded history and has no fixed window
-# to observe an avoidable figure over). This callout selects strictly on
-# `past_overspend_*`, so relearn can never be the winner. Measured on a real
-# 300-session corpus it cost 27.9s of the 35.0s the whole set took, for a
-# finding structurally ineligible here. If relearn ever moves onto the
-# canonical field (the retirement sequence in the repo CLAUDE.md), delete this
-# helper and pass `COST_ANALYZERS` whole.
+# THIS IS A DECLARED SUBSET, NOT AN OVERSIGHT — read this before "fixing" it
+# by deleting the skip. `_compute_avoidable_total` folds relearn's open
+# clusters into its rollup exactly like the Review inbox does, through
+# `inbox_contribution.gather_rollup_population` (the same function the CLI's
+# `tj relearn cost-proposals` and the API's `GET /relearn/cost-proposals`
+# use) — so relearn is NOT excluded because it has no figure to contribute
+# any more; it has one, on the canonical field, same as every other
+# analyzer here. It is excluded because `run(ctx)` deliberately scans
+# unbounded retained history rather than the report window (relearn's whole
+# signal is recurrence across history), which makes it the one analyzer here
+# whose cost does not shrink with quickstart's already-capped corpus.
+# Measured on a real 300-session corpus it cost 27.9s of the 35.0s the whole
+# analyzer set took — on a zero-install path whose own status line exists
+# because ~14s of silence already reads as a hang, tripling that is not a
+# trade this screen makes for one more contributor's money.
+#
+# The consequence: `report.findings.get("relearn")` is always `None` here, so
+# `gather_rollup_population` always folds in ZERO relearn rows on this
+# screen — never a fabricated number, but never relearn's real one either.
+# This screen's total is therefore a DELIBERATE SUBSET of what the Review
+# inbox can show after `tj onboard` (which runs relearn out of band, on the
+# daemon's own cadence, where this runtime cost is amortised rather than
+# paid inline): a lower bound, not a guaranteed match. If relearn's runtime
+# ever drops enough to affordably run inline (or this screen grows a budget
+# for it), delete this helper and pass `COST_ANALYZERS` whole — the rollup
+# plumbing already has nothing left to change to pick it up.
 _OVERSPEND_SKIP_ANALYZERS = frozenset({"relearn"})
 
 #: Analyzers that reason over the raw on-disk transcript tree directly
@@ -451,11 +475,10 @@ def _compute_avoidable_total(
     """
     try:
         from tokenjam.core.config import TjConfig
-        from tokenjam.core.optimize import build_report
+        from tokenjam.core.optimize import build_report, inbox_contribution
         from tokenjam.core.optimize.cost_proposals import (
             COST_ANALYZERS,
             cost_proposals_from_report,
-            past_overspend_rollup,
         )
 
         # In-memory defaults only. Matches what `load_config` synthesises when
@@ -488,11 +511,19 @@ def _compute_avoidable_total(
                     and p.past_overspend_usd > window_cost)
         ]
 
-        # THE rollup, not a local sum: same function, same dedup-by-signature,
-        # same canonical field as the Review inbox and the dashboard, so this
-        # screen and the one the user lands on after `tj onboard` cannot
-        # disagree. `window_days` is only a label on the basis string here.
-        rollup = past_overspend_rollup(eligible, window_days=int(window_days))
+        # THE rollup, not a local sum: `gather_rollup_population` is the same
+        # gatherer the Review inbox CLI/API routes use (dedup-by-signature,
+        # canonical field, and — unlike a bare `past_overspend_rollup` call —
+        # it also folds in relearn's open clusters as ordinary rows, so a
+        # population that includes relearn's money is not something this call
+        # site has to remember separately). `window_days` doubles as the label
+        # every row's window has to match exactly for relearn's contribution
+        # to join; see the module docstring below on why this screen still is
+        # NOT a strict guarantee of parity with the Review inbox.
+        rollup = inbox_contribution.gather_rollup_population(
+            eligible, getattr(report, "findings", {}).get("relearn"),
+            window_days=window_days,
+        )
         usd = float(rollup.get("past_overspend_usd") or 0.0)
 
         # The population comes off the REPORT's own window summary, which is

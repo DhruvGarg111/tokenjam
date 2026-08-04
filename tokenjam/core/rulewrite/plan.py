@@ -126,8 +126,10 @@ def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
     relearn's clusters already carry a resolved ``suggested_target`` and their
     own per-repo exposure accounting (``relearn._write_exposure_sessions``), so
     the destination is read off the cluster rather than re-derived. The two
-    lanes stay separate upstream — different budgets, different populations,
-    Critical Rule 27 — and meet only here, at the fix surface.
+    lanes keep separate POPULATIONS upstream (Critical Rule 27) but share ONE
+    write budget, spent once over both — see
+    ``core/optimize/write_allocation.py``; this surface simply reads the
+    verdict each of them already carries.
     """
     target = str(raw.get("suggested_target", "") or "")
     artifact = str(raw.get("proposed_fix", "") or "")
