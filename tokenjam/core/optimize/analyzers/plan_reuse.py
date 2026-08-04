@@ -372,6 +372,7 @@ def run(ctx: AnalyzerContext) -> None:
             script_replacement_recoverable_tokens=avg_tokens * reps,
             example_session_ids=example_ids,
             skeleton_session_id=by_recency[0].session_id,
+            member_session_ids=tuple(m.session_id for m in members),
         ))
 
     # Cluster listing order (independent of the finding-level headline basis
