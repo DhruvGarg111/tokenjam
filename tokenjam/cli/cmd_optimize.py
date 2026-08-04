@@ -36,6 +36,7 @@ from tokenjam.utils.formatting import (
     console,
     format_cost,
     format_tokens,
+    make_table,
 )
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -422,13 +423,28 @@ def cmd_optimize(
         click.echo(json.dumps(payload, default=str))
         return
 
-    _render_report(
-        report, agent=agent, plan_mix=plan_mix,
-        dominant_plan=dominant, pricing_mode=pricing_mode,
-        declared_plan=declared_plan,
-        requested=requested,
-        persona=persona,
-    )
+    # Three views over one renderer set (see `_render_scoreboard`). The card
+    # path is reached deliberately — by naming an analyzer, or by asking for
+    # everything with -v — rather than being the default nobody chose.
+    # `-v` is byte-for-byte what a bare `tj optimize` used to print, which is
+    # also the migration path for the tests that pin that output.
+    verbose = bool(ctx.obj.get("verbose"))
+    if verbose or requested:
+        _render_report(
+            report, agent=agent, plan_mix=plan_mix,
+            dominant_plan=dominant, pricing_mode=pricing_mode,
+            declared_plan=declared_plan,
+            requested=requested,
+            persona=persona,
+        )
+    else:
+        _render_scoreboard(
+            report, agent=agent, plan_mix=plan_mix,
+            dominant_plan=dominant, pricing_mode=pricing_mode,
+            declared_plan=declared_plan,
+            cost_proposal_count=cost_proposal_count,
+        )
+
     if cost_diff is not None:
         from tokenjam.cli.cmd_cost import _render_diff
         console.print("\n[bold]Window comparison[/bold]")
@@ -442,7 +458,9 @@ def cmd_optimize(
     # in `tj optimize`'s output pointed anywhere — the fix for e.g. a `cache`
     # or `deadweight` finding lived only in the web Review inbox's cost-proposal
     # cards (core.optimize.cost_proposals), never named from the terminal.
-    if cost_proposal_count:
+    # Card path only: the scoreboard names the same command in its Next block,
+    # so printing it here too would say it twice.
+    if cost_proposal_count and (verbose or requested):
         console.print(
             f"[dim]{cost_proposal_count} cost fix"
             f"{'es' if cost_proposal_count != 1 else ''} available, each with "
@@ -1021,6 +1039,349 @@ def _render_report(
             "[dim]No candidates flagged in this window. Either spend is small or "
             "all sessions already use a cost-effective model.[/dim]"
         )
+
+
+# ---------------------------------------------------------------------------
+# Scoreboard — the default `tj optimize` view
+# ---------------------------------------------------------------------------
+# `_render_report` above prints every finding card in full: candidate lists,
+# verbatim caveats, methodology paragraphs. That is the right screen once you
+# have chosen an area to work on, and the wrong one as an opening screen —
+# several pages of justified prose in which the headline numbers, the
+# per-area findings and the next command all sit at equal weight.
+#
+# So the card path is now reached deliberately rather than by default:
+#
+#   tj optimize            → the scoreboard below (never calls a card renderer)
+#   tj optimize <area>     → that one card, in full, renderer untouched
+#   tj optimize -v         → byte-for-byte what `tj optimize` printed before
+#
+# The one-line summaries live HERE, in the CLI layer, rather than as a new
+# `summary` field on every analyzer's finding dataclass: they are a
+# presentation concern of this one screen, and the analyzers must stay the
+# single source of the prose that has to render verbatim.
+#
+# Honesty rails, which are the whole reason this is a summary and not a
+# rewrite (Critical Rule 14 in tokenjam/CLAUDE.md, root anti-pattern 22):
+#
+#   * A `caveat` / `estimate_basis` / `coverage_note` is NEVER paraphrased
+#     into a summary line. The scoreboard carries a pointer at the card that
+#     prints them verbatim, and nothing else.
+#   * A finding with no priced figure shows `—` in RECOVERABLE. Never `0`,
+#     never blank: zero reads as "no waste", which is the opposite claim.
+#   * An analyzer that ran and found nothing gets no row, and the
+#     `N analyzers · M findings` header line carries the did-it-run signal so
+#     silence is still not ambiguous.
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _summarize_downsize(f: Any) -> tuple[str, str] | None:
+    if not f.candidate_sessions:
+        return None
+    return _plural(f.candidate_sessions, "downsize candidate"), "which sessions"
+
+
+def _summarize_cache(f: Any) -> tuple[str, str] | None:
+    flagged = list(f.flagged) if f.flagged else []
+    root_caused = (
+        len(f.uncached_agents or []) + len(f.thrash_agents or [])
+        + len(f.lookback_miss_agents or [])
+    )
+    if not flagged and not root_caused:
+        return None
+    if flagged:
+        line = (
+            f"{_plural(len(flagged), 'model')} below "
+            f"{f.efficacy_threshold * 100:.0f}% cache efficacy"
+        )
+    else:
+        line = _plural(root_caused, "cache root-cause candidate")
+    return line, "why"
+
+
+def _summarize_cache_recommend(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    return _plural(len(candidates), "uncached repeated prefix"), "which prefixes"
+
+
+def _summarize_resend(f: Any) -> tuple[str, str] | None:
+    if f.repeat_share is None:
+        return None
+    share = f"{f.repeat_share * 100:.0f}%"
+    return f"{share} of prompt tokens re-sent", f"why {share}"
+
+
+def _summarize_script(f: Any) -> tuple[str, str] | None:
+    clusters = list(f.clusters) if f.clusters else []
+    if not clusters:
+        return None
+    return _plural(len(clusters), "scriptable repeated workflow"), "which workflows"
+
+
+def _summarize_reuse(f: Any) -> tuple[str, str] | None:
+    clusters = list(f.clusters) if f.clusters else []
+    if not clusters:
+        return None
+    return _plural(len(clusters), "repeated plan cluster"), "which plans"
+
+
+def _summarize_trim(f: Any) -> tuple[str, str] | None:
+    per_prompt = list(f.per_prompt) if f.per_prompt else []
+    if not per_prompt:
+        return None
+    return _plural(len(per_prompt), "prompt with low-significance text"), "which regions"
+
+
+def _summarize_subagent(f: Any) -> tuple[str, str] | None:
+    flagged = list(f.flagged) if f.flagged else []
+    if not flagged:
+        return None
+    return _plural(len(flagged), "over-powered candidate"), "which subagents"
+
+
+def _summarize_relearn(f: Any) -> tuple[str, str] | None:
+    clusters = list(f.clusters) if f.clusters else []
+    if not clusters:
+        return None
+    return _plural(len(clusters), "recurring blocker"), "which blockers"
+
+
+def _summarize_verbosity(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    total = f.total_candidates or len(candidates)
+    return _plural(total, "high-output candidate"), "which sessions"
+
+
+def _summarize_deadweight(f: Any) -> tuple[str, str] | None:
+    dead = list(f.dead_servers) if f.dead_servers else []
+    if not dead:
+        return None
+    return f"{_plural(len(dead), 'MCP server')} injected, never invoked", "which servers"
+
+
+def _summarize_placement(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    return _plural(len(candidates), "batch-placement candidate"), "which jobs"
+
+
+def _summarize_summarize(f: Any) -> tuple[str, str] | None:
+    candidates = list(f.candidates) if f.candidates else []
+    if not candidates:
+        return None
+    return _plural(len(candidates), "summarizable prompt file"), "which files"
+
+
+def _summarize_stream_usage(f: Any) -> tuple[str, str] | None:
+    if not f.call_sites:
+        return None
+    return (
+        f"{f.streams_missing_usage} of {f.streams_observed} streams reported no usage",
+        "which call sites",
+    )
+
+
+# Dispatch table — analyzer registration name → one-line summarizer. Mirrors
+# `_FINDING_RENDERERS`; a summarizer returns None when its analyzer ran and
+# found nothing, which is how a clean analyzer earns no row.
+_FINDING_SUMMARIES = {
+    "downsize":      _summarize_downsize,
+    "cache":         _summarize_cache,
+    "cache-recommend": _summarize_cache_recommend,
+    "resend":        _summarize_resend,
+    "script":        _summarize_script,
+    "reuse":         _summarize_reuse,
+    "trim":          _summarize_trim,
+    "subagent":      _summarize_subagent,
+    "relearn":       _summarize_relearn,
+    "verbosity":     _summarize_verbosity,
+    "deadweight":    _summarize_deadweight,
+    "placement":     _summarize_placement,
+    "summarize":     _summarize_summarize,
+    "stream-usage":  _summarize_stream_usage,
+}
+
+# Findings whose headline figure is NOT a recoverable amount, so the
+# RECOVERABLE column must stay `—` for them however well-priced they are.
+# `stream-usage` carries `undercounted_usd`: spend that already happened and
+# was never recorded. A data-quality number sitting in a savings column is
+# read as a saving.
+_UNPRICED_IN_SCOREBOARD = {"stream-usage"}
+
+
+def _scoreboard_recoverable(name: str, finding: Any, framing: Framing) -> str:
+    """RECOVERABLE cell for one row — `—` whenever there is no priced figure.
+
+    `render_savings` already returns the `—` marker for a missing figure, so
+    an absent estimate can never surface as `0` or an empty cell.
+    """
+    if name in _UNPRICED_IN_SCOREBOARD:
+        return "—"
+    return render_savings(
+        getattr(finding, "past_overspend_usd", None),
+        getattr(finding, "past_overspend_tokens", None),
+        framing,
+    )
+
+
+def _render_scoreboard(
+    report: OptimizeReport,
+    agent: str | None,
+    plan_mix: dict[str, int] | None = None,
+    dominant_plan: str = "unknown",
+    pricing_mode: str = "unknown",
+    declared_plan: str | None = None,
+    cost_proposal_count: int = 0,
+) -> None:
+    """The default `tj optimize` screen: header, findings table, Next block."""
+    w = report.window
+    scope_tag = f", {agent}" if agent else ""
+    days_int = max(int(round(w.days)), 1)
+    plan_mix = plan_mix or {}
+    unknown_count = plan_mix.get("unknown", 0)
+    total_sessions = sum(plan_mix.values()) or w.sessions
+    all_unknown = total_sessions > 0 and unknown_count == total_sessions
+
+    counts = f"[bold]{w.sessions}[/bold] sessions · [bold]{format_tokens(w.total_tokens)}[/bold] tokens"
+
+    # ----- Header -----
+    if all_unknown:
+        console.print(f"\n  {counts} (last {days_int}d{scope_tag})")
+        console.print(
+            "  [dim]All sessions have unknown plan tier; dollar figures "
+            "suppressed. Run [accent]tj onboard --claude-code --reconfigure"
+            "[/accent] to set your plan.[/dim]"
+        )
+    elif pricing_mode == "subscription":
+        label, fee = PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
+        plan_suffix = f" (${fee:.0f}/mo)" if fee else ""
+        console.print(f"\n  {counts} · [bold]{label}[/bold]{plan_suffix}")
+        if fee and w.total_cost_usd > 0:
+            multiplier = w.total_cost_usd / fee
+            console.print(
+                f"  [dim]Implied API value [bold]{format_cost(w.total_cost_usd)}"
+                f"[/bold], about {_format_plan_multiplier(multiplier)} your "
+                f"plan cost.[/dim]"
+            )
+        else:
+            console.print(
+                f"  [dim]Implied API value [bold]{format_cost(w.total_cost_usd)}"
+                f"[/bold] (what this usage would cost at API list prices).[/dim]"
+            )
+    elif pricing_mode == "local":
+        console.print(f"\n  {counts} (last {days_int}d{scope_tag})")
+        console.print("  [dim]Local inference; no marginal cost.[/dim]")
+    else:
+        console.print(
+            f"\n  {counts} · [bold]{format_cost(w.total_cost_usd)}[/bold] spend "
+            f"(last {days_int}d{scope_tag})"
+        )
+        if unknown_count > 0:
+            console.print(
+                f"  [dim]{unknown_count} of {total_sessions} sessions have "
+                f"unknown plan tier; dollar figures may overstate actual cost "
+                f"for those. Run [accent]tj onboard --claude-code --reconfigure"
+                f"[/accent] to resolve.[/dim]"
+            )
+
+    if (
+        declared_plan
+        and declared_plan != dominant_plan
+        and declared_plan in PLAN_LABEL_AND_FEE
+    ):
+        label, _ = PLAN_LABEL_AND_FEE[declared_plan]
+        console.print(
+            f"  [dim]Your config declares [bold]{label}[/bold] but historical "
+            f"sessions ran under a different plan; rendering reflects what "
+            f"actually ran.[/dim]"
+        )
+
+    if w.sessions == 0:
+        console.print("\n  [dim]No sessions in window.[/dim]")
+        return
+
+    # ----- Rows -----
+    ranked = _rank_findings(report, requested=None)
+    framing = Framing(
+        pricing_mode=("unknown" if all_unknown else pricing_mode),
+        window_total_tokens=w.total_tokens,
+    )
+    rows: list[tuple[str, str, str, str]] = []
+    for name, _share in ranked:
+        summarize = _FINDING_SUMMARIES.get(name)
+        if summarize is None:
+            continue
+        finding = report.downgrade if name == "downsize" else report.findings.get(name)
+        if finding is None:
+            continue
+        summary = summarize(finding)
+        if summary is None:
+            continue
+        line, why = summary
+        rows.append((name, line, _scoreboard_recoverable(name, finding, framing), why))
+
+    console.print(
+        f"  [dim]{_plural(len(ranked), 'analyzer')} · "
+        f"{_plural(len(rows), 'finding')}[/dim]\n"
+    )
+
+    # Said out loud rather than left as three quiet absences: an analyzer that
+    # never looked is not an analyzer that found nothing (root anti-pattern 22).
+    for note in report.notes:
+        console.print(f"  [warn]![/warn] {_rich_escape(note)}")
+    if report.filesystem_scan_skipped_reason:
+        console.print(
+            "  [dim]deadweight, relearn and summarize did not run: "
+            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
+        )
+    if report.notes or report.filesystem_scan_skipped_reason:
+        console.print()
+
+    if rows:
+        table = make_table("ANALYZERS", "FINDING", "RECOVERABLE")
+        for name, line, recoverable, _why in rows:
+            # The recoverable figure is weight, not colour: the accent role
+            # means "a string you can type" and nothing else (Critical Rule 35
+            # in tokenjam/CLAUDE.md).
+            table.add_row(name, _rich_escape(line), f"[label]{recoverable}[/label]")
+        console.print(table)
+        console.print(
+            "  [dim]Estimates carry method notes and caveats. See "
+            "[accent]tj optimize <analyzer>[/accent].[/dim]\n"
+        )
+    else:
+        console.print(
+            "  [dim]No candidates flagged in this window. Either spend is small "
+            "or your sessions already use a cost-effective shape.[/dim]\n"
+        )
+
+    # ----- Next -----
+    # Literal runnable commands, not advice. A finding with nowhere to go is
+    # a diagnosis the user cannot act on.
+    next_lines: list[tuple[str, str]] = []
+    if cost_proposal_count:
+        next_lines.append((
+            "tj relearn cost-proposals",
+            f"{cost_proposal_count} copy-paste fix"
+            f"{'' if cost_proposal_count == 1 else 'es'}",
+        ))
+    if rows:
+        top_name, _line, _rec, top_why = rows[0]
+        next_lines.append((f"tj optimize {top_name}", top_why))
+    next_lines.append(("tj optimize -v", "every finding in full"))
+
+    width = max(len(cmd) for cmd, _ in next_lines)
+    for i, (cmd, hint) in enumerate(next_lines):
+        prefix = "  Next:  " if i == 0 else "         "
+        console.print(f"{prefix}[accent]{cmd:<{width}}[/accent]   [dim]{hint}[/dim]")
 
 
 def _sampling_ci_suffix(d: DowngradeFinding) -> str:

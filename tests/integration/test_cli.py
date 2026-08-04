@@ -1256,7 +1256,9 @@ def test_optimize_flags_downgrade_candidate(runner, db, config):
     )
     db.insert_span(span)
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     assert "Downsize" in result.output
     # Mandatory caveat must appear in human output
@@ -1416,7 +1418,9 @@ def test_optimize_subscription_renders_implied_api_value(runner, db, config):
     """Subscription users see implied-API-value framing, never dollar 'spend'."""
     _seed_optimize_window(db, plan_tier="max_20x")
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
     # Subscription header: plan label + implied API value
@@ -1453,6 +1457,71 @@ def test_optimize_api_mode_unchanged(runner, db, config):
     out = result.output
     assert "spend (last" in out  # historical header
     assert "Implied API value" not in out
+
+
+def test_optimize_default_is_the_scoreboard_and_dash_v_is_the_cards(runner, db, config):
+    """The three views over one renderer set: bare `tj optimize` summarises,
+    `-v` prints the cards it used to print by default, and `tj optimize <area>`
+    prints that one card in full."""
+    _seed_optimize_window(db, plan_tier="api")
+
+    scoreboard = _invoke(runner, db, config, ["optimize"])
+    verbose = _invoke(runner, db, config, ["-v", "optimize"])
+    area = _invoke(runner, db, config, ["optimize", "downsize"])
+    assert scoreboard.exit_code == 0, scoreboard.output
+    assert verbose.exit_code == 0, verbose.output
+    assert area.exit_code == 0, area.output
+
+    board = " ".join(scoreboard.output.split())
+    cards = " ".join(verbose.output.split())
+    one_card = " ".join(area.output.split())
+
+    # Scoreboard: the table and the Next block, and none of the card prose.
+    assert "ANALYZERS" in board and "RECOVERABLE" in board
+    assert "Next:" in board
+    assert "Candidate-flagging heuristic" not in board
+    assert "Examples:" not in board
+
+    # -v and <area>: the verbatim caveat renders, exactly as it always has.
+    assert "Candidate-flagging heuristic" in cards
+    assert "Candidate-flagging heuristic" in one_card
+    assert "ANALYZERS" not in cards and "ANALYZERS" not in one_card
+    assert len(board) < len(cards)
+
+
+def test_optimize_json_is_unchanged_by_the_scoreboard(runner, db, config):
+    """--json is a machine surface and the scoreboard is a human one. The
+    verbosity flag must not reach the payload, and no scoreboard string may
+    leak into it."""
+    _seed_optimize_window(db, plan_tier="api")
+
+    plain = _invoke(runner, db, config, ["optimize", "--json"])
+    verbose = _invoke(runner, db, config, ["-v", "optimize", "--json"])
+    assert plain.exit_code == 0, plain.output
+    assert verbose.exit_code == 0, verbose.output
+
+    # Same payload either way. Compared on shape + every scalar, because two
+    # invocations legitimately differ on the clock (`since`/`until`/`days`)
+    # and on the order of equal-cost examples.
+    a, b = json.loads(plain.output), json.loads(verbose.output)
+    assert a.keys() == b.keys()
+    assert a["findings"].keys() == b["findings"].keys()
+    assert a["downgrade"].keys() == b["downgrade"].keys()
+    for key in ("candidate_sessions", "total_sessions", "actual_cost_usd",
+                "monthly_savings_usd", "percent_of_sessions", "caveat"):
+        assert a["downgrade"][key] == b["downgrade"][key], key
+    for key in ("plan", "pricing_mode", "plan_tier_mix", "persona",
+                "cost_proposals_available", "persona_disabled_analyzers"):
+        assert a[key] == b[key], key
+
+    payload = a
+    # The full report shape the pre-scoreboard CLI emitted, unchanged.
+    for key in ("window", "downgrade", "findings", "plan", "pricing_mode",
+                "plan_tier_mix", "persona", "cost_proposals_available",
+                "persona_disabled_analyzers"):
+        assert key in payload, key
+    assert "ANALYZERS" not in plain.output
+    assert "Next:" not in plain.output
 
 
 def test_optimize_json_includes_plan_and_pricing_mode(runner, db, config):
@@ -1519,7 +1588,9 @@ def test_optimize_ranks_findings_by_reclaimable_share_not_registry_order(runner,
         tool.start_time = now - timedelta(days=1)
         db.insert_span(tool)
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
 
@@ -1554,7 +1625,9 @@ def test_optimize_downsize_cta_matches_claude_code_persona(runner, db, config):
         session_id="s-small", start_time=now - timedelta(days=1),
     ))
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
 
@@ -1577,7 +1650,9 @@ def test_optimize_downsize_cta_unchanged_for_sdk_persona(runner, db, config):
         session_id="s-small", start_time=utcnow() - timedelta(days=1),
     ))
 
-    result = _invoke(runner, db, config, ["optimize"])
+    # -v: this pins the full card rendering, which bare `tj optimize` now
+    # summarises into a scoreboard. -v reproduces it byte for byte.
+    result = _invoke(runner, db, config, ["-v", "optimize"])
     assert result.exit_code == 0
     out = result.output
 
