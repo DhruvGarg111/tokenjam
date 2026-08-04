@@ -195,8 +195,17 @@ def _check_ingest_secret(config: object) -> dict:
     # one store — the SDK reads one, a daemon started from a different cwd
     # reads the other, and span pushes 401 silently with no error surfaced
     # anywhere else (see `core/config.find_diverged_secret_config`).
-    import tomllib
+    import sys
     from typing import cast
+
+    # tomllib is stdlib only from 3.11+; pyproject.toml declares >=3.10, and
+    # this file already carries this exact guard at `_check_mcp_wiring`
+    # (~:1247) for the same reason — matching it here, not inventing a
+    # second spelling.
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib  # type: ignore[no-redef]
 
     from tokenjam.core.config import TjConfig, active_config_path, find_diverged_secret_config
 
