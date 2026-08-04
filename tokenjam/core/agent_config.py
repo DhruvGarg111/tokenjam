@@ -49,6 +49,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,7 @@ log = logging.getLogger(__name__)
 KIND_INSTRUCTION = "instruction"
 KIND_HOOK = "hook"
 KIND_MCP_SERVER = "mcp_server"
+KIND_PLUGIN = "plugin"
 
 SCOPE_GLOBAL = "global"
 SCOPE_PROJECT = "project"
@@ -806,6 +808,156 @@ def scan_hooks(
     return records
 
 
+# --- Plugins ----------------------------------------------------------------
+#
+# TWO GATES DECIDE WHETHER A PLUGIN COSTS ANYTHING, AND NEITHER IS VISIBLE ON
+# DISK. A plugin's skills sit under `~/.claude/plugins/cache/<marketplace>/
+# <plugin>/<version>/`, and being installed there says nothing about being
+# loaded: `enabledPlugins` in `~/.claude/settings.json` decides whether it is on
+# at all, and its install SCOPE decides where. Measured on a real machine, 15 of
+# 1,299 installed SKILL.md files were actually resident — pricing installed-ness
+# would have overstated the population by nearly two orders of magnitude.
+#
+# WHAT IS RESIDENT IS THE `name: description` SURFACE, NOT THE BODIES. A skill's
+# body arrives when it is invoked; its name and description are listed to the
+# model before anything is invoked. On the same machine those two quantities
+# differ by more than three orders of magnitude, so counting bodies is not a
+# conservative overestimate — it is a different number about a different thing.
+
+PLUGIN_SETTINGS_RELPATH = "settings.json"
+PLUGIN_INSTALLED_RELPATH = "plugins/installed_plugins.json"
+
+_FRONTMATTER_RE = re.compile(r"^---\r?\n(.*?)\r?\n---\r?\n", re.S)
+_NAME_RE = re.compile(r"^name:\s*(.*)$", re.M)
+_DESC_RE = re.compile(r"^description:\s*(.*(?:\r?\n\s+.*)*)$", re.M)
+
+
+def skill_listing_line(path: Path, fallback_name: str = "") -> str:
+    """The one line a skill contributes to the resident listing.
+
+    ``name: description`` off the frontmatter and NOTHING ELSE. The body is
+    deliberately not read into this: it is not resident, and a function that
+    returned it would be one refactor away from something pricing it.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    match = _FRONTMATTER_RE.match(text)
+    head = match.group(1) if match else ""
+    name = _NAME_RE.search(head)
+    desc = _DESC_RE.search(head)
+    label = (name.group(1) if name else (fallback_name or path.parent.name)).strip()
+    body = (desc.group(1) if desc else "").strip()
+    return f"{label}: {body}"
+
+
+def _plugin_resident_chars(install_path: Path) -> tuple[int, int]:
+    """``(skill count, resident chars)`` for one installed plugin."""
+    if not install_path.is_dir():
+        return 0, 0
+    count = 0
+    chars = 0
+    for skill in sorted(install_path.rglob("SKILL.md")):
+        count += 1
+        chars += len(skill_listing_line(skill))
+    return count, chars
+
+
+def scan_plugins(
+    *,
+    claude_dir: Path | None = None,
+    seen_at: datetime | None = None,
+) -> list[ConfigRecord]:
+    """One record per installed plugin, gated on enablement and scope.
+
+    ``claude_dir`` is the ``~/.claude`` directory itself (not its parent), which
+    is what ``core/optimize/scope.AnalyzerScope.claude_home`` carries.
+
+    EVERY installed plugin gets a record, including the ones that cost nothing.
+    Recording only the resident ones would make "this plugin is disabled" and
+    "we never looked" the same absence, and the disabled ones are precisely what
+    a user needs to see before enabling something large.
+    """
+    at = seen_at or utcnow()
+    root = claude_dir if claude_dir is not None else Path.home() / ".claude"
+    enabled_map = _read_json_safe(root / PLUGIN_SETTINGS_RELPATH).get("enabledPlugins")
+    enabled_map = enabled_map if isinstance(enabled_map, dict) else {}
+    installed = _read_json_safe(root / PLUGIN_INSTALLED_RELPATH).get("plugins")
+    installed = installed if isinstance(installed, dict) else {}
+
+    records: list[ConfigRecord] = []
+    for key in sorted(installed):
+        entries = installed[key]
+        if not isinstance(entries, list):
+            continue
+        enabled = bool(enabled_map.get(key))
+        for install in entries:
+            if not isinstance(install, dict):
+                continue
+            scope = str(install.get("scope") or "")
+            install_path = Path(str(install.get("installPath") or ""))
+            project_path = str(install.get("projectPath") or "")
+            skills, resident_chars = _plugin_resident_chars(install_path)
+            # BOTH gates, and the reason each verdict was reached, so a card can
+            # explain itself instead of showing an unexplained zero.
+            if not enabled:
+                resident, why = False, "disabled in enabledPlugins"
+            elif scope == "user":
+                resident, why = True, ""
+            elif scope == "project" and project_path:
+                resident, why = False, f"project-scoped to {project_path}"
+            else:
+                resident, why = False, f"install scope {scope!r} does not load globally"
+            detail = {
+                "enabled": enabled,
+                "install_scope": scope,
+                "project_path": project_path,
+                "install_path": str(install_path),
+                "version": str(install.get("version") or ""),
+                "skills": skills,
+                "resident": resident,
+                "not_resident_because": why,
+                "resident_chars": resident_chars if resident else 0,
+            }
+            records.append(ConfigRecord(
+                kind=KIND_PLUGIN,
+                scope=SCOPE_GLOBAL if scope == "user" else SCOPE_PROJECT,
+                root=project_path,
+                name=key,
+                path=str(root / PLUGIN_SETTINGS_RELPATH),
+                size_bytes=resident_chars if resident else 0,
+                # ONLY the name+description surface, and only when both gates
+                # pass. Never the bodies — see the block comment above.
+                tokens=tokens_for_chars(resident_chars) if resident else 0,
+                content_hash=_hash_obj(detail),
+                last_seen=at,
+                subkind=str(install.get("version") or ""),
+                detail=detail,
+                seq=len(records),
+            ))
+    return records
+
+
+def plugin_usage(claude_home: Path | None = None) -> dict[str, int]:
+    """``pluginUsage`` counts out of ``~/.claude.json``, by plugin key.
+
+    The observed-use signal for the plugin lane, exactly as the MCP lane uses
+    observed tool calls. A key with no entry is absent rather than zero: the
+    caller decides what "never recorded" means, and it is not the same statement
+    as "recorded and never used".
+    """
+    home = claude_home if claude_home is not None else Path.home()
+    raw = _read_json_safe(home / GLOBAL_MCP_RELPATH).get("pluginUsage")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict) and isinstance(value.get("usageCount"), (int, float)):
+            out[str(key)] = int(value["usageCount"])
+    return out
+
+
 def ingest_agent_config(
     store: AgentConfigStore,
     *,
@@ -813,6 +965,7 @@ def ingest_agent_config(
     home: Path | None = None,
     claude_home: Path | None = None,
     kinds: Sequence[str] = (KIND_INSTRUCTION, KIND_HOOK, KIND_MCP_SERVER),
+    claude_dir: Path | None = None,
     include_global: bool = True,
     extra_exts: Iterable[str] = (),
     extra_paths: Sequence[tuple[Path, str, Path | None]] = (),
@@ -841,6 +994,8 @@ def ingest_agent_config(
         records.extend(scan_hooks(
             roots=roots, claude_home=claude_home, seen_at=at,
         ))
+    if KIND_PLUGIN in kinds:
+        records.extend(scan_plugins(claude_dir=claude_dir, seen_at=at))
     store.upsert(records)
     return at
 
@@ -851,6 +1006,7 @@ __all__ = [
     "KIND_HOOK",
     "KIND_INSTRUCTION",
     "KIND_MCP_SERVER",
+    "KIND_PLUGIN",
     "MEASUREMENT_DETAIL_KEY",
     "MEASURE_OK",
     "MEASURE_SKIPPED",
@@ -870,7 +1026,10 @@ __all__ = [
     "ingest_agent_config",
     "scan_hooks",
     "scan_instruction_files",
+    "plugin_usage",
     "scan_mcp_servers",
+    "scan_plugins",
+    "skill_listing_line",
     "store_for",
     "tokens_for_chars",
 ]

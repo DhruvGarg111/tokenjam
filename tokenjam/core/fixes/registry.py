@@ -827,6 +827,28 @@ DEADWEIGHT_REMOVE_SERVER = register(FixRecord(
     }),
 ))
 
+#: The plugin lane's fix. Same shape as the MCP one — an installed dependency
+#: paid for continuously — and the same one-line reversible edit, which is why
+#: it is a separate record rather than a widening of the server text: the file
+#: to edit and the key to flip are different, and a fix that names the wrong
+#: file is worse than one that says nothing.
+DEADWEIGHT_DISABLE_PLUGIN = register(FixRecord(
+    key="deadweight.disable_unused_plugin",
+    text=(
+        "Set the plugin to false in `enabledPlugins` in "
+        "`~/.claude/settings.json`. Every skill an enabled plugin ships lists "
+        "its name and description into the context of every session before "
+        "anything is invoked, so a plugin that is never used is paying that "
+        "listing for nothing. Flipping the flag back on costs nothing and "
+        "keeps the plugin installed, so this is reversible in one line."
+    ),
+    delivery="claude_md_rule",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"deadweight"}),
+    answers="enabled plugins whose skill listing is resident every session and never invoked",
+    lever=LEVER_AWARENESS,
+))
+
 #: The DURABLE half of the oversized-instruction-file card. This is the text
 #: that used to live as a ~330-character paragraph hardcoded in
 #: `cost_proposals._summarize_to_proposals`, invisible to the guard because the
@@ -852,6 +874,7 @@ SUMMARIZE_REVIEW_OVERSIZED = register(FixRecord(
 
 __all__ = [
     "CACHE_NO_CC_LEVER",
+    "DEADWEIGHT_DISABLE_PLUGIN",
     "DEADWEIGHT_REMOVE_SERVER",
     "SUMMARIZE_REVIEW_OVERSIZED",
     "COMPACTION_RELIEF",

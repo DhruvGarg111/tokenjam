@@ -851,6 +851,46 @@ class ServerDeadweight:
 
 
 @dataclass
+class PluginDeadweight:
+    """One INSTALLED Claude Code plugin, and whether it costs anything.
+
+    The MCP lane's shape applied to a different dependency: something installed
+    once, paid for continuously, and possibly never used, whose fix is a
+    one-line reversible edit.
+
+    Every installed plugin gets a row, including the ones that cost nothing —
+    "disabled, so free" and "we never looked" must not be the same absence, and
+    a user deciding whether to ENABLE something large is exactly who needs the
+    disabled rows.
+    """
+    name:                     str
+    enabled:                  bool
+    install_scope:            str
+    #: Both gates passed: enabled AND installed at a scope that loads globally.
+    resident:                 bool
+    #: Which gate it failed, in words. Empty when resident.
+    not_resident_because:     str
+    skills:                   int
+    #: Tokens the plugin's skills contribute to EVERY call — the `name:
+    #: description` listing surface and nothing else. A skill BODY arrives on
+    #: invocation, not at session start, so counting bodies would not be a
+    #: conservative overestimate; it would be a different number about a
+    #: different thing.
+    resident_tokens:          int
+    #: `pluginUsage` count out of `~/.claude.json`. `None` means Claude Code
+    #: never recorded this plugin at all, which is not the same statement as
+    #: "recorded and never used" and never counts as evidence of disuse.
+    usage_count:              int | None
+    sessions_present:         int
+    dead:                     bool
+    estimated_tax_tokens_window: int = 0
+    estimated_tax_usd_window:    float | None = None
+    priced_model:             str = ""
+    tax_construction:         str = ""
+    fix:                      str = ""
+
+
+@dataclass
 class ContextTaxRow:
     """One always-injected content source's measured/estimated per-session tax."""
     source:                 str
@@ -867,6 +907,15 @@ class DeadweightFinding:
     configured_servers:           int = 0
     servers:                      list[ServerDeadweight] = field(default_factory=list)
     dead_servers:                 list[ServerDeadweight] = field(default_factory=list)
+    #: Every INSTALLED plugin, resident or not (see `PluginDeadweight`).
+    plugins:                      list[PluginDeadweight] = field(default_factory=list)
+    #: Resident plugins with zero recorded use — the ones with a fix.
+    dead_plugins:                 list[PluginDeadweight] = field(default_factory=list)
+    #: How many installed plugins actually reach the model. The gap between
+    #: this and `len(plugins)` is the whole point of the two gates: on a real
+    #: machine most of what is installed is not loaded, and a figure built from
+    #: installed-ness overstates by orders of magnitude.
+    plugins_resident:             int = 0
     tax_table:                    list[ContextTaxRow] = field(default_factory=list)
     past_overspend_tokens: int | None = None
     past_overspend_usd:    float | None = None
@@ -1027,6 +1076,91 @@ def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
     return " ".join(parts)
 
 
+def _plugin_rows(
+    store: Any,
+    *,
+    claude_dir: Path | None,
+    claude_home: Path | None,
+    seen_at: datetime | None,
+    session_calls: list[int],
+    input_per_mtok: float | None,
+    cache_read_ratio: float,
+    priced_model: str,
+) -> list[PluginDeadweight]:
+    """The plugin lane: what an ENABLED, IN-SCOPE plugin costs every session.
+
+    Two gates, and neither is visible on the filesystem — a plugin being
+    installed on disk says nothing about whether it reaches the model.
+    ``core/agent_config.scan_plugins`` applies both; this prices what survives
+    them, against the same per-session call multiplier the MCP lane uses (the
+    listing rides in the system prompt of every call, so later calls are
+    cache-read rather than re-charged at the input rate).
+
+    A resident plugin is present in EVERY session, which is what makes it a
+    standing cost rather than a per-project one — and what makes the decision to
+    enable one worth seeing priced before it is made.
+    """
+    from tokenjam.core import agent_config as ac
+
+    at = ac.ingest_agent_config(
+        store, kinds=(ac.KIND_PLUGIN,), claude_dir=claude_dir, seen_at=seen_at,
+    )
+    usage = ac.plugin_usage(claude_home)
+    sessions_present = len(session_calls)
+    rows: list[PluginDeadweight] = []
+    for record in store.select(kind=ac.KIND_PLUGIN, seen_at=at):
+        detail = record.detail
+        resident = bool(detail.get("resident"))
+        resident_tokens = int(record.tokens or 0)
+        count = usage.get(record.name)
+        tax_window = 0
+        if resident and resident_tokens:
+            for calls in session_calls:
+                tax_window += round(
+                    resident_tokens * (1.0 + (max(calls, 1) - 1) * cache_read_ratio)
+                )
+        usd_window = (
+            round(tax_window / 1_000_000 * input_per_mtok, 6)
+            if input_per_mtok is not None and tax_window else None
+        )
+        # `count is None` is NOT zero. Claude Code never recording a plugin is
+        # absence of evidence; only a recorded zero is evidence of absence.
+        dead = resident and count == 0 and sessions_present > 0
+        construction = (
+            f"{resident_tokens:,} tok resident per call — the `name: "
+            f"description` line of each of this plugin's {detail.get('skills', 0)} "
+            f"skill(s), measured off the installed files. Skill BODIES are NOT "
+            f"counted: a body arrives when the skill is invoked, not at session "
+            f"start."
+            if resident else
+            f"Not resident: {detail.get('not_resident_because') or 'gated off'}. "
+            f"Nothing is priced for it."
+        )
+        rows.append(PluginDeadweight(
+            name=record.name,
+            enabled=bool(detail.get("enabled")),
+            install_scope=str(detail.get("install_scope") or ""),
+            resident=resident,
+            not_resident_because=str(detail.get("not_resident_because") or ""),
+            skills=int(detail.get("skills") or 0),
+            resident_tokens=resident_tokens,
+            usage_count=count,
+            sessions_present=sessions_present if resident else 0,
+            dead=dead,
+            estimated_tax_tokens_window=tax_window,
+            estimated_tax_usd_window=usd_window,
+            priced_model=priced_model if usd_window is not None else "",
+            tax_construction=construction,
+            fix=(
+                f"`{record.name}` is enabled and was used {count} time(s) on "
+                f"record. " + fix_text("deadweight.disable_unused_plugin")
+                if dead else ""
+            ),
+        ))
+    rows.sort(key=lambda p: (not p.resident, -p.estimated_tax_tokens_window, p.name))
+    return rows
+
+
 def _measurement_coverage_note(finding: DeadweightFinding) -> str:
     """State, in words, how much of the configured surface was actually measured.
 
@@ -1058,6 +1192,7 @@ def compute_deadweight_finding(
     *,
     projects_root: Path | str | None = None,
     claude_home: Path | None = None,
+    claude_dir: Path | None = None,
     min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
     cache_dir: Path | None = None,
     store: Any | None = None,
@@ -1177,11 +1312,57 @@ def compute_deadweight_finding(
     from tokenjam.core.optimize.mcp_probe import resolve_schema_measurements
 
     config_store = store if store is not None else ac.InMemoryAgentConfigStore()
+    # The plugin lane. Runs BEFORE the `if not configured: return` below and is
+    # independent of it: a user with no MCP servers at all can still be paying
+    # for an enabled plugin every session, and hanging this off the MCP early
+    # return would make it silent in exactly that case.
+    window_models: dict[str, int] = {}
+    window_volume_at: list[tuple[datetime | None, float]] = []
+    for session_id, signal in per_session.items():
+        for model, count in signal.models.items():
+            window_models[model] = window_models.get(model, 0) + count
+            window_volume_at.append((session_mtimes.get(session_id), float(count)))
+    window_model = _dominant_model(window_models)
+    window_rate: float | None = None
+    window_cache_ratio = 0.0
+    if window_model:
+        from tokenjam.core.pricing import provider_for_model as _provider
+
+        rates = blended_rates(
+            _provider(window_model) or "unknown", window_model, window_volume_at,
+        )
+        if rates is not None and rates.input_per_mtok > 0:
+            window_rate = rates.input_per_mtok
+            window_cache_ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+        else:
+            window_model = ""
+    # A caller that scoped the MCP read away from the operator's real machine
+    # meant to scope the PLUGIN read too. Deriving the plugin directory from
+    # `claude_home` when it was not given explicitly is what stops an isolated
+    # run from silently reading the operator's real `~/.claude/plugins` — the
+    # same escape `_settings_paths` documents one level up.
+    plugin_dir = claude_dir
+    if plugin_dir is None:
+        plugin_dir = (claude_home / ".claude") if claude_home is not None else None
+    finding.plugins = _plugin_rows(
+        config_store,
+        claude_dir=plugin_dir,
+        claude_home=claude_home,
+        seen_at=None,
+        session_calls=[max(s.assistant_turns, 1) for s in per_session.values()],
+        input_per_mtok=window_rate,
+        cache_read_ratio=window_cache_ratio,
+        priced_model=window_model,
+    )
+    finding.plugins_resident = sum(1 for p in finding.plugins if p.resident)
+    finding.dead_plugins = [p for p in finding.plugins if p.dead]
+
     configured = enumerate_configured_servers(
         repo_cwds, claude_home=claude_home, store=config_store,
     )
     finding.configured_servers = len(configured)
     if not configured:
+        _finish_totals(finding, min_sessions=min_sessions, configured=configured)
         return finding
 
     # The per-server schema measurement (see `core/optimize/mcp_probe`). Cached
@@ -1478,6 +1659,20 @@ def compute_deadweight_finding(
     # <name>" row for EVERY configured server (dead or alive) for visibility,
     # but that row never feeds this sum — so a server's tax is never counted
     # twice between the tax table and a dead-weight proposal.
+    _finish_totals(finding, min_sessions=min_sessions, configured=configured)
+    return finding
+
+
+def _finish_totals(
+    finding: DeadweightFinding, *, min_sessions: int, configured: dict,
+) -> DeadweightFinding:
+    """Roll the recoverable totals up and state what is missing from them.
+
+    Split out because it has to run on BOTH exits from the pipeline: a window
+    with no configured MCP server can still carry a dead plugin, and leaving
+    this behind the MCP early return would make the plugin lane silent in
+    exactly the case where it is the only thing there is to say.
+    """
     measured_dead = [
         s for s in finding.dead_servers if s.schema_tokens_measured is not None
     ]
@@ -1551,6 +1746,37 @@ def compute_deadweight_finding(
             f"present in fewer sessions."
         )
 
+    # The plugin lane adds to the same totals — it is the same shape of waste
+    # (an installed dependency paid for continuously and never used) and the
+    # populations do not overlap, so there is nothing to double-count between
+    # them. Kept as a separate summand rather than folded into the server loop
+    # so a reader can always see which lane a figure came from.
+    plugin_tokens = sum(p.estimated_tax_tokens_window for p in finding.dead_plugins)
+    plugin_usd = [
+        p.estimated_tax_usd_window for p in finding.dead_plugins
+        if p.estimated_tax_usd_window is not None
+    ]
+    if plugin_tokens:
+        finding.past_overspend_tokens = (finding.past_overspend_tokens or 0) + plugin_tokens
+        finding.estimate_basis = (finding.estimate_basis or "") + (
+            f" Plus {len(finding.dead_plugins)} enabled plugin(s) with zero "
+            f"recorded use: their skills' `name: description` listing is "
+            f"resident in every session, priced per call at the window's "
+            f"dominant model. Skill BODIES are never counted — a body arrives "
+            f"on invocation, not at session start."
+        ).lstrip()
+    if plugin_usd:
+        finding.past_overspend_usd = round(
+            (finding.past_overspend_usd or 0.0) + sum(plugin_usd), 6,
+        )
+    if finding.plugins and not finding.dead_plugins:
+        finding.notes.append(
+            f"{finding.plugins_resident} of {len(finding.plugins)} installed "
+            f"plugin(s) are actually resident (the rest are disabled or scoped "
+            f"to one project, and cost nothing). None of the resident ones has "
+            f"zero recorded use, so no plugin is flagged."
+        )
+
     finding.measurement_note = _measurement_coverage_note(finding)
     return finding
 
@@ -1596,6 +1822,7 @@ def run(ctx: AnalyzerContext) -> None:
         ctx.since, ctx.until,
         projects_root=scope.projects_root,
         claude_home=scope.claude_home,
+        claude_dir=scope.claude_home,
         min_sessions=min_sessions,
         cache_dir=default_cache_dir(ctx.config),
         store=store_for(getattr(ctx, "conn", None)),
