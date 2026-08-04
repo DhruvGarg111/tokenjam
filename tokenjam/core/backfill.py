@@ -940,8 +940,18 @@ def _apply_session(
     _record_insert_outcome(result, parsed, inserted, retagged)
 
 
+#: Attribute keys `parse_claude_code_session` always sets, regardless of
+#: `[capture]` — the provenance tag and the call-identity key (see the
+#: `llm_attrs` construction in that function). A span whose `attributes`
+#: contains nothing BEYOND these carries no content worth overlaying, so
+#: checking the size of this set is a cheap pre-filter before ever building
+#: the (comparatively expensive) `json_merge_patch` candidate payload.
+_BASELINE_ATTRIBUTE_KEYS = frozenset({"source", TjAttributes.CALL_ID})
+
+
 def _dedup_new_spans(
     conn, parsed: ParsedSession, scan: DuplicateScan | None = None,
+    capture: CaptureConfig | None = None,
 ) -> tuple[list[NormalizedSpan], list[NormalizedSpan]]:
     """Partition `parsed`'s spans into (new, overlay_candidates) — a cheap,
     indexed, chunked existence check. Kept PER SESSION (not batched) so
@@ -950,13 +960,21 @@ def _dedup_new_spans(
     columnar INSERT is deferred to a batched flush.
 
     `new` are spans not already present in the DB. `overlay_candidates` are
-    spans that ARE already present but whose re-parse resolved a
-    `sub_agent_id`/`sub_agent_type` this file's transcript can supply — e.g. a
-    row inserted before migration 19 (`sub_agent_type`) existed, or before this
-    file's sidecar (`agent-<id>.meta.json`) was written. The caller batches
-    these into a set-based overlay UPDATE rather than touching them here, for
-    the same reason new spans are batched: per-span UPDATEs are the ~350×-slower
-    path this bulk branch exists to avoid.
+    spans that ARE already present but whose re-parse resolved something new
+    the stored row is missing — either half of the set-based overlay
+    `bulk_overlay_span_attrs` performs:
+      - `sub_agent_id`/`sub_agent_type` this file's transcript can supply —
+        e.g. a row inserted before migration 19 (`sub_agent_type`) existed,
+        or before this file's sidecar (`agent-<id>.meta.json`) was written.
+      - Captured content (`gen_ai.prompt.content` etc.) when `[capture]` is
+        ON now but was off when the row was first ingested — gated on
+        `capture` actually having a toggle enabled AND the re-parsed span
+        carrying more than the baseline provenance keys, so a plain re-run
+        with capture off (the common case) never re-queues every existing
+        span just to ship a no-op payload.
+    The caller batches these into a set-based overlay UPDATE rather than
+    touching them here, for the same reason new spans are batched: per-span
+    UPDATEs are the ~350×-slower path this bulk branch exists to avoid.
 
     Also drops calls the LIVE path already recorded (`scan` carries the
     running per-call tally across this run's files) — see
@@ -966,9 +984,15 @@ def _dedup_new_spans(
     new_spans = _drop_calls_another_source_recorded(
         conn, parsed.session_id, new_spans, scan,
     )
+    capture_on = capture is not None and (
+        capture.prompts or capture.completions or capture.tool_inputs
+    )
     overlay_candidates = [
         s for s in parsed.spans
-        if s.span_id in existing and (s.sub_agent_id or s.sub_agent_type)
+        if s.span_id in existing and (
+            s.sub_agent_id or s.sub_agent_type
+            or (capture_on and set(s.attributes) - _BASELINE_ATTRIBUTE_KEYS)
+        )
     ]
     return new_spans, overlay_candidates
 
@@ -1155,12 +1179,12 @@ def ingest_claude_code(
     use_bulk = conn is not None and not reingest
     pending: list[NormalizedSpan] = []
     pending_ids: set[str] = set()
-    # Existing spans this run resolved a sub_agent_id/sub_agent_type for (see
-    # `_dedup_new_spans`'s `overlay_candidates`), queued for a batched additive
-    # UPDATE alongside the new-span flush below. `pending_overlay_ids` is
-    # belt-and-braces against queuing the same span_id twice, matching
-    # `pending_ids` above.
-    pending_overlay: list[tuple[str, str | None, str | None]] = []
+    # Existing spans this run resolved something new for — sub_agent_id/
+    # sub_agent_type, or captured content (see `_dedup_new_spans`'s
+    # `overlay_candidates`) — queued for a batched additive UPDATE alongside
+    # the new-span flush below. `pending_overlay_ids` is belt-and-braces
+    # against queuing the same span_id twice, matching `pending_ids` above.
+    pending_overlay: list[tuple[str, str | None, str | None, dict | None]] = []
     pending_overlay_ids: set[str] = set()
     # Session-total deltas wait for the spans they describe. Nothing here has
     # transaction control — every statement auto-commits — so the only lever on
@@ -1187,7 +1211,7 @@ def ingest_claude_code(
             pending.clear()
             pending_ids.clear()
         if pending_overlay:
-            overlay = getattr(db, "bulk_overlay_subagent_attrs", None)
+            overlay = getattr(db, "bulk_overlay_span_attrs", None)
             if overlay is not None:
                 try:
                     changed = overlay(pending_overlay)
@@ -1244,7 +1268,9 @@ def ingest_claude_code(
 
         if use_bulk:
             try:
-                new_spans, overlay_candidates = _dedup_new_spans(conn, parsed, duplicate_scan)
+                new_spans, overlay_candidates = _dedup_new_spans(
+                    conn, parsed, duplicate_scan, capture=capture,
+                )
             except Exception as exc:
                 result.files_failed += 1
                 if len(result.sample_errors) < 5:
@@ -1255,7 +1281,7 @@ def ingest_claude_code(
                     continue
                 pending_overlay_ids.add(span.span_id)
                 pending_overlay.append(
-                    (span.span_id, span.sub_agent_id, span.sub_agent_type)
+                    (span.span_id, span.sub_agent_id, span.sub_agent_type, span.attributes)
                 )
             # Queue the new spans for the batched INSERT, but count them NOW so the
             # progress callback sees an increasing `spans_ingested` instead of a

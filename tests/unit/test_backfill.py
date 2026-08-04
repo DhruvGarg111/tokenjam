@@ -1152,7 +1152,7 @@ def test_reingest_retags_existing_spans(tmp_path):
     before the column existed. A PLAIN re-run does the same now (the default
     bulk path overlays newly-resolvable identity columns onto existing spans,
     not just newly-inserted ones — see `_dedup_new_spans`'s overlay_candidates
-    / `bulk_overlay_subagent_attrs`), so both paths converge on the same
+    / `bulk_overlay_span_attrs`), so both paths converge on the same
     result; --reingest is left with nothing to do afterwards."""
     proj = "/Users/me/proj"
     _make_session_file(
@@ -1211,9 +1211,16 @@ def test_reingest_retags_existing_spans(tmp_path):
 
 def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
     """#10: enabling [capture] AFTER a session is already ingested, then
-    re-running backfill with --reingest, populates content / tool_input onto the
-    EXISTING spans — no fresh DB required. Without this, #4's recurring-inclusion
-    detection (which reads that content) only worked against a fresh DB."""
+    re-running backfill, populates content / tool_input onto the EXISTING
+    spans — no fresh DB required. Without this, #4's recurring-inclusion
+    detection (which reads that content) only worked against a fresh DB.
+
+    A PLAIN (non-reingest) re-run now does this too (the default bulk path
+    overlays newly-available attributes onto existing spans, not just
+    newly-inserted ones — see `_dedup_new_spans`'s `overlay_candidates` /
+    `bulk_overlay_span_attrs`'s `json_merge_patch` half), so both paths
+    converge on the same result; --reingest is left with nothing further to
+    add afterwards."""
     from tokenjam.core.config import TjConfig
 
     _content_session_file(tmp_path)
@@ -1238,21 +1245,15 @@ def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
         assert GenAIAttributes.COMPLETION_CONTENT not in llm_before
         assert GenAIAttributes.TOOL_INPUT not in tool_before
 
-        # 2. A plain (non-reingest) re-run with capture ON still does NOT touch
-        #    existing rows — the conflict path skips them. This is the gap #10
-        #    fixes: --reingest is required.
+        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+        # 2. A PLAIN (non-reingest) re-run with capture ON overlays content
+        #    onto the existing rows: no new spans, no new rows.
         cfg = TjConfig(version="1")
         cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
         r_plain = ingest_claude_code(db, root=tmp_path, config=cfg)
         assert r_plain.spans_ingested == 0
-        assert GenAIAttributes.PROMPT_CONTENT not in _attrs("gen_ai.llm.call")
-
-        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
-
-        # 3. --reingest WITH capture on backfills content in place: no new rows.
-        r_re = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
-        assert r_re.spans_ingested == 0
-        assert r_re.spans_retagged > 0
+        assert r_plain.spans_retagged > 0
         assert db.conn.execute(
             "SELECT COUNT(*) FROM spans"
         ).fetchone()[0] == before_rows
@@ -1266,6 +1267,16 @@ def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
             {"file_path": "/etc/app/config.toml"}
         # The pre-existing "source" key is preserved through the merge.
         assert llm_after["source"] == "backfill.claude_code"
+
+        # 3. Nothing left to overlay -> idempotent, both on a plain re-run and
+        #    on --reingest.
+        r_plain2 = ingest_claude_code(db, root=tmp_path, config=cfg)
+        assert r_plain2.spans_retagged == 0
+        r_re = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans"
+        ).fetchone()[0] == before_rows
     finally:
         db.close()
 

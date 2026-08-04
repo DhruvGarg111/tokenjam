@@ -105,6 +105,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     attribution need.
     checks.append(_check_unresolved_subagent_type(ctx.obj["db"]))
 
+    # 21. Captured content backfill gap — [capture] is on, but a slice of
+    #     backfilled history predates that and never got the content.
+    checks.append(_check_content_capture_backfill_gap(config, ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -727,6 +731,64 @@ def _check_unresolved_subagent_type(db: object) -> dict:
     }
 
 
+def _check_content_capture_backfill_gap(config: object, db: object) -> dict:
+    """Warn loudly when `[capture]` is ON but backfilled spans still have no
+    content — the other side of `_check_capture_prompts` above, which only
+    flags capture being OFF. A row backfilled BEFORE the user turned capture
+    on never gets the content on its own (a plain re-run only ever inserted
+    NEW spans until `bulk_overlay_span_attrs` grew a content-merge half), so
+    silently having neither check cover this case reads as "capture is on,
+    so it must be working" when in fact a slice of history never got it.
+    """
+    capture = getattr(config, "capture", None)
+    prompts_on = bool(getattr(capture, "prompts", False))
+    completions_on = bool(getattr(capture, "completions", False))
+    tool_inputs_on = bool(getattr(capture, "tool_inputs", False))
+    name = "Captured content backfill"
+    if not (prompts_on or completions_on or tool_inputs_on):
+        return {"name": name, "level": "info",
+                "message": "Skipped — no [capture] toggle is on."}
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        from tokenjam.core.db import (
+            missing_captured_content_stats,
+            missing_captured_tool_input_stats,
+        )
+
+        llm_missing = missing_captured_content_stats(
+            conn, prompts=prompts_on, completions=completions_on,
+        )
+        tool_missing = missing_captured_tool_input_stats(conn) if tool_inputs_on else 0
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not inspect span content: {e}"}
+    total_missing = llm_missing + tool_missing
+    if not total_missing:
+        return {"name": name, "level": "ok",
+                "message": "Every backfilled span has the content [capture] "
+                           "toggles say it should."}
+    parts = []
+    if llm_missing:
+        parts.append(f"{llm_missing} LLM span(s) missing prompt/completion content")
+    if tool_missing:
+        parts.append(f"{tool_missing} tool span(s) missing tool_input")
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{'; '.join(parts)} — likely backfilled before [capture] was "
+            f"turned on. Run `tj doctor --repair` to re-derive it from the "
+            f"on-disk transcripts still present; some may remain unresolved "
+            f"if Claude Code has since pruned them."
+        ),
+        "repair_action": "backfill_missing_content",
+    }
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -998,7 +1060,7 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
                 # newly on disk AND, as of this repair, overlays
                 # sub_agent_id/sub_agent_type onto existing rows it can now
                 # resolve (see `_dedup_new_spans`'s overlay_candidates /
-                # `bulk_overlay_subagent_attrs`). Unbounded (no `--since`) so
+                # `bulk_overlay_span_attrs`). Unbounded (no `--since`) so
                 # it reaches every row this check counted, matching how the
                 # transcript-ingest-gap repair above is also unbounded.
                 subagent_repair_result = ingest_claude_code(
@@ -1023,6 +1085,64 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
                     f"  [green]Resolved sub_agent_type on "
                     f"{subagent_repair_result.spans_retagged} existing "
                     f"span(s).[/green]{tail}"
+                )
+            continue
+        if action == "backfill_missing_content":
+            from tokenjam.core.backfill import (
+                CLAUDE_CODE_PROJECTS_ROOT,
+                ingest_claude_code,
+            )
+            from tokenjam.core.db import (
+                missing_captured_content_stats,
+                missing_captured_tool_input_stats,
+            )
+
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            capture = getattr(config, "capture", None)
+            prompts_on = bool(getattr(capture, "prompts", False))
+            completions_on = bool(getattr(capture, "completions", False))
+            tool_inputs_on = bool(getattr(capture, "tool_inputs", False))
+            try:
+                # Same underlying mechanism as "resolve_subagent_types" — a
+                # normal (non-`--reingest`) backfill, unbounded — the
+                # content-overlay half of `bulk_overlay_span_attrs` is
+                # capture-config-aware (see `_dedup_new_spans`'s
+                # `capture_on` gate), so this one pass re-derives content
+                # from the transcripts still on disk using whatever
+                # [capture] toggles are ACTUALLY on right now.
+                content_repair_result = ingest_claude_code(
+                    db, root=CLAUDE_CODE_PROJECTS_ROOT, config=config,
+                )
+                still_missing = missing_captured_content_stats(
+                    conn, prompts=prompts_on, completions=completions_on,
+                ) + (missing_captured_tool_input_stats(conn) if tool_inputs_on else 0)
+            except Exception as e:  # backfill can raise for many reasons (OS, JSON, DB)
+                if not output_json:
+                    console.print(
+                        f"  [red]Content-backfill repair failed — {e}.[/red]"
+                    )
+                continue
+            if not output_json:
+                tail = (
+                    f" {still_missing} span(s) remain missing content — "
+                    "their transcript has likely been pruned by Claude Code."
+                    if still_missing else " None remain missing."
+                )
+                # spans_retagged counts every overlay this pass made (content
+                # AND any newly-resolvable sub_agent_type together — one
+                # shared counter), so it is an upper bound on the content
+                # portion specifically, not an exact count of it.
+                console.print(
+                    f"  [green]Overlaid {content_repair_result.spans_retagged} "
+                    f"existing span(s) (content and/or subagent type)."
+                    f"[/green]{tail}"
                 )
             continue
         if action == "purge_timestamp_sentinels":
