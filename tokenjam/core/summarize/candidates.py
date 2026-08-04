@@ -19,12 +19,12 @@ top-level). Advisory only — reads and reports, never writes.
 from __future__ import annotations
 
 import fnmatch
-import glob as _glob
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
+from tokenjam.core import agent_config
 from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
@@ -33,6 +33,7 @@ from tokenjam.core.summarize.relocate import relocatable_content_chars
 from tokenjam.core.summarize.route import recommend_route
 
 if TYPE_CHECKING:
+    from tokenjam.core.agent_config import AgentConfigStore, ConfigRecord
     from tokenjam.core.config import TjConfig
 
 # Directories never descended into during a --recursive walk.
@@ -341,54 +342,92 @@ def _pricing_mode(config: "TjConfig | None") -> str:
 # Target enumeration
 # --------------------------------------------------------------------------- #
 
-def _expand_home(raw: str, home: Path | None) -> str:
-    """Expand a leading `~` against `home`, or the real home when None.
+# WHERE THE CATALOG IS ENUMERATED, AND WHY IT IS NOT HERE ANY MORE.
+#
+# `_global_targets` and `_project_targets` used to expand the catalog inline,
+# at scan time, with `prompt_bloat` keeping a second near-identical pair of
+# helpers doing the same expansion a different way. Both now come through
+# `core/agent_config` — `catalog_global_paths` / `catalog_project_paths` — so
+# "the catalog is the source of truth for which paths count" is enforced by
+# there being one expander rather than by two modules agreeing to behave.
+#
+# The walk below is still the only thing that can DISCOVER a file. What changed
+# is that its output is INGESTED (path, size, token count, content hash, last
+# seen) and this scan then reads the population back out of the store, so a
+# consumer can answer "what config is present and how big is it" without a stat
+# call, and so the MCP schema measurement has somewhere to live between runs.
 
-    `home` is the analyzer scope's home (see `core/optimize/scope.py`). The
-    catalog's global paths span several agent homes (`~/.claude`, `~/.gemini`,
-    `~/.codex`), so scoping them means redirecting `~` itself — anything
-    narrower would leave most of the catalog reading the operator's real files
-    while a `--projects-root` was in force.
+
+def _ingest_and_read(
+    store: "AgentConfigStore",
+    records: "list[ConfigRecord]",
+    *,
+    scope: str,
+    root: str = "",
+) -> list[Path]:
+    """Store ``records``, then read that same population back, in scan order.
+
+    The read is filtered on the pass's own timestamp AND its root. A persistent
+    store holds every root ever scanned, so an unfiltered read would hand this
+    scan files from a repo the caller never asked about — the stored table has
+    to answer the same question the live walk answered, not a broader one.
     """
-    if home is None:
-        return os.path.expanduser(raw)
-    if raw == "~":
-        return str(home)
-    if raw.startswith("~/"):
-        return str(home / raw[2:])
-    return raw
+    if not records:
+        return []
+    at = records[0].last_seen
+    store.upsert(records)
+    return [Path(r.path) for r in store.select(
+        kind=agent_config.KIND_INSTRUCTION, scope=scope, root=root, seen_at=at,
+    )]
 
 
-def _global_targets(home: Path | None = None) -> list[Path]:
-    """Catalog global/system paths ("~" expanded; glob patterns expanded)."""
-    out: list[Path] = []
-    for raw in load_catalog().global_paths:
-        ep = _expand_home(raw, home)
-        if any(ch in ep for ch in "*?["):
-            # recursive=True so a `**` in a catalog global path (e.g.
-            # `~/.claude/rules/**/*.md`) descends; without it `glob` treats `**`
-            # as a plain `*` and sees only the top level of a nested rule tree.
-            out.extend(Path(x) for x in sorted(_glob.glob(ep, recursive=True)))
-        else:
-            out.append(Path(ep))
-    return out
+def _global_targets(
+    store: "AgentConfigStore", home: Path | None = None,
+) -> list[Path]:
+    """Catalog global/system paths that exist, ingested then read back."""
+    return _ingest_and_read(
+        store,
+        agent_config.scan_instruction_files(
+            home=home, include_global=True, catalog=load_catalog(),
+        ),
+        scope=agent_config.SCOPE_GLOBAL,
+    )
 
 
-def _project_targets(root: Path, ext_set: set[str]) -> Iterator[Path]:
+def _project_targets(
+    store: "AgentConfigStore", root: Path, ext_set: set[str],
+) -> list[Path]:
     """Catalog names + globs at ``root`` (always); plus, when ``ext_set`` is
-    non-empty (the net is open), every root-level file with a matching extension."""
-    cat = load_catalog()
-    for name in sorted(cat.project_files):
-        yield root / name
-    for pattern in cat.project_globs:
-        yield from sorted(root.glob(pattern))
-    if ext_set:
-        try:
-            for p in sorted(root.iterdir()):
-                if p.is_file() and p.suffix.lower() in ext_set:
-                    yield p
-        except OSError:
-            pass
+    non-empty (the net is open), every root-level file with a matching
+    extension. Ingested, then read back."""
+    return _ingest_and_read(
+        store,
+        agent_config.scan_instruction_files(
+            roots=[root], include_global=False, extra_exts=ext_set,
+            catalog=load_catalog(),
+        ),
+        scope=agent_config.SCOPE_PROJECT, root=str(root),
+    )
+
+
+def _ingest_walked(
+    store: "AgentConfigStore", root: Path, paths: list[Path],
+) -> list[Path]:
+    """A ``--recursive`` walk's own output, ingested on the same terms.
+
+    A widened walk finds files the catalog does not name, and they go into the
+    store too: the point of the table is that it holds the config surface that
+    was actually looked at, not a re-derivation of what the catalog would have
+    predicted.
+    """
+    return _ingest_and_read(
+        store,
+        agent_config.scan_instruction_files(
+            include_global=False,
+            extra_paths=[(p, agent_config.SCOPE_PROJECT, root) for p in paths],
+        ),
+        scope=agent_config.SCOPE_PROJECT, root=str(root),
+    )
 
 
 def _walk_targets(root: Path, ext_set: set[str]) -> tuple[list[Path], bool]:
@@ -449,6 +488,7 @@ def list_candidates(
     home: "Path | None" = None,
     project_root: "Path | None" = None,
     project_roots: "Sequence[str | os.PathLike[str]] | None" = None,
+    store: "AgentConfigStore | None" = None,
 ) -> ScanResult:
     """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes.
 
@@ -479,8 +519,15 @@ def list_candidates(
     ``project_root`` and ``project_roots`` never both apply: a caller supplying
     an explicit root list has already decided the population, and
     ``project_root`` is the fallback starting point for when it has not.
+
+    ``store`` is where the enumerated population is INGESTED (``core/
+    agent_config``) and then read back from. It defaults to a fresh in-memory
+    store, so a caller with no database gets exactly the enumeration the walk
+    produced and nothing is persisted; the optimize analyzer passes a
+    DuckDB-backed one so the config surface this scan looked at outlives the run.
     """
     mode = _pricing_mode(config)
+    store = store if store is not None else agent_config.InMemoryAgentConfigStore()
     extra = {e for e in (_norm_ext(x) for x in extra_exts) if e}
     # The net opens to all-md (+ extras) the moment ANY widening input is given.
     widened = (path is not None) or recursive or repo or bool(extra)
@@ -505,10 +552,9 @@ def list_candidates(
     # 1) Globals (the floor) — always catalog prompts, unless suppressed.
     globals_checked = 0
     if include_global:
-        for gp in _global_targets(home):
-            if gp.exists():
-                globals_checked += 1
-                _add(gp, "global")
+        for gp in _global_targets(store, home):
+            globals_checked += 1
+            _add(gp, "global")
 
     # 2) Project scope.
     explicit = path is not None
@@ -542,7 +588,7 @@ def list_candidates(
             root_used = walk_root
             roots_scanned = 1
             paths, walk_capped = _walk_targets(walk_root, ext_set)
-            for p in paths:
+            for p in _ingest_walked(store, walk_root, paths):
                 _add(p, "path" if explicit else "repo", walk_root)
     elif project_roots is not None:
         # Corpus-wide project scope: the same catalog-default net, once per root.
@@ -551,7 +597,7 @@ def list_candidates(
             if not scan_root.is_dir():
                 continue
             roots_scanned += 1
-            for p in _project_targets(scan_root, ext_set):
+            for p in _project_targets(store, scan_root, ext_set):
                 _add(p, "project", scan_root)
         root_used = None
     else:
@@ -567,7 +613,7 @@ def list_candidates(
             scope = "path" if explicit else "project"
         root_used = scope_root
         roots_scanned = 1
-        for p in _project_targets(scope_root, ext_set):
+        for p in _project_targets(store, scope_root, ext_set):
             _add(p, scope, scope_root)
 
     # Sectioned sort (DEC-021, refined): what the user asked for first — the scanned

@@ -7,6 +7,8 @@ so downsize must run first when both are selected.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any
@@ -25,6 +27,8 @@ from tokenjam.core.optimize.types import (
 # Ensure analyzers are imported (triggers @register side effects).
 # Auto-discovery in analyzers/__init__.py walks the directory.
 from tokenjam.core.optimize import analyzers as _analyzers  # noqa: F401
+
+log = logging.getLogger(__name__)
 
 # Deterministic order. Adding a new analyzer? Append to this list. Analyzers
 # requested via positional are filtered against ANALYZER_REGISTRY but executed
@@ -270,6 +274,12 @@ def build_report(
 
     ctx = AnalyzerContext(
         conn=conn,
+        # The owning backend's write lock, so an analyzer that writes through
+        # the raw `conn` can serialize against the backend's own mutating
+        # methods (`.claude/rules/core-architecture.md`). `None` when the caller
+        # passed something without one; the agent-config store then relies on
+        # its retry path instead, which is slower under contention, not wrong.
+        write_lock=getattr(db, "write_lock", None),
         config=config,
         since=since,
         until=until,
@@ -305,16 +315,45 @@ def build_report(
     # cannot act on. See PERSONA_DISABLED_ANALYZERS for the per-name reasons.
     selected -= disabled_analyzers_for_persona(persona)
 
+    def _dispatch(name: str, analyzer: Any) -> None:
+        """Run one analyzer, and DISCLOSE it if it fails.
+
+        The loop used to be bare, so one analyzer raising took `build_report`
+        down with it and lost every other analyzer's findings — a report of
+        thirteen analyzers destroyed by one. That was survivable while every
+        analyzer was pure in-memory computation over already-fetched rows; it
+        stopped being survivable once one of them could hit a database write
+        conflict, which is a failure mode that simply did not exist before.
+
+        Isolation alone would be the WORSE bug, though. An analyzer that
+        vanishes silently reads as "this analyzer found nothing", which is a
+        positive claim the run has no evidence for — exactly the class of defect
+        (root anti-pattern 22) this file's own persona gate is careful about
+        when it drops an analyzer deliberately. So a swallowed failure is
+        recorded on the report, in a field surfaces render, and never merely
+        omitted.
+        """
+        try:
+            analyzer(ctx)
+        except Exception as exc:  # noqa: BLE001 - recorded, not hidden
+            log.exception("analyzer %s failed; continuing with the rest", name)
+            report.analyzer_errors[name] = f"{type(exc).__name__}: {exc}"
+            report.notes.append(
+                f"The `{name}` analyzer did not complete ({type(exc).__name__}), "
+                f"so this report says nothing about it. That is not the same as "
+                f"it finding nothing — re-run to try again."
+            )
+
     for name in ANALYZER_ORDER:
         if name in selected and name in ANALYZER_REGISTRY:
-            ANALYZER_REGISTRY[name](ctx)
+            _dispatch(name, ANALYZER_REGISTRY[name])
 
     # Analyzers not in ANALYZER_ORDER (future ones, registered but not yet
     # explicitly ordered) run last in arbitrary order. Maintainers should add
     # new analyzers to ANALYZER_ORDER when they land.
     for name, analyzer in ANALYZER_REGISTRY.items():
         if name in selected and name not in ANALYZER_ORDER:
-            analyzer(ctx)
+            _dispatch(name, analyzer)
 
     # THE write allocation, after every analyzer and before anyone reads the
     # report. This is the only place in the tree that decides which permanent

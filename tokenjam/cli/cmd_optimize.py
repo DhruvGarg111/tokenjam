@@ -2465,6 +2465,48 @@ def _render_summarize(
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
+    """The plugin half of the deadweight finding.
+
+    Renders the RESIDENT count against the installed count, always, because the
+    gap is the story: on a real machine most of what is installed is switched
+    off or scoped to one project and costs nothing, and a reader shown only a
+    dollar figure has no way to know which of those they are looking at.
+    """
+    plugins = list(getattr(finding, "plugins", []) or [])
+    if not plugins:
+        return
+    resident = int(getattr(finding, "plugins_resident", 0) or 0)
+    console.print(
+        f"     [dim]Plugins: {resident} of {len(plugins)} installed are resident "
+        f"(the rest are disabled or scoped to one project and cost "
+        f"nothing).[/dim]"
+    )
+    for plugin in getattr(finding, "dead_plugins", []) or []:
+        console.print(
+            f"       [bold]{plugin.name}[/bold] [dim]({plugin.skills} skill"
+            f"{'s' if plugin.skills != 1 else ''} listed every session)[/dim]  "
+            f"[yellow]{plugin.usage_count}[/yellow] recorded uses"
+        )
+        if pricing_mode == "api" and plugin.estimated_tax_usd_window is not None:
+            tax = (
+                f"~{format_tokens(plugin.estimated_tax_tokens_window)} tokens / "
+                f"{format_cost(plugin.estimated_tax_usd_window)} in this window "
+                f"[dim](estimated, priced at {plugin.priced_model})[/dim]"
+            )
+        else:
+            tax = (
+                f"~{format_tokens(plugin.estimated_tax_tokens_window)} tokens in "
+                f"this window [dim](estimated; no priced model observed, so no "
+                f"dollar figure)[/dim]"
+            )
+        console.print(f"          [dim]tax[/dim] {tax}")
+        if plugin.tax_construction:
+            console.print(f"          [dim]{_rich_escape(plugin.tax_construction)}[/dim]")
+        if plugin.fix:
+            console.print(f"          [yellow]→[/yellow] {_rich_escape(plugin.fix)}")
+
+
 def _render_deadweight(
     finding, *, pricing_mode: str = "api", marker: str = "",
 ) -> None:
@@ -2487,6 +2529,12 @@ def _render_deadweight(
             f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
             f"configured, so nothing is being injected.[/dim]"
         )
+        # The plugin lane is INDEPENDENT of the MCP one and must still render
+        # here: a user with no MCP servers at all can be paying for an enabled
+        # plugin in every session, and returning early would make the whole
+        # lane invisible to exactly that user (Critical Rule 24 — a capability
+        # nobody has a path to does not exist).
+        _render_deadweight_plugins(finding, pricing_mode=pricing_mode)
         if finding.coverage_note:
             console.print(
                 f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
@@ -2540,6 +2588,8 @@ def _render_deadweight(
                 console.print(f"          [dim]{s.tax_construction}[/dim]")
             console.print(f"          [yellow]→[/yellow] {s.fix}")
 
+    _render_deadweight_plugins(finding, pricing_mode=pricing_mode)
+
     # C2 context tax: every always-injected content source, dead or alive. Kept
     # to the top rows so it stays a pointer rather than a second report.
     if finding.tax_table:
@@ -2563,6 +2613,14 @@ def _render_deadweight(
 
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    # The MEASUREMENT coverage note, beside the figure it qualifies. Without it
+    # the terminal showed a priced dollar total for the servers that could be
+    # measured and said nothing about the ones excluded — an undisclosed FLOOR
+    # rendered as a total. The number was honest; the presentation was not.
+    if getattr(finding, "measurement_note", ""):
+        console.print(
+            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.measurement_note)}[/dim]"
+        )
     if finding.coverage_note:
         console.print(
             f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"

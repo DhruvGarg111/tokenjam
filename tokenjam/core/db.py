@@ -557,6 +557,35 @@ RETENTION_EVENTS_TABLE_SQL = (
     ")"
 )
 
+# The ingested agent-config surface, single-sourced so migration 22 and the
+# `EXPECTED_TABLES` self-heal create the same table. See `core/agent_config.py`
+# for what each column answers and why the measurement columns are separate
+# from the size ones: `tokens` is what the file's own text costs, while
+# `measured_tokens` is what an MCP server's tool schemas were MEASURED to inject
+# and is NULL until something actually measured them. A NULL there is load-
+# bearing — no consumer may substitute a default for it, because "we have not
+# measured this server" and "this server injects nothing" are different answers.
+AGENT_CONFIG_FILES_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS agent_config_files (\n"
+    "    config_id       TEXT PRIMARY KEY,\n"
+    "    kind            TEXT NOT NULL,\n"
+    "    scope           TEXT NOT NULL,\n"
+    "    root            TEXT,\n"
+    "    name            TEXT,\n"
+    "    path            TEXT NOT NULL,\n"
+    "    size_bytes      BIGINT NOT NULL DEFAULT 0,\n"
+    "    tokens          BIGINT NOT NULL DEFAULT 0,\n"
+    "    content_hash    TEXT,\n"
+    "    last_seen       TIMESTAMPTZ NOT NULL,\n"
+    "    subkind         TEXT,\n"
+    "    detail          JSON,\n"
+    "    measured_tokens BIGINT,\n"
+    "    measured_at     TIMESTAMPTZ,\n"
+    "    measure_status  TEXT,\n"
+    "    seq             BIGINT NOT NULL DEFAULT 0\n"
+    ")"
+)
+
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -858,6 +887,29 @@ MIGRATIONS: list[tuple[int, str]] = [
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT;"
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS task_statement_hash TEXT;"
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dominant_model TEXT"),
+    # Migration 22: the ingested agent-config surface.
+    #
+    # Three analyzers each walked the filesystem themselves at analysis time to
+    # answer "what config does this user have" — `deadweight` re-read
+    # `~/.claude.json` and every project's `.mcp.json`, `core/summarize/
+    # candidates` re-globbed the prompt-file catalog, and `prompt_bloat` globbed
+    # it a second time through its own helper. Nothing about any of it was
+    # stored, so the same tree was walked three times per run and no question
+    # about it could be answered without touching disk.
+    #
+    # This table is what those analyzers now read; the walk is only how it gets
+    # populated. One row per instruction file, hook, or (MCP server, declaring
+    # config file), carrying presence, size, token count, content hash and when
+    # it was last seen. `measured_tokens` is the separate, independently taken
+    # measurement of what an MCP server's tool schemas actually inject — cached
+    # here precisely because taking it means STARTING the server, so it must
+    # survive between analysis runs and be invalidated by the spec hash rather
+    # than re-taken on a schedule.
+    (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n"
+     "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
+     "ON agent_config_files(kind);\n"
+     "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
+     "ON agent_config_files(last_seen)"),
 ]
 
 
@@ -996,6 +1048,8 @@ EXPECTED_TABLES: dict[str, str] = {
     ),
     # migration 20
     "retention_events": RETENTION_EVENTS_TABLE_SQL,
+    # migration 22
+    "agent_config_files": AGENT_CONFIG_FILES_TABLE_SQL,
 }
 
 
