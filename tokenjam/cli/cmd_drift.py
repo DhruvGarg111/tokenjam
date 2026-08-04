@@ -7,11 +7,12 @@ import click
 from rich.table import Table
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.drift import evaluate_drift
 from tokenjam.utils.formatting import console
 
 
-@click.command("drift")
+@click.command("drift", cls=TjCommand)
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @json_option
 @click.pass_context

@@ -5,6 +5,7 @@ import socket
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.server_state import server_state_path
 from tokenjam.utils.formatting import console
 
@@ -40,7 +41,10 @@ def _port_in_use(host: str, port: int) -> bool:
     return False
 
 
-@click.command("serve")
+#: Structural opt-out: serve prints its own startup banner then blocks
+#: forever inside uvicorn — there is no "done" for a transient status to
+#: erase on, and a spinner would sit on screen next to a running server.
+@click.command("serve", cls=TjCommand, no_status=True)
 @click.option("--host", default=None, help="Bind host (default: from config)")
 @click.option("--port", default=None, type=int, help="Bind port (default: from config)")
 @click.option("--reload", is_flag=True, help="Enable auto-reload for development")

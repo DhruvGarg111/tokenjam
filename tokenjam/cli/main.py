@@ -2,6 +2,7 @@ import os
 from typing import TYPE_CHECKING
 
 import click
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.config import load_config
 from tokenjam.core.db import open_db
 
@@ -46,6 +47,7 @@ def _lock_holder_hint() -> str:
 
 
 @click.group(
+    cls=TjGroup,
     invoke_without_command=True,
     epilog="Upgrade with: tj upgrade (installs the new package AND "
            "restarts the daemon). Verify with `tj --version`.",

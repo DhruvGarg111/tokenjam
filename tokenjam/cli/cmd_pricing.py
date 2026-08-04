@@ -3,11 +3,12 @@ import json
 import click
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjGroup
 from tokenjam.core.pricing import load_pricing_sources, load_pricing_table
 from tokenjam.utils.formatting import console, make_table
 
 
-@click.group("pricing", invoke_without_command=False)
+@click.group("pricing", cls=TjGroup, invoke_without_command=False)
 def cmd_pricing() -> None:
     """Inspect the model pricing table."""
 

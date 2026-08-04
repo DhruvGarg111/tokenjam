@@ -7,6 +7,7 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import Alert, AlertFilters
 from tokenjam.utils.formatting import (
     console,
@@ -26,7 +27,7 @@ _TEASER_WINDOW_DAYS = 30
 _TEASER_MIN_USD = 1.0
 
 
-@click.command("status")
+@click.command("status", cls=TjCommand, status_message="Scanning your sessions…")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("-v", "--verbose", "verbose_flag", is_flag=True, default=False,
               help="Print every agent's full card instead of the capped table.")
