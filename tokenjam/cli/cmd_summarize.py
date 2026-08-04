@@ -29,7 +29,14 @@ from tokenjam.core.summarize.calibrate import (
     CalibrationReport,
     run_calibration,
 )
+from tokenjam.core.summarize import quarantine
 from tokenjam.core.summarize.candidates import list_candidates
+from tokenjam.core.summarize.prune import (
+    DEFAULT_EXPIRE_DAYS,
+    apply_prune,
+    plan_expire,
+    plan_prune,
+)
 from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
 from tokenjam.core.summarize.relocate import (
     DEFAULT_TARGET,
@@ -552,3 +559,246 @@ def cmd_summarize_relocate(
             f"[muted]Both files are backed up; `tj summarize undo {escape(str(source))} --go` "
             f"restores the original.[/muted]"
         )
+
+
+# --- prune / expire / quarantine ------------------------------------------
+#
+# The two routes `route.py` names that could not previously reach a write. They
+# use the same shape every write-affecting subcommand above uses — plan, show
+# the exact change, default to a dry run, `--go` writes — because the human gate
+# is not what the quarantine replaces. The quarantine is what sits UNDER that
+# gate, so approving a removal is no longer an irreversible act.
+
+def _print_prune_plan(plan, *, route_label: str) -> None:
+    if not plan.fragments:
+        console.print(f"[dim]nothing to {route_label}.[/dim]")
+    for fragment in plan.fragments:
+        console.print(
+            f"[yellow]-[/yellow] {escape(fragment.title)} "
+            f"[dim](lines {fragment.start_line}-{fragment.end_line - 1}, "
+            f"~{format_tokens(fragment.tokens)} tok) — {escape(fragment.reason)}[/dim]"
+        )
+    for title, why in plan.declined:
+        console.print(f"[dim]  kept  {escape(title)} — {escape(why)}[/dim]")
+
+
+def _finish_prune(config, plan, *, go: bool, output_json: bool, route_label: str) -> None:
+    try:
+        result = apply_prune(config, plan, go=go)
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    _print_prune_plan(plan, route_label=route_label)
+    for skip in result["skipped"]:
+        console.print(f"[yellow]skip[/yellow] {escape(skip['path'])} — {escape(skip['reason'])}")
+    if result["applied"]:
+        console.print(
+            f"[green]✓[/green] {route_label}d {len(plan.fragments)} fragment(s), "
+            f"~{format_tokens(plan.tokens_freed)} always-resident tok freed"
+        )
+        console.print(
+            f"[dim]quarantined as {', '.join(result['quarantined'])} — "
+            f"`tj summarize restore <id> --go` puts any of them back.[/dim]"
+        )
+    elif result["dry_run"] and plan.fragments:
+        console.print("[dim]dry-run — nothing written. Re-run with --go to apply.[/dim]")
+
+
+@cmd_summarize.command("prune")
+@click.argument("path")
+@click.option("--section", "sections", multiple=True,
+              help="Heading of a section to remove. Repeatable; required.")
+@click.option("--level", default=2, show_default=True, type=int,
+              help="Heading level the sections are at.")
+@click.option("--go", is_flag=True,
+              help="Write the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_prune(
+    ctx: click.Context, path: str, sections: tuple[str, ...], level: int,
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Remove named sections from an instruction file. Default dry-run; --go writes.
+
+    Nothing is selected for you: which rules earn their place is a question only
+    the file's owner can answer, and the shape measurement behind the `prune`
+    verdict deliberately does not answer it. Every removal is quarantined first
+    and can be restored with `tj summarize restore`.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError(
+            "Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    target = Path(path).expanduser()
+    if target.is_dir():
+        raise click.UsageError("PATH is a directory — prune takes one file.")
+    if not target.is_file():
+        raise click.ClickException(f"{target} not found.")
+    try:
+        plan = plan_prune(
+            source_path=str(target), source_text=target.read_text(encoding="utf-8"),
+            titles=list(sections), level=level,
+        )
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+    _finish_prune(config, plan, go=go, output_json=output_json, route_label="prune")
+
+
+@cmd_summarize.command("expire")
+@click.argument("path")
+@click.option("--older-than", "older_than", default=DEFAULT_EXPIRE_DAYS, show_default=True,
+              type=int, help="Days. Dated entries older than this are offered for removal.")
+@click.option("--level", default=2, show_default=True, type=int,
+              help="Heading level the entries are at.")
+@click.option("--go", is_flag=True,
+              help="Write the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_expire(
+    ctx: click.Context, path: str, older_than: int, level: int,
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Drain aged entries from a dated log. Default dry-run; --go writes.
+
+    Only entries whose heading carries a date older than the cutoff. An undated
+    section in a log is standing content and is never swept along. Every removal
+    is quarantined first and can be restored with `tj summarize restore`.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError(
+            "Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    target = Path(path).expanduser()
+    if target.is_dir():
+        raise click.UsageError("PATH is a directory — expire takes one file.")
+    if not target.is_file():
+        raise click.ClickException(f"{target} not found.")
+    plan = plan_expire(
+        source_path=str(target), source_text=target.read_text(encoding="utf-8"),
+        older_than_days=older_than, level=level,
+    )
+    _finish_prune(config, plan, go=go, output_json=output_json, route_label="expire")
+
+
+@cmd_summarize.group("quarantine")
+def cmd_summarize_quarantine() -> None:
+    """What prune and expire removed, and how to read it back."""
+
+
+@cmd_summarize_quarantine.command("list")
+@click.argument("path", required=False, default=None)
+@json_option
+@click.pass_context
+def cmd_summarize_quarantine_list(
+    ctx: click.Context, path: str | None, output_json_flag: bool,
+) -> None:
+    """Every quarantined removal, newest first — all files, or one PATH."""
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    entries = quarantine.list_entries(config, source_path=path)
+    if output_json:
+        click.echo(json.dumps([e.to_dict() for e in entries], indent=2))
+        return
+    if not entries:
+        console.print("[dim]nothing quarantined.[/dim]")
+        return
+    for entry in entries:
+        console.print(
+            f"[cyan]{entry.entry_id}[/cyan]  {escape(entry.route)}  "
+            f"{escape(entry.source_path)} "
+            f"[dim](lines {entry.start_line}-{entry.end_line - 1}, "
+            f"{entry.removed_chars} chars, {escape(entry.removed_at)})[/dim]"
+        )
+        if entry.reason:
+            console.print(f"    [dim]{escape(entry.reason)}[/dim]")
+
+
+@cmd_summarize_quarantine.command("show")
+@click.argument("entry_id")
+@json_option
+@click.pass_context
+def cmd_summarize_quarantine_show(
+    ctx: click.Context, entry_id: str, output_json_flag: bool,
+) -> None:
+    """Print one quarantined fragment verbatim."""
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    entry = quarantine.read(config, entry_id)
+    if entry is None:
+        raise click.ClickException(
+            f"no quarantine entry {entry_id!r}. `tj summarize quarantine list` "
+            f"shows what is there.")
+    if output_json:
+        click.echo(json.dumps({**entry.to_dict(), "removed_text": entry.removed_text}, indent=2))
+        return
+    console.print(f"[dim]{escape(entry.source_path)} — {escape(entry.reason)}[/dim]")
+    click.echo(entry.removed_text)
+
+
+@cmd_summarize.command("restore")
+@click.argument("entry_id", required=False, default=None)
+@click.option("--all", "restore_every", is_flag=True,
+              help="Restore every quarantined fragment (optionally scoped by --path).")
+@click.option("--path", "path", default=None,
+              help="With --all, restore only this file's fragments.")
+@click.option("--go", is_flag=True,
+              help="Write the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@json_option
+@click.pass_context
+def cmd_summarize_restore(
+    ctx: click.Context, entry_id: str | None, restore_every: bool, path: str | None,
+    go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Put a quarantined fragment back. Default dry-run; --go writes.
+
+    Refuses rather than guessing when the file changed so much that the
+    fragment's original surroundings can no longer be located: silent corruption
+    of an instruction file is a worse failure than a refusal you can act on.
+    """
+    config: TjConfig = ctx.obj["config"]
+    output_json = resolve_output_json(ctx, output_json_flag)
+    if dry_run and go:
+        raise click.UsageError(
+            "Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    if bool(entry_id) == bool(restore_every):
+        raise click.UsageError("Give either an ENTRY_ID or --all, not both and not neither.")
+
+    try:
+        if restore_every:
+            report = quarantine.restore_all(config, source_path=path, go=go)
+            results = report["results"]
+        else:
+            results = [quarantine.restore(config, entry_id or "", go=go)]
+            report = {
+                "restored": sum(1 for r in results if r["restored"]),
+                "refused": [r for r in results if not r["restored"] and r["reason"]],
+                "dry_run": not go, "results": results,
+            }
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e
+
+    if output_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    for result in results:
+        if result["restored"]:
+            exact = "exactly" if result["source_unchanged"] else "re-anchored"
+            console.print(
+                f"[green]✓[/green] restored {result['entry_id']} into "
+                f"{escape(result['path'])} ({exact})")
+        elif result["reason"]:
+            console.print(f"[yellow]refused[/yellow] {escape(result['reason'])}")
+        else:
+            console.print(
+                f"[dim]would restore {result['entry_id']} into "
+                f"{escape(result['path'])} — re-run with --go.[/dim]")
