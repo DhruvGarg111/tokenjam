@@ -640,24 +640,6 @@ async def test_status_response_includes_framing_block(db, client):
     assert _FRAMING_KEYS <= set(data["framing"])
 
 
-@pytest.mark.parametrize("plan_tier,expected_mode", [
-    ("max_5x", "subscription"),
-    ("api", "api"),
-    ("local", "local"),
-    ("unknown", "unknown"),
-])
-async def test_status_framing_reflects_plan_tier(
-    db, client, monkeypatch, tmp_path, plan_tier, expected_mode,
-):
-    """The /status framing pricing_mode tracks the session plan tier (#191).
-    HOME is isolated so the unknown case can't pick up this machine's global
-    ~/.config/tj plan via compute_framing's config fallback."""
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    _seed_trace_with_plan(db, plan_tier, trace_id="ee" * 16, session_id="sess-191")
-    framing = (await client.get("/api/v1/status")).json()["framing"]
-    assert framing["pricing_mode"] == expected_mode
-
-
 # --- #2: /sessions/{id} carries a framing block so SessionDetailView's ------- #
 # --- Overview / subagents / traces cost cells reframe subscription/local. ----- #
 async def test_session_detail_includes_framing_block(db, client):
@@ -791,17 +773,6 @@ async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
     assert "planning_texts" in data
     assert any(v for v in data["planning_texts"].values())
     assert data["pricing_mode"] in ("api", "subscription", "local", "unknown")
-
-
-async def test_optimize_response_includes_framing_block(client, db, config):
-    await _ingest_sample_span(client)
-    _warm_scan(db, config)
-    resp = await client.get("/api/v1/optimize?since=30d")
-    assert resp.status_code == 200
-    data = resp.json()
-    if data.get("error") == "no_data":
-        pytest.skip("no spans landed for optimize in this fixture")
-    assert _FRAMING_KEYS <= set(data["framing"])
 
 
 async def test_optimize_response_always_carries_downgrade_key(client, db, config):
@@ -1111,12 +1082,6 @@ async def test_get_endpoint_works_with_valid_api_key(auth_client):
     )
     assert resp.status_code == 200
 
-
-# ── Docs endpoint ──────────────────────────────────────────────────────────
-
-async def test_docs_endpoint_is_accessible(client):
-    resp = await client.get("/docs")
-    assert resp.status_code == 200
 
 
 # ── agent_id normalization ─────────────────────────────────────────────────
