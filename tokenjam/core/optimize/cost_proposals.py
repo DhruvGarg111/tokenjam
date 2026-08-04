@@ -2734,6 +2734,88 @@ def _adapter_failure_entries(failures: dict[str, str]) -> dict[str, Any]:
     }
 
 
+#: The three outcomes a recompute call can have. A caller that publishes one
+#: must publish WHICH — see :class:`CostRecomputeResult`.
+RECOMPUTE_READY = "ready"
+RECOMPUTE_DECLINED = "declined"
+RECOMPUTE_FAILED = "failed"
+
+#: Machine-readable ``reason`` tokens for the two ways a call declines. Both
+#: are NORMAL: something else is already measuring, and two measurements of one
+#: window is the defect this module exists to avoid.
+DECLINED_SCAN_CYCLE_IN_FLIGHT = "scan_cycle_in_flight"
+DECLINED_RECOMPUTE_IN_FLIGHT = "recompute_in_flight"
+
+
+@dataclass(frozen=True)
+class CostRecomputeResult:
+    """What a :func:`recompute_cost_proposals` call actually did.
+
+    This used to be a bare ``list[CostProposal]``, and ``[]`` meant FOUR
+    different things — a cycle was in flight, the lock was held, the build
+    raised, or there was genuinely nothing to propose. Callers could not tell
+    them apart, so ``POST /relearn/cost-proposals/refresh`` reported a declined
+    refresh as ``{"status": "ready", "proposals": 0}`` while the store still
+    held a full, good set: a surface asserting more than its data supports
+    (root anti-pattern 22 in the workspace ``CLAUDE.md``).
+
+    ``proposals``
+        THIS call's own build. Empty unless ``status`` is ``"ready"`` — a
+        declined or failed call built nothing, and returning someone else's
+        proposals under this field would be the same conflation again.
+    ``served_count`` / ``served_computed_at``
+        what a reader of the proposal store would see RIGHT NOW, and when it
+        was built. On ``"ready"`` that is this call's fresh write; otherwise it
+        is the last-good stored set, which is exactly what a decline leaves up.
+        ``served_computed_at`` is ``None`` when nothing has ever been stored.
+    ``fresh``
+        whether ``served_count`` describes THIS call's measurement. ``False``
+        is the honest signal that a surface is republishing a previous result.
+    ``reason`` / ``detail``
+        a machine token and one human sentence, ``None`` on ``"ready"``.
+    """
+
+    status: str
+    proposals: list[CostProposal]
+    served_count: int
+    served_computed_at: str | None
+    fresh: bool
+    reason: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.status not in (RECOMPUTE_READY, RECOMPUTE_DECLINED, RECOMPUTE_FAILED):
+            raise ValueError(f"unknown CostRecomputeResult.status {self.status!r}")
+
+
+def _serving_last_good(
+    status: str, *, config: Any, reason: str, detail: str,
+) -> CostRecomputeResult:
+    """A non-fresh result describing whatever the proposal store already holds.
+
+    One store read, here, so every caller reports the same count for the same
+    moment instead of each deciding whether to look. A store that has never
+    been written reads as ``0``/``None`` — "nothing has ever been computed",
+    which is a different claim from "this refresh found nothing".
+    """
+    from tokenjam.core.optimize import relearn_store
+
+    try:
+        block = relearn_store.read_cost_proposals(config=config)
+    except Exception:
+        block = None
+    stored = list((block or {}).get("cost_proposals") or [])
+    return CostRecomputeResult(
+        status=status,
+        proposals=[],
+        served_count=len(stored),
+        served_computed_at=(block or {}).get("cost_computed_at"),
+        fresh=False,
+        reason=reason,
+        detail=detail,
+    )
+
+
 def recompute_cost_proposals(
     db: Any,
     config: Any,
@@ -2743,19 +2825,22 @@ def recompute_cost_proposals(
     until: Any | None = None,
     report: Any | None = None,
     provenance: Any | None = None,
-) -> list[CostProposal]:
+) -> CostRecomputeResult:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
     cost findings into proposals, and write them into the shared proposal
-    store. Returns the proposals (``[]`` if a recompute is already in flight,
-    or on a build failure — the inbox shows its empty/degraded state, never a
-    crash on the refresh path).
+    store.
+
+    Returns a :class:`CostRecomputeResult`, never a bare list: a caller that
+    publishes this outcome has to be able to say WHICH of ready / declined /
+    failed it got, and a declined call still reports the last-good stored set
+    through ``served_count`` rather than a zero it never measured.
 
     This is the "daemon path produces findings -> same proposal store" entry
     point the Review-inbox refresh calls; ``tj optimize`` can call it too so a
     manual run also refreshes the inbox. Locked against concurrent recomputes
     (the scheduled job and a manual "Rescan now" can otherwise overlap and
-    race each other's cache write) — a caller that hits the lock gets ``[]``
-    back rather than blocking, same as a build failure.
+    race each other's cache write) — a caller that hits the lock DECLINES
+    rather than blocking.
 
     A failure is never silent: the exception is recorded via
     ``relearn_store.write_cost_proposals_error`` (behavioral requirement #5)
@@ -2772,6 +2857,36 @@ def recompute_cost_proposals(
     values it resolves itself. An ``agent_id`` scope always resolves its own
     persona: the cycle's label is window-wide, and a per-agent recompute is a
     different population.
+
+    A LONE REFRESH DECLINES WHILE A SCAN CYCLE IS IN FLIGHT, and that is the
+    other half of the one-measurement invariant, not a nicety. ``_COST_LOCK``
+    only serializes two COST recomputes; the cycle is a three-leg pass (report
+    store, then relearn, then this) and only its LAST leg ever touches that
+    lock. So a manual refresh landing while a cycle sits between its report leg
+    and its cost leg used to take the lock uncontested, build its OWN report
+    over a corpus ingestion has moved on, mint its OWN ``CycleProvenance``, and
+    write the cost store under a cycle id nothing else carries — and then the
+    cycle's own cost leg found the lock held, returned ``[]``, and dropped its
+    cost work with no error recorded anywhere. The result is precisely the torn
+    artifact ``cycle_provenance`` exists to make impossible: a report store from
+    cycle N sitting beside a cost store from a standalone pass at a different
+    anchor, with no way for a surface to tell. Declining is the same contract
+    this function already offers on a held lock — the caller is told it declined
+    and the last-good proposals stay up — except now the cycle's coherent write
+    is the one that survives. The cycle's own cost leg is never blocked by this:
+    it passes ``provenance``, which is what distinguishes "a leg of the pass in
+    flight" from "a second, competing pass".
+
+    A DECLINE IS NOT RECORDED IN ``excluded``, deliberately. That channel is
+    keyed by ANALYZER and states that a named analyzer's money is missing from
+    an otherwise-fresh total (see :func:`_adapter_failure_entries`). A declined
+    call withheld no analyzer — it declined to take a measurement at all, and
+    the store keeps the previous cycle's proposals AND that cycle's provenance
+    record, which is what a surface compares. Stamping an ``excluded`` entry
+    would assert a partial fresh total that was never built, and recording a
+    ``cost_proposals_error`` would flag the tab degraded over an outcome that is
+    normal and expected. The decline is reported to the CALLER instead, which is
+    the only party positioned to say anything true about it.
     """
     from datetime import timedelta
 
@@ -2792,8 +2907,35 @@ def recompute_cost_proposals(
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
+    # Checked BEFORE the lock, because the thing being guarded against is not
+    # another cost recompute (the lock handles that) but a cycle that has not
+    # reached its cost leg yet and therefore holds nothing. `provenance` is the
+    # discriminator: a leg OF the cycle carries the cycle's record, a competing
+    # standalone pass carries none. `report` counts too — a caller handing in a
+    # report is reusing someone else's measurement, not starting a rival one.
+    if provenance is None and report is None:
+        from tokenjam.core.optimize import scan_cycle
+
+        if scan_cycle.is_cycle_computing():
+            return _serving_last_good(
+                RECOMPUTE_DECLINED, config=config,
+                reason=DECLINED_SCAN_CYCLE_IN_FLIGHT,
+                detail=(
+                    "A full analyzer scan cycle is in flight, so this refresh "
+                    "declined rather than mint a second measurement of the same "
+                    "window. The proposals below are the previous cycle's."
+                ),
+            )
     if not _COST_LOCK.acquire(blocking=False):
-        return []
+        return _serving_last_good(
+            RECOMPUTE_DECLINED, config=config,
+            reason=DECLINED_RECOMPUTE_IN_FLIGHT,
+            detail=(
+                "Another cost-proposal recompute is already running, so this "
+                "refresh declined rather than race its write. The proposals "
+                "below are the last completed result."
+            ),
+        )
     _COST_COMPUTING.set()
     try:
         try:
@@ -2907,10 +3049,24 @@ def recompute_cost_proposals(
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
             except Exception:
                 pass
-            return []
+            # The build failed, so this call has no measurement of its own — but
+            # `write_cost_proposals_error` deliberately preserves the last GOOD
+            # block, so there is usually still something up. Report both facts:
+            # `failed` (abnormal, unlike a decline) AND what a reader is looking
+            # at while it stays failed.
+            return _serving_last_good(
+                RECOMPUTE_FAILED, config=config,
+                reason=f"{type(exc).__name__}: {exc}",
+                detail=(
+                    "The cost-proposal recompute failed, so nothing fresher was "
+                    "produced. Any proposals below are the last result that "
+                    "completed."
+                ),
+            )
 
+        stored_at: str | None = None
         try:
-            relearn_store.write_cost_proposals(
+            written = relearn_store.write_cost_proposals(
                 proposals, config=config,
                 window_days=effective_window_days,
                 excluded=excluded or None,
@@ -2928,10 +3084,20 @@ def recompute_cost_proposals(
                     window_days=effective_window_days, persona=persona,
                 ),
             )
+            stored_at = written.get("cost_computed_at")
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
+            # Best-effort, exactly as before: the build SUCCEEDED, so the caller
+            # gets its proposals. `served_computed_at` stays None, which is the
+            # honest reading — the store may not have taken this write.
             pass
-        return proposals
+        return CostRecomputeResult(
+            status=RECOMPUTE_READY,
+            proposals=proposals,
+            served_count=len(proposals),
+            served_computed_at=stored_at,
+            fresh=True,
+        )
     finally:
         _COST_COMPUTING.clear()
         _COST_LOCK.release()

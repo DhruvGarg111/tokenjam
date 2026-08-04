@@ -231,12 +231,37 @@ _COMPONENT_LABELS = [
 def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     """Split the window's spend into the four token components (#211).
 
-    Computes each component's cost per (provider, model) via the pricing table
-    so the split is exact rather than apportioned from the aggregate cost_usd.
-    Returns the four components with both cost and token volume (the UI shows
-    tokens for subscription/local framing where dollars are suppressed).
+    Computes each component's cost per (provider, model, variant) via the
+    pricing table so the split is exact rather than apportioned from the
+    aggregate cost_usd. Returns the four components with both cost and token
+    volume (the UI shows tokens for subscription/local framing where dollars
+    are suppressed).
+
+    THE SPLIT MUST SUM TO THE WINDOW TOTAL ``/cost`` PUBLISHES. That total is
+    ``SUM(spans.cost_usd)``, priced once at ingest by ``CostEngine.
+    process_span``, and the only way a re-pricing agrees with it is by using the
+    same convention for all three of its inputs:
+
+    * the INSTANT — the UTC-day bucket below, since a rate can only change at
+      UTC midnight (``SPAN_UTC_DAY_SQL``);
+    * the VARIANT — ``core.cost.SPAN_VARIANT_SQL``, the stored-column spelling
+      of ``rate_variant_for_span``. This used to be omitted entirely, so every
+      span was re-priced at ``STANDARD_VARIANT``: an Anthropic ``speed="fast"``
+      call billed at the premium rate in the stored total and at half that here;
+    * the FALLBACK — ``core.cost.billing_rates``, which never returns ``None``.
+      This used to be ``span_pricing.rates_at`` followed by ``continue``, so a
+      model absent from the pricing table contributed real fallback dollars to
+      ``/cost`` and exactly ``$0`` here, silently.
+
+    Reconciliation is exact up to per-span 8-dp rounding (``calculate_cost``
+    rounds each span; this sums a bucket's tokens first). The one population
+    that can still differ is a span with a model but NO provider: ``CostEngine``
+    skips those, leaving whatever cost ingest supplied, while the lookup here
+    falls back to ``UNKNOWN_PROVIDER``. ``pricing_coverage`` on the payload is
+    what discloses fallback-priced traffic either way.
     """
-    from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL, rates_at
+    from tokenjam.core.cost import SPAN_VARIANT_SQL, billing_rates
+    from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL, UNKNOWN_PROVIDER
 
     comp = {k: {"cost_usd": 0.0, "tokens": 0} for k, _ in _COMPONENT_LABELS}
     if conn is None:
@@ -259,22 +284,28 @@ def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     # are summed across buckets, which is the price-each-span-then-sum
     # convention in `tokenjam.core.optimize.span_pricing`.
     sql = (
-        "SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
+        f"SELECT provider, model, {SPAN_VARIANT_SQL} AS variant, "
+        "COALESCE(SUM(input_tokens), 0), "
         "COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_tokens), 0), "
         "COALESCE(SUM(cache_write_tokens), 0), MIN(start_time) "
         "FROM spans WHERE " + where
-        + f" GROUP BY provider, model, {SPAN_UTC_DAY_SQL}"
+        + f" GROUP BY provider, model, variant, {SPAN_UTC_DAY_SQL}"
     )
-    for (provider, model, in_t, out_t, cr_t, cw_t,
+    for (provider, model, variant, in_t, out_t, cr_t, cw_t,
          day_start) in conn.execute(sql, params).fetchall():
         in_t, out_t, cr_t, cw_t = int(in_t or 0), int(out_t or 0), int(cr_t or 0), int(cw_t or 0)
         comp["input"]["tokens"] += in_t
         comp["output"]["tokens"] += out_t
         comp["cache_read"]["tokens"] += cr_t
         comp["cache_write"]["tokens"] += cw_t
-        rates = rates_at(provider, model, day_start) if (model and day_start) else None
-        if rates is None:
-            continue
+        # No `continue` on an unresolved rate, and no skip on a missing bucket
+        # instant: `start_time` is NOT NULL, so `day_start` is only ever absent
+        # for a store that has been corrupted below the schema, and
+        # `billing_rates` then prices at the current rate exactly as a live
+        # call does rather than dropping the bucket's money to zero.
+        rates = billing_rates(
+            provider or UNKNOWN_PROVIDER, model, at=day_start, variant=variant,
+        )
         comp["input"]["cost_usd"] += in_t * rates.input_per_mtok / 1_000_000.0
         comp["output"]["cost_usd"] += out_t * rates.output_per_mtok / 1_000_000.0
         comp["cache_read"]["cost_usd"] += cr_t * rates.cache_read_per_mtok / 1_000_000.0
@@ -432,6 +463,16 @@ async def get_cost_components(
         "largest_recoverable_usd": largest["past_overspend_usd"] if largest else None,
         "largest_recoverable_tokens": largest["past_overspend_tokens"] if largest else None,
         "largest_recoverable_analyzer": largest["analyzer"] if largest else None,
+        # Same block, same derivation, as `/cost` — now that the component split
+        # prices unpriced models through the same non-null fallback the stored
+        # total uses, the two endpoints publish the same dollars over the same
+        # window, and a reader of EITHER has to be able to tell an estimated
+        # figure from a quoted one. Shipping it on one and not the other made
+        # the components view the surface where a 5-30x-wrong model stayed
+        # invisible.
+        "pricing_coverage": _pricing_coverage_block(
+            conn, agent_id, since_dt, until_dt,
+        ),
         "framing": _framing_block(db, config, agent_id, total_cost, total_tokens),
     }
 

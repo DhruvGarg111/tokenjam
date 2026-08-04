@@ -303,6 +303,27 @@ BESPOKE_SEAMS: tuple[BespokeSeam, ...] = (
         test_name="test_the_report_and_cost_stores_come_from_ONE_analyzer_pass",
     ),
     BespokeSeam(
+        name="lone-refresh exclusion",
+        description=(
+            "while a scan cycle is in flight, no standalone caller may mint a "
+            "SECOND measurement into the cost-proposal store — so the report "
+            "store and the cost store can never end up carrying two different "
+            "cycle ids at two different anchors."
+        ),
+        reason_not_mechanized=(
+            "the seam above pins that ONE record is threaded through both legs "
+            "of a cycle; this pins that nothing ELSE writes between them. That "
+            "is a concurrency property of two entry points, not a symbol "
+            "reachable from one module — `recompute_cost_proposals` is "
+            "legitimately called by the cycle, the refresh route and "
+            "`tj optimize` alike, and which of them is allowed to proceed "
+            "depends on runtime state (`scan_cycle.is_cycle_computing()`), "
+            "which no static walk can evaluate."
+        ),
+        test_module="tests.unit.test_cost_proposals",
+        test_name="test_a_lone_cost_refresh_declines_while_a_scan_cycle_is_in_flight",
+    ),
+    BespokeSeam(
         name="downgrade-map priceability",
         description=(
             "every DOWNGRADE_CANDIDATES entry — the key model AND its "
@@ -339,7 +360,286 @@ def check_bespoke_seam(seam: BespokeSeam) -> str | None:
 
 
 #: --------------------------------------------------------------------- #
-#: AGGREGATE VERSUS PARTS.
+#: AGGREGATE VERSUS PARTS — the mechanized half.
+#:
+#: The shape below used to be pinned one assertion at a time: `cache` held it,
+#: `downsize` did not, and every OTHER many-from-one adapter was simply
+#: unchecked. That is the same failure the SEAMS registry above exists to
+#: retire — a design needing a new hand-written test per value has rebuilt the
+#: problem it was built to solve. So the fan-out adapters get the same
+#: treatment: ONE registry naming every family, ONE property test driven by
+#: it, and a mechanical check that the registry still covers every adapter the
+#: live dispatcher actually runs.
+#: --------------------------------------------------------------------- #
+
+#: The module and function that own the cost-adapter dispatch table. Every
+#: finding-to-proposal adapter the product runs is named inside this function's
+#: `adapters` tuple, so it is the one place :func:`cost_adapter_symbols` has to
+#: read to answer "what fan-out adapters exist today".
+COST_ADAPTER_MODULE = "core/optimize/cost_proposals.py"
+COST_ADAPTER_DISPATCH = "_adapt_report"
+
+#: What an adapter's name ends with. The dispatch table holds a mix of bare
+#: references (``_trim_to_proposals``) and lambdas wrapping a call
+#: (``lambda f: _cache_to_proposals(f, persona=persona)``); matching on the
+#: NAME rather than the reference shape catches both without caring which form
+#: a future adapter is registered in.
+_ADAPTER_SUFFIXES = ("_to_proposal", "_to_proposals")
+
+
+def cost_adapter_symbols() -> frozenset[str]:
+    """Every finding-to-proposal adapter reachable from the live dispatcher.
+
+    Read out of the source rather than imported, for the same reason
+    :func:`offenders_for` walks the AST: the dispatch table is a local inside
+    :data:`COST_ADAPTER_DISPATCH`, built per call from the report's own
+    persona and config, so there is no importable object to enumerate. Parsing
+    it means a newly-added adapter is visible to the registry check the moment
+    it is wired in, with no second list to remember to update.
+    """
+    path = PACKAGE_ROOT / COST_ADAPTER_MODULE
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == COST_ADAPTER_DISPATCH:
+            return frozenset(
+                inner.id
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Name)
+                and inner.id.endswith(_ADAPTER_SUFFIXES)
+            )
+    raise LookupError(
+        f"{COST_ADAPTER_MODULE} no longer defines {COST_ADAPTER_DISPATCH}() — "
+        "the cost-adapter dispatch table moved. Point COST_ADAPTER_DISPATCH at "
+        "its new home; do not delete this check."
+    )
+
+
+@dataclass(frozen=True)
+class AggregateFamily:
+    """One finding, and every adapter that fans it out into proposals.
+
+    The invariant: the figure a surface publishes as the family's TOTAL (the
+    finding's own ``past_overspend_usd``, which
+    ``api/routes/cost.py::_collect_recoverable`` reads generically off every
+    finding for the Dashboard overlay) must equal the sum of the ``past_
+    overspend_usd`` on the cards another surface publishes for it (the Review
+    inbox), or the difference must be disclosed on the cards.
+
+    ``verdict`` is one of:
+
+    ``"conserves"``
+        the parts sum to the whole (or disclose the difference) for a
+        representative finding. The property test asserts it.
+    ``"single-card"``
+        the family emits at most ONE card however many rows the finding
+        carries, so aggregate-versus-parts cannot arise — the card simply
+        carries the finding's own figure. The property test asserts the
+        at-most-one part, so an adapter that starts fanning out stops being
+        exempt automatically rather than silently.
+    ``"gap"``
+        it does NOT hold, closing it is a product decision, and a strict
+        ``xfail`` pins the current behaviour. ``gap_pins`` names those tests
+        and they are checked to still exist, exactly like
+        :data:`BESPOKE_SEAMS`.
+
+    ``gap_pins`` may also be non-empty on a ``"conserves"`` family: `cache`
+    conserves in the regime its cards cover and fails outside it, and both
+    facts are worth pinning.
+    """
+
+    name: str
+    description: str
+    adapters: frozenset[str]
+    verdict: str
+    reason: str
+    gap_pins: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.verdict not in ("conserves", "single-card", "gap"):
+            raise ValueError(
+                f"unknown AggregateFamily.verdict {self.verdict!r} for {self.name!r}"
+            )
+
+
+AGGREGATE_FAMILIES: tuple[AggregateFamily, ...] = (
+    AggregateFamily(
+        name="downsize",
+        description=(
+            "the model-over-sizing finding, fanned out into a driver-role card "
+            "plus either one card per agent or one window-wide card."
+        ),
+        adapters=frozenset({"_downsize_to_proposal"}),
+        verdict="gap",
+        reason=(
+            "the per-agent cards come from build_agent_price_rows, a SEPARATE "
+            "per-(agent, provider, model) repricing that drops any group it "
+            "cannot price, while finding.past_overspend_usd is computed "
+            "window-wide over every candidate session, priced or not. Nothing "
+            "subtracts the dropped groups and nothing discloses them."
+        ),
+        gap_pins=(
+            "test_the_downsize_per_agent_path_can_undercount_the_findings_own_total",
+        ),
+    ),
+    AggregateFamily(
+        name="cache",
+        description=(
+            "one cache-efficacy finding, fanned out by four adapters: the "
+            "generic per-(provider, model) efficacy row plus the A1 uncached / "
+            "A2 thrash / A3 lookback-miss per-agent root-cause cards."
+        ),
+        adapters=frozenset({
+            "_cache_to_proposals",
+            "_cache_uncached_to_proposals",
+            "_cache_thrash_to_proposals",
+            "_cache_lookback_to_proposals",
+        }),
+        verdict="conserves",
+        reason=(
+            "_cache_to_proposals nets each generic row against whatever the "
+            "per-agent root-cause cards already claimed for the same "
+            "(provider, model), so the family partitions the finding's total "
+            "instead of double-claiming it — WHILE EVERY ROW IS FLAGGED. It "
+            "does not hold once a row is not; see gap_pins."
+        ),
+        gap_pins=(
+            "test_the_cache_family_drops_every_unflagged_rows_share",
+        ),
+    ),
+    AggregateFamily(
+        name="cache-recommend",
+        description=(
+            "the repeated-prefix finding, one card per prefix candidate."
+        ),
+        adapters=frozenset({"_cache_recommend_to_proposals"}),
+        verdict="conserves",
+        reason=(
+            "the finding's total is the sum of its candidates' own figures, "
+            "and each card carries its candidate's figure. Where a card is "
+            "reduced to avoid double-counting a sibling cache card, the "
+            "subtraction is named in that card's own estimate_basis, so the "
+            "difference is disclosed rather than silent."
+        ),
+    ),
+    AggregateFamily(
+        name="trim",
+        description="the prompt-bloat finding, one card per flagged agent.",
+        adapters=frozenset({"_trim_to_proposals"}),
+        verdict="conserves",
+        reason=(
+            "each card carries the finding's dollar figure PRORATED by that "
+            "agent's share of total bloat characters, so the shares sum to 1 "
+            "and the cards sum to the finding by construction."
+        ),
+    ),
+    AggregateFamily(
+        name="deadweight",
+        description=(
+            "the unused-MCP-server finding, one card per dead server."
+        ),
+        adapters=frozenset({"_deadweight_to_proposals"}),
+        verdict="conserves",
+        reason=(
+            "the finding's total is the sum of exactly the same list the "
+            "cards iterate (dead_servers), skipping the same unpriced "
+            "entries, and the count of skipped ones is stated in the basis."
+        ),
+    ),
+    AggregateFamily(
+        name="script",
+        description=(
+            "the deterministic-tool-pattern finding, one card per cluster."
+        ),
+        adapters=frozenset({"_script_to_proposals"}),
+        verdict="conserves",
+        reason=(
+            "the finding's total is accumulated over the same surfaced "
+            "cluster list the cards iterate; the only clusters skipped carry "
+            "no money to skip."
+        ),
+    ),
+    AggregateFamily(
+        name="reuse",
+        description=(
+            "the repeated-planning-skeleton finding, one card per cluster."
+        ),
+        adapters=frozenset({"_reuse_to_proposals"}),
+        verdict="conserves",
+        reason=(
+            "the finding's total is the sum of the surfaced clusters' "
+            "cache_reuse_recoverable_usd, which is the field each card "
+            "carries; the only clusters skipped carry no money to skip."
+        ),
+    ),
+    AggregateFamily(
+        name="subagent",
+        description="the subagent right-sizing finding.",
+        adapters=frozenset({"_subagent_to_proposals"}),
+        verdict="single-card",
+        reason=(
+            "the delta-verify pass measures the fan-out model-mix cost delta "
+            "across ALL over-powered models at once, so one card listing them "
+            "keeps that finding-level estimate coherent — splitting it per "
+            "model would publish parts of an aggregate nothing re-derived "
+            "per model."
+        ),
+    ),
+    AggregateFamily(
+        name="placement",
+        description="the batch-placement finding.",
+        adapters=frozenset({"_placement_to_proposals"}),
+        verdict="single-card",
+        reason=(
+            "moving to the batch lane is one architectural change in the "
+            "user's own application; the candidates are evidence on that one "
+            "card, not separate levers."
+        ),
+    ),
+    AggregateFamily(
+        name="verbosity",
+        description="the cohort-relative verbosity finding.",
+        adapters=frozenset({"_verbosity_to_proposals"}),
+        verdict="single-card",
+        reason=(
+            "a cohort-scoped signal is window-wide by construction — there is "
+            "no per-row lever to card up."
+        ),
+    ),
+    AggregateFamily(
+        name="resend",
+        description="the context-re-send finding.",
+        adapters=frozenset({"_resend_to_proposals"}),
+        verdict="single-card",
+        reason=(
+            "the card is deliberately COMPOUND — it consolidates resend's and "
+            "subagent's levers into one CLAUDE.md rule rather than growing "
+            "the inbox."
+        ),
+    ),
+    AggregateFamily(
+        name="summarize",
+        description="the oversized-catalog-prompt-file finding.",
+        adapters=frozenset({"_summarize_to_proposals"}),
+        verdict="single-card",
+        reason=(
+            "one card however many files the scan flags: the card routes to "
+            "the summarize curate/diff surface, which is where per-file work "
+            "actually happens."
+        ),
+    ),
+)
+
+
+def unregistered_cost_adapters() -> frozenset[str]:
+    """Adapters the dispatcher runs that no :data:`AGGREGATE_FAMILIES` entry
+    claims. Non-empty means a new fan-out shipped with nothing checking that
+    its cards sum to the figure the Dashboard publishes for it."""
+    claimed = frozenset().union(*(f.adapters for f in AGGREGATE_FAMILIES))
+    return cost_adapter_symbols() - claimed
+
+
+#: --------------------------------------------------------------------- #
+#: AGGREGATE VERSUS PARTS — the known gaps.
 #:
 #: A DIFFERENT shape of the same defect class: not one value derived twice,
 #: but one FINDING fanned out into several proposals whose figures a surface
@@ -347,13 +647,32 @@ def check_bespoke_seam(seam: BespokeSeam) -> str | None:
 #: finding itself carries — with nothing forcing the parts to sum to the
 #: whole, or disclosing it when they don't.
 #:
-#: The `cache` family holds this invariant BY CONSTRUCTION today:
+#: The `cache` family holds this invariant WHERE ITS CARDS REACH:
 #: `_cache_to_proposals` subtracts whatever the per-agent root-cause cards
 #: (`_per_agent_cache_recoverable_by_model`) already claimed for the same
 #: (provider, model) before it surfaces the generic row, so the family's
-#: cards sum EXACTLY to the finding's own `past_overspend_usd` — pinned in
+#: cards sum EXACTLY to the finding's own `past_overspend_usd` when every row
+#: the finding priced is a flagged one — pinned in
 #: `tests/unit/test_single_derivation.py::
 #: test_the_cache_family_sums_exactly_to_the_findings_own_total`.
+#:
+#: It does NOT hold once a row is not flagged, and this is the second known
+#: gap. `CacheEfficacyFinding.past_overspend_usd` is
+#: `estimate_cache_recoverable(rows)` over EVERY (provider, model) row in the
+#: window, which charges each row the gap between its own efficacy and the
+#: 80% ceiling. The cards, though, are emitted per FLAGGED row only, and a row
+#: is flagged on a much narrower test — supported provider, at least
+#: `MIN_INPUT_TOKENS` of input, AND efficacy below `EFFICACY_THRESHOLD`. Every
+#: row sitting between the flag threshold and the ceiling therefore contributes
+#: real money to the aggregate the Dashboard tile publishes
+#: (`api/routes/cost.py::_collect_recoverable` reads `past_overspend_usd`
+#: straight off each finding) and produces no card at all, with nothing on
+#: either surface naming the difference. The same asymmetry runs the other way
+#: for the netting: `_per_agent_cache_recoverable_by_model`'s subtraction is
+#: applied only while walking flagged rows, so a per-agent root-cause card on
+#: an unflagged model's (provider, model) is never netted against anything.
+#: Pinned as a strict xfail in
+#: `test_the_cache_family_drops_every_unflagged_rows_share`.
 #:
 #: `downsize` does NOT hold it. When a finding carries `per_agent` rows,
 #: `_downsize_to_proposal` drops the window-wide card and emits the
@@ -393,16 +712,28 @@ KNOWN_GAPS = (
     "above this constant, and "
     "test_the_downsize_per_agent_path_can_undercount_the_findings_own_total "
     "in tests/unit/test_single_derivation.py.",
+    "cache: the finding's total is priced over EVERY (provider, model) row "
+    "while its cards are emitted per FLAGGED row only, so an unflagged row's "
+    "share reaches the Dashboard tile and no card — see the module docstring "
+    "above this constant, and "
+    "test_the_cache_family_drops_every_unflagged_rows_share "
+    "in tests/unit/test_single_derivation.py.",
 )
 
 
 __all__ = [
     "PACKAGE_ROOT",
+    "AGGREGATE_FAMILIES",
+    "COST_ADAPTER_DISPATCH",
+    "COST_ADAPTER_MODULE",
     "SEAMS",
     "BESPOKE_SEAMS",
     "KNOWN_GAPS",
+    "AggregateFamily",
     "SingleSeam",
     "BespokeSeam",
     "check_bespoke_seam",
+    "cost_adapter_symbols",
     "offenders_for",
+    "unregistered_cost_adapters",
 ]
