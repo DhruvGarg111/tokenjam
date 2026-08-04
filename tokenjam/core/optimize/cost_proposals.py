@@ -2756,6 +2756,25 @@ def recompute_cost_proposals(
     values it resolves itself. An ``agent_id`` scope always resolves its own
     persona: the cycle's label is window-wide, and a per-agent recompute is a
     different population.
+
+    A LONE REFRESH DECLINES WHILE A SCAN CYCLE IS IN FLIGHT, and that is the
+    other half of the one-measurement invariant, not a nicety. ``_COST_LOCK``
+    only serializes two COST recomputes; the cycle is a three-leg pass (report
+    store, then relearn, then this) and only its LAST leg ever touches that
+    lock. So a manual refresh landing while a cycle sits between its report leg
+    and its cost leg used to take the lock uncontested, build its OWN report
+    over a corpus ingestion has moved on, mint its OWN ``CycleProvenance``, and
+    write the cost store under a cycle id nothing else carries — and then the
+    cycle's own cost leg found the lock held, returned ``[]``, and dropped its
+    cost work with no error recorded anywhere. The result is precisely the torn
+    artifact ``cycle_provenance`` exists to make impossible: a report store from
+    cycle N sitting beside a cost store from a standalone pass at a different
+    anchor, with no way for a surface to tell. Declining is the same contract
+    this function already offers on a held lock — the caller gets ``[]`` and the
+    last-good proposals stay up — except now the cycle's coherent write is the
+    one that survives. The cycle's own cost leg is never blocked by this: it
+    passes ``provenance``, which is what distinguishes "a leg of the pass in
+    flight" from "a second, competing pass".
     """
     from datetime import timedelta
 
@@ -2776,6 +2795,17 @@ def recompute_cost_proposals(
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
+    # Checked BEFORE the lock, because the thing being guarded against is not
+    # another cost recompute (the lock handles that) but a cycle that has not
+    # reached its cost leg yet and therefore holds nothing. `provenance` is the
+    # discriminator: a leg OF the cycle carries the cycle's record, a competing
+    # standalone pass carries none. `report` counts too — a caller handing in a
+    # report is reusing someone else's measurement, not starting a rival one.
+    if provenance is None and report is None:
+        from tokenjam.core.optimize import scan_cycle
+
+        if scan_cycle.is_cycle_computing():
+            return []
     if not _COST_LOCK.acquire(blocking=False):
         return []
     _COST_COMPUTING.set()

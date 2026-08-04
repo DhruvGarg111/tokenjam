@@ -303,6 +303,27 @@ BESPOKE_SEAMS: tuple[BespokeSeam, ...] = (
         test_name="test_the_report_and_cost_stores_come_from_ONE_analyzer_pass",
     ),
     BespokeSeam(
+        name="lone-refresh exclusion",
+        description=(
+            "while a scan cycle is in flight, no standalone caller may mint a "
+            "SECOND measurement into the cost-proposal store — so the report "
+            "store and the cost store can never end up carrying two different "
+            "cycle ids at two different anchors."
+        ),
+        reason_not_mechanized=(
+            "the seam above pins that ONE record is threaded through both legs "
+            "of a cycle; this pins that nothing ELSE writes between them. That "
+            "is a concurrency property of two entry points, not a symbol "
+            "reachable from one module — `recompute_cost_proposals` is "
+            "legitimately called by the cycle, the refresh route and "
+            "`tj optimize` alike, and which of them is allowed to proceed "
+            "depends on runtime state (`scan_cycle.is_cycle_computing()`), "
+            "which no static walk can evaluate."
+        ),
+        test_module="tests.unit.test_cost_proposals",
+        test_name="test_a_lone_cost_refresh_declines_while_a_scan_cycle_is_in_flight",
+    ),
+    BespokeSeam(
         name="downgrade-map priceability",
         description=(
             "every DOWNGRADE_CANDIDATES entry — the key model AND its "

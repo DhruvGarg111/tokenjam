@@ -1453,6 +1453,75 @@ def test_recompute_cost_proposals_skips_when_already_locked(db, cfg):
         cost_proposals_mod._COST_LOCK.release()
 
 
+def test_a_lone_cost_refresh_declines_while_a_scan_cycle_is_in_flight(db, cfg, monkeypatch):
+    """The lock alone did NOT close this.
+
+    A scan cycle is three legs (report store, relearn, cost proposals) and only
+    the LAST one touches `_COST_LOCK`. Between the cycle's report write and its
+    cost leg the lock is free, so a manual "Rescan now" (or a `tj optimize`)
+    landing in that gap used to take it uncontested and write the cost store
+    from its own report, its own anchor and its own freshly-minted cycle id —
+    and the cycle's own cost leg then found the lock held and silently returned
+    `[]`. Report store from cycle N, cost store from a standalone pass: two
+    anchors, two cycle ids, no error anywhere and nothing on either surface able
+    to tell.
+
+    The cycle-in-flight flag is the guard that actually spans the gap, so a lone
+    refresh declines against it exactly the way it already declines against the
+    lock.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+    from tokenjam.core.optimize import scan_cycle
+
+    # A report with real findings behind it, so an EMPTY result can only mean
+    # "declined" — not "there was nothing to propose anyway". Without that this
+    # assertion would pass on a build that never had the guard at all.
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.runner.build_report", lambda *_a, **_k: _report(),
+    )
+    assert cost_proposals_mod.recompute_cost_proposals(db, cfg), (
+        "fixture assumption broken: an unguarded lone refresh should produce "
+        "proposals here, or the decline below proves nothing"
+    )
+
+    scan_cycle._CYCLE_COMPUTING.set()
+    try:
+        assert cost_proposals_mod.recompute_cost_proposals(db, cfg) == []
+        # And it declined BEFORE taking the lock — a cycle leg arriving a
+        # moment later must still find it free.
+        assert cost_proposals_mod._COST_LOCK.acquire(blocking=False)
+        cost_proposals_mod._COST_LOCK.release()
+    finally:
+        scan_cycle._CYCLE_COMPUTING.clear()
+
+
+def test_a_cycle_leg_is_never_blocked_by_its_own_cycle_flag(db, cfg, monkeypatch):
+    """The guard above must not deadlock the very pass it protects.
+
+    `_CYCLE_COMPUTING` is set for the WHOLE cycle, cost leg included, so a naive
+    "decline while a cycle is running" would make the cycle decline itself and
+    the cost store would never be written again. `provenance` is what tells the
+    two apart: a leg of the pass carries the cycle's record; a competing
+    standalone pass carries none.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+    from tokenjam.core.optimize import scan_cycle
+    from tokenjam.core.optimize.cycle_provenance import begin_cycle
+
+    record = begin_cycle(cfg, conn=getattr(db, "conn", None))
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.runner.build_report", lambda *_a, **_k: _report(),
+    )
+    scan_cycle._CYCLE_COMPUTING.set()
+    try:
+        proposals = cost_proposals_mod.recompute_cost_proposals(
+            db, cfg, provenance=record,
+        )
+    finally:
+        scan_cycle._CYCLE_COMPUTING.clear()
+    assert proposals, "the cycle's own cost leg was blocked by its own flag"
+
+
 def test_legacy_cost_window_keys_never_disagree_with_the_cycle_provenance_record(db, cfg):
     """``cost_since``/``cost_until`` and the record's ``since``/``until`` are two
     spellings of ONE fact, and the store lets a caller supply them independently:

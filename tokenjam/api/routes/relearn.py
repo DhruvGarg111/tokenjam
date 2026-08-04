@@ -861,12 +861,15 @@ def refresh_cost_proposals(request: Request) -> dict[str, Any]:
     thread (unchanged, synchronous contract — the client awaits this before
     reading the refreshed list). Degrades to ``{"status": "unavailable"}``
     when the daemon has no direct DB connection (e.g. a proxy) rather than
-    erroring. Locked against the scheduled background job (``tj serve``'s
-    cost-proposals job, behavioral requirement #5) via ``cost_proposals.
-    recompute_cost_proposals``'s own lock — this request either runs the
-    recompute or, if the scheduled job already holds the lock, returns the
-    unchanged last-good proposals rather than the two racing each other's
-    cache write."""
+    erroring. Serialized against the scheduled background job (``tj serve``'s
+    cost-proposals job, behavioral requirement #5) inside
+    ``cost_proposals.recompute_cost_proposals`` — both by its own lock and by
+    the scan-cycle-in-flight check that covers the gap the lock cannot (the
+    cycle writes the report store and the relearn cache before its cost leg
+    ever takes that lock). This request either runs the recompute or returns
+    the unchanged last-good proposals; it never races a cycle's cache write,
+    and never writes a cost store under a cycle id the report store does not
+    share."""
     config = _config(request)
     db = getattr(request.app.state, "db", None)
     if db is None or getattr(db, "conn", None) is None:
