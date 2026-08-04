@@ -1453,6 +1453,37 @@ def test_recompute_cost_proposals_skips_when_already_locked(db, cfg):
         cost_proposals_mod._COST_LOCK.release()
 
 
+def test_legacy_cost_window_keys_never_disagree_with_the_cycle_provenance_record(db, cfg):
+    """``cost_since``/``cost_until`` and the record's ``since``/``until`` are two
+    spellings of ONE fact, and the store lets a caller supply them independently:
+    the string kwargs win over the record when both are given. The single
+    production caller derives both from the same window, so they agree TODAY BY
+    CONSTRUCTION — nothing forces it. This pins the production path's artifact,
+    so an edit that starts passing bounds computed apart from the record fails
+    here instead of silently restoring the two-spellings bug the record exists to
+    end.
+
+    Asserted on the KEYS' presence first: an artifact that stored neither
+    spelling would satisfy an equality check vacuously, which is the failure mode
+    least likely to be noticed.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    assert cost_proposals_mod.recompute_cost_proposals(db, cfg) == []
+    payload = relearn_store.read_cost_proposals(config=cfg)
+
+    record = payload["cost_provenance"]
+    for key in ("cost_since", "cost_until", "cost_window_days", "cost_tj_version"):
+        assert key in payload, f"{key} missing — equality below would pass vacuously"
+    for key in ("since", "until", "window_days", "build"):
+        assert record.get(key) is not None, f"provenance {key} missing"
+
+    assert payload["cost_since"] == record["since"]
+    assert payload["cost_until"] == record["until"]
+    assert payload["cost_window_days"] == record["window_days"]
+    assert payload["cost_tj_version"] == record["build"]
+
+
 def test_write_and_clear_cost_proposals_error_round_trip(tmp_path):
     from tokenjam.core.optimize import relearn_store as rs
 
