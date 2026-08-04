@@ -318,3 +318,115 @@ def test_scoreboard_degrades_to_plain_aligned_text_without_colour(db):
     body = next(ln for ln in out.splitlines() if "resend" in ln and "%" in ln)
     # The FINDING column starts at the same offset in the header and the row.
     assert body.index("resend") == header.index("ANALYZERS")
+
+
+# --------------------------------------------------------------------------- #
+# Row order
+# --------------------------------------------------------------------------- #
+
+def _row_order(out: str, names) -> list[str]:
+    """The analyzer names in the order their rows render."""
+    seen = []
+    for line in out.splitlines():
+        for name in names:
+            if line.strip().startswith(name) and name not in seen:
+                seen.append(name)
+    return seen
+
+
+def test_rows_are_ordered_by_the_recoverable_column_they_print(capsys):
+    """The rows came out of `_rank_findings`, which orders by reclaimable
+    TOKEN share — the right order for the card path it was written for, and
+    the wrong one for a table whose visible column is dollars. It rendered
+    $48.55 above $296.74, which reads as unsorted."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        summarize=SimpleNamespace(
+            candidates=[object()],
+            past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
+        ),
+        deadweight=SimpleNamespace(
+            dead_servers=["some-mcp"],
+            past_overspend_usd=296.74, past_overspend_tokens=1_000,
+        ),
+        relearn=SimpleNamespace(
+            clusters=[object()],
+            past_overspend_usd=253.74, past_overspend_tokens=5_000,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert _row_order(out, ("summarize", "deadweight", "relearn")) == [
+        "deadweight", "relearn", "summarize",
+    ]
+
+
+def test_unpriced_rows_sort_last_and_keep_the_null_marker(capsys):
+    """An unpriced finding is one with no figure, not one worth nothing: it
+    goes to the bottom rather than being sorted as a zero, and the cell stays
+    the null marker."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        deadweight=SimpleNamespace(
+            dead_servers=["some-mcp"],
+            past_overspend_usd=None, past_overspend_tokens=None,
+        ),
+        relearn=SimpleNamespace(
+            clusters=[object()],
+            past_overspend_usd=12.0, past_overspend_tokens=5_000,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert _row_order(out, ("deadweight", "relearn")) == ["relearn", "deadweight"]
+    dead_row = next(ln for ln in out.splitlines() if ln.strip().startswith("deadweight"))
+    assert "—" in dead_row
+    assert "$0" not in dead_row
+
+
+def test_local_framing_orders_by_the_token_figure_it_prints(capsys):
+    """`local` pricing renders tokens, not dollars, so the ordering has to
+    follow the same figure — a sort key read from a field the column does not
+    show is the same defect wearing a different hat."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        summarize=SimpleNamespace(
+            candidates=[object()],
+            past_overspend_usd=1.0, past_overspend_tokens=9_000_000,
+        ),
+        relearn=SimpleNamespace(
+            clusters=[object()],
+            past_overspend_usd=900.0, past_overspend_tokens=5_000,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="local")
+    out = capsys.readouterr().out
+
+    assert _row_order(out, ("summarize", "relearn")) == ["summarize", "relearn"]
+
+
+def test_next_block_points_at_the_largest_recoverable_finding(capsys):
+    """The Next block names `rows[0]`, so an unsorted table also mis-aimed the
+    one command it tells the user to run."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        summarize=SimpleNamespace(
+            candidates=[object()],
+            past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
+        ),
+        deadweight=SimpleNamespace(
+            dead_servers=["some-mcp"],
+            past_overspend_usd=296.74, past_overspend_tokens=1_000,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="api")
+    out = _flat(capsys.readouterr().out)
+
+    assert "tj optimize deadweight" in out
+    assert "tj optimize summarize" not in out

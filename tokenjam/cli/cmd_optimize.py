@@ -1232,6 +1232,27 @@ def _scoreboard_recoverable(name: str, finding: Any, framing: Framing) -> str:
     )
 
 
+def _scoreboard_sort_value(name: str, finding: Any, framing: Framing) -> float | None:
+    """The numeric behind the RECOVERABLE cell, for ordering the rows.
+
+    Deliberately mirrors `_scoreboard_recoverable` field for field, including
+    which figure each pricing mode renders (`local` shows tokens, everything
+    else dollars). A sort key read from a different field than the column
+    displays produces exactly the defect this replaces: a table that looks
+    ranked and is not.
+
+    `None` for anything the column renders as the null marker, so an unpriced
+    row sorts to the bottom instead of being treated as a zero-value row.
+    """
+    if name in _UNPRICED_IN_SCOREBOARD:
+        return None
+    if framing.pricing_mode == "local":
+        tokens = getattr(finding, "past_overspend_tokens", None)
+        return None if tokens is None else float(tokens)
+    usd = getattr(finding, "past_overspend_usd", None)
+    return None if usd is None else float(usd)
+
+
 def _render_scoreboard(
     report: OptimizeReport,
     agent: str | None,
@@ -1315,7 +1336,15 @@ def _render_scoreboard(
         window_total_tokens=w.total_tokens,
     )
     rows: list[tuple[str, str, str, str]] = []
-    for name, _share in ranked:
+    # `_rank_findings` orders by reclaimable TOKEN share, which is the right
+    # order for the card path it was written for (it also drives the
+    # de-minimis pointer collapsing there) and the wrong one here: this table
+    # publishes a RECOVERABLE column, and a table sorted by a quantity it does
+    # not show reads as unsorted — a $48 row landing above a $296 one. So the
+    # rows are re-sorted on the figure the column actually prints, with the
+    # token-share rank kept only as a deterministic tie-break.
+    ordered: list[tuple[float | None, int, str, str, str, str]] = []
+    for rank, (name, _share) in enumerate(ranked):
         summarize = _FINDING_SUMMARIES.get(name)
         if summarize is None:
             continue
@@ -1326,7 +1355,15 @@ def _render_scoreboard(
         if summary is None:
             continue
         line, why = summary
-        rows.append((name, line, _scoreboard_recoverable(name, finding, framing), why))
+        ordered.append((
+            _scoreboard_sort_value(name, finding, framing), rank,
+            name, line, _scoreboard_recoverable(name, finding, framing), why,
+        ))
+
+    # An unpriced row sorts last and keeps its null marker: it is a finding
+    # with no figure, not a finding worth nothing.
+    ordered.sort(key=lambda r: (r[0] is None, -(r[0] or 0.0), r[1]))
+    rows = [(name, line, recoverable, why) for _v, _r, name, line, recoverable, why in ordered]
 
     console.print(
         f"  [dim]{_plural(len(ranked), 'analyzer')} · "
