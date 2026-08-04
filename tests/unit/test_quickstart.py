@@ -807,6 +807,84 @@ def test_avoidable_total_dedupes_by_signature(monkeypatch):
     assert total.usd == 35.0
 
 
+def test_avoidable_total_folds_in_relearn_through_the_shared_gatherer(monkeypatch):
+    """Quickstart's rollup is not a hand-rolled sum: it is whatever
+    `inbox_contribution.gather_rollup_population` — the SAME gatherer
+    `tj relearn cost-proposals` and `GET /relearn/cost-proposals` use — would
+    return for the same cost proposals and the same relearn finding.
+
+    Relearn is deliberately skipped from `build_report`'s own analyzer set on
+    this screen today (runtime cost — see `_OVERSPEND_SKIP_ANALYZERS`), so
+    `report.findings["relearn"]` is normally absent. This test constructs the
+    stub report AS IF relearn had run (a `.findings["relearn"]` payload
+    exactly like a live `RelearnFinding.asdict()` would produce), which is
+    the shape the wiring has to handle correctly whether or not today's skip
+    stands. That is the structural claim this pins: `_compute_avoidable_total`
+    reaches relearn's money through the one shared gatherer rather than a
+    parallel derivation that could quietly drop it, exactly as
+    `cmd_quickstart`'s prior comment falsely claimed it already did.
+    """
+    from tokenjam.core.optimize import inbox_contribution
+    from tokenjam.cli.cmd_quickstart import _compute_avoidable_total
+    import tokenjam.core.optimize as opt
+    import tokenjam.core.optimize.cost_proposals as cp
+
+    relearn_finding = {
+        # The FINDING-level window vocabulary — read by `contribution_window_
+        # label` to pick which label matches this screen's window. Distinct
+        # from each cluster's own `past_overspend_windows` below (the actual
+        # bucketed figures); both have to carry the "30d" key.
+        "past_overspend_windows": {"30d": {"window_days": 30}},
+        "clusters": [
+            {
+                "signature": "relearn:retry-loop",
+                "title": "Recurring retry-loop failure",
+                "past_overspend_usd": 999.0,
+                "past_overspend_tokens": 50_000,
+                "past_overspend_windows": {
+                    "30d": {
+                        "window_days": 30,
+                        "past_overspend_usd": 12.0,
+                        "past_overspend_tokens": 4_000,
+                        "past_reread_usd": 2.0,
+                        "past_reread_tokens": 500,
+                    },
+                },
+            },
+        ],
+    }
+
+    class _StubReportWithRelearn(_StubReport):
+        def __init__(self, total_cost_usd, sessions, findings):
+            super().__init__(total_cost_usd, sessions)
+            self.findings = findings
+
+    proposals = [_proposal(analyzer="deadweight", usd=42.5, tokens=900)]
+    monkeypatch.setattr(
+        opt, "build_report",
+        lambda **kwargs: _StubReportWithRelearn(
+            1000.0, 12, {"relearn": relearn_finding},
+        ),
+    )
+    monkeypatch.setattr(
+        cp, "cost_proposals_from_report", lambda *a, **kw: list(proposals),
+    )
+
+    since, until = _NOW - timedelta(days=30), _NOW
+    total = _compute_avoidable_total(object(), since, until, fallback_sessions=0)
+
+    window_days = max((until - since).total_seconds() / 86400.0, 1.0)
+    expected = inbox_contribution.gather_rollup_population(
+        proposals, relearn_finding, window_days=window_days,
+    )
+
+    assert total is not None
+    # 42.5 (deadweight) + 10.0 (relearn's 30d bucket, net of its 2.0 re-read
+    # share) — relearn's money reached the total through the same gatherer.
+    assert total.usd == expected["past_overspend_usd"] == 52.5
+    assert "relearn" in total.contributors
+
+
 def test_avoidable_total_drops_a_figure_larger_than_the_window_cost(monkeypatch):
     """A figure bigger than what the whole window cost is self-refuting: a
     reader can disprove it from their own billing. The over-ceiling proposal is

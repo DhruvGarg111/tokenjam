@@ -1067,6 +1067,65 @@ def test_rollup_excluded_defaults_to_empty_dict_not_none():
     assert rollup["excluded"] == {}
 
 
+def test_the_rollup_can_only_be_reached_through_gather_rollup_population():
+    """A rollup population can no longer be assembled BY OMISSION.
+
+    THE DEFECT THIS PINS. Completeness used to be a caller CONVENTION:
+    whoever built ``past_overspend_rollup``'s input list had to remember to
+    separately fetch relearn's cache, turn it into rows via
+    ``relearn_contribution_rows``, and concatenate before calling this
+    function. Two callers remembered (the CLI's ``tj relearn cost-proposals``
+    and the API's ``GET /relearn/cost-proposals``); a third
+    (``cmd_quickstart``'s first-run screen) did not, and its own comment
+    asserted the two totals could never disagree while quietly handing the
+    rollup a cost-proposals-only list — relearn's money vanished from exactly
+    the screen a brand-new user sees first.
+
+    THE FIX, AND WHAT THIS PINS. ``inbox_contribution.gather_rollup_population``
+    is now the only function that gathers BOTH feeds (cost proposals AND
+    relearn's open clusters) before calling ``past_overspend_rollup``, and it
+    is written ONCE. This walks every module under ``tokenjam/`` and fails if
+    ``past_overspend_rollup`` is called from anywhere other than
+    ``inbox_contribution.py`` itself (where ``gather_rollup_population``
+    calls it) — so a future caller cannot silently regress to a
+    cost-proposals-only sum the way ``cmd_quickstart`` did: reaching the raw
+    function from a new call site is the structural signature of exactly that
+    defect, whether or not the author meant to reintroduce it.
+
+    A caller that genuinely wants a documented SUBSET (not an omission) must
+    add that call inside ``inbox_contribution.py`` itself, with its own
+    docstring naming the exclusion — see ``gather_rollup_population``'s own
+    docstring. Nothing about that path is blocked here; what is blocked is a
+    silent, undocumented bypass from outside the module that owns the
+    contract.
+
+    Tests are exempt (they legitimately pin the raw function's own behaviour,
+    e.g. this file) — this walks only the shipped package.
+    """
+    import ast
+    import pathlib
+
+    import tokenjam as _pkg
+
+    root = pathlib.Path(_pkg.__file__).parent
+    allowed_path = root / "core" / "optimize" / "inbox_contribution.py"
+    offenders: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if path == allowed_path:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "past_overspend_rollup":
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not offenders, (
+        "past_overspend_rollup called outside inbox_contribution."
+        "gather_rollup_population at:\n  " + "\n  ".join(offenders)
+    )
+
+
 # --- no per-analyzer projection: the figure is the window observation ------ #
 
 def test_no_analyzer_figure_is_paced_however_rich_the_window():

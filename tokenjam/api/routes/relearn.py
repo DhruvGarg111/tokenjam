@@ -814,38 +814,22 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # is one list fed by two endpoints; a headline summed over one of them left
     # the other's rows outside it, which made the collapsed tail's combined
     # figure and the below-floor "still counted in the total above" note false
-    # for the money they described. Each open cluster arrives here as an
-    # ORDINARY row on the one canonical field — no parameter on the rollup, no
-    # second aggregate, no second key — carrying the detector's own bounded
-    # figure for THIS window, net of the re-read share the resend proposal
-    # already prices in full. `core/optimize/inbox_contribution.py` owns that
-    # design and why it is neither of the two mechanisms this repo retired.
+    # for the money they described. `gather_rollup_population` is the ONE
+    # function allowed to reach `past_overspend_rollup` (see its docstring):
+    # it always folds in relearn's clusters as ordinary rows on the one
+    # canonical field — no parameter on the rollup, no second aggregate, no
+    # second key — carrying the detector's own bounded figure for THIS
+    # window, net of the re-read share the resend proposal already prices in
+    # full, and discloses any cluster it could not place through `excluded`.
+    # `core/optimize/inbox_contribution.py` owns that design and why it is
+    # neither of the two mechanisms this repo retired.
     relearn_cache = relearn_store.read_cache(config=config)
     relearn_finding = (relearn_cache or {}).get("finding")
-    relearn_label = inbox_contribution.contribution_window_label(
-        relearn_finding, window_days,
-    )
     relearn_applied_sigs = relearn_apply.applied_signatures(config)
-    relearn_rows = inbox_contribution.relearn_contribution_rows(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    # Clusters whose money could NOT be put on this window's basis (a cache
-    # written before bounded figures, or occurrences with no parseable
-    # timestamp). Absent is never zero: stated through the rollup's `excluded`
-    # channel, summed into nothing.
-    unrepresented = inbox_contribution.unrepresented_relearn(
-        relearn_finding, label=relearn_label,
-        applied_signatures=relearn_applied_sigs,
-    )
-    excluded = {
-        **((block.get("cost_excluded") or {}) if block else {}),
-        **inbox_contribution.relearn_excluded_entry(
-            unrepresented, reason=inbox_contribution.NO_BOUNDED_WINDOW_REASON,
-        ),
-    }
-    past_overspend = cost_proposals_mod.past_overspend_rollup(
-        open_proposals + relearn_rows, window_days=window_days, excluded=excluded,
+    past_overspend = inbox_contribution.gather_rollup_population(
+        open_proposals, relearn_finding, window_days=window_days,
+        relearn_applied_signatures=relearn_applied_sigs,
+        cost_excluded=(block.get("cost_excluded") or {}) if block else None,
     )
     # Every row a reader sees carries what it contributed, cost and relearn
     # alike, so the noise floor and the tail's combined figure read the SAME
