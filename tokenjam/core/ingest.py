@@ -7,6 +7,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from tokenjam.core.agent_kind import classify_agent_kind
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
@@ -509,6 +510,16 @@ class IngestPipeline:
 
         # New session
         plan_tier = self._resolve_plan_tier(span.billing_account)
+        # This path sees a MIX of runtimes — Claude Code / Codex OTLP telemetry
+        # and genuine SDK callers all converge here — so, unlike the two
+        # backfill adapters (which each parse exactly one tool's own files and
+        # can just say so), the source has to be classified rather than
+        # stated. `classify_agent_kind` is the TIGHTER of the two existing
+        # predicates (exact match on Codex's hardcoded service name, not a
+        # prefix), reused here as the write-time source of truth rather than
+        # duplicated — see core.agent_kind's module docstring for why it and
+        # `alerts.is_interactive_coding_agent` intentionally stay separate.
+        agent_kind = classify_agent_kind(span.agent_id)
         return SessionRecord(
             session_id=span.session_id,
             agent_id=span.agent_id or "unknown",
@@ -528,6 +539,7 @@ class IngestPipeline:
             service_instance_id=span.service_instance_id,
             run_id=span.run_id,
             parent_session_id=span.parent_session_id,
+            source=agent_kind.group or "sdk",
         )
 
     def _resolve_project(self, agent_id: str | None) -> str | None:

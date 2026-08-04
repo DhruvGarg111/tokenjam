@@ -418,6 +418,10 @@ def session_record_from_parsed(
         tool_call_count=parsed.tool_call_count,
         error_count=0,
         plan_tier=plan_tier,
+        # This function ONLY ever parses a Codex CLI rollout — a literal fact
+        # (mirrors backfill.session_record_from_parsed's Claude Code source
+        # tag), not a heuristic.
+        source="codex",
     )
 
 

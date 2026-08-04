@@ -1149,7 +1149,11 @@ def test_ingest_persists_captured_content_when_config_enables_it(tmp_path):
 
 def test_reingest_retags_existing_spans(tmp_path):
     """--reingest re-populates sub_agent_id on spans an older backfill ingested
-    before the column existed; a plain idempotent re-run leaves them NULL."""
+    before the column existed. A PLAIN re-run does the same now (the default
+    bulk path overlays newly-resolvable identity columns onto existing spans,
+    not just newly-inserted ones — see `_dedup_new_spans`'s overlay_candidates
+    / `bulk_overlay_span_attrs`), so both paths converge on the same
+    result; --reingest is left with nothing to do afterwards."""
     proj = "/Users/me/proj"
     _make_session_file(
         tmp_path, session_id="sess-rt", cwd=proj,
@@ -1172,32 +1176,51 @@ def test_reingest_retags_existing_spans(tmp_path):
         # Simulate a pre-column backfill: blank the tags.
         db.conn.execute("UPDATE spans SET sub_agent_id = NULL")
 
-        # Plain re-run is idempotent -> existing spans skipped -> still NULL.
+        # A plain re-run inserts no new spans but overlays the now-resolvable
+        # sub_agent_id back onto the existing rows.
+        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
         r_plain = ingest_claude_code(db, root=tmp_path)
         assert r_plain.spans_ingested == 0
-        assert db.conn.execute(
-            "SELECT COUNT(*) FROM spans WHERE sub_agent_id IS NOT NULL"
-        ).fetchone()[0] == 0
-
-        # --reingest re-tags in place: no new rows, no duplicates.
-        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
-        r_re = ingest_claude_code(db, root=tmp_path, reingest=True)
-        assert r_re.spans_ingested == 0
-        assert r_re.spans_retagged > 0
+        assert r_plain.spans_retagged == 2  # the subagent's LLM span + its tool span
         assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
-        # The subagent's LLM span + its tool span are both re-tagged.
         assert db.conn.execute(
             "SELECT COUNT(*) FROM spans WHERE sub_agent_id = 'rt1'"
         ).fetchone()[0] == 2
+
+        # Nothing left for the PLAIN path to overlay — it only queues a span as
+        # a candidate when a value would actually change (see
+        # `_SUBAGENT_OVERLAY_MATCH_PREDICATE`'s WHERE clause).
+        r_plain2 = ingest_claude_code(db, root=tmp_path)
+        assert r_plain2.spans_retagged == 0
+        # `--reingest` UPDATEs every existing span unconditionally (its
+        # per-row `retagged` counts rows TOUCHED, not rows CHANGED — matches
+        # its pre-existing attributes-overlay semantics); the data is still a
+        # no-op via the same COALESCE.
+        before_dump = db.conn.execute(
+            "SELECT span_id, sub_agent_id, sub_agent_type FROM spans ORDER BY span_id"
+        ).fetchall()
+        r_re = ingest_claude_code(db, root=tmp_path, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
+        assert db.conn.execute(
+            "SELECT span_id, sub_agent_id, sub_agent_type FROM spans ORDER BY span_id"
+        ).fetchall() == before_dump
     finally:
         db.close()
 
 
 def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
     """#10: enabling [capture] AFTER a session is already ingested, then
-    re-running backfill with --reingest, populates content / tool_input onto the
-    EXISTING spans — no fresh DB required. Without this, #4's recurring-inclusion
-    detection (which reads that content) only worked against a fresh DB."""
+    re-running backfill, populates content / tool_input onto the EXISTING
+    spans — no fresh DB required. Without this, #4's recurring-inclusion
+    detection (which reads that content) only worked against a fresh DB.
+
+    A PLAIN (non-reingest) re-run now does this too (the default bulk path
+    overlays newly-available attributes onto existing spans, not just
+    newly-inserted ones — see `_dedup_new_spans`'s `overlay_candidates` /
+    `bulk_overlay_span_attrs`'s `json_merge_patch` half), so both paths
+    converge on the same result; --reingest is left with nothing further to
+    add afterwards."""
     from tokenjam.core.config import TjConfig
 
     _content_session_file(tmp_path)
@@ -1222,21 +1245,15 @@ def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
         assert GenAIAttributes.COMPLETION_CONTENT not in llm_before
         assert GenAIAttributes.TOOL_INPUT not in tool_before
 
-        # 2. A plain (non-reingest) re-run with capture ON still does NOT touch
-        #    existing rows — the conflict path skips them. This is the gap #10
-        #    fixes: --reingest is required.
+        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+        # 2. A PLAIN (non-reingest) re-run with capture ON overlays content
+        #    onto the existing rows: no new spans, no new rows.
         cfg = TjConfig(version="1")
         cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
         r_plain = ingest_claude_code(db, root=tmp_path, config=cfg)
         assert r_plain.spans_ingested == 0
-        assert GenAIAttributes.PROMPT_CONTENT not in _attrs("gen_ai.llm.call")
-
-        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
-
-        # 3. --reingest WITH capture on backfills content in place: no new rows.
-        r_re = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
-        assert r_re.spans_ingested == 0
-        assert r_re.spans_retagged > 0
+        assert r_plain.spans_retagged > 0
         assert db.conn.execute(
             "SELECT COUNT(*) FROM spans"
         ).fetchone()[0] == before_rows
@@ -1250,6 +1267,16 @@ def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
             {"file_path": "/etc/app/config.toml"}
         # The pre-existing "source" key is preserved through the merge.
         assert llm_after["source"] == "backfill.claude_code"
+
+        # 3. Nothing left to overlay -> idempotent, both on a plain re-run and
+        #    on --reingest.
+        r_plain2 = ingest_claude_code(db, root=tmp_path, config=cfg)
+        assert r_plain2.spans_retagged == 0
+        r_re = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans"
+        ).fetchone()[0] == before_rows
     finally:
         db.close()
 
@@ -1924,5 +1951,204 @@ def test_reingest_retags_the_stable_type_without_disturbing_anything_else(tmp_pa
         snapshot = (_dump_spans(db), _identity_dump())
         ingest_claude_code(db, root=tmp_path, reingest=True)
         assert (_dump_spans(db), _identity_dump()) == snapshot
+    finally:
+        db.close()
+
+
+def test_a_fresh_ingest_through_the_full_pipeline_resolves_the_type_via_the_sidecar(
+    tmp_path,
+):
+    """Pins the LINKAGE, not just the derivation: a session ingested through
+    `ingest_claude_code` (the mechanism a continuous catch-up run and
+    `tj backfill claude-code` both call — there is no separate ingest path for
+    Claude Code subagent data; see `core/transcript_sync.py`'s module
+    docstring) lands `sub_agent_type` on its subagent spans straight from a
+    realistic on-disk `<project>/<session-uuid>/subagents/agent-<id>.jsonl` +
+    `.meta.json` layout, on the very first ingest — no reingest/repair needed
+    when the sidecar is present from the start."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-link", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-link", proj,
+        )],
+    )
+    _subagent_transcript(
+        tmp_path, proj, "sess-link", "alink1",
+        records=[_assistant_record(
+            "m-link", "claude-haiku-4-5", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-link", proj,
+            tool_uses=[("tu-link", "Read")], is_sidechain=True, agent_id="alink1",
+        )],
+        meta={"agentType": "code-reviewer", "description": "review the diff"},
+    )
+
+    db = InMemoryBackend()
+    try:
+        result = ingest_claude_code(db, root=tmp_path)
+        assert result.spans_ingested == 3  # main LLM + subagent LLM + its tool span
+        rows = db.conn.execute(
+            "SELECT sub_agent_id, sub_agent_type FROM spans "
+            "WHERE sub_agent_id IS NOT NULL"
+        ).fetchall()
+        assert rows and all(r == ("alink1", "code-reviewer") for r in rows)
+    finally:
+        db.close()
+
+
+def test_a_plain_backfill_overlays_newly_resolvable_type_onto_existing_spans(
+    tmp_path,
+):
+    """The Part-2 gap: a default (non-`--reingest`) backfill re-run must
+    OVERLAY a newly-resolvable `sub_agent_type` onto rows that were already in
+    the DB, not just skip them as already-present. Before this, the bulk path
+    (`_dedup_new_spans`) only ever partitioned new-vs-existing and silently
+    dropped the existing half — a span written before migration 19 (or before
+    its sidecar existed) could never gain a type on its own."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-ov", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-ov", proj,
+        )],
+    )
+    _subagent_transcript(
+        tmp_path, proj, "sess-ov", "aov1",
+        records=[_assistant_record(
+            "m-ov", "claude-haiku-4-5", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-ov", proj,
+            tool_uses=[("tu-ov", "Read")], is_sidechain=True, agent_id="aov1",
+        )],
+        meta={"agentType": "code-reviewer", "description": "review the diff"},
+    )
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Simulate history ingested before migration 19 landed.
+        db.conn.execute("UPDATE spans SET sub_agent_type = NULL")
+        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        before_tokens = db.conn.execute(
+            "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) FROM spans"
+        ).fetchone()
+
+        # A PLAIN re-run (no --reingest) must overlay the type back on.
+        r = ingest_claude_code(db, root=tmp_path)
+        assert r.spans_ingested == 0  # nothing new — every span already existed
+        assert r.spans_retagged == 2  # the subagent's LLM span + its tool span
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before_rows
+        assert db.conn.execute(
+            "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cost_usd) FROM spans"
+        ).fetchone() == before_tokens  # additive-only: no other field moved
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_type = 'code-reviewer'"
+        ).fetchone()[0] == 2
+
+        # Idempotent: a second plain re-run finds nothing left to overlay.
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r2.spans_ingested == 0
+        assert r2.spans_retagged == 0
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before_rows
+    finally:
+        db.close()
+
+
+def test_the_overlay_never_clobbers_an_already_resolved_type_with_a_different_one(
+    tmp_path,
+):
+    """Additive means additive: if a span already carries a (non-NULL)
+    `sub_agent_type` from any source, a re-parse that would resolve to a
+    DIFFERENT value must never overwrite it. Guards the `COALESCE` in
+    `_SUBAGENT_OVERLAY_MATCH_PREDICATE` — an unconditional `UPDATE ... SET
+    sub_agent_type = src.sub_agent_type` would silently flip an already-correct
+    value the moment two runs disagree (e.g. a sidecar that changed between
+    runs, or a value set by a future direct-write path)."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-noclob", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-noclob", proj,
+        )],
+    )
+    _subagent_transcript(
+        tmp_path, proj, "sess-noclob", "anc1",
+        records=[_assistant_record(
+            "m-nc", "claude-haiku-4-5", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-noclob", proj,
+            is_sidechain=True, agent_id="anc1",
+        )],
+        meta={"agentType": "code-reviewer", "description": "review the diff"},
+    )
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Pretend a different value was already resolved for this span.
+        db.conn.execute(
+            "UPDATE spans SET sub_agent_type = 'planner' WHERE sub_agent_id = 'anc1'"
+        )
+        ingest_claude_code(db, root=tmp_path)  # re-parses the SAME transcript
+        assert db.conn.execute(
+            "SELECT DISTINCT sub_agent_type FROM spans WHERE sub_agent_id = 'anc1'"
+        ).fetchone() == ("planner",)
+    finally:
+        db.close()
+
+
+def test_doctor_reports_and_repairs_unresolved_subagent_types(tmp_path, monkeypatch):
+    """The user-facing route into the repair: `tj doctor` names the gap and
+    `--repair` closes as much of it as the on-disk transcripts still support,
+    same shape as the duplicate-call-ingest repair
+    (test_doctor_reports_and_repairs_a_double_ingested_db in
+    test_ingest_accounting.py)."""
+    from tokenjam.cli.cmd_doctor import (
+        _attempt_repairs,
+        _check_unresolved_subagent_type,
+    )
+
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-doc", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-doc", proj,
+        )],
+    )
+    _subagent_transcript(
+        tmp_path, proj, "sess-doc", "adoc1",
+        records=[_assistant_record(
+            "m-doc", "claude-haiku-4-5", 5000, 500,
+            "2026-04-01T10:00:01.000Z", "sess-doc", proj,
+            is_sidechain=True, agent_id="adoc1",
+        )],
+        meta={"agentType": "code-reviewer", "description": "review the diff"},
+    )
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Simulate the pre-migration-19 corpus this check exists for.
+        db.conn.execute("UPDATE spans SET sub_agent_type = NULL")
+
+        check = _check_unresolved_subagent_type(db)
+        assert check["level"] == "warning"
+        assert check["repair_action"] == "resolve_subagent_types"
+        assert "1 subagent span" in check["message"]
+
+        # The repair walks the real CLAUDE_CODE_PROJECTS_ROOT by default — the
+        # repair branch imports it fresh from core.backfill at call time, so
+        # patch it there to point at our fixture tree instead.
+        monkeypatch.setattr(
+            "tokenjam.core.backfill.CLAUDE_CODE_PROJECTS_ROOT", tmp_path,
+        )
+        _attempt_repairs([check], db, output_json=True)
+
+        assert _check_unresolved_subagent_type(db)["level"] == "ok"
+        assert db.conn.execute(
+            "SELECT sub_agent_type FROM spans WHERE sub_agent_id = 'adoc1'"
+        ).fetchone()[0] == "code-reviewer"
     finally:
         db.close()

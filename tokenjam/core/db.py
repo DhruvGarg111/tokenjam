@@ -72,6 +72,9 @@ def _is_cost_outlier(
 class StorageBackend(Protocol):
     def insert_span(self, span: NormalizedSpan) -> None: ...
     def bulk_insert_spans(self, spans: Sequence[NormalizedSpan]) -> None: ...
+    def bulk_overlay_span_attrs(
+        self, updates: Sequence[tuple[str, str | None, str | None, dict | None]],
+    ) -> int: ...
     def insert_alert(self, alert: Alert) -> None: ...
     def insert_validation(self, result: SchemaValidationResult) -> None: ...
     def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None: ...
@@ -301,6 +304,111 @@ def _build_bulk_span_insert_sql() -> str:
 
 
 _BULK_SPAN_INSERT_SQL = _build_bulk_span_insert_sql()
+
+# ---------------------------------------------------------------------------
+# Columnar overlay of sub_agent_id / sub_agent_type / attributes onto
+# EXISTING spans
+# ---------------------------------------------------------------------------
+#
+# A normal (non-`--reingest`) backfill only ever INSERTs spans whose span_id
+# is not yet in the store — `_BULK_SPAN_INSERT_SQL` above never touches a row
+# that already exists. That is correct for the row's money/token fields (they
+# must never move under an existing span), but it means anything added AFTER a
+# span was first ingested can never fill on a row inserted before it existed —
+# the row is never "new" again. Two independent cases share this shape:
+#   - `sub_agent_type` (migration 19) is simply absent on older rows.
+#   - `attributes` carries content keys (`gen_ai.prompt.content` etc.) only
+#     when `[capture]` was ON at parse time — a row backfilled before the user
+#     enabled it never gets the content, even though the SAME transcript can
+#     supply it on a later re-parse.
+# This is the set-based sibling of `_insert_session_idempotent`'s per-row
+# `--reingest` UPDATE, sized for the full-history case: one vectorized
+# `UPDATE ... FROM read_json` instead of a Python loop per span. Both cases
+# go through this ONE primitive rather than two — see `_dedup_new_spans`'s
+# `overlay_candidates` for how a span qualifies for either half.
+#
+# Strictly additive by construction:
+#   - `COALESCE(spans.col, src.col)` for the two scalar columns only ever
+#     replaces a NULL, so a value the row already carries (from any source,
+#     live or backfill) can never be overwritten with a different one.
+#   - `json_merge_patch(src.attributes, spans.attributes)` for the JSON
+#     column — NOT the other argument order. RFC 7396 merge-patch semantics
+#     make the SECOND argument win on any key both sides carry, so putting
+#     the STORED attributes second means a key the row already has (e.g. from
+#     live ingest, or a previous capture-content overlay) is never replaced;
+#     only keys present in the freshly-parsed `src.attributes` and ABSENT
+#     from the stored row get added. (Merge-patch also treats an explicit
+#     JSON `null` value as "delete this key" — never a concern here, since
+#     nothing in this codebase ever stores a literal null attribute value.)
+# Re-running either overlay over an unchanged transcript is therefore always
+# a no-op (the parsed value is stable), and this is what makes the AUTOMATIC,
+# unattended catch-up loop safe to run this against on every pass.
+#
+# Reports the changed count via a separate COUNT query sharing the exact same
+# JOIN + WHERE as the UPDATE, run first under the same write-lock hold — NOT
+# `UPDATE ... RETURNING`, which crashed with an internal DuckDB fatal error
+# ("Failed to append to PRIMARY_spans_0", a PRIMARY KEY constraint violation
+# despite the source batch holding no duplicate span_id — reproduced on
+# DuckDB 1.5.1 against the real `spans` table at ~25k rows/batch; a synthetic
+# minimal table did NOT reproduce it, so it's specific to this table's shape,
+# not a general RETURNING bug) the one time this ran against a real ~700k-span
+# corpus. Two passes over the same batch costs one extra vectorized scan,
+# negligible next to the crash it avoids.
+_SUBAGENT_OVERLAY_COLUMNS: tuple[str, ...] = (
+    "span_id", "sub_agent_id", "sub_agent_type", "attributes",
+)
+_SUBAGENT_OVERLAY_READ_TYPES: dict[str, str] = {
+    "span_id": "VARCHAR", "sub_agent_id": "VARCHAR", "sub_agent_type": "VARCHAR",
+    "attributes": "JSON",
+}
+
+# Match when a fill will actually HAPPEN on at least one column — a null slot
+# paired with a non-null offered value for the two scalars, or a genuinely
+# different (superset) attributes JSON for the content case — not merely
+# "some column somewhere is null/could differ and something is offered",
+# which would also match rows where no pairing does anything and inflate the
+# count with no-op rows.
+_SUBAGENT_OVERLAY_MATCH_PREDICATE = (
+    "spans.span_id = src.span_id\n"
+    "  AND (\n"
+    "    (spans.sub_agent_id IS NULL AND src.sub_agent_id IS NOT NULL)\n"
+    "    OR (spans.sub_agent_type IS NULL AND src.sub_agent_type IS NOT NULL)\n"
+    "    OR (\n"
+    "      src.attributes IS NOT NULL\n"
+    "      AND json_merge_patch(src.attributes, spans.attributes) != spans.attributes\n"
+    "    )\n"
+    "  )"
+)
+
+
+def _subagent_overlay_read_json_clause() -> str:
+    read_cols = ", ".join(
+        f"'{c}': '{_SUBAGENT_OVERLAY_READ_TYPES[c]}'" for c in _SUBAGENT_OVERLAY_COLUMNS
+    )
+    return (
+        f"read_json(\n"
+        f"    ?, format='newline_delimited', records='true',\n"
+        f"    columns={{{read_cols}}},\n"
+        f"    maximum_object_size={_SPAN_BULK_MAX_OBJECT_BYTES}\n"
+        f") AS src"
+    )
+
+
+_BULK_SUBAGENT_OVERLAY_COUNT_SQL = (
+    f"SELECT COUNT(*) FROM spans, {_subagent_overlay_read_json_clause()}\n"
+    f"WHERE {_SUBAGENT_OVERLAY_MATCH_PREDICATE}"
+)
+
+_BULK_SUBAGENT_OVERLAY_UPDATE_SQL = (
+    "UPDATE spans SET "
+    "sub_agent_id = COALESCE(spans.sub_agent_id, src.sub_agent_id), "
+    "sub_agent_type = COALESCE(spans.sub_agent_type, src.sub_agent_type), "
+    "attributes = CASE WHEN src.attributes IS NOT NULL "
+    "THEN json_merge_patch(src.attributes, spans.attributes) "
+    "ELSE spans.attributes END\n"
+    f"FROM {_subagent_overlay_read_json_clause()}\n"
+    f"WHERE {_SUBAGENT_OVERLAY_MATCH_PREDICATE}"
+)
 
 
 def _span_to_json_obj(span: NormalizedSpan) -> dict:
@@ -719,6 +827,37 @@ MIGRATIONS: list[tuple[int, str]] = [
     # deletion that happened always has a record and a record that exists always
     # describes a deletion. `tj doctor` reads it; nothing else writes it.
     (20, RETENTION_EVENTS_TABLE_SQL),
+    # Migration 21: session provenance + task identity.
+    #
+    # `source` records what PRODUCED a session — 'claude-code' (matches
+    # `agent_kind.CODING_AGENT_GROUPS`'s spelling exactly) / 'codex' / 'sdk' —
+    # at the point of ingest, from the strongest signal available at
+    # that ingest path (a literal constant for the two dedicated backfill
+    # adapters, which parse ONLY that tool's transcripts; `agent_kind
+    # .classify_agent_kind` for the live path, which sees a mix — its exact/
+    # prefix rules are grounded in verified id-minting behavior, not a guess).
+    # Before this, nothing recorded provenance at write time at all; every
+    # reader re-derived a "coding vs SDK" answer from `agent_id` naming
+    # conventions, and two independently-maintained predicates
+    # (`core.agent_kind` vs `core.alerts.is_interactive_coding_agent`)
+    # disagree BY DESIGN on Codex prefix-vs-exact matching (see
+    # `agent_kind`'s module docstring). This column does NOT merge them —
+    # both predicates, and their five existing call sites plus the pinned
+    # margin-case test, are UNCHANGED; this is a new, more precise field a
+    # caller can additionally choose to read.
+    #
+    # `task_statement_hash` / `dominant_model` support "did this session
+    # repeat prior work" without storing raw prompt text: the only
+    # high-confidence "same task" signal is the first user prompt, which
+    # lived only in the on-disk transcript (rotated ~30 days by Claude Code)
+    # and was discarded at ingest — unrecoverable once gone. Masked (hashed),
+    # never the raw prompt. `dominant_model` records the model that actually
+    # ran the bulk of the session, alongside the hash, for the same
+    # correlate-across-sessions use case (`core.optimize.repeat_task`).
+    (21,
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS task_statement_hash TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dominant_model TEXT"),
 ]
 
 
@@ -752,6 +891,9 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("spans",    "prompt_template_version", "TEXT"),               # migration 17
     ("spans",    "pricing_source",          "TEXT"),               # migration 18
     ("spans",    "sub_agent_type",          "TEXT"),               # migration 19
+    ("sessions", "source",                  "TEXT"),               # migration 21
+    ("sessions", "task_statement_hash",     "TEXT"),               # migration 21
+    ("sessions", "dominant_model",          "TEXT"),               # migration 21
 ]
 
 
@@ -1141,6 +1283,86 @@ def stored_observations_by_call(
     return by_call
 
 
+def unresolved_subagent_type_stats(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[int, float]:
+    """Count + spend of Claude Code subagent spans with no resolved TYPE.
+
+    `sub_agent_id IS NOT NULL` scopes to spans backfill has already tagged as
+    a real Task-tool subagent dispatch (see Critical Rule 34 in CLAUDE.md);
+    `sub_agent_type IS NULL` among those is either a row inserted before
+    migration 19 landed (fixable — `tj backfill claude-code` re-derives it from
+    the on-disk `agent-<id>.meta.json` sidecar and overlays it), a dispatch
+    whose sidecar/transcript Claude Code has since pruned (unfixable — the
+    source is gone), or a deliberate `_PER_DISPATCH_TASK_KINDS` carve-out
+    (correct, not a gap). This count cannot distinguish the three from stored
+    columns alone — see `_subagent_type_for` in `core/backfill.py`.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0) FROM spans "
+        "WHERE sub_agent_id IS NOT NULL AND sub_agent_type IS NULL"
+    ).fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row[0] or 0), float(row[1] or 0.0)
+
+
+#: The backfill provenance tag every Claude Code backfill LLM/tool span
+#: carries in `attributes.source` (mirrors `backfill._CLAUDE_CODE_SOURCE`,
+#: not imported directly to keep `core/db.py` free of a `core/backfill.py`
+#: import — the string is a stable, long-standing wire value, not an
+#: implementation detail either side is free to change independently).
+_BACKFILL_CLAUDE_CODE_SOURCE_TAG = "backfill.claude_code"
+
+
+def missing_captured_content_stats(
+    conn: duckdb.DuckDBPyConnection, *, prompts: bool, completions: bool,
+) -> int:
+    """Count backfill-sourced `gen_ai.llm.call` spans missing content
+    `[capture]` says should be there — the linkage `bulk_overlay_span_attrs`'s
+    content half exists to close: a row backfilled before the user turned
+    `[capture]` on never gets the content on its own, even though a later
+    `tj backfill claude-code` re-run CAN supply it from the same transcript.
+
+    Counts a span missing `gen_ai.prompt.content` (when `prompts`) OR
+    `gen_ai.completion.content` (when `completions`) — either is enough to
+    flag it if both toggles are on. See `missing_captured_tool_input_stats`
+    for `tool_inputs`, kept separate since it scopes to `gen_ai.tool.call`
+    spans, a disjoint set from the LLM spans this counts.
+    """
+    if not (prompts or completions):
+        return 0
+    clauses = []
+    if prompts:
+        clauses.append("(attributes -> '$.\"gen_ai.prompt.content\"') IS NULL")
+    if completions:
+        clauses.append("(attributes -> '$.\"gen_ai.completion.content\"') IS NULL")
+    where = " OR ".join(clauses)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM spans "
+        "WHERE name = 'gen_ai.llm.call' "
+        "AND (attributes ->> '$.source') = $1 "
+        f"AND ({where})",
+        [_BACKFILL_CLAUDE_CODE_SOURCE_TAG],
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def missing_captured_tool_input_stats(conn: duckdb.DuckDBPyConnection) -> int:
+    """Count backfill-sourced tool spans missing `gen_ai.tool.input` — the
+    `tool_inputs` half of `missing_captured_content_stats`, kept separate
+    because it scopes to `gen_ai.tool.call` spans, not the LLM spans that
+    function counts."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM spans "
+        "WHERE name = 'gen_ai.tool.call' "
+        "AND (attributes ->> '$.source') = $1 "
+        "AND (attributes -> '$.\"gen_ai.tool.input\"') IS NULL",
+        [_BACKFILL_CLAUDE_CODE_SOURCE_TAG],
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def duplicate_call_observations(
     conn: duckdb.DuckDBPyConnection, limit: int = 20,
 ) -> tuple[int, float, list[tuple[str, int, float]]]:
@@ -1375,6 +1597,9 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         service_instance_id=d.get("service_instance_id"),
         run_id=d.get("run_id"),
         parent_session_id=d.get("parent_session_id"),
+        source=d.get("source"),
+        task_statement_hash=d.get("task_statement_hash"),
+        dominant_model=d.get("dominant_model"),
     )
 
 
@@ -2028,6 +2253,54 @@ class DuckDBBackend:
         # gate marginally more willing to fire — never less safe.
         ingest_watermark.bump(len(spans))
 
+    def bulk_overlay_span_attrs(
+        self, updates: Sequence[tuple[str, str | None, str | None, dict | None]],
+    ) -> int:
+        """Fill `sub_agent_id`/`sub_agent_type`/`attributes` on EXISTING
+        spans, additively.
+
+        `updates` is `(span_id, sub_agent_id, sub_agent_type, attributes)`
+        tuples — the freshly re-parsed values for spans a caller already
+        knows are present in the store (e.g. a backfill re-walking
+        transcripts it has ingested before, or re-parsing now that
+        `[capture]` is on). `attributes` is the span's FULL freshly-parsed
+        attributes dict (or `None` to skip the content overlay for that
+        span); see `_SUBAGENT_OVERLAY_MATCH_PREDICATE` for why the merge can
+        never clobber a key the stored row already carries, scalar or JSON.
+        Returns the number of spans that actually changed (not
+        `len(updates)` — most calls offer values the row already has, which
+        is a no-op).
+        """
+        if not updates:
+            return 0
+        fd, path = tempfile.mkstemp(prefix="tj-subagent-overlay-", suffix=".ndjson")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for span_id, sub_agent_id, sub_agent_type, attributes in updates:
+                    fh.write(json.dumps({
+                        "span_id": span_id,
+                        "sub_agent_id": sub_agent_id,
+                        "sub_agent_type": sub_agent_type,
+                        "attributes": attributes,
+                    }))
+                    fh.write("\n")
+            with self._write_lock:
+                # COUNT first, then the plain UPDATE (no RETURNING — see the
+                # module comment above `_BULK_SUBAGENT_OVERLAY_COUNT_SQL` for
+                # why). Both share `_SUBAGENT_OVERLAY_MATCH_PREDICATE` and run
+                # back-to-back under the write lock, so nothing else can
+                # change the matched set between the two.
+                changed = self.conn.execute(
+                    _BULK_SUBAGENT_OVERLAY_COUNT_SQL, [path],
+                ).fetchone()
+                self.conn.execute(_BULK_SUBAGENT_OVERLAY_UPDATE_SQL, [path])
+            return int(changed[0]) if changed else 0
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def insert_alert(self, alert: Alert) -> None:
         with self._write_lock:
             self.conn.execute(
@@ -2184,8 +2457,9 @@ class DuckDBBackend:
                     session_id, agent_id, conversation_id, started_at, ended_at,
                     status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                     tool_call_count, error_count, plan_tier, service_namespace,
-                    service_instance_id, cache_write_tokens, run_id, parent_session_id
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                    service_instance_id, cache_write_tokens, run_id, parent_session_id,
+                    source, task_statement_hash, dominant_model
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
                 ON CONFLICT (session_id) DO UPDATE SET
                     -- `started_at` was absent from this list entirely, which
                     -- made it WRITE-ONCE: whatever the first span to reach a
@@ -2232,7 +2506,14 @@ class DuckDBBackend:
                     service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
                     service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
                     run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
-                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
+                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id),
+                    -- Provenance and task identity are properties of the
+                    -- session as a WHOLE, fixed at its first observation —
+                    -- fill once, like plan_tier above, never flip a value a
+                    -- prior write already resolved.
+                    source = COALESCE(sessions.source, EXCLUDED.source),
+                    task_statement_hash = COALESCE(sessions.task_statement_hash, EXCLUDED.task_statement_hash),
+                    dominant_model = COALESCE(sessions.dominant_model, EXCLUDED.dominant_model)
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -2242,6 +2523,7 @@ class DuckDBBackend:
                     session.plan_tier, session.service_namespace,
                     session.service_instance_id, session.cache_write_tokens,
                     session.run_id, session.parent_session_id,
+                    session.source, session.task_statement_hash, session.dominant_model,
                 ],
             )
 
