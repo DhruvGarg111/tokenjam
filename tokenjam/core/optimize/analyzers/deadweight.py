@@ -14,13 +14,21 @@ tool_use blocks) across the window's sessions. A server present in at least
 of them is dead weight: its tool schemas are still injected into context for
 no return.
 
+Both per-call sizes are MEASURED per server, not assumed:
+``core/optimize/mcp_probe`` starts each configured server, asks it for its
+tools, and counts the serialized schemas. A server that cannot be measured is
+excluded from every priced figure rather than billed a default (see
+``SchemaMeasurement`` and ``ServerDeadweight.schema_tokens_measured``).
+
 Deferred-tools caveat (mandatory, spec hard rule). When a session's
 transcript shows a deferred/ToolSearch-style listing naming a server's tools,
 that server's full schemas were NOT loaded that turn — only a short
 name+description line per tool appears in the listing, so the real per-turn
-tax is much smaller. This module detects that marker per session and blends
-``DEFERRED_SCHEMA_TAX_TOKENS`` into the estimate for those sessions; it never
-claims the full ``FULL_SCHEMA_TAX_TOKENS`` tax for a deferred session.
+tax is much smaller. This module detects that marker per session and prices
+those calls at ``SchemaMeasurement.deferred_tokens`` — the name+description
+listing measured off the SAME ``tools/list`` response as the full schema, so
+neither lane is an assumption — and never claims a deferred call cost the full
+``SchemaMeasurement.tokens``.
 
 C2 — always-injected context tax table (report-only, no proposals): a ranked,
 per-source, per-session token-tax table for what actually shows up verbatim
@@ -972,9 +980,11 @@ def _session_usage_from_records(records: list[dict[str, Any]]) -> AssistantUsage
     ``core.usage.session_usage``, just replayed over records this module
     already parsed once rather than re-reading the raw lines a second time.
 
-    This is real usage (what the session actually cost), never to be
-    confused with ``FULL_SCHEMA_TAX_TOKENS``/``DEFERRED_SCHEMA_TAX_TOKENS``
-    above, which model the MCP schema-injection TAX, not actual spend.
+    This is real usage (what the session actually cost), never to be confused
+    with the per-server measurements in ``SchemaMeasurement`` (surfaced on the
+    finding as ``ServerDeadweight.schema_tokens_measured`` /
+    ``deferred_tokens_measured``), which size the MCP schema-injection TAX
+    rather than actual spend.
     """
     by_key: dict[str, AssistantUsage] = {}
     for line_no, record in enumerate(records, start=1):
