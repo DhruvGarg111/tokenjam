@@ -181,11 +181,46 @@ def _check_db(config: object) -> dict:
 
 
 def _check_ingest_secret(config: object) -> dict:
-    if config.security.ingest_secret:
-        return {"name": "Ingest secret", "level": "ok",
-                "message": "Ingest secret is configured."}
-    return {"name": "Ingest secret", "level": "warning",
-            "message": "No ingest secret set. API ingest endpoint is unprotected."}
+    if not config.security.ingest_secret:
+        return {"name": "Ingest secret", "level": "warning",
+                "message": "No ingest secret set. API ingest endpoint is unprotected."}
+
+    # Beyond "is a secret set": is it the SAME secret every config on this
+    # machine's search path would resolve to? A project-local .tj/config.toml
+    # and the global ~/.config/tj/config.toml can carry different secrets for
+    # one store — the SDK reads one, a daemon started from a different cwd
+    # reads the other, and span pushes 401 silently with no error surfaced
+    # anywhere else (see `core/config.find_diverged_secret_config`).
+    import tomllib
+    from typing import cast
+
+    from tokenjam.core.config import TjConfig, active_config_path, find_diverged_secret_config
+
+    active_path = active_config_path(cast("TjConfig", config))
+    if active_path is not None:
+        try:
+            with open(active_path, "rb") as f:
+                active_raw = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            active_raw = None
+        if active_raw is not None:
+            diverged = find_diverged_secret_config(active_path, active_raw)
+            if diverged is not None:
+                other_path, _active_secret, _other_secret = diverged
+                return {
+                    "name": "Ingest secret",
+                    "level": "warning",
+                    "message": (
+                        f"ingest_secret differs between {active_path} and "
+                        f"{other_path} — whichever process reads the other "
+                        f"file will 401 every span it tries to push. Align "
+                        f"them (copy one secret into the other config) or "
+                        f"delete the unused config."
+                    ),
+                }
+
+    return {"name": "Ingest secret", "level": "ok",
+            "message": "Ingest secret is configured."}
 
 
 def _check_prometheus(config: object) -> dict:

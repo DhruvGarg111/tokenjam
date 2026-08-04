@@ -520,27 +520,25 @@ SEARCH_PATHS = [
 ]
 
 
-def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
-    """
-    Emit a stderr warning if a shadowed config exists with a different
-    ingest_secret. Tracks the common footgun (#68 §5): project-local
-    .tj/config.toml has secret A; global ~/.config/tj/config.toml has
-    secret B; the SDK uses A; the daemon (started with global config)
-    uses B; span pushes 401 silently.
+def find_diverged_secret_config(active_path: Path, active_raw: dict) -> tuple[Path, str, str] | None:
+    """Return `(other_path, active_secret, other_secret)` for the first
+    shadowed config on `SEARCH_PATHS` that carries a DIFFERENT non-empty
+    `ingest_secret` than `active_raw`'s, or None when none diverges.
 
-    Fires at most once per process via the module-level guard so this
-    doesn't spam multi-call test environments.
+    The single source of truth for the footgun both `_warn_if_secrets_diverge`
+    (fires once, at load time, stderr) and `tj doctor`'s ingest-secret check
+    (queryable, repeatable) report: project-local `.tj/config.toml` has
+    secret A; global `~/.config/tj/config.toml` has secret B; the SDK uses A;
+    the daemon (started with global config) uses B; span pushes 401 silently.
+    Best-effort — an unreadable/unparseable candidate is skipped, never raised.
     """
-    global _SECRET_DIVERGENCE_WARNED
-    if _SECRET_DIVERGENCE_WARNED:
-        return
     active_secret = (active_raw.get("security") or {}).get("ingest_secret")
     if not active_secret:
-        return
+        return None
     try:
         active_resolved = active_path.resolve()
     except OSError:
-        return
+        return None
     for candidate in SEARCH_PATHS:
         try:
             cand_resolved = candidate.resolve()
@@ -558,18 +556,35 @@ def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
         other_secret = (other_raw.get("security") or {}).get("ingest_secret")
         if not other_secret or other_secret == active_secret:
             continue
-        # Diverged. Warn once.
-        print(
-            f"warning: ingest_secret differs between {active_path} "
-            f"and {candidate}. The SDK will use the secret from "
-            f"{active_path} but a daemon launched from a different cwd "
-            f"may use the other one — span pushes will 401 silently. "
-            f"Align them (copy one secret into the other config) or "
-            f"delete the unused config.",
-            file=sys.stderr,
-        )
-        _SECRET_DIVERGENCE_WARNED = True
+        return candidate, active_secret, other_secret
+    return None
+
+
+def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
+    """
+    Emit a stderr warning if a shadowed config exists with a different
+    ingest_secret (see `find_diverged_secret_config`).
+
+    Fires at most once per process via the module-level guard so this
+    doesn't spam multi-call test environments.
+    """
+    global _SECRET_DIVERGENCE_WARNED
+    if _SECRET_DIVERGENCE_WARNED:
         return
+    diverged = find_diverged_secret_config(active_path, active_raw)
+    if diverged is None:
+        return
+    candidate, _active_secret, _other_secret = diverged
+    print(
+        f"warning: ingest_secret differs between {active_path} "
+        f"and {candidate}. The SDK will use the secret from "
+        f"{active_path} but a daemon launched from a different cwd "
+        f"may use the other one — span pushes will 401 silently. "
+        f"Align them (copy one secret into the other config) or "
+        f"delete the unused config.",
+        file=sys.stderr,
+    )
+    _SECRET_DIVERGENCE_WARNED = True
 
 
 # Module-level guard. Reset for tests via the helper exposed below.
