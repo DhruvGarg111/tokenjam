@@ -381,3 +381,58 @@ def test_dashboard_empty_tiles_are_not_clickable(html: str) -> None:
     # cursor) so an empty tile cannot read as a dead link.
     assert ".rec-tile.static { cursor: default; }" in html
     assert ".rec-tile.static:hover { border-color: var(--border); }" in html
+
+
+# --------------------------------------------------------------------------- #
+# Lens table horizontal-overflow fix — wide .opt-table findings tables (long
+# absolute paths, provider/model strings) were pushing the whole page into
+# horizontal scroll instead of scrolling inside their own container.
+# --------------------------------------------------------------------------- #
+def test_body_never_scrolls_horizontally(html: str) -> None:
+    # Belt-and-suspenders: no descendant, however wide, may push the PAGE
+    # itself into horizontal scroll. Wide content must scroll inside its own
+    # .table-wrap instead.
+    assert "overflow-x: hidden;" in html
+    body = html[html.index("\nbody {"):]
+    body = body[: body.index("}")]
+    assert "overflow-x: hidden;" in body, "body rule must set overflow-x: hidden"
+
+
+def test_every_opt_table_is_wrapped_for_horizontal_scroll(html: str) -> None:
+    # Every OptimizeFinding detail table (.opt-table) must sit inside a
+    # .table-wrap (overflow-x: auto) container so a long unbreakable string
+    # (a repo-relative path, a provider/model id) scrolls inside the table
+    # instead of forcing the whole card, and the page, wider than the
+    # viewport. A bare, unwrapped `<table class="opt-table"` is the bug.
+    import re
+
+    for m in re.finditer(r'<table class="opt-table"', html):
+        preceding = html[max(0, m.start() - 40): m.start()]
+        assert '<div class="table-wrap">' in preceding, (
+            f"unwrapped .opt-table at offset {m.start()}: {preceding!r}"
+        )
+
+
+def test_recurring_inclusions_label_is_truncated_with_full_path_in_title(html: str) -> None:
+    # The "What's re-included" column in the resend finding's recurring-
+    # inclusions table renders absolute paths. Rendering them untruncated
+    # forced the table (and the page) wider than the viewport, with the
+    # label unreadable on both ends. shortPath() truncates to the last two
+    # path segments for display; the full path still rides in title= for a
+    # hover tooltip.
+    assert (
+        '<td class="mono" title=${r.label}>${shortPath(r.label)}</td>' in html
+    ), "recurring-inclusions label must be shortPath()-truncated with the full value in title="
+
+
+def test_cursor_listbox_scrolls_horizontally_and_truncates_paths(html: str) -> None:
+    # The Summarize/Rules file pickers (.cur-listbox > .cur-table) render a
+    # File column of absolute paths. The listbox must scroll horizontally on
+    # its own (overflow-x, alongside its existing overflow-y) instead of
+    # relying on the page to scroll, and the path itself must be
+    # shortPath()-truncated with the full path in a hover title.
+    assert (
+        ".cur-listbox { max-height:380px; overflow-y:auto; overflow-x:auto;" in html
+    ), "cur-listbox must scroll horizontally, not just vertically"
+    assert '<td class="mono" title=${c.path}>${shortPath(c.path)}</td>' in html
+    assert "title=${r.path + ' — review the diff'}" in html
