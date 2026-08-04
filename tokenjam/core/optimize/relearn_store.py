@@ -106,33 +106,24 @@ def write_cache(
         "tj_version": tj_build(),
     }
     if "cost_proposals" in existing:
-        payload["cost_proposals"] = existing["cost_proposals"]
-        payload["cost_computed_at"] = existing.get("cost_computed_at")
-        # `cost_window_days`/`cost_excluded` are written alongside
-        # `cost_proposals` by `write_cost_proposals` and read back through
-        # `read_cost_proposals`/`_headline_window_days` (see
-        # `api/routes/relearn.py`) to label the Review inbox headline with the
-        # window its figures were actually observed over. This relearn-detector
-        # write shares the same cache file (see this module's docstring) and
-        # used to preserve only the two keys above, silently forgetting a
-        # non-default cost window on every relearn recompute. Harmless while
-        # every route falls back to the same default, but round-tripping both
-        # keys here means a variable window survives regardless of which
-        # producer wrote the cache last.
-        #
-        # THE WHITELIST IS THE TRAP. Every `cost_*` key a cost write produces has
-        # to be named here or this write silently drops it, and the symptom is
-        # never an error — it is a field that reads as "never stamped". Caught
-        # live: `cost_tj_version` was added to `write_cost_proposals` and omitted
-        # here, so a freshly-booted daemon served a cost payload claiming an
-        # unknown producing build, because the pass writes the cost proposals and
-        # then the relearn cache over the top of them.
-        for key in (
-            "cost_window_days", "cost_since", "cost_until", "cost_excluded",
-            "cost_tj_version",
-        ):
-            if key in existing:
-                payload[key] = existing[key]
+        # THE WHITELIST WAS THE TRAP. This used to copy forward a hand-picked
+        # list of `cost_*` keys, and every new key a cost write introduced had
+        # to be added here or this write silently dropped it — the symptom was
+        # never an error, just a field that read as "never stamped". Caught
+        # live twice: `cost_tj_version` (added to `write_cost_proposals` and
+        # omitted here, so a freshly-booted daemon served a cost payload
+        # claiming an unknown producing build) and `cost_proposals_error`/
+        # `cost_proposals_error_at` (a recorded recompute failure silently
+        # erased by the very next relearn-leg recompute, reading downstream as
+        # if nothing had failed). Copy forward by PREFIX instead: this branch
+        # (unlike `write_cost_proposals_error`/`clear_cost_proposals_error`,
+        # which preserve the WHOLE existing payload) only ever originates
+        # `computed_at`/`finding`/`tj_version` above, so every `cost_`-prefixed
+        # key in `existing` belongs to the cost-proposal producer and none of
+        # them can collide with a key this branch means to set itself.
+        for key, value in existing.items():
+            if key.startswith("cost_"):
+                payload[key] = value
     _atomic_write(p, payload)
     return payload
 
@@ -181,28 +172,29 @@ def read_cost_proposals(
     has_error = "cost_proposals_error" in raw
     if not has_proposals and not has_error:
         return None
-    return {
-        "cost_computed_at": raw.get("cost_computed_at"),
-        "cost_proposals": raw.get("cost_proposals") or [],
-        "cost_proposals_error": raw.get("cost_proposals_error"),
-        "cost_proposals_error_at": raw.get("cost_proposals_error_at"),
-        "cost_window_days": raw.get("cost_window_days") or 0,
-        # The bounds the recompute ran over. `None` on a cache written before
-        # they were recorded — absent, never guessed from the day count, since
-        # deriving them would invent the very provenance this exists to supply.
-        "cost_since": raw.get("cost_since"),
-        "cost_until": raw.get("cost_until"),
-        "cost_excluded": raw.get("cost_excluded") or {},
-        # The build that computed these proposals. `None` on a cache written
-        # before the stamp existed — absent, never the running build, which
-        # would assert agreement about figures we cannot vouch for.
-        #
-        # This is the SECOND whitelist a `cost_*` key has to be named in (the
-        # first is the round-trip list in `write_cache`). Both drop an unnamed
-        # key silently, and the symptom is a field that reads as "never
-        # stamped" rather than an error.
-        "cost_tj_version": raw.get("cost_tj_version"),
-    }
+    # Project by PREFIX rather than a hand-written dict — this used to be the
+    # SECOND whitelist a `cost_*` key had to be named in (the first was the
+    # round-trip loop in `write_cache`, now also prefix-based). Both dropped
+    # an unnamed key silently, and the symptom was a field that read as
+    # "never stamped" rather than an error. Every key the cost-proposal
+    # producer writes is prefixed `cost_`, and `write_cache` never originates
+    # one of its own (see the comment there), so a plain prefix filter over
+    # the raw cache is exactly the cost block.
+    block: dict[str, Any] = {k: v for k, v in raw.items() if k.startswith("cost_")}
+    # Defaulting behavior callers depend on: absent/falsy reads as the empty
+    # value below rather than `None`, so a caller's own `or` chain isn't
+    # needed at every call site.
+    block["cost_proposals"] = block.get("cost_proposals") or []
+    block["cost_window_days"] = block.get("cost_window_days") or 0
+    block["cost_excluded"] = block.get("cost_excluded") or {}
+    # Stable shape: these read as `None` (never guessed/derived) on a cache
+    # written before the field existed, same as before prefix-projection.
+    for key in (
+        "cost_computed_at", "cost_proposals_error", "cost_proposals_error_at",
+        "cost_since", "cost_until", "cost_tj_version",
+    ):
+        block.setdefault(key, None)
+    return block
 
 
 def write_cost_proposals_error(

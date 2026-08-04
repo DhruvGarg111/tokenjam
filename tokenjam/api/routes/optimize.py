@@ -342,7 +342,13 @@ def rescan_optimize(request: Request) -> dict[str, Any]:
     # pressed it from — and the Dashboard's tiles could end up hours fresher
     # than the inbox headline they are naturally compared against. One cycle,
     # one meaning: see `core/optimize/scan_cycle.py`.
-    started = trigger_scan_cycle(lambda: DuckDBBackend(config.storage), config)
+    # force=True: an explicit rescan bypasses the ingestion-watermark gate
+    # (`core/optimize/scan_cycle.py`) — a human asking must always attempt a
+    # pass, never get deferred to the next scheduled tick just because the
+    # corpus hasn't grown.
+    started = trigger_scan_cycle(
+        lambda: DuckDBBackend(config.storage), config, force=True,
+    )
     any_started = any(started.values())
     return {
         **report_store.stored_report_block(config),

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterator
 
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.distill import is_tokenjam_invoke_cwd
 from tokenjam.core.pricing import classify_pricing_source
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
@@ -421,6 +422,14 @@ def parse_claude_code_session(
             session_id = record.get("sessionId")
         if cwd is None:
             cwd = record.get("cwd")
+            # tokenjam's own distill/presence model calls (core.distill,
+            # core.rulewrite.presence) shell out to this SAME `claude` CLI
+            # from a private temp-dir cwd, and leave an ordinary transcript
+            # on disk like any user session — never a session the user
+            # actually worked. Excluded at the earliest possible point (the
+            # first record that reveals cwd) rather than parsed and priced.
+            if cwd is not None and is_tokenjam_invoke_cwd(cwd):
+                return None
 
         rtype = record.get("type")
         if rtype == "user" and capture.prompts and not record.get("isMeta"):

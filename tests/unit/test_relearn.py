@@ -674,6 +674,62 @@ def test_legit_evidence_is_not_too_thin(family, samples):
     assert _evidence_too_thin_for_distill(cluster) is False
 
 
+def test_name_fallback_evidence_is_too_thin_even_when_the_text_looks_substantive():
+    """A name-fallback failure's error_text is the span's own NAME (e.g.
+    ``gen_ai.tool.call``), which reads as ordinary words rather than noise —
+    ``_is_substantive_error_text`` alone would wave it through. The explicit
+    ``error_text_is_name_fallback`` check must reject it regardless, since
+    there is no diagnosis in it for distill to ground a fix in. This
+    exercises the SECOND, independent gate directly: `_failure_signature`
+    already keeps a real span-sourced cluster like this from ever recurring
+    (see test_relearn_otel.py), so this test bypasses that by building the
+    `_RawCluster` by hand, as if it had somehow reached this function."""
+    from tokenjam.core.optimize.analyzers.relearn import (
+        FailureEpisode,
+        _RawCluster,
+        _evidence_too_thin_for_distill,
+    )
+
+    cluster = _RawCluster(
+        signature="Bash:__no_error_text__", family_key=None, title="Bash: no error text captured",
+        failures=[
+            FailureEpisode(
+                f"s{i}", "repo", None, "Bash", "", "gen_ai.tool.call", "act", False, 0,
+                error_text_is_name_fallback=True,
+            )
+            for i in range(3)
+        ],
+    )
+    assert _evidence_too_thin_for_distill(cluster) is True
+
+
+def test_name_fallback_cluster_is_never_distilled(tmp_path):
+    """Same treatment as any other confidence-gate suppression (see
+    `test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache`):
+    a cluster the gate rejects is dropped, not distilled and not passed
+    through with a fabricated title."""
+    from tokenjam.core.optimize.analyzers.relearn import (
+        FailureEpisode,
+        _RawCluster,
+        apply_distill_to_residual,
+    )
+
+    cluster = _RawCluster(
+        signature="Bash:__no_error_text__", family_key=None, title="Bash: no error text captured",
+        failures=[
+            FailureEpisode(
+                f"s{i}", "repo", None, "Bash", "", "gen_ai.tool.call", "act", False, 0,
+                error_text_is_name_fallback=True,
+            )
+            for i in range(3)
+        ],
+    )
+
+    result = apply_distill_to_residual([cluster], cache_dir=tmp_path / "distill_cache", enabled=True)
+
+    assert result == []
+
+
 def test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache(tmp_path):
     """The gate runs BEFORE the cache is ever consulted — even a stale cache
     entry from before this fix (holding the exact real confabulated answer)

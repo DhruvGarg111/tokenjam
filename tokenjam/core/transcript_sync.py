@@ -52,6 +52,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tokenjam.core.distill import is_tokenjam_invoke_cwd
+
 logger = logging.getLogger(__name__)
 
 
@@ -173,17 +175,20 @@ def _parse_ts(value: object) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _header_fields(path: Path) -> tuple[str | None, datetime | None]:
-    """Read the internal ``sessionId`` + first timestamp out of a transcript's
-    leading records WITHOUT parsing the whole file.
+def _header_fields(path: Path) -> tuple[str | None, datetime | None, str | None]:
+    """Read the internal ``sessionId`` + first timestamp + ``cwd`` out of a
+    transcript's leading records WITHOUT parsing the whole file.
 
     Deriving the id from content is the entire point: a nested
     ``subagents/agent-*.jsonl`` file has its own filename but its parent's
     ``sessionId``, so keying on the filename double-counts it as a separate
-    session.
+    session. ``cwd`` is read the same way so ``scan_disk_sessions`` can
+    exclude tokenjam's own internal model calls (see
+    ``core.distill.is_tokenjam_invoke_cwd``) without a second file open.
     """
     session_id: str | None = None
     started_at: datetime | None = None
+    cwd: str | None = None
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for index, line in enumerate(fh):
@@ -204,12 +209,16 @@ def _header_fields(path: Path) -> tuple[str | None, datetime | None]:
                         session_id = candidate
                 if started_at is None:
                     started_at = _parse_ts(record.get("timestamp"))
-                if session_id is not None and started_at is not None:
+                if cwd is None:
+                    candidate_cwd = record.get("cwd")
+                    if isinstance(candidate_cwd, str) and candidate_cwd:
+                        cwd = candidate_cwd
+                if session_id is not None and started_at is not None and cwd is not None:
                     break
     except OSError as exc:
         logger.debug("could not read transcript header %s: %s", path, exc)
-        return None, None
-    return session_id, started_at
+        return None, None, None
+    return session_id, started_at, cwd
 
 
 def scan_disk_sessions(
@@ -240,9 +249,16 @@ def scan_disk_sessions(
             if mtime < since:
                 continue
         scanned += 1
-        session_id, started_at = _header_fields(path)
+        session_id, started_at, cwd = _header_fields(path)
         if not session_id:
             unreadable += 1
+            continue
+        if is_tokenjam_invoke_cwd(cwd):
+            # tokenjam's own distill/presence model calls, not a session the
+            # user worked — see core.distill.is_tokenjam_invoke_cwd. Excluded
+            # here too (not just core.backfill's parse loop) so this reader,
+            # used by the reconciliation gap report, never counts one as
+            # "missing" and pulls it in via a catch-up backfill.
             continue
         try:
             project = path.relative_to(root).parts[0]
