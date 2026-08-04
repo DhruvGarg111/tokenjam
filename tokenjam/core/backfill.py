@@ -31,6 +31,7 @@ from tokenjam.core.distill import is_tokenjam_invoke_cwd
 from tokenjam.core.pricing import classify_pricing_source
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
+from tokenjam.core.optimize.repeat_task import hash_task_statement
 from tokenjam.core.models import (
     SESSION_STALE_THRESHOLD,
     NormalizedSpan,
@@ -158,6 +159,20 @@ class ParsedSession:
     # dropped in silence: a record tj refuses to ingest is a change to what the
     # corpus contains, and has to be as visible as one it accepts.
     records_undated: int = 0
+    # The FIRST genuine human prompt seen in this file — captured
+    # UNCONDITIONALLY (unlike `pending_prompt`'s per-span attachment above,
+    # which is gated on `[capture] prompts`). This is never stored raw: the
+    # only use is `session_record_from_parsed` hashing it into
+    # `SessionRecord.task_statement_hash` via `repeat_task.hash_task_statement`
+    # — a one-way, normalized fingerprint, not readable content, so it needs
+    # no capture-toggle gate. None when the file has no main-thread user turn
+    # (a subagent-only file, or a session with no recognizable prompt).
+    first_user_prompt: str | None = None
+    # The model that ran the most (input+output) tokens on the MAIN THREAD of
+    # this file (subagent-dispatch spans excluded — a rightsized-down subagent
+    # model shouldn't drown out what the session itself mostly ran on). None
+    # when the file carries no priced assistant turn.
+    dominant_model: str | None = None
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -369,6 +384,11 @@ def parse_claude_code_session(
     earliest: datetime | None = None
     latest: datetime | None = None
     records_undated: int = 0
+    # Captured unconditionally (never gated on `[capture] prompts` — see
+    # `ParsedSession.first_user_prompt`'s docstring for why that's safe).
+    first_user_prompt: str | None = None
+    # Main-thread-only per-model token totals, for `ParsedSession.dominant_model`.
+    _model_tokens: dict[str, int] = {}
 
     # Dedup by span_id WITHIN the session (#294). Claude Code replays/re-snapshots
     # assistant turns into the same JSONL on resume/branch — each appended record
@@ -432,13 +452,26 @@ def parse_claude_code_session(
                 return None
 
         rtype = record.get("type")
-        if rtype == "user" and capture.prompts and not record.get("isMeta"):
-            # Remember the latest genuine human prompt so the next assistant
-            # span can carry it. Tool-result-only user turns yield "" and are
-            # ignored (no prompt to attribute).
-            prompt_text = _user_prompt_text(record)
-            if prompt_text.strip():
-                pending_prompt = prompt_text
+        if rtype == "user" and not record.get("isMeta"):
+            # First genuine MAIN-THREAD human prompt, captured UNCONDITIONALLY
+            # (never gated on `capture.prompts` — see `ParsedSession
+            # .first_user_prompt`'s docstring for why that's safe: only ever
+            # hashed, never stored raw). A subagent file's "user" turns are
+            # the Task tool's dispatched instructions, not what the human
+            # actually typed, so those are excluded here.
+            if (
+                first_user_prompt is None
+                and not record.get("isSidechain")
+                and _user_prompt_text(record).strip()
+            ):
+                first_user_prompt = _user_prompt_text(record)
+            if capture.prompts:
+                # Remember the latest genuine human prompt so the next
+                # assistant span can carry it. Tool-result-only user turns
+                # yield "" and are ignored (no prompt to attribute).
+                prompt_text = _user_prompt_text(record)
+                if prompt_text.strip():
+                    pending_prompt = prompt_text
         if rtype != "assistant":
             continue
 
@@ -501,6 +534,12 @@ def parse_claude_code_session(
         is_sidechain = bool(record.get("isSidechain"))
         sub_agent_id = record.get("agentId") if is_sidechain else None
         span_sub_agent_type = sub_agent_type if is_sidechain else None
+
+        # Main-thread-only per-model token tally, for `ParsedSession
+        # .dominant_model` — a rightsized-down subagent model shouldn't drown
+        # out what the session itself mostly ran on.
+        if not is_sidechain:
+            _model_tokens[model] = _model_tokens.get(model, 0) + input_tokens + output_tokens
 
         provider = _provider_for_model(model)
         cost = calculate_cost(
@@ -669,6 +708,10 @@ def parse_claude_code_session(
         tool_call_count=tool_count,
         transcript_mtime=transcript_mtime,
         records_undated=records_undated,
+        first_user_prompt=first_user_prompt,
+        dominant_model=(
+            max(_model_tokens, key=lambda m: _model_tokens[m]) if _model_tokens else None
+        ),
     )
 
 
@@ -808,6 +851,15 @@ def session_record_from_parsed(
         tool_call_count=parsed.tool_call_count,
         error_count=0,
         plan_tier=plan_tier,
+        # This function ONLY ever parses a Claude Code transcript — a literal
+        # fact, not a heuristic (contrast the live path, which has to
+        # classify an ambiguous agent_id; see core.agent_kind). Matches
+        # `agent_kind.CODING_AGENT_GROUPS`'s "claude-code" spelling exactly —
+        # not "claude_code" — so a value this function stamps and one the
+        # live path derives via `classify_agent_kind` are the SAME string.
+        source="claude-code",
+        task_statement_hash=hash_task_statement(parsed.first_user_prompt),
+        dominant_model=parsed.dominant_model,
     )
 
 

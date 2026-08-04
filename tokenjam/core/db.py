@@ -797,6 +797,37 @@ MIGRATIONS: list[tuple[int, str]] = [
     # deletion that happened always has a record and a record that exists always
     # describes a deletion. `tj doctor` reads it; nothing else writes it.
     (20, RETENTION_EVENTS_TABLE_SQL),
+    # Migration 21: session provenance + task identity.
+    #
+    # `source` records what PRODUCED a session — 'claude-code' (matches
+    # `agent_kind.CODING_AGENT_GROUPS`'s spelling exactly) / 'codex' / 'sdk' —
+    # at the point of ingest, from the strongest signal available at
+    # that ingest path (a literal constant for the two dedicated backfill
+    # adapters, which parse ONLY that tool's transcripts; `agent_kind
+    # .classify_agent_kind` for the live path, which sees a mix — its exact/
+    # prefix rules are grounded in verified id-minting behavior, not a guess).
+    # Before this, nothing recorded provenance at write time at all; every
+    # reader re-derived a "coding vs SDK" answer from `agent_id` naming
+    # conventions, and two independently-maintained predicates
+    # (`core.agent_kind` vs `core.alerts.is_interactive_coding_agent`)
+    # disagree BY DESIGN on Codex prefix-vs-exact matching (see
+    # `agent_kind`'s module docstring). This column does NOT merge them —
+    # both predicates, and their five existing call sites plus the pinned
+    # margin-case test, are UNCHANGED; this is a new, more precise field a
+    # caller can additionally choose to read.
+    #
+    # `task_statement_hash` / `dominant_model` support "did this session
+    # repeat prior work" without storing raw prompt text: the only
+    # high-confidence "same task" signal is the first user prompt, which
+    # lived only in the on-disk transcript (rotated ~30 days by Claude Code)
+    # and was discarded at ingest — unrecoverable once gone. Masked (hashed),
+    # never the raw prompt. `dominant_model` records the model that actually
+    # ran the bulk of the session, alongside the hash, for the same
+    # correlate-across-sessions use case (`core.optimize.repeat_task`).
+    (21,
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS source TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS task_statement_hash TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dominant_model TEXT"),
 ]
 
 
@@ -830,6 +861,9 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("spans",    "prompt_template_version", "TEXT"),               # migration 17
     ("spans",    "pricing_source",          "TEXT"),               # migration 18
     ("spans",    "sub_agent_type",          "TEXT"),               # migration 19
+    ("sessions", "source",                  "TEXT"),               # migration 21
+    ("sessions", "task_statement_hash",     "TEXT"),               # migration 21
+    ("sessions", "dominant_model",          "TEXT"),               # migration 21
 ]
 
 
@@ -1477,6 +1511,9 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         service_instance_id=d.get("service_instance_id"),
         run_id=d.get("run_id"),
         parent_session_id=d.get("parent_session_id"),
+        source=d.get("source"),
+        task_statement_hash=d.get("task_statement_hash"),
+        dominant_model=d.get("dominant_model"),
     )
 
 
@@ -2328,8 +2365,9 @@ class DuckDBBackend:
                     session_id, agent_id, conversation_id, started_at, ended_at,
                     status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                     tool_call_count, error_count, plan_tier, service_namespace,
-                    service_instance_id, cache_write_tokens, run_id, parent_session_id
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                    service_instance_id, cache_write_tokens, run_id, parent_session_id,
+                    source, task_statement_hash, dominant_model
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
                 ON CONFLICT (session_id) DO UPDATE SET
                     -- `started_at` was absent from this list entirely, which
                     -- made it WRITE-ONCE: whatever the first span to reach a
@@ -2376,7 +2414,14 @@ class DuckDBBackend:
                     service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
                     service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
                     run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
-                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
+                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id),
+                    -- Provenance and task identity are properties of the
+                    -- session as a WHOLE, fixed at its first observation —
+                    -- fill once, like plan_tier above, never flip a value a
+                    -- prior write already resolved.
+                    source = COALESCE(sessions.source, EXCLUDED.source),
+                    task_statement_hash = COALESCE(sessions.task_statement_hash, EXCLUDED.task_statement_hash),
+                    dominant_model = COALESCE(sessions.dominant_model, EXCLUDED.dominant_model)
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -2386,6 +2431,7 @@ class DuckDBBackend:
                     session.plan_tier, session.service_namespace,
                     session.service_instance_id, session.cache_write_tokens,
                     session.run_id, session.parent_session_id,
+                    session.source, session.task_statement_hash, session.dominant_model,
                 ],
             )
 
