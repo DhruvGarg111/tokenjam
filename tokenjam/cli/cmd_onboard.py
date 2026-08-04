@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json as json_mod
+import os
 import platform
 import secrets
 import shutil
@@ -16,7 +17,14 @@ from tokenjam.cli.backfill_progress import transient_status
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.cli.tj_status import TjCommand
-from tokenjam.core.config import resolve_config_path
+from tokenjam.core.config import (
+    align_project_secret_to_global,
+    ensure_global_ingest_secret,
+    resolve_config_path,
+)
+# Aliased: several flows below bind a LOCAL `global_config_path` variable, which
+# would shadow the imported helper inside those functions.
+from tokenjam.core.config import global_config_path as _global_config_path
 from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
@@ -607,7 +615,13 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         f'\n[budget.{plan_provider}]\nplan = "{plan_tier}"\n' if plan_tier else ""
     )
 
-    ingest_secret = secrets.token_hex(32)
+    # One machine-wide ingest secret, always the global config's. This path
+    # writes a project-local `.tj/config.toml`, and minting a secret into it
+    # produced a config the daemon (always launched against the global config)
+    # rejects: the SDK signs spans with the project secret, the daemon
+    # authenticates against the global one, and every push 401s silently. The
+    # project file now MIRRORS the global secret rather than owning one.
+    ingest_secret, secret_minted = ensure_global_ingest_secret()
 
     want_daemon = not no_daemon
 
@@ -712,8 +726,18 @@ analysis_span = "{analysis_span}"
     # Output
     console.print()
     console.print("[ok]\u2713[/ok] Config written to [accent].tj/config.toml[/accent]")
-    console.print(f"[ok]\u2713[/ok] Ingest secret generated: "
-                  f"[dim]{ingest_secret[:8]}...[/dim]")
+    if secret_minted:
+        console.print(f"[ok]\u2713[/ok] Ingest secret generated: "
+                      f"[dim]{ingest_secret[:8]}...[/dim]")
+    else:
+        # Adopted, not generated: saying "generated" about a secret that
+        # already existed reads as a rotation, and would send the user looking
+        # for integrations to re-key that in fact still work.
+        console.print(
+            f"[ok]\u2713[/ok] Ingest secret: [dim]{ingest_secret[:8]}... "
+            f"(shared with {display_path(_global_config_path())})[/dim]",
+            soft_wrap=True,
+        )
     if budget and budget > 0:
         console.print(f"[ok]\u2713[/ok] Default daily budget: "
                       f"[bold]${budget:.2f}[/bold] per agent")
@@ -1591,14 +1615,88 @@ _ZSHRC_OTEL_LEGACY_MARKERS = (
 )
 
 
+def _report_secret_alignment(secret: str) -> None:
+    """Repair a project-local config carrying a stale ingest secret.
+
+    The global secret is the survivor, never the project-local one: the managed
+    shell block, the daemon unit file and every already-working integration
+    carry it, so adopting a project value would break all of them at once. A
+    left-over `.tj/config.toml` from an older install is silently rewritten to
+    match, and the repair is reported (a config file edited without a word is
+    exactly how a divergence goes unnoticed in the first place).
+    """
+    repaired = align_project_secret_to_global(secret)
+    if repaired is not None:
+        console.print(
+            f"  Aligned the ingest secret in {display_path(repaired)} with "
+            f"{display_path(_global_config_path())}.",
+            soft_wrap=True,
+        )
+
+
+_OTEL_HOST_ENV = "TJ_OTEL_HOST"
+_DOCKER_GATEWAY_HOST = "host.docker.internal"
+
+
+def _in_container() -> bool:
+    """True when this process is itself running inside a container.
+
+    Docker writes `/.dockerenv`; the cgroup path names the runtime under
+    Docker/Podman/containerd. Best-effort and never raising: an unreadable
+    cgroup file simply means "not detected", which lands on the loopback
+    default that is correct on a host.
+    """
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text()
+    except OSError:
+        return False
+    return any(rt in cgroup for rt in ("docker", "containerd", "podman", "kubepods"))
+
+
+def _otel_endpoint_host() -> str:
+    """The host an OTLP exporter configured by onboarding should send to.
+
+    `host.docker.internal` is the address a process INSIDE a container uses to
+    reach a service on its host. It was written unconditionally, including into
+    a host user's ~/.zshrc, where it does not resolve at all: every span an
+    agent session emitted failed at DNS and was dropped silently, leaving only
+    the delayed transcript backfill. Two event types have no transcript
+    equivalent (tool decisions and API errors), so those were lost outright.
+
+    So it is now conditional on actually being in that environment, and
+    overridable by `TJ_OTEL_HOST` for a setup this cannot detect (an exported
+    shell rc consumed inside a container, a remote daemon).
+    """
+    override = os.environ.get(_OTEL_HOST_ENV, "").strip()
+    if override:
+        return override
+    if _in_container() and _host_resolves(_DOCKER_GATEWAY_HOST):
+        return _DOCKER_GATEWAY_HOST
+    return "127.0.0.1"
+
+
+def _host_resolves(host: str) -> bool:
+    """True when `host` resolves via DNS on this machine. Never raises."""
+    import socket
+
+    try:
+        socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return True
+
+
 def _zshrc_otel_block(port: int, secret: str) -> str:
     """Build one fresh sentinel-delimited OTEL export block for ~/.zshrc."""
+    host = _otel_endpoint_host()
     return (
         f"{_ZSHRC_OTEL_START}\n"
         f"export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
         f"export OTEL_LOGS_EXPORTER=otlp\n"
         f"export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
-        f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:{port}\n"
+        f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://{host}:{port}\n"
         f'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer {secret}"\n'
         f"{_ZSHRC_OTEL_END}\n"
     )
@@ -1672,7 +1770,7 @@ def _onboard_claude_code(
     # ingest secret and one running daemon. Per-project configs cause the secret in
     # ~/.claude/settings.json to rotate on every project onboard, breaking auth for
     # every other project.
-    global_config_path = Path.home() / ".config" / "tj" / "config.toml"
+    global_config_path = _global_config_path()
 
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
@@ -1917,6 +2015,7 @@ def _onboard_claude_code(
     # headers are replaced when the secret rotates.
     port = config.api.port
     secret = config.security.ingest_secret
+    _report_secret_alignment(secret)
     global_env: dict = global_settings.get("env", {})
     global_env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
     global_env["OTEL_LOGS_EXPORTER"] = "otlp"
@@ -1988,9 +2087,10 @@ def _onboard_claude_code(
         projects_index.write_text(json_mod.dumps(known, indent=2) + "\n")
 
     # --- Shell env (~/.zshrc) ---
-    # Writes host.docker.internal endpoint so harness sessions (Docker) pick up
-    # the vars automatically via compose.yml passthrough — no manual setup needed.
-    # Native Claude Code uses settings.json (127.0.0.1) written above instead.
+    # The endpoint host is chosen by `_otel_endpoint_host()` for the machine
+    # being written to: loopback on a host, the Docker gateway only when this
+    # is genuinely running inside a container, and `TJ_OTEL_HOST` overrides
+    # both. Native Claude Code uses settings.json (127.0.0.1) written above.
     zshrc = Path.home() / ".zshrc"
     zshrc.touch(exist_ok=True)
     zshrc_text = zshrc.read_text()
@@ -2127,7 +2227,7 @@ def _onboard_claude_code(
             console.print(f"[dim]  Daily budget:       ${budget:.2f}[/dim]")
         console.print(
             f"[dim]  OTLP endpoint:      http://127.0.0.1:{port} (native) . "
-            f"http://host.docker.internal:{port} (harness)[/dim]"
+            f"http://{_otel_endpoint_host()}:{port} (shell env)[/dim]"
         )
         if secret:
             console.print(f"[dim]  Ingest secret:      {secret[:8]}...[/dim]")
@@ -2215,7 +2315,7 @@ def _onboard_codex(
     # `codex_exec` is project-agnostic by design (Codex hardcodes service.name
     # in its binary). Per-project TokenJam configs would rotate the secret on every
     # onboard, breaking the running server.
-    config_path = Path.home() / ".config" / "tj" / "config.toml"
+    config_path = _global_config_path()
 
     previous_secret: str | None = None
     if config_path.exists():
@@ -2327,6 +2427,7 @@ def _onboard_codex(
 
     port = config.api.port
     secret = config.security.ingest_secret
+    _report_secret_alignment(secret)
     secret_rotated = bool(previous_secret) and previous_secret != secret
     want_daemon = not no_daemon
 

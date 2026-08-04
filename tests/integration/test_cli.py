@@ -2245,6 +2245,109 @@ def test_onboard_claude_code_replaces_legacy_zshrc_otel_markers(runner, tmp_path
     assert "export FOO=bar" in text  # user's own content preserved
 
 
+def test_onboard_rewrites_an_unreachable_endpoint_already_in_zshrc(runner, tmp_path, monkeypatch):
+    """Re-onboarding REPAIRS a shell profile that already carries the
+    container-only endpoint, rather than only writing a good one on fresh
+    installs. That seeded state — a current-sentinel block naming
+    `host.docker.internal` on a host where it does not resolve — is what every
+    machine onboarded before this fix is sitting in, and it drops every span
+    silently at the DNS layer."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text(
+        "# my own env\nexport FOO=bar\n\n"
+        "# >>> tokenjam OTEL (managed) >>>\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_LOGS_EXPORTER=otlp\n"
+        "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7500\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-token"\n'
+        "# <<< tokenjam OTEL <<<\n"
+    )
+
+    monkeypatch.delenv("TJ_OTEL_HOST", raising=False)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._in_container", lambda: False)
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x",
+        ])
+
+    assert result.exit_code == 0, result.output
+    text = zshrc.read_text()
+    assert text.count(">>> tokenjam OTEL (managed) >>>") == 1
+    assert "host.docker.internal" not in text
+    assert ":7500" not in text
+    assert "stale-token" not in text
+    assert "export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391" in text
+    assert "export FOO=bar" in text  # user's own content preserved
+
+
+def test_onboard_then_uninstall_leaves_zero_managed_residue(runner, tmp_path, monkeypatch):
+    """Full round trip on one shell profile seeded with BOTH legacy markers and
+    a stale bad endpoint: onboard collapses them to exactly one correct block,
+    uninstall then leaves zero tj residue and the user's own lines intact."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text(
+        "# my own env\nexport FOO=bar\n\n"
+        "# ocw harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7391\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-ocw-token"\n'
+        "\n"
+        "# tj harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-tj-token"\n'
+        "\n"
+        "# >>> tokenjam OTEL (managed) >>>\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7500\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-current-token"\n'
+        "# <<< tokenjam OTEL <<<\n"
+    )
+
+    monkeypatch.delenv("TJ_OTEL_HOST", raising=False)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._in_container", lambda: False)
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        onboarded = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x",
+        ])
+
+    assert onboarded.exit_code == 0, onboarded.output
+    after_onboard = zshrc.read_text()
+    assert after_onboard.count(">>> tokenjam OTEL (managed) >>>") == 1
+    assert "harness observability" not in after_onboard
+    assert "host.docker.internal" not in after_onboard
+    for stale in ("stale-ocw-token", "stale-tj-token", "stale-current-token"):
+        assert stale not in after_onboard
+    assert "export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391" in after_onboard
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("tokenjam.cli.cmd_stop.cmd_stop", MagicMock())
+    monkeypatch.setattr("tokenjam.cli.cmd_uninstall.shutil.which", lambda _name: None)
+    monkeypatch.delenv("PIPX_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    removed = runner.invoke(cli, ["uninstall", "--yes"])
+
+    assert removed.exit_code == 0, removed.output
+    final = zshrc.read_text()
+    assert ">>> tokenjam OTEL (managed) >>>" not in final
+    assert "harness observability" not in final
+    assert "OTEL_EXPORTER_OTLP" not in final
+    assert "CLAUDE_CODE_ENABLE_TELEMETRY" not in final
+    assert "export FOO=bar" in final  # user's own content preserved
+
+
 def test_uninstall_removes_legacy_and_current_zshrc_otel_blocks(runner, tmp_path, monkeypatch):
     """`tj uninstall` strips every managed OTEL block from ~/.zshrc — the
     current sentinel-delimited block AND any legacy marker left over from an
