@@ -1067,6 +1067,59 @@ def test_rollup_excluded_defaults_to_empty_dict_not_none():
     assert rollup["excluded"] == {}
 
 
+def test_the_rollup_can_only_be_reached_through_gather_rollup_population():
+    """A rollup population can no longer be assembled BY OMISSION.
+
+    THE DEFECT THIS PINS. Completeness used to be a caller CONVENTION:
+    whoever built ``past_overspend_rollup``'s input list had to remember to
+    separately fetch relearn's cache, turn it into rows via
+    ``relearn_contribution_rows``, and concatenate before calling this
+    function. Two callers remembered (the CLI's ``tj relearn cost-proposals``
+    and the API's ``GET /relearn/cost-proposals``); a third
+    (``cmd_quickstart``'s first-run screen) did not, and its own comment
+    asserted the two totals could never disagree while quietly handing the
+    rollup a cost-proposals-only list — relearn's money vanished from exactly
+    the screen a brand-new user sees first.
+
+    THE FIX, AND WHAT THIS PINS. ``inbox_contribution.gather_rollup_population``
+    is now the only function that gathers BOTH feeds (cost proposals AND
+    relearn's open clusters) before calling ``past_overspend_rollup``, and it
+    is written ONCE. This walks every module under ``tokenjam/`` and fails if
+    ``past_overspend_rollup`` is called from anywhere other than
+    ``inbox_contribution.py`` itself (where ``gather_rollup_population``
+    calls it) — so a future caller cannot silently regress to a
+    cost-proposals-only sum the way ``cmd_quickstart`` did: reaching the raw
+    function from a new call site is the structural signature of exactly that
+    defect, whether or not the author meant to reintroduce it.
+
+    A caller that genuinely wants a documented SUBSET (not an omission) must
+    add that call inside ``inbox_contribution.py`` itself, with its own
+    docstring naming the exclusion — see ``gather_rollup_population``'s own
+    docstring. Nothing about that path is blocked here; what is blocked is a
+    silent, undocumented bypass from outside the module that owns the
+    contract.
+
+    Tests are exempt (they legitimately pin the raw function's own behaviour,
+    e.g. this file) — this walks only the shipped package.
+
+    THE WALK ITSELF now lives in ``core/optimize/single_derivation.py``
+    (the "rollup population" entry), shared with every other
+    single-derivation seam in the product instead of being reimplemented
+    per value — see that module's docstring. This test keeps its own name
+    and account of the incident because both are still the most useful
+    place for a reader to find them; it no longer owns a second copy of the
+    AST walk.
+    """
+    from tokenjam.core.optimize.single_derivation import SEAMS, offenders_for
+
+    seam = next(s for s in SEAMS if s.name == "rollup population")
+    offenders = offenders_for(seam)
+    assert not offenders, (
+        "past_overspend_rollup called outside inbox_contribution."
+        "gather_rollup_population at:\n  " + "\n  ".join(offenders)
+    )
+
+
 # --- no per-analyzer projection: the figure is the window observation ------ #
 
 def test_no_analyzer_figure_is_paced_however_rich_the_window():
@@ -1398,6 +1451,37 @@ def test_recompute_cost_proposals_skips_when_already_locked(db, cfg):
         assert cost_proposals_mod.recompute_cost_proposals(db, cfg) == []
     finally:
         cost_proposals_mod._COST_LOCK.release()
+
+
+def test_legacy_cost_window_keys_never_disagree_with_the_cycle_provenance_record(db, cfg):
+    """``cost_since``/``cost_until`` and the record's ``since``/``until`` are two
+    spellings of ONE fact, and the store lets a caller supply them independently:
+    the string kwargs win over the record when both are given. The single
+    production caller derives both from the same window, so they agree TODAY BY
+    CONSTRUCTION — nothing forces it. This pins the production path's artifact,
+    so an edit that starts passing bounds computed apart from the record fails
+    here instead of silently restoring the two-spellings bug the record exists to
+    end.
+
+    Asserted on the KEYS' presence first: an artifact that stored neither
+    spelling would satisfy an equality check vacuously, which is the failure mode
+    least likely to be noticed.
+    """
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    assert cost_proposals_mod.recompute_cost_proposals(db, cfg) == []
+    payload = relearn_store.read_cost_proposals(config=cfg)
+
+    record = payload["cost_provenance"]
+    for key in ("cost_since", "cost_until", "cost_window_days", "cost_tj_version"):
+        assert key in payload, f"{key} missing — equality below would pass vacuously"
+    for key in ("since", "until", "window_days", "build"):
+        assert record.get(key) is not None, f"provenance {key} missing"
+
+    assert payload["cost_since"] == record["since"]
+    assert payload["cost_until"] == record["until"]
+    assert payload["cost_window_days"] == record["window_days"]
+    assert payload["cost_tj_version"] == record["build"]
 
 
 def test_write_and_clear_cost_proposals_error_round_trip(tmp_path):

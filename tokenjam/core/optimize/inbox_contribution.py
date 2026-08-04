@@ -79,6 +79,7 @@ floor may not hide it and no combined figure may include it.
 """
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
 from tokenjam.core.optimize import cost_proposals as _cost_proposals_mod
@@ -484,6 +485,89 @@ def unrepresented_relearn(
         "past_overspend_usd": round(usd, 6) if priced else None,
         "past_overspend_tokens": tokens,
     }
+
+
+def gather_rollup_population(
+    cost_proposals: Sequence[Any],
+    relearn_finding: Any,
+    *,
+    window_days: float | int,
+    relearn_applied_signatures: Iterable[str] = (),
+    cost_excluded: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """THE complete Review-inbox rollup: every cost proposal PLUS every open
+    relearn cluster's contribution, summed through
+    ``cost_proposals.past_overspend_rollup``.
+
+    **THIS IS THE ONLY PLACE IN THE TREE ALLOWED TO CALL THAT FUNCTION** —
+    pinned by ``tests/unit/test_cost_proposals.
+    test_the_rollup_can_only_be_reached_through_gather_rollup_population``.
+    Completeness used to be a caller CONVENTION: whoever assembled a rollup's
+    input list had to remember to separately fetch relearn's cache, turn it
+    into rows via ``relearn_contribution_rows``, and concatenate. Two call
+    sites remembered (the CLI's ``tj relearn cost-proposals`` and the API's
+    ``GET /relearn/cost-proposals``); a third (``cmd_quickstart``'s first-run
+    screen) did not, and its own comment asserted the two totals could never
+    disagree while silently handing the rollup a cost-proposals-only list.
+    Routing every caller through this one function turns "a caller
+    remembered to gather both feeds" into "a caller cannot omit either feed
+    without calling the lower-level function directly, which is the thing
+    the guard test above exists to catch."
+
+    ``relearn_finding`` accepts either shape already live in this codebase:
+
+      * a ``dict`` read back off ``relearn_store.read_cache()["finding"]``
+        (how the CLI and API routes reach it — relearn runs out of band, on
+        its own daemon cadence, and these callers read its last cached
+        result); or
+      * a live ``RelearnFinding`` dataclass straight off
+        ``report.findings["relearn"]`` (how a caller with no cache reaches
+        it — a freshly built, never-persisted report, e.g.
+        ``cmd_quickstart``'s transient in-memory run).
+
+    Normalised here with ``dataclasses.asdict`` (recursive, so the nested
+    ``RelearnCluster``/``RelearnWindowTotal`` dataclasses come along) into
+    the plain ``Mapping`` shape ``relearn_contribution_rows`` already reads —
+    so neither that function nor any caller of this one has to branch on
+    which shape arrived. ``None`` (the analyzer never ran, or a scope guard
+    left ``ctx.report.findings["relearn"]`` unset) degrades to "relearn
+    contributes nothing", exactly like any other absent finding on this
+    rollup.
+
+    ``window_days`` is NOT resolved here — it has to be the same window every
+    proposal in ``cost_proposals`` was already observed over, and that
+    resolution rule differs by caller shape (``headline_window_days`` off a
+    cached block, or a report's own window summary). Relearn's rows only
+    join when the finding carries a bucket whose span EXACTLY matches this
+    value (see this module's docstring on why there is no nearest-match
+    fallback); a mismatch is not an error, it surfaces through the returned
+    ``excluded`` channel instead of silently vanishing from the total.
+
+    A caller that genuinely needs a SUBSET of this population (not "forgot
+    the other feed", a deliberate exclusion) says so by reaching for
+    ``cost_proposals.past_overspend_rollup`` directly from this module,
+    naming the exclusion in its own docstring — never by working around this
+    function from outside it.
+    """
+    if is_dataclass(relearn_finding) and not isinstance(relearn_finding, type):
+        relearn_finding = asdict(relearn_finding)
+    applied = {str(s) for s in relearn_applied_signatures}
+    label = contribution_window_label(relearn_finding, window_days)
+    relearn_rows = relearn_contribution_rows(
+        relearn_finding, label=label, applied_signatures=applied,
+    )
+    unrepresented = unrepresented_relearn(
+        relearn_finding, label=label, applied_signatures=applied,
+    )
+    excluded = {
+        **(dict(cost_excluded) if cost_excluded else {}),
+        **relearn_excluded_entry(unrepresented, reason=NO_BOUNDED_WINDOW_REASON),
+    }
+    return _cost_proposals_mod.past_overspend_rollup(
+        list(cost_proposals) + relearn_rows,
+        window_days=int(window_days),
+        excluded=excluded,
+    )
 
 
 def relearn_excluded_entry(

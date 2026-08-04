@@ -36,6 +36,7 @@ import pytest
 from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 
 from tokenjam.core.db import InMemoryBackend
+from tests.write_allocation_helpers import allocate_relearn
 from tokenjam.core.optimize.analyzers.relearn import (
     GROUNDED_TOKENS_PER_OCCURRENCE,
     MIN_RECURRING_SESSIONS,
@@ -231,6 +232,7 @@ def test_net_negative_write_budget_does_not_zero_the_past_cost(db):
         clusters, conn=db.conn, window_days=30.0, persona="claude-code",
         projection=underwater, repo_cwd_map={"demo": "/tmp/demo"},
     )
+    proposals = allocate_relearn(proposals)
 
     assert len(proposals) == 1
     p = proposals[0]
@@ -410,7 +412,7 @@ def test_suppressed_cluster_carries_a_short_gate_label(db):
         clusters, conn=db.conn, window_days=30.0, persona="claude-code",
         projection=underwater, repo_cwd_map={"demo": "/tmp/demo"},
     )
-    p = proposals[0]
+    p = allocate_relearn(proposals)[0]
     assert not p.write_offered
     assert p.write_blocked_reason, "the long sentence must survive for the card"
     assert p.write_blocked_short, "the short label must exist for the list"
@@ -465,7 +467,7 @@ def test_cli_relearn_row_leads_with_what_it_cost_not_the_gated_claim(db):
         clusters, conn=db.conn, window_days=30.0, persona="claude-code",
         projection=underwater, repo_cwd_map={"demo": "/tmp/demo"},
     )
-    p = proposals[0]
+    p = allocate_relearn(proposals)[0]
     assert p.net_negative
     # No write is offered — no forward field exists to be zero...
     assert not p.write_offered

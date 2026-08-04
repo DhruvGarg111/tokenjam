@@ -400,16 +400,22 @@ def test_the_report_and_cost_stores_come_from_ONE_analyzer_pass(monkeypatch):
     seen = {}
     sentinel = object()
 
+    # THE ANCHOR NOW TRAVELS ON A RECORD, not as a bare `until=`. One
+    # `CycleProvenance` per pass carries the anchor, the window, the persona and
+    # the producing build, so "both halves used the same instant" and "both
+    # halves belong to the same cycle" are one assertion instead of a timestamp
+    # comparison that could not tell two passes apart at all. See
+    # `core/optimize/cycle_provenance.py`.
     monkeypatch.setattr(
         report_store, "recompute_now",
-        lambda _db, _cfg, **kw: seen.setdefault("anchor_report", kw.get("until")) or {"ok": 1},
+        lambda _db, _cfg, **kw: seen.setdefault("prov_report", kw.get("provenance")) or {"ok": 1},
     )
     monkeypatch.setattr(report_store, "is_computing", lambda: False)
     monkeypatch.setattr(report_store, "stored_report", lambda _cfg: sentinel)
 
     def _cost(_db, _cfg, **kw):
         seen["report_arg"] = kw.get("report")
-        seen["anchor_cost"] = kw.get("until")
+        seen["prov_cost"] = kw.get("provenance")
         return []
 
     done = threading.Event()
@@ -428,9 +434,13 @@ def test_the_report_and_cost_stores_come_from_ONE_analyzer_pass(monkeypatch):
     # The cost side was handed the report the pass just built — it did not
     # build its own.
     assert seen["report_arg"] is sentinel
-    # And both halves used the same anchor.
-    assert seen["anchor_report"] is not None
-    assert seen["anchor_report"] == seen["anchor_cost"]
+    # And both halves used the same anchor — carried by one record, so they are
+    # also provably the same CYCLE and the same producing build.
+    assert seen["prov_report"] is not None
+    assert seen["prov_cost"] is not None
+    assert seen["prov_report"].anchor == seen["prov_cost"].anchor
+    assert seen["prov_report"].cycle_id == seen["prov_cost"].cycle_id
+    assert seen["prov_report"].build == seen["prov_cost"].build
 
 
 def test_a_pass_that_cannot_start_is_reported_not_raised(monkeypatch):

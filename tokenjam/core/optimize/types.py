@@ -406,6 +406,17 @@ class OptimizeReport:
     # no config was ever looked at. One field on the report rather than one
     # per finding, so every surface reads the same answer.
     filesystem_scan_skipped_reason: str | None = None
+    # THE write allocation for this report, keyed by "<lane>:<signature>" and
+    # serialized (see `core/optimize/write_allocation.py`). Every permanent
+    # write either producer proposes — relearn's clusters and the write-bearing
+    # cost cards — is ranked against ONE budget, once, and the verdict is
+    # recorded here rather than decided independently inside each producer.
+    # It rides on the report because the report is what crosses the process
+    # boundary between the pass that allocates and the pass that applies the
+    # cost half; an empty dict means nobody has allocated yet, which
+    # `write_allocation.decisions_for` resolves rather than treating as "no
+    # write was offered".
+    write_decisions: dict = field(default_factory=dict)
 
 
 @dataclass
