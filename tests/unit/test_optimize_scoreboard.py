@@ -430,3 +430,81 @@ def test_next_block_points_at_the_largest_recoverable_finding(capsys):
 
     assert "tj optimize deadweight" in out
     assert "tj optimize summarize" not in out
+
+
+# --------------------------------------------------------------------------- #
+# No total, and a disclosure that says why
+# --------------------------------------------------------------------------- #
+
+def test_scoreboard_prints_no_summed_total(capsys):
+    """The analyzers price overlapping angles on the same sessions (`downsize`
+    excludes `sub_agent_id IS NOT NULL` spans precisely because `subagent`
+    already prices the identical swap over them), so a summed headline would
+    add waste that was measured twice. The largest single line is the honest
+    standalone figure, and sorting puts it on top; nothing is summed."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        summarize=SimpleNamespace(
+            candidates=[object()],
+            past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
+        ),
+        deadweight=SimpleNamespace(
+            dead_servers=["some-mcp"],
+            past_overspend_usd=296.74, past_overspend_tokens=1_000,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="api")
+    out = _flat(capsys.readouterr().out)
+
+    assert "$48.55" in out and "$296.74" in out
+    # 48.55 + 296.74, in every rendering `_fmt_usd` could produce.
+    assert "345" not in out
+    assert "Total" not in out and "total" not in out
+
+
+def test_two_or_more_priced_rows_carry_the_overlap_disclosure(capsys):
+    """A column of dollar figures invites the reader to add it up. The
+    disclosure is what stops the sum happening in their head instead of in
+    our code."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        summarize=SimpleNamespace(
+            candidates=[object()],
+            past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
+        ),
+        deadweight=SimpleNamespace(
+            dead_servers=["some-mcp"],
+            past_overspend_usd=296.74, past_overspend_tokens=1_000,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="api")
+    out = _flat(capsys.readouterr().out)
+
+    assert "These 2 estimates are computed from overlapping angles on the same sessions" in out
+    assert "do not add up" in out
+    assert "largest single line is the one to act on first" in out
+
+
+def test_unpriced_rows_do_not_count_toward_the_disclosure(capsys):
+    """One priced row and one `—` row is not two overlapping estimates, so
+    there is nothing to disclaim — mirroring `_recoverable_overlap_note`,
+    which returns an empty string below two entries."""
+    from tokenjam.cli.cmd_optimize import _render_scoreboard
+
+    report = _synthetic_report(
+        summarize=SimpleNamespace(
+            candidates=[object()],
+            past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
+        ),
+        deadweight=SimpleNamespace(
+            dead_servers=["some-mcp"],
+            past_overspend_usd=None, past_overspend_tokens=None,
+        ),
+    )
+    _render_scoreboard(report, agent=None, pricing_mode="api")
+    out = _flat(capsys.readouterr().out)
+
+    assert "overlapping angles" not in out
+    assert "—" in out

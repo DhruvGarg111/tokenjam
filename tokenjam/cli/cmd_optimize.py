@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 
 import click
 from rich.markup import escape as _rich_escape
+from rich.padding import Padding
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
@@ -1364,6 +1365,9 @@ def _render_scoreboard(
     # with no figure, not a finding worth nothing.
     ordered.sort(key=lambda r: (r[0] is None, -(r[0] or 0.0), r[1]))
     rows = [(name, line, recoverable, why) for _v, _r, name, line, recoverable, why in ordered]
+    # Rows carrying an actual figure. Drives the overlap disclosure below,
+    # which only has something to say once two figures sit in one column.
+    priced_rows = sum(1 for value, *_rest in ordered if value is not None)
 
     console.print(
         f"  [dim]{_plural(len(ranked), 'analyzer')} · "
@@ -1390,6 +1394,28 @@ def _render_scoreboard(
             # in tokenjam/CLAUDE.md).
             table.add_row(name, _rich_escape(line), f"[label]{recoverable}[/label]")
         console.print(table)
+        # A column of dollar figures invites the reader to add it up, and the
+        # sum would be wrong: the analyzers price overlapping angles on the
+        # SAME sessions (`downsize` deliberately excludes `sub_agent_id IS NOT
+        # NULL` spans because `subagent` already prices the identical swap over
+        # them), so summing them sums waste measured twice. Same reasoning and
+        # substantially the same wording as `_recoverable_overlap_note` in
+        # api/routes/cost.py, condensed for a terminal; that route's
+        # `recoverable_additive: False` is the machine-readable form of it.
+        # This is why the screen prints no total: the top row, being the
+        # largest single lever, is not a sum of anything and is the one figure
+        # that is honest standing alone.
+        if priced_rows >= 2:
+            # Padded rather than prefixed with two spaces: this is the one
+            # note here long enough to wrap, and a hand-written prefix indents
+            # only the first line, dropping the continuation to column 0.
+            console.print(Padding(
+                f"[dim]These {priced_rows} estimates are computed from "
+                f"overlapping angles on the same sessions, so they do not add "
+                f"up to an amount you could recover. The largest single line "
+                f"is the one to act on first.[/dim]",
+                (0, 0, 0, 2),
+            ))
         console.print(
             "  [dim]Estimates carry method notes and caveats. See "
             "[accent]tj optimize <analyzer>[/accent].[/dim]\n"
