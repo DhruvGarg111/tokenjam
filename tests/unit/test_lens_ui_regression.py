@@ -14,6 +14,9 @@ follow-ups: opt-in light payload, lazy per-span attributes, capped/pinned rows).
 """
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -436,3 +439,172 @@ def test_cursor_listbox_scrolls_horizontally_and_truncates_paths(html: str) -> N
     ), "cur-listbox must scroll horizontally, not just vertically"
     assert '<td class="mono" title=${c.path}>${shortPath(c.path)}</td>' in html
     assert "title=${r.path + ' — review the diff'}" in html
+
+
+# --------------------------------------------------------------------------- #
+# Total opportunity tile — a 7th tile, first in the Dashboard's "Opportunities
+# to optimize token efficiency" row, summing the six per-analyzer figures.
+#
+# `totalOpportunityFigure()` is the one pure function that decides the sum and
+# its population; a static string match on the source would still pass if that
+# arithmetic or exclusion logic were wrong (the exact critique
+# test_lens_select_all_behaviour.py levels at grep-only tests), so it is
+# extracted straight out of the served index.html and run under node instead,
+# the same trick that module and test_lens_dashboard_states.py use.
+# --------------------------------------------------------------------------- #
+_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not available for JS evaluation")
+
+
+def _total_figure_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function totalOpportunityFigure")
+    end = src.index("// The TOTAL tile itself", start)
+    return src[start:end]
+
+
+def _total_figure(tiles: list[dict]):
+    script = (
+        _total_figure_source()
+        + "\nconsole.log(JSON.stringify(totalOpportunityFigure(" + json.dumps(tiles) + ")));"
+    )
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+@_node
+def test_total_equals_the_plain_sum_of_actionable_contributors():
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 1528.89, "tokens": 100},
+        {"name": "resend", "state": "actionable", "usd": 374.33, "tokens": 200},
+        {"name": "downsize", "state": "actionable", "usd": 295.23, "tokens": 300},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "populated"
+    assert round(fig["totalUsd"], 2) == round(1528.89 + 374.33 + 295.23, 2)
+    assert fig["totalTokens"] == 600
+    assert fig["contributorCount"] == 3
+
+
+@_node
+def test_an_absent_no_findings_analyzer_is_excluded_not_zeroed():
+    # Deadweight with no candidates renders 'No candidates', never a $0 tile
+    # (root CLAUDE.md anti-pattern 22). Its state carries no usd at all here,
+    # mirroring classifyFinding()'s real 'no_findings' shape, and the sum must
+    # come out identical to the same row with that tile removed entirely --
+    # proof it is excluded structurally (by state), not by a falsy usd check.
+    with_deadweight = [
+        {"name": "subagent", "state": "actionable", "usd": 100.0, "tokens": 10},
+        {"name": "deadweight", "state": "no_findings"},
+    ]
+    without_deadweight = [
+        {"name": "subagent", "state": "actionable", "usd": 100.0, "tokens": 10},
+    ]
+    with_fig = _total_figure(with_deadweight)
+    without_fig = _total_figure(without_deadweight)
+    assert with_fig["totalUsd"] == without_fig["totalUsd"] == 100.0
+    assert with_fig["contributorCount"] == without_fig["contributorCount"] == 1
+    # The excluded tile is still counted as a KNOWN (resolved) tile, just not
+    # a contributor -- it answered "nothing here", which is not the same as
+    # "not yet known".
+    assert with_fig["knownCount"] == 2
+
+
+@_node
+def test_an_at_ceiling_tile_contributes_nothing_to_the_sum():
+    # cache's positive "already at the ceiling" state carries a metric string,
+    # never a usd figure; it must be excluded the same way no_findings is.
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 50.0, "tokens": 5},
+        {"name": "cache", "state": "at_ceiling", "metric": "98% cache efficacy"},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["totalUsd"] == 50.0
+    assert fig["contributorCount"] == 1
+
+
+@_node
+def test_all_analyzers_unresolved_is_the_unknown_state_never_zero():
+    # Nothing has resolved yet -- the tile must render a skeleton, not a $0.00
+    # total (the worst possible placeholder: it reads as "no waste").
+    tiles = [
+        {"name": "subagent", "state": "not_ready", "hint": "Not run on Overview."},
+        {"name": "resend", "state": "not_ready", "hint": "Not run on Overview."},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "unknown"
+    assert fig["totalUsd"] == 0
+    assert fig["knownCount"] == 0
+
+
+@_node
+def test_every_analyzer_resolved_empty_is_the_empty_state():
+    # Every tile answered, none had a recoverable figure: this is the ONE
+    # legitimate home for empty-state copy, distinct from 'unknown'.
+    tiles = [
+        {"name": "subagent", "state": "no_findings"},
+        {"name": "deadweight", "state": "no_findings"},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "empty"
+    assert fig["totalUsd"] == 0
+    assert fig["contributorCount"] == 0
+    assert fig["knownCount"] == 2
+
+
+@_node
+def test_a_partially_resolved_row_discloses_its_coverage_not_a_full_claim():
+    # Some analyzers answered, some have not: the total must not claim to
+    # cover every tile in the row. unresolvedCount is how the renderer knows
+    # to disclose the partial population instead of publishing a total that
+    # reads as complete.
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 10.0, "tokens": 1},
+        {"name": "resend", "state": "not_ready", "hint": "Not run on Overview."},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "populated"
+    assert fig["totalUsd"] == 10.0
+    assert fig["unresolvedCount"] == 1
+    assert fig["totalCount"] == 2
+    assert fig["knownCount"] == 1
+
+
+def test_total_tile_is_first_in_the_row_and_visually_distinct(html: str) -> None:
+    # Rendered before tiles.map(), so it is the first child of .tile-grid; a
+    # dedicated CSS class carries the weight/border distinction (never the
+    # accent colour, which means "typeable/clickable" and this tile links
+    # nowhere).
+    assert (
+        "<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${tiles.map(t => {" in html
+    ), "the total tile must render before tiles.map() in the tile-grid"
+    assert ".rec-tile.total-tile" in html
+    assert ".rec-tile.total-tile .rec-amount { color: var(--text); }" in html
+
+
+def test_total_tile_cannot_render_a_dollar_figure_while_unresolved(html: str) -> None:
+    # The 'unknown' branch returns before any amount/hint computation touches
+    # fmtFramedSavings -- a skeleton, never a number, while nothing has
+    # resolved. Anchor on the guard clause and its skeleton markup.
+    fn = html[html.index("function TotalOpportunityTile("):]
+    fn = fn[: fn.index("\n}\n")]
+    assert "if (fig.state === 'unknown') {" in fn
+    idx_guard = fn.index("if (fig.state === 'unknown')")
+    idx_amount = fn.index("const amount")
+    assert idx_guard < idx_amount, "the unresolved guard must return before computing an amount"
+    assert 'class="rec-tile total-tile rec-skel" aria-hidden="true"' in fn
+
+
+def test_total_tile_comment_marks_the_sum_as_deliberate_and_scoped(html: str) -> None:
+    # The founder decision (naive sum now, netted rollup once `script` runs
+    # for a persona that reaches this row) must be recorded at the summing
+    # site, with no internal ticket id per root anti-pattern 11.
+    fn_start = html.index("function totalOpportunityFigure")
+    comment = html[html.index("// The TOTAL opportunity tile"): fn_start]
+    assert "PLAIN SUM" in comment
+    assert "netted cross-analyzer" in comment
+    assert "persona-disabled" in comment
+    import re
+    assert not re.search(r"#\d+", comment), "no internal ticket id in a source comment"
