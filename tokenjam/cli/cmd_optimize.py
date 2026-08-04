@@ -122,6 +122,8 @@ def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
                    "(default 5, max 20).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
               help="Skip the --validate cost-estimate confirmation prompt.")
+@click.option("-v", "--verbose", "verbose_flag", is_flag=True, default=False,
+              help="Print every finding card in full instead of the scoreboard.")
 @json_option
 @click.pass_context
 def cmd_optimize(
@@ -137,6 +139,7 @@ def cmd_optimize(
     validate_finding: str | None,
     samples: int | None,
     assume_yes: bool,
+    verbose_flag: bool,
     output_json_flag: bool,
 ) -> None:
     """Find cost-saving opportunities."""
@@ -429,7 +432,12 @@ def cmd_optimize(
     # everything with -v — rather than being the default nobody chose.
     # `-v` is byte-for-byte what a bare `tj optimize` used to print, which is
     # also the migration path for the tests that pin that output.
-    verbose = bool(ctx.obj.get("verbose"))
+    # Either position turns it on. The scoreboard's Next block advertises
+    # `tj optimize -v`, which parsed as "No such option" while the flag lived
+    # only on the group: reading `ctx.obj` is not the same as accepting the
+    # flag. Both copies are booleans meaning the same thing, so OR is the
+    # entire resolution rule.
+    verbose = verbose_flag or bool(ctx.obj.get("verbose"))
     if verbose or requested:
         _render_report(
             report, agent=agent, plan_mix=plan_mix,

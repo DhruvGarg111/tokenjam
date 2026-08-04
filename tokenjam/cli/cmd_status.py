@@ -28,9 +28,13 @@ _TEASER_MIN_USD = 1.0
 
 @click.command("status")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
+@click.option("-v", "--verbose", "verbose_flag", is_flag=True, default=False,
+              help="Print every agent's full card instead of the capped table.")
 @json_option
 @click.pass_context
-def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) -> None:
+def cmd_status(
+    ctx: click.Context, agent: str | None, verbose_flag: bool, output_json_flag: bool,
+) -> None:
     """Show agent status overview."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
@@ -140,7 +144,13 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) ->
         # than being the default nobody chose: one ~9-line card per tracked
         # agent_id is a screen whose length grows with every project
         # directory tj has ever seen, with the totals stranded at the bottom.
-        verbose = bool(ctx.obj.get("verbose"))
+        # Either position turns it on. `-v` is declared on the group AND on
+        # this command because the screen advertises `tj status -v`, which is
+        # what a user types; reading only the group's copy made the advertised
+        # string exit 2 with "No such option". They cannot conflict: both are
+        # booleans meaning the same thing, so OR is the whole resolution rule
+        # and there is no precedence question to get wrong.
+        verbose = verbose_flag or bool(ctx.obj.get("verbose"))
         if verbose or agent_filter:
             for agent_data, active_alerts, session in entries:
                 _print_agent_status(agent_data, active_alerts, session)
