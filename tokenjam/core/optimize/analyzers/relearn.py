@@ -607,6 +607,17 @@ class FailureEpisode:
     #: carry no detour and fall back to 1.0 (the conservative floor, and the
     #: value the whole analyzer assumed before this was measured).
     detour_turns: float | None = None
+    #: True when ``error_text`` is NOT the real error — the OTel/archive lanes
+    #: (``core/optimize/relearn_otel.py``) fall back to the span's own NAME
+    #: (e.g. ``gen_ai.tool.call``) when a span carries no ``status_message``.
+    #: That text carries no diagnosis of what actually went wrong, so it must
+    #: never be treated as if it did: it cannot ground an LLM-distilled title
+    #: (there is nothing to distill) and it must not collapse unrelated
+    #: failures into one shared signature just because they all fell back to
+    #: the same generic span name. See ``_failure_signature`` and
+    #: ``_evidence_too_thin_for_distill``. The transcript lane never sets
+    #: this — a transcript's raw tool error is always the real text.
+    error_text_is_name_fallback: bool = False
 
 
 #: Stop looking for the recovery turn after this many steps. Past it the agent
@@ -809,7 +820,22 @@ class _RawCluster:
 def _failure_signature(failure: FailureEpisode) -> tuple[str, str | None, str]:
     """``(signature, family_key, title)`` for one failure: a known family (sig ==
     family_key) or a generic normalized signature. The single classify point
-    ``cluster_failures`` keys on."""
+    ``cluster_failures`` keys on.
+
+    A name-fallback failure (``error_text_is_name_fallback`` — see
+    ``FailureEpisode``) gets a signature scoped to its OWN session rather than
+    the shared generic one every other failure on the same tool would land on.
+    Two genuinely unrelated failures that both happened to carry no error text
+    are not evidence of one root cause, so they must never bucket together —
+    and scoping to the session also guarantees the cluster can never clear the
+    cross-session recurrence gate (``MIN_RECURRING_SESSIONS``), which is what
+    keeps it out of the distill pass without relying on a second check there.
+    The money is still counted: an un-recurring cluster still lands in
+    ``_below_threshold_residue``, never silently dropped.
+    """
+    if failure.error_text_is_name_fallback:
+        sig = f"{failure.tool_name}:__no_error_text__:{failure.session_id}"
+        return sig, None, f"{failure.tool_name}: no error text captured"
     family_key = classify_known_family(failure.tool_name, failure.error_text, failure.label)
     if family_key is not None:
         return family_key, family_key, _FAMILY_BY_KEY[family_key]["title"]
@@ -1019,8 +1045,23 @@ def _evidence_too_thin_for_distill(cluster: _RawCluster, *, sample_cap: int = 8)
     error text — the distill confidence gate. A cluster failing this check is
     suppressed entirely rather than distilled (see ``apply_distill_to_residual``):
     showing a human a confident title + fix that traces to nothing but bare
-    exit codes / leftover stdout is worse than surfacing nothing."""
-    samples = [f.error_text for f in cluster.failures if f.error_text][:sample_cap]
+    exit codes / leftover stdout is worse than surfacing nothing.
+
+    A cluster made entirely of name-fallback failures (``error_text_is_name_fallback``
+    — see ``FailureEpisode``) is rejected outright, never even sampled: that
+    text is the span's own NAME, not a diagnosis, so there is nothing in it
+    for distill to legitimately ground a fix in. In practice
+    ``_failure_signature`` already keeps such a cluster from ever recurring
+    across enough sessions to reach this function at all; this check is the
+    second, independent line of defense so the guarantee does not rest on one
+    mechanism alone.
+    """
+    if cluster.failures and all(f.error_text_is_name_fallback for f in cluster.failures):
+        return True
+    samples = [
+        f.error_text for f in cluster.failures
+        if f.error_text and not f.error_text_is_name_fallback
+    ][:sample_cap]
     if not samples:
         return True
     return not any(_is_substantive_error_text(s) for s in samples)
@@ -1052,7 +1093,7 @@ def _distill_cached(tool_name: str, cluster: _RawCluster, cache_dir: Path) -> di
 
 
 def apply_distill_to_residual(
-    clusters: list[_RawCluster], *, cache_dir: Path | None = None, enabled: bool = True,
+    clusters: list[_RawCluster], *, cache_dir: Path, enabled: bool = True,
 ) -> list[_RawCluster]:
     """Distill the top (by session count) residual clusters and merge any that
     distill assigns the same ``family_key``. Bounded by ``MAX_DISTILL_CLUSTERS``
@@ -1061,10 +1102,14 @@ def apply_distill_to_residual(
     Clusters already matched to a known family are left untouched. When
     ``enabled`` is False (no ``claude`` CLI / caller opt-out) the residual
     clusters pass through with their generic titles, unmerged.
-    """
-    if cache_dir is None:
-        cache_dir = _distill_cache_dir()
 
+    ``cache_dir`` is REQUIRED and deliberately has no default: the natural
+    default (``_distill_cache_dir()`` with no config) resolves to the real
+    ``~/.tj``, which would write outside an isolated ``--projects-root`` /
+    ``--db`` scope with no signal to the caller. Every real call site
+    resolves it from the active config (``_distill_cache_dir(ctx.config)``)
+    before calling in — pass that scoped path, not the unscoped helper.
+    """
     known = [c for c in clusters if c.family_key is not None]
     residual = [c for c in clusters if c.family_key is None]
     if not enabled or not residual:
@@ -2179,8 +2224,15 @@ def analyze_relearns(
     raw_clusters = cluster_failures(all_failures)
     recurring = _recurring(raw_clusters, min_sessions)
     residue = _below_threshold_residue(raw_clusters, recurring, conn)
+    # apply_distill_to_residual requires an explicit cache_dir (no silent
+    # unscoped default — see its docstring). A caller here with no config to
+    # scope from (standalone helpers, tests) keeps today's historical
+    # ~/.tj-backed path via the config-less resolver; a caller WITH a config
+    # threads it in through `distill_cache_dir` instead, scoped.
     distilled = apply_distill_to_residual(
-        recurring, cache_dir=distill_cache_dir, enabled=distill_enabled,
+        recurring,
+        cache_dir=distill_cache_dir if distill_cache_dir is not None else _distill_cache_dir(),
+        enabled=distill_enabled,
     )
     distilled_count = sum(1 for c in distilled if (c.family_key or "").startswith("distilled:"))
 

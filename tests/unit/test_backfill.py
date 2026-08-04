@@ -117,6 +117,52 @@ def test_parse_returns_none_for_file_with_no_assistant_turns(tmp_path):
     assert parse_claude_code_session(path) is None
 
 
+# -- tokenjam's own internal model calls must never be ingested as a session -
+
+def test_parse_excludes_tokenjam_internal_invoke_cwd(tmp_path):
+    """core.distill/core.rulewrite.presence shell out to the SAME `claude`
+    CLI, from a private marker cwd under the system temp root
+    (`core.distill.INVOKE_CWD_DIRNAME`). Their transcripts must never be
+    ingested as a user session — they are tokenjam naming its own findings,
+    not agent work anyone did."""
+    from tokenjam.core.distill import INVOKE_CWD_DIRNAME
+
+    marker_cwd = f"/private/var/folders/xx/yyyy/T/{INVOKE_CWD_DIRNAME}"
+    path = _make_session_file(
+        tmp_path,
+        session_id="sess-internal",
+        cwd=marker_cwd,
+        records=[
+            _assistant_record(
+                "msg-1", "claude-haiku-4-5", 100, 20,
+                "2026-04-01T10:00:00.000Z", "sess-internal", marker_cwd,
+            ),
+        ],
+    )
+    assert parse_claude_code_session(path) is None
+
+
+def test_parse_keeps_a_real_session_genuinely_working_out_of_tmp(tmp_path):
+    """A user's own project can legitimately live under /tmp — only
+    tokenjam's OWN marker subdirectory is excluded, never the bare temp root
+    or an unrelated subdirectory of it."""
+    real_tmp_cwd = "/tmp/my-scratch-project"
+    path = _make_session_file(
+        tmp_path,
+        session_id="sess-real-tmp",
+        cwd=real_tmp_cwd,
+        records=[
+            _assistant_record(
+                "msg-1", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-real-tmp", real_tmp_cwd,
+            ),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert parsed.session_id == "sess-real-tmp"
+
+
 def test_iter_walks_root(tmp_path):
     _make_session_file(
         tmp_path,

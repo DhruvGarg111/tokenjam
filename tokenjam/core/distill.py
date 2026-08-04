@@ -34,7 +34,11 @@ import re
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tokenjam.core.config import TjConfig
 
 #: Max words a distilled title may contain (instructed to the model).
 MAX_TITLE_WORDS = 6
@@ -135,6 +139,54 @@ def _extract_titles(result: str, valid_ns: set[int]) -> dict[int, str]:
     return titles
 
 
+#: Sub-directory of the system temp root every ``_invoke_claude`` subprocess
+#: runs from — deliberately NOT the bare temp root. This is tokenjam's own
+#: internal model call (naming a relearn cluster, distilling a title,
+#: checking rule presence), never agent work a user did, but it still writes
+#: an ordinary Claude Code transcript to disk like any other ``claude``
+#: invocation and would otherwise be ingested as one more user session (it
+#: was — see ``core.backfill``/``core.transcript_sync``'s exclusion of this
+#: marker). A bare "cwd resolves under the temp root" check would ALSO catch
+#: a user genuinely working out of ``/tmp``; a dedicated, unlikely-to-collide
+#: directory name lets the ingest boundary positively identify tokenjam's own
+#: calls instead of guessing from a heuristic. See ``is_tokenjam_invoke_cwd``.
+INVOKE_CWD_DIRNAME = "tokenjam-internal-distill-cwd"
+
+
+def _invoke_cwd() -> str:
+    """Resolve (creating if needed) the private subprocess cwd — see
+    ``INVOKE_CWD_DIRNAME``. Falls back to the bare temp root if the
+    subdirectory can't be created (read-only temp, permissions): the call
+    still runs, just without the positive-identification marker, same as
+    before this existed."""
+    marker = Path(tempfile.gettempdir()) / INVOKE_CWD_DIRNAME
+    try:
+        marker.mkdir(parents=True, exist_ok=True)
+        return str(marker)
+    except OSError:
+        return tempfile.gettempdir()
+
+
+def is_tokenjam_invoke_cwd(cwd: str | None) -> bool:
+    """True when a recorded session ``cwd`` is tokenjam's own private
+    subprocess directory (``INVOKE_CWD_DIRNAME``), not a project a user
+    worked in. The ingest boundary (``core.backfill``, ``core.transcript_
+    sync``) uses this to exclude tokenjam's own distill/presence calls from
+    a user's session corpus. Checks the directory's BASENAME only (never a
+    prefix/substring match, and never resolved against the live filesystem —
+    the recorded cwd may no longer exist by ingest time) so it is robust to
+    the temp root itself differing (symlink resolution: macOS records
+    ``/private/var/...`` for a call made against ``/var/...``) — the marker
+    name is unique enough on its own that a basename match is unambiguous.
+    """
+    if not cwd:
+        return False
+    try:
+        return PurePosixPath(cwd.replace("\\", "/")).name == INVOKE_CWD_DIRNAME
+    except (TypeError, ValueError):
+        return False
+
+
 def _invoke_claude(prompt: str, *, model: str, timeout: int) -> str | None:
     """Shell out to the local ``claude`` CLI with ``prompt`` on stdin; return its
     ``result`` string, or ``None`` on any failure (missing CLI, non-zero exit,
@@ -160,15 +212,17 @@ def _invoke_claude(prompt: str, *, model: str, timeout: int) -> str | None:
     ]
 
     try:
-        # Neutral cwd so the CLI loads no project CLAUDE.md / MCP config, keeping
-        # the input tiny and the call cheap.
+        # A private, tokenjam-specific cwd (not the bare temp root) so the
+        # CLI loads no project CLAUDE.md / MCP config, keeping the input tiny
+        # and the call cheap, AND so the transcript this call writes to disk
+        # can be positively excluded at ingest — see INVOKE_CWD_DIRNAME.
         proc = subprocess.run(
             argv,
             input=prompt,
             text=True,
             capture_output=True,
             timeout=timeout,
-            cwd=tempfile.gettempdir(),
+            cwd=_invoke_cwd(),
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -249,8 +303,24 @@ def _cache_signature(asks: list[dict], model: str) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _default_cache_dir() -> Path:
-    """Default on-disk cache location: ``~/.tj/distill_cache``."""
+def _default_cache_dir(config: TjConfig | None = None) -> Path:
+    """Default on-disk cache location.
+
+    With a ``config`` this honors ``--projects-root`` / ``--db`` scoping the
+    same way ``relearn_store.default_cache_path``,
+    ``report_store.default_report_path`` and
+    ``transcript_cache.default_cache_dir`` already do — routed through
+    ``relearn_apply._storage_base_dir`` (an isolated ``storage.path`` resolves
+    under a scratch root, never the real ``~/.tj``). ``config=None`` (the
+    default) keeps today's hardcoded ``~/.tj/distill_cache`` so a caller with
+    no config to thread — most of this module's own callers — is unchanged.
+    Imported lazily to avoid this pure module picking up an import-time
+    dependency on the rest of the package.
+    """
+    if config is not None:
+        from tokenjam.core.optimize.relearn_apply import _storage_base_dir
+
+        return _storage_base_dir(config) / "distill_cache"
     return Path.home() / ".tj" / "distill_cache"
 
 

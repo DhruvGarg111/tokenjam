@@ -38,7 +38,7 @@ from fastapi.responses import JSONResponse
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _child_sessions, _run_sessions
 from tokenjam.core.db import delete_session_label, set_session_label
-from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
+from tokenjam.core.distill import _default_cache_dir, distill_titles_cached, peek_cached_titles
 from tokenjam.core.method_capture import capture_session_method, load_session_method
 from tokenjam.core.framing import (
     WindowSummary,
@@ -1940,10 +1940,15 @@ def get_session_distill(
         if (a.get("outcome") or "").strip()
         and len((a["outcome"]).strip()) >= DISTILL_MIN_OUTCOME_CHARS
     ]
+    # Scoped to the active config, not the historical unscoped ~/.tj default —
+    # an isolated `--projects-root` / `--db` run must never write into the
+    # operator's real home. See `core.distill._default_cache_dir`.
+    config = getattr(request.app.state, "config", None)
+    cache_dir = _default_cache_dir(config)
     if cached_only:
-        titles = peek_cached_titles(session_id, candidates)
+        titles = peek_cached_titles(session_id, candidates, cache_dir=cache_dir)
     else:
-        titles = distill_titles_cached(session_id, candidates)
+        titles = distill_titles_cached(session_id, candidates, cache_dir=cache_dir)
     return {
         "available": True,
         "model": "haiku",

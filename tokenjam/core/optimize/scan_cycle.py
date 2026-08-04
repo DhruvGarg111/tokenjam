@@ -64,10 +64,33 @@ It is a READ cadence and no surface may drive a scan cycle from it. Doing so
 put a full-corpus pass on a five-minute timer against passes that take minutes,
 which is most of a duty cycle of continuous scanning; the surfaces now re-read
 on that timer and the daemon owns when scanning happens.
+
+GATED ON INGESTION, NOT THE WALL CLOCK ALONE. The interval job used to fire
+this cycle on a pure timer, so an idle machine recomputed an answer that could
+not have changed — several minutes of full-corpus analysis, including the
+relearn distill pass's LLM subprocess calls, on zero new telemetry.
+``core/optimize/ingest_watermark.py`` is a cheap in-process counter bumped at
+the two DuckDB write paths every ingestion source funnels through. A
+SCHEDULED tick (the interval job, and the startup kick — which always passes,
+since this process has no prior watermark to compare against) now also
+requires ``[optimize] scan_watermark_min_new_spans`` new spans since the last
+pass that actually ran; below it, the tick is a no-op, same shape as
+``scan_enabled`` or the overlap guard declining. The floor against thrash is
+structural rather than a second timer: the watermark baseline only advances
+when a pass actually completes, and this function can fire no more often than
+the scheduler's own interval, so two passes can never land back-to-back
+faster than ``scan_interval_hours`` apart. The ceiling,
+``scan_watermark_max_staleness_hours``, forces a tick to run regardless of the
+watermark once that long has passed since the last pass — a quiet machine
+still gets refreshed occasionally rather than never again. An explicit
+user-triggered rescan (``POST /optimize/rescan``) passes ``force=True`` and
+bypasses this gate entirely — a human asking is answered, not deferred to the
+next tick.
 """
 from __future__ import annotations
 
 import threading
+from datetime import timedelta
 from typing import Any, Callable
 
 # THE CYCLE'S OWN IN-FLIGHT FLAG — the whole pass, not one of the stores it
@@ -100,6 +123,61 @@ def is_cycle_computing() -> bool:
     return _CYCLE_COMPUTING.is_set()
 
 
+# WATERMARK STATE FOR THE SCHEDULED-TICK GATE. ``None``/``None`` means "no
+# pass has completed in this process yet" — deliberately the state right
+# after a fresh `tj serve` boot, so the first tick (interval or startup kick)
+# always proceeds rather than comparing against a watermark it has no history
+# for. Set once, from `_job()`'s own success path, never read+cleared like
+# `_CYCLE_COMPUTING` — a declined/failed pass must leave the last SUCCESSFUL
+# watermark in place so the next tick's delta is still measured from real
+# ground truth.
+_watermark_lock = threading.Lock()
+_last_pass_watermark: int | None = None
+_last_pass_at: Any = None
+
+
+def _record_pass_watermark(watermark: int) -> None:
+    from tokenjam.utils.time_parse import utcnow
+
+    global _last_pass_watermark, _last_pass_at
+    with _watermark_lock:
+        _last_pass_watermark = watermark
+        _last_pass_at = utcnow()
+
+
+def _should_run_scheduled_pass(config: Any) -> bool:
+    """Gate for a SCHEDULED tick only. An explicit rescan never calls this.
+
+    True when: no pass has completed yet in this process; the corpus has
+    grown by at least ``scan_watermark_min_new_spans`` since the last one
+    that did; or the last one is older than
+    ``scan_watermark_max_staleness_hours`` (the ceiling — forces a refresh on
+    a quiet machine regardless of the watermark).
+    """
+    from tokenjam.core.optimize import ingest_watermark
+    from tokenjam.utils.time_parse import utcnow
+
+    with _watermark_lock:
+        last_watermark = _last_pass_watermark
+        last_at = _last_pass_at
+
+    if last_watermark is None or last_at is None:
+        return True
+
+    optimize = getattr(config, "optimize", None)
+    min_new_spans = int(getattr(optimize, "scan_watermark_min_new_spans", 1))
+    max_staleness_hours = float(
+        getattr(optimize, "scan_watermark_max_staleness_hours", 24.0)
+    )
+
+    if max_staleness_hours > 0 and utcnow() - last_at >= timedelta(hours=max_staleness_hours):
+        return True
+
+    if min_new_spans <= 0:
+        return True
+    return (ingest_watermark.current() - last_watermark) >= min_new_spans
+
+
 def scan_enabled(config: Any) -> bool:
     """Whether the daemon may scan on its own at all.
 
@@ -112,7 +190,7 @@ def scan_enabled(config: Any) -> bool:
 
 
 def trigger_scan_cycle(
-    backend_factory: Callable[[], Any], config: Any,
+    backend_factory: Callable[[], Any], config: Any, *, force: bool = False,
 ) -> dict[str, bool]:
     """Refresh every analyzer store. Returns which passes actually STARTED.
 
@@ -121,6 +199,15 @@ def trigger_scan_cycle(
     bind path. A ``False`` in the result means that store's own overlap guard
     declined — a pass was already in flight — which is a no-op, not a failure.
 
+    ``force=False`` (the default — every SCHEDULED caller, i.e. the interval
+    job and the startup kick) is additionally gated by
+    ``_should_run_scheduled_pass``: an idle machine with no new spans since
+    the last pass is answered with ``{"analyzer_pass": False}`` before
+    anything is dispatched — see this module's docstring, "GATED ON
+    INGESTION". ``force=True`` is reserved for an explicit user rescan
+    (``POST /optimize/rescan``), which must always attempt a pass — a human
+    asking is never deferred to the next tick.
+
     Never raises. One store failing to start must not stop the other two from
     refreshing; a store that raises on trigger is reported as not started and
     its own error channel records why (each recompute stores its exception so
@@ -128,6 +215,9 @@ def trigger_scan_cycle(
     no explanation).
     """
     from tokenjam.utils.time_parse import utcnow
+
+    if not force and not _should_run_scheduled_pass(config):
+        return {"analyzer_pass": False}
 
     # Resolved ONCE, before anything is dispatched, so every pass in this cycle
     # subtracts its window from the same instant.
@@ -159,12 +249,17 @@ def _trigger_analyzer_pass(
     Returns ``False`` when the report store's own overlap guard declined, which
     means a pass is already in flight and this cycle is a no-op.
     """
-    from tokenjam.core.optimize import cost_proposals, report_store
+    from tokenjam.core.optimize import cost_proposals, ingest_watermark, report_store
 
     if report_store.is_computing() or is_cycle_computing():
         return False
 
     def _job() -> None:
+        # Read BEFORE the pass runs, not after: a span landing WHILE this pass
+        # is in flight is not covered by what it analyzed, so it must still
+        # count toward the next tick's delta. Recording a post-pass value
+        # would silently consume that span's contribution to the watermark.
+        watermark_at_start = ingest_watermark.current()
         backend = None
         try:
             backend = backend_factory()
@@ -172,6 +267,7 @@ def _trigger_analyzer_pass(
             if stored is None:
                 # The overlap guard declined between the check above and here.
                 return
+            _record_pass_watermark(watermark_at_start)
             # The typed report the pass just wrote. `None` when the stored
             # payload cannot be rehydrated (corrupt, or written by a newer
             # producer); the downstream stores then fall back to computing
