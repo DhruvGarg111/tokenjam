@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
+from tests.summarize_fakes import compliant_summary, envelope_like
 from tokenjam.cli.main import cli
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize import candidates
@@ -247,10 +248,9 @@ _RUN = "tokenjam.core.summarize.delivery.subprocess.run"
 
 
 def _fake_claude():
-    """`subprocess.run` stand-in for the CLI: echo every marker so restore() succeeds (no real claude)."""
+    """`subprocess.run` stand-in for the CLI: a model that obeyed the contract (no real claude)."""
     def _run(cmd, *, input, capture_output, text, timeout=None):
-        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', input, re.DOTALL)
-        return SimpleNamespace(returncode=0, stdout="Be careful; never skip. " + " ".join(markers), stderr="")
+        return SimpleNamespace(returncode=0, stdout=compliant_summary(input), stderr="")
     return _run
 
 
@@ -313,10 +313,9 @@ def _fake_api():
     """`httpx.post` stand-in for the CLI api path: echo markers + report usage (no network)."""
     def _post(url, *, timeout, headers, json):
         wrapped = json["messages"][0]["content"]
-        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', wrapped, re.DOTALL)
         return SimpleNamespace(
             status_code=200, text="",
-            json=lambda: {"content": [{"type": "text", "text": "Be careful; never skip. " + " ".join(markers)}],
+            json=lambda: {"content": [{"type": "text", "text": compliant_summary(wrapped)}],
                           "stop_reason": "end_turn",
                           "usage": {"input_tokens": 1200, "output_tokens": 400}})
     return _post
@@ -403,10 +402,9 @@ def test_prep_via_api_missing_usage_json_omits_amortization(runner, tmp_path, mo
 
     def _api_without_usage(url, *, timeout, headers, json):
         wrapped = json["messages"][0]["content"]
-        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', wrapped, re.DOTALL)
         return SimpleNamespace(
             status_code=200, text="",
-            json=lambda: {"content": [{"type": "text", "text": "Be careful. " + " ".join(markers)}],
+            json=lambda: {"content": [{"type": "text", "text": compliant_summary(wrapped)}],
                           "stop_reason": "end_turn"})
 
     with patch(_POST, _api_without_usage):
@@ -458,8 +456,10 @@ def test_calibrate_json_reports_the_measured_ratio(runner, tmp_path):
     def _shrink(config, mode, wrapped_prompt, system_rules):
         from tokenjam.core.summarize.delivery import DeliveryResult
         markers = marker_re.findall(wrapped_prompt)
-        words = [w for w in wrapped_prompt.split() if not w.startswith("<tj-keep")]
-        return DeliveryResult(summary=" ".join(words[: len(words) // 4] + markers))
+        words = [w for w in wrapped_prompt.split()
+                 if not w.startswith("<tj-keep") and not w.startswith(("<tj-source", "</tj-source"))]
+        body = " ".join(words[: len(words) // 4] + markers)
+        return DeliveryResult(summary=envelope_like(wrapped_prompt, body))
 
     with patch("tokenjam.core.summarize.delivery.deliver", _shrink):
         result = _invoke_cfg(
