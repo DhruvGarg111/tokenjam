@@ -100,6 +100,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     the fact, not inferable by diffing two measurements days apart.
     checks.append(_check_retention(config, ctx.obj["db"]))
 
+    # 20. Subagent type linkage — sub_agent_id spans with no resolved
+    #     sub_agent_type, the join key `subagent_rightsizing` and cost
+    #     attribution need.
+    checks.append(_check_unresolved_subagent_type(ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -108,7 +113,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # --repair: attempt fixes for any check that exposed a repair_action
     if repair:
-        _attempt_repairs(checks, ctx.obj["db"], output_json)
+        _attempt_repairs(checks, ctx.obj["db"], output_json, config)
 
     has_errors = any(c["level"] == "error" for c in checks)
     has_warnings = any(c["level"] == "warning" for c in checks)
@@ -640,6 +645,53 @@ def _check_duplicate_call_ingest(db: object) -> dict:
     }
 
 
+def _check_unresolved_subagent_type(db: object) -> dict:
+    """Flag Claude Code subagent spans with no resolved `sub_agent_type`.
+
+    `sub_agent_id` (migration 14) and `sub_agent_type` (migration 19, the
+    stable per-dispatch-agent-definition identity `subagent_rightsizing` and
+    the cost-attribution proposals key on) are both derived from the on-disk
+    transcript by `core/backfill.py`. A span tagged with the former but not
+    the latter is one of: a row inserted before migration 19 shipped (the
+    common case, and the one this check's repair actually fixes — a normal
+    `tj backfill claude-code` re-derives it from the sidecar and overlays it
+    onto the existing row), a dispatch whose transcript/sidecar Claude Code has
+    since pruned (unrecoverable), or a deliberate `_PER_DISPATCH_TASK_KINDS`
+    carve-out (not a gap — see that constant's docstring). The count here
+    can't tell those apart; the repair narrows it to whatever the first case
+    still leaves.
+    """
+    from tokenjam.core.db import unresolved_subagent_type_stats
+
+    name = "Subagent type linkage"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        spans, cost_usd = unresolved_subagent_type_stats(conn)
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not inspect subagent spans: {e}"}
+    if not spans:
+        return {"name": name, "level": "ok",
+                "message": "Every subagent-dispatch span has a resolved type."}
+    return {
+        "name": name,
+        "level": "warning",
+        "message": (
+            f"{spans} subagent span(s) (${cost_usd:,.2f}) carry a "
+            f"sub_agent_id with no resolved sub_agent_type — per-agent-type "
+            f"cost breakdowns undercount them. Run `tj doctor --repair` to "
+            f"re-derive what the on-disk transcripts still support; some may "
+            f"remain unresolved because Claude Code has since pruned the "
+            f"transcript or sidecar."
+        ),
+        "repair_action": "resolve_subagent_types",
+    }
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -768,7 +820,7 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     }
 
 
-def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
+def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: object = None) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
         SESSION_COST_DRIFT_TOLERANCE_USD,
@@ -889,6 +941,53 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"  [green]Dropped {deleted} restated observation(s) across "
                     f"{len(sessions)} session(s); their totals were "
                     f"reconciled.[/green]"
+                )
+            continue
+        if action == "resolve_subagent_types":
+            from tokenjam.core.backfill import (
+                CLAUDE_CODE_PROJECTS_ROOT,
+                ingest_claude_code,
+            )
+            from tokenjam.core.db import unresolved_subagent_type_stats
+
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # A normal (non-`--reingest`) backfill: it inserts anything
+                # newly on disk AND, as of this repair, overlays
+                # sub_agent_id/sub_agent_type onto existing rows it can now
+                # resolve (see `_dedup_new_spans`'s overlay_candidates /
+                # `bulk_overlay_subagent_attrs`). Unbounded (no `--since`) so
+                # it reaches every row this check counted, matching how the
+                # transcript-ingest-gap repair above is also unbounded.
+                subagent_repair_result = ingest_claude_code(
+                    db, root=CLAUDE_CODE_PROJECTS_ROOT, config=config,
+                )
+                still_unresolved, still_unresolved_usd = unresolved_subagent_type_stats(conn)
+            except Exception as e:  # backfill can raise for many reasons (OS, JSON, DB)
+                if not output_json:
+                    console.print(
+                        f"  [red]Subagent-type repair failed — {e}.[/red]"
+                    )
+                continue
+            if not output_json:
+                tail = (
+                    f" {still_unresolved} span(s) (${still_unresolved_usd:,.2f}) "
+                    "remain unresolved — their transcript or sidecar has likely "
+                    "been pruned by Claude Code, or they're a per-dispatch "
+                    "label that's correctly untyped."
+                    if still_unresolved else " None remain unresolved."
+                )
+                console.print(
+                    f"  [green]Resolved sub_agent_type on "
+                    f"{subagent_repair_result.spans_retagged} existing "
+                    f"span(s).[/green]{tail}"
                 )
             continue
         if action == "purge_timestamp_sentinels":

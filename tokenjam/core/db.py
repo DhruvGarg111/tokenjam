@@ -72,6 +72,9 @@ def _is_cost_outlier(
 class StorageBackend(Protocol):
     def insert_span(self, span: NormalizedSpan) -> None: ...
     def bulk_insert_spans(self, spans: Sequence[NormalizedSpan]) -> None: ...
+    def bulk_overlay_subagent_attrs(
+        self, updates: Sequence[tuple[str, str | None, str | None]],
+    ) -> int: ...
     def insert_alert(self, alert: Alert) -> None: ...
     def insert_validation(self, result: SchemaValidationResult) -> None: ...
     def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None: ...
@@ -301,6 +304,81 @@ def _build_bulk_span_insert_sql() -> str:
 
 
 _BULK_SPAN_INSERT_SQL = _build_bulk_span_insert_sql()
+
+# ---------------------------------------------------------------------------
+# Columnar overlay of sub_agent_id / sub_agent_type onto EXISTING spans
+# ---------------------------------------------------------------------------
+#
+# A normal (non-`--reingest`) backfill only ever INSERTs spans whose span_id
+# is not yet in the store — `_BULK_SPAN_INSERT_SQL` above never touches a row
+# that already exists. That is correct for the row's money/token fields (they
+# must never move under an existing span), but it means a column added AFTER a
+# span was first ingested (`sub_agent_type`, migration 19) can never fill on a
+# row inserted before the column existed — the row is never "new" again. This
+# is the set-based sibling of `_insert_session_idempotent`'s per-row
+# `--reingest` UPDATE, sized for the full-history case: one vectorized
+# `UPDATE ... FROM read_json` instead of a Python loop per span.
+#
+# Strictly additive by construction: `COALESCE(spans.col, src.col)` only ever
+# replaces a NULL, so a value the row already carries (from any source, live
+# or backfill) can never be overwritten with a different one, and re-running
+# it over an unchanged transcript is a no-op (the sidecar-derived value is
+# stable).
+#
+# Reports the changed count via a separate COUNT query sharing the exact same
+# JOIN + WHERE as the UPDATE, run first under the same write-lock hold — NOT
+# `UPDATE ... RETURNING`, which crashed with an internal DuckDB fatal error
+# ("Failed to append to PRIMARY_spans_0", a PRIMARY KEY constraint violation
+# despite the source batch holding no duplicate span_id — reproduced on
+# DuckDB 1.5.1 against the real `spans` table at ~25k rows/batch; a synthetic
+# minimal table did NOT reproduce it, so it's specific to this table's shape,
+# not a general RETURNING bug) the one time this ran against a real ~700k-span
+# corpus. Two passes over the same batch costs one extra vectorized scan,
+# negligible next to the crash it avoids.
+_SUBAGENT_OVERLAY_COLUMNS: tuple[str, ...] = ("span_id", "sub_agent_id", "sub_agent_type")
+_SUBAGENT_OVERLAY_READ_TYPES: dict[str, str] = {
+    "span_id": "VARCHAR", "sub_agent_id": "VARCHAR", "sub_agent_type": "VARCHAR",
+}
+
+# Match only when a fill will actually HAPPEN on at least one column (a null
+# slot paired with a non-null offered value) — not merely "some column
+# somewhere is null and some column somewhere is offered", which would also
+# match rows where neither pairing does anything (e.g. id already resolved,
+# type has no sidecar on either side) and inflate the count with no-op rows.
+_SUBAGENT_OVERLAY_MATCH_PREDICATE = (
+    "spans.span_id = src.span_id\n"
+    "  AND (\n"
+    "    (spans.sub_agent_id IS NULL AND src.sub_agent_id IS NOT NULL)\n"
+    "    OR (spans.sub_agent_type IS NULL AND src.sub_agent_type IS NOT NULL)\n"
+    "  )"
+)
+
+
+def _subagent_overlay_read_json_clause() -> str:
+    read_cols = ", ".join(
+        f"'{c}': '{_SUBAGENT_OVERLAY_READ_TYPES[c]}'" for c in _SUBAGENT_OVERLAY_COLUMNS
+    )
+    return (
+        f"read_json(\n"
+        f"    ?, format='newline_delimited', records='true',\n"
+        f"    columns={{{read_cols}}},\n"
+        f"    maximum_object_size={_SPAN_BULK_MAX_OBJECT_BYTES}\n"
+        f") AS src"
+    )
+
+
+_BULK_SUBAGENT_OVERLAY_COUNT_SQL = (
+    f"SELECT COUNT(*) FROM spans, {_subagent_overlay_read_json_clause()}\n"
+    f"WHERE {_SUBAGENT_OVERLAY_MATCH_PREDICATE}"
+)
+
+_BULK_SUBAGENT_OVERLAY_UPDATE_SQL = (
+    "UPDATE spans SET "
+    "sub_agent_id = COALESCE(spans.sub_agent_id, src.sub_agent_id), "
+    "sub_agent_type = COALESCE(spans.sub_agent_type, src.sub_agent_type)\n"
+    f"FROM {_subagent_overlay_read_json_clause()}\n"
+    f"WHERE {_SUBAGENT_OVERLAY_MATCH_PREDICATE}"
+)
 
 
 def _span_to_json_obj(span: NormalizedSpan) -> dict:
@@ -1139,6 +1217,30 @@ def stored_observations_by_call(
         key = accounting.call_fingerprint(*r[:6])
         by_call.setdefault(key, {})[str(r[6])] = int(r[7])
     return by_call
+
+
+def unresolved_subagent_type_stats(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[int, float]:
+    """Count + spend of Claude Code subagent spans with no resolved TYPE.
+
+    `sub_agent_id IS NOT NULL` scopes to spans backfill has already tagged as
+    a real Task-tool subagent dispatch (see Critical Rule 34 in CLAUDE.md);
+    `sub_agent_type IS NULL` among those is either a row inserted before
+    migration 19 landed (fixable — `tj backfill claude-code` re-derives it from
+    the on-disk `agent-<id>.meta.json` sidecar and overlays it), a dispatch
+    whose sidecar/transcript Claude Code has since pruned (unfixable — the
+    source is gone), or a deliberate `_PER_DISPATCH_TASK_KINDS` carve-out
+    (correct, not a gap). This count cannot distinguish the three from stored
+    columns alone — see `_subagent_type_for` in `core/backfill.py`.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0) FROM spans "
+        "WHERE sub_agent_id IS NOT NULL AND sub_agent_type IS NULL"
+    ).fetchone()
+    if not row:
+        return 0, 0.0
+    return int(row[0] or 0), float(row[1] or 0.0)
 
 
 def duplicate_call_observations(
@@ -2011,6 +2113,48 @@ class DuckDBBackend:
                     fh.write("\n")
             with self._write_lock:
                 self.conn.execute(_BULK_SPAN_INSERT_SQL, [path])
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def bulk_overlay_subagent_attrs(
+        self, updates: Sequence[tuple[str, str | None, str | None]],
+    ) -> int:
+        """Fill `sub_agent_id`/`sub_agent_type` on EXISTING spans, additively.
+
+        `updates` is `(span_id, sub_agent_id, sub_agent_type)` triples — the
+        freshly re-parsed values for spans a caller already knows are present
+        in the store (e.g. a backfill re-walking transcripts it has ingested
+        before). See `_SUBAGENT_OVERLAY_MATCH_PREDICATE` for why this can
+        never clobber a value the row already carries. Returns the number of
+        spans that actually changed (not `len(updates)` — most calls offer
+        values the row already has, which is a no-op).
+        """
+        if not updates:
+            return 0
+        fd, path = tempfile.mkstemp(prefix="tj-subagent-overlay-", suffix=".ndjson")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for span_id, sub_agent_id, sub_agent_type in updates:
+                    fh.write(json.dumps({
+                        "span_id": span_id,
+                        "sub_agent_id": sub_agent_id,
+                        "sub_agent_type": sub_agent_type,
+                    }))
+                    fh.write("\n")
+            with self._write_lock:
+                # COUNT first, then the plain UPDATE (no RETURNING — see the
+                # module comment above `_BULK_SUBAGENT_OVERLAY_COUNT_SQL` for
+                # why). Both share `_SUBAGENT_OVERLAY_MATCH_PREDICATE` and run
+                # back-to-back under the write lock, so nothing else can
+                # change the matched set between the two.
+                changed = self.conn.execute(
+                    _BULK_SUBAGENT_OVERLAY_COUNT_SQL, [path],
+                ).fetchone()
+                self.conn.execute(_BULK_SUBAGENT_OVERLAY_UPDATE_SQL, [path])
+            return int(changed[0]) if changed else 0
         finally:
             try:
                 os.remove(path)

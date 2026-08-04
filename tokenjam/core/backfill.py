@@ -881,21 +881,35 @@ def _apply_session(
 
 def _dedup_new_spans(
     conn, parsed: ParsedSession, scan: DuplicateScan | None = None,
-) -> list[NormalizedSpan]:
-    """Return `parsed`'s spans not already present in the DB — a cheap, indexed,
-    chunked existence check. Kept PER SESSION (not batched) so `spans_ingested`
-    can be counted the moment a session is processed, giving the progress
-    callback monotonically-increasing counts while the actual columnar INSERT is
-    deferred to a batched flush.
+) -> tuple[list[NormalizedSpan], list[NormalizedSpan]]:
+    """Partition `parsed`'s spans into (new, overlay_candidates) — a cheap,
+    indexed, chunked existence check. Kept PER SESSION (not batched) so
+    `spans_ingested` can be counted the moment a session is processed, giving
+    the progress callback monotonically-increasing counts while the actual
+    columnar INSERT is deferred to a batched flush.
+
+    `new` are spans not already present in the DB. `overlay_candidates` are
+    spans that ARE already present but whose re-parse resolved a
+    `sub_agent_id`/`sub_agent_type` this file's transcript can supply — e.g. a
+    row inserted before migration 19 (`sub_agent_type`) existed, or before this
+    file's sidecar (`agent-<id>.meta.json`) was written. The caller batches
+    these into a set-based overlay UPDATE rather than touching them here, for
+    the same reason new spans are batched: per-span UPDATEs are the ~350×-slower
+    path this bulk branch exists to avoid.
 
     Also drops calls the LIVE path already recorded (`scan` carries the
     running per-call tally across this run's files) — see
     `_drop_calls_another_source_recorded`."""
     existing = _existing_span_ids(conn, [s.span_id for s in parsed.spans])
     new_spans = [s for s in parsed.spans if s.span_id not in existing]
-    return _drop_calls_another_source_recorded(
+    new_spans = _drop_calls_another_source_recorded(
         conn, parsed.session_id, new_spans, scan,
     )
+    overlay_candidates = [
+        s for s in parsed.spans
+        if s.span_id in existing and (s.sub_agent_id or s.sub_agent_type)
+    ]
+    return new_spans, overlay_candidates
 
 
 @dataclass
@@ -1080,6 +1094,13 @@ def ingest_claude_code(
     use_bulk = conn is not None and not reingest
     pending: list[NormalizedSpan] = []
     pending_ids: set[str] = set()
+    # Existing spans this run resolved a sub_agent_id/sub_agent_type for (see
+    # `_dedup_new_spans`'s `overlay_candidates`), queued for a batched additive
+    # UPDATE alongside the new-span flush below. `pending_overlay_ids` is
+    # belt-and-braces against queuing the same span_id twice, matching
+    # `pending_ids` above.
+    pending_overlay: list[tuple[str, str | None, str | None]] = []
+    pending_overlay_ids: set[str] = set()
     # Session-total deltas wait for the spans they describe. Nothing here has
     # transaction control — every statement auto-commits — so the only lever on
     # a mid-run interruption is ORDER, and the two orders fail very differently:
@@ -1104,6 +1125,27 @@ def ingest_claude_code(
             _flush_pending_spans(db, pending)
             pending.clear()
             pending_ids.clear()
+        if pending_overlay:
+            overlay = getattr(db, "bulk_overlay_subagent_attrs", None)
+            if overlay is not None:
+                try:
+                    changed = overlay(pending_overlay)
+                except Exception:
+                    # Best-effort: the overlay is a repair of an already-stored
+                    # row, never a reason to fail a backfill that otherwise
+                    # succeeded. The next run offers the same candidates again.
+                    logger.warning("subagent overlay flush failed", exc_info=True)
+                else:
+                    result.spans_retagged += changed
+                    # These spans were provisionally counted as "skipped
+                    # existing" per-session (see `_record_insert_outcome`)
+                    # before we knew how many the overlay would actually
+                    # change; move the ones that did change into `retagged` so
+                    # the two counts stay mutually exclusive and sum to the
+                    # session's total spans, same invariant `--reingest` keeps.
+                    result.spans_skipped_existing -= changed
+            pending_overlay.clear()
+            pending_overlay_ids.clear()
         for delta in pending_deltas:
             try:
                 db.upsert_session(delta, accumulate_totals=True)
@@ -1141,12 +1183,19 @@ def ingest_claude_code(
 
         if use_bulk:
             try:
-                new_spans = _dedup_new_spans(conn, parsed, duplicate_scan)
+                new_spans, overlay_candidates = _dedup_new_spans(conn, parsed, duplicate_scan)
             except Exception as exc:
                 result.files_failed += 1
                 if len(result.sample_errors) < 5:
                     result.sample_errors.append(f"{parsed.session_id}: {exc}")
                 continue
+            for span in overlay_candidates:
+                if span.span_id in pending_overlay_ids:
+                    continue
+                pending_overlay_ids.add(span.span_id)
+                pending_overlay.append(
+                    (span.span_id, span.sub_agent_id, span.sub_agent_type)
+                )
             # Queue the new spans for the batched INSERT, but count them NOW so the
             # progress callback sees an increasing `spans_ingested` instead of a
             # flat zero that only jumps at the final flush. The `pending_ids` guard
@@ -1169,7 +1218,7 @@ def ingest_claude_code(
                 session_totals_delta(parsed, plan_tier, queued_spans)
             )
             _record_insert_outcome(result, parsed, len(queued_spans), 0)
-            if len(pending) >= _BULK_FLUSH_SPAN_TARGET:
+            if len(pending) >= _BULK_FLUSH_SPAN_TARGET or len(pending_overlay) >= _BULK_FLUSH_SPAN_TARGET:
                 _flush_pending()
         else:
             _apply_session(db, parsed, plan_tier, reingest, result, duplicate_scan)
@@ -1395,8 +1444,16 @@ def _insert_session_idempotent(
                 exists_attributes=_load_attrs(conn, span.span_id),
                 parsed_attributes=span.attributes,
             )
+            # COALESCE, not overwrite: a re-derived value is always identical
+            # for an unchanged transcript, but if the sidecar has since gone
+            # missing (pruned) a re-parse yields None — COALESCE keeps
+            # whatever the row already resolved rather than clobbering it back
+            # to NULL. Matches the bulk overlay's additive semantics (see
+            # `_SUBAGENT_OVERLAY_MATCH_PREDICATE` in `core/db.py`).
             conn.execute(
-                "UPDATE spans SET sub_agent_id = $1, sub_agent_type = $2, "
+                "UPDATE spans SET "
+                "sub_agent_id = COALESCE(sub_agent_id, $1), "
+                "sub_agent_type = COALESCE(sub_agent_type, $2), "
                 "attributes = $3 WHERE span_id = $4",
                 [span.sub_agent_id, span.sub_agent_type,
                  json.dumps(merged_attrs), span.span_id],

@@ -104,6 +104,7 @@ SHIM_KNOWN_GAPS = {
 # the new method cannot land without parity coverage or an explicit gap entry.
 SHIM_NOT_IMPLEMENTED = {
     "bulk_insert_spans",
+    "bulk_overlay_subagent_attrs",
     "close_session_by_id",
     "close_sessions_by_instance",
     "count_traces",

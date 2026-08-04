@@ -37,9 +37,10 @@ def cmd_backfill() -> None:
               help="Deprecated alias for --since Nd.")
 @click.option("--quiet", is_flag=True, help="Suppress per-session progress output.")
 @click.option("--reingest", is_flag=True,
-              help="Update spans already in the DB in place (never duplicated): "
-                   "re-tags sub_agent_id on pre-column history AND backfills "
-                   "captured content (message text / tool_input) onto existing "
+              help="Update spans already in the DB in place (never duplicated). "
+                   "A normal (non-reingest) run already re-tags sub_agent_id / "
+                   "sub_agent_type on pre-column history; --reingest additionally "
+                   "backfills captured content (message text / tool_input) onto existing "
                    "spans when [capture] was enabled after they were first "
                    "ingested. Run this after turning on [capture].")
 @click.pass_context
@@ -121,7 +122,7 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
     if result.spans_retagged:
         console.print(
             f"  [dim]Re-tagged {result.spans_retagged} existing spans "
-            f"(sub_agent_id refreshed).[/dim]"
+            f"(subagent identity refreshed).[/dim]"
         )
     if result.spans_skipped_existing:
         console.print(
