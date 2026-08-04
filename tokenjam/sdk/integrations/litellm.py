@@ -357,46 +357,83 @@ class _SyncStreamWrapper:
         self._usage = None
         self._last_chunk = None
         self._completion_parts: list[str] = []
+        # Idempotency guard — see `_finalize`'s docstring. Load-bearing here
+        # beyond just "don't double-end the span": `_tj_litellm_active.reset`
+        # raises if the SAME token is reset twice, so a double-finalize
+        # would crash the caller's next chunk/iteration instead of merely
+        # duplicating work.
+        self._finalized = False
+
+    def _consume(self, chunk: Any) -> None:
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            self._usage = usage
+        delta = _chunk_delta_text(chunk)
+        if delta:
+            self._completion_parts.append(delta)
+        self._last_chunk = chunk
+
+    def _finalize(self, ok: bool, exc: BaseException | None = None) -> None:
+        """Record usage/completion/provider, end the span, release the
+        litellm-active contextvar token.
+
+        Reached from `__iter__`'s `finally` (drained/abandoned/errored via
+        `for`) and from `__next__` on `StopIteration`/any exception (drained
+        by hand via bare `next()`, which never touches `__iter__` at all —
+        that used to leave both the span AND the contextvar token open
+        forever). See the idempotency note on `self._finalized` above for why
+        a double-call would be worse than a no-op here.
+        """
+        if self._finalized:
+            return
+        self._finalized = True
+        if not ok and exc is not None:
+            self._span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+        provider = _parse_provider(self._model, self._last_chunk)
+        self._span.set_attribute(GenAIAttributes.PROVIDER_NAME, provider)
+        self._span.set_attribute(
+            GenAIAttributes.REQUEST_MODEL,
+            _strip_provider_prefix(self._model),
+        )
+        if self._usage:
+            _set_usage_attributes(self._usage, self._span)
+        if self._completion_parts:
+            self._span.set_attribute(
+                GenAIAttributes.COMPLETION_CONTENT,
+                "".join(self._completion_parts),
+            )
+        if ok:
+            self._span.set_status(trace.Status(trace.StatusCode.OK))
+        self._span.end()
+        _tj_litellm_active.reset(self._token)
 
     def __iter__(self):
         _ok = False
+        _exc: BaseException | None = None
         try:
             for chunk in self._stream:
-                usage = getattr(chunk, "usage", None)
-                if usage:
-                    self._usage = usage
-                delta = _chunk_delta_text(chunk)
-                if delta:
-                    self._completion_parts.append(delta)
-                self._last_chunk = chunk
+                self._consume(chunk)
                 yield chunk
             _ok = True
         except Exception as exc:
-            self._span.set_status(
-                trace.Status(trace.StatusCode.ERROR, str(exc)),
-            )
+            _exc = exc
             raise
         finally:
-            provider = _parse_provider(self._model, self._last_chunk)
-            self._span.set_attribute(GenAIAttributes.PROVIDER_NAME, provider)
-            self._span.set_attribute(
-                GenAIAttributes.REQUEST_MODEL,
-                _strip_provider_prefix(self._model),
-            )
-            if self._usage:
-                _set_usage_attributes(self._usage, self._span)
-            if self._completion_parts:
-                self._span.set_attribute(
-                    GenAIAttributes.COMPLETION_CONTENT,
-                    "".join(self._completion_parts),
-                )
-            if _ok:
-                self._span.set_status(trace.Status(trace.StatusCode.OK))
-            self._span.end()
-            _tj_litellm_active.reset(self._token)
+            self._finalize(ok=_ok, exc=_exc)
 
     def __next__(self):
-        return self._stream.__next__()
+        # Bare `next(wrapper)` used to bypass `__iter__` (and its `finally`)
+        # entirely — see `_finalize`'s docstring.
+        try:
+            chunk = self._stream.__next__()
+        except StopIteration:
+            self._finalize(ok=True)
+            raise
+        except Exception as exc:
+            self._finalize(ok=False, exc=exc)
+            raise
+        self._consume(chunk)
+        return chunk
 
 
 class _AsyncStreamWrapper:
