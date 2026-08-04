@@ -59,13 +59,13 @@ wheel automatically — this is how the vendored UI (`tokenjam/ui/index.html`,
 Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column handling — it's listed
 explicitly in `dependencies` because DuckDB doesn't declare it on all platforms.
 
-**The `tj` npm wrapper** (`npm-wrapper/`, issue #6) is a separate, dependency-free npm package named
+**The `tj` npm wrapper** (`npm-wrapper/`) is a separate, dependency-free npm package named
 `tokenjam` (unscoped, distinct from the `@tokenjam/sdk` SDK package; the bare `tj` name is already
 taken on npm by an unrelated pub/sub library, so the PACKAGE is `tokenjam` while the installed BIN is
 still `tj`) whose only job is to make `npx tokenjam` work. `bin/tj.js` shells out to the Python CLI
 via the first available runner (`uvx --from tokenjam tj` → `pipx run --spec tokenjam tj` → an
 installed `tj` on PATH) and passes every arg through. It is published to npm by the
-`publish-npm-wrapper` job in `publish-npm.yml` (#65), which derives the published version from the
+`publish-npm-wrapper` job in `publish-npm.yml`, which derives the published version from the
 release tag — you do **not** need to bump `npm-wrapper/package.json` on release (CI overwrites it
 from the tag; keep the literal roughly current so local `npm pack` is sane). `npm-wrapper/` has no CI
 test (no Python to drive in the JS lane); the publish job runs a `node -c bin/tj.js` syntax guard,
