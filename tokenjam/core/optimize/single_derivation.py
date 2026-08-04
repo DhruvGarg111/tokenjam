@@ -273,6 +273,26 @@ BESPOKE_SEAMS: tuple[BespokeSeam, ...] = (
         test_module="tests.unit.test_report_window",
         test_name="test_the_report_and_cost_stores_come_from_ONE_analyzer_pass",
     ),
+    BespokeSeam(
+        name="downgrade-map priceability",
+        description=(
+            "every DOWNGRADE_CANDIDATES entry — the key model AND its "
+            "alternative, for every provider — must resolve to a price in "
+            "pricing/models.toml."
+        ),
+        reason_not_mechanized=(
+            "the defect is a missing ROW in a second, independently "
+            "maintained TABLE (pricing/models.toml), not a second call site "
+            "reaching a guarded symbol — DOWNGRADE_CANDIDATES and the "
+            "pricing table have no shared symbol a reachability walk could "
+            "pin. This is the same two-lists-drift shape the "
+            "DOWNGRADE_CANDIDATES comment already documents biting once "
+            "before via model_tiers.TIER_SUBSTRINGS, checked here from the "
+            "other list's direction."
+        ),
+        test_module="tests.unit.test_downgrade_candidates_priceable",
+        test_name="test_every_downgrade_candidate_is_currently_priceable",
+    ),
 )
 
 
