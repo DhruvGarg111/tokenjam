@@ -14,6 +14,9 @@ follow-ups: opt-in light payload, lazy per-span attributes, capped/pinned rows).
 """
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -381,3 +384,301 @@ def test_dashboard_empty_tiles_are_not_clickable(html: str) -> None:
     # cursor) so an empty tile cannot read as a dead link.
     assert ".rec-tile.static { cursor: default; }" in html
     assert ".rec-tile.static:hover { border-color: var(--border); }" in html
+
+
+# --------------------------------------------------------------------------- #
+# Lens table horizontal-overflow fix — wide .opt-table findings tables (long
+# absolute paths, provider/model strings) were pushing the whole page into
+# horizontal scroll instead of scrolling inside their own container.
+# --------------------------------------------------------------------------- #
+def test_body_never_scrolls_horizontally(html: str) -> None:
+    # Belt-and-suspenders: no descendant, however wide, may push the PAGE
+    # itself into horizontal scroll. Wide content must scroll inside its own
+    # .table-wrap instead.
+    assert "overflow-x: hidden;" in html
+    body = html[html.index("\nbody {"):]
+    body = body[: body.index("}")]
+    assert "overflow-x: hidden;" in body, "body rule must set overflow-x: hidden"
+
+
+def test_every_opt_table_is_wrapped_for_horizontal_scroll(html: str) -> None:
+    # Every OptimizeFinding detail table (.opt-table) must sit inside a
+    # .table-wrap (overflow-x: auto) container so a long unbreakable string
+    # (a repo-relative path, a provider/model id) scrolls inside the table
+    # instead of forcing the whole card, and the page, wider than the
+    # viewport. A bare, unwrapped `<table class="opt-table"` is the bug.
+    import re
+
+    for m in re.finditer(r'<table class="opt-table"', html):
+        preceding = html[max(0, m.start() - 40): m.start()]
+        assert '<div class="table-wrap">' in preceding, (
+            f"unwrapped .opt-table at offset {m.start()}: {preceding!r}"
+        )
+
+
+def test_recurring_inclusions_label_is_truncated_with_full_path_in_title(html: str) -> None:
+    # The "What's re-included" column in the resend finding's recurring-
+    # inclusions table renders absolute paths. Rendering them untruncated
+    # forced the table (and the page) wider than the viewport, with the
+    # label unreadable on both ends. shortPath() truncates to the last two
+    # path segments for display; the full path still rides in title= for a
+    # hover tooltip.
+    assert (
+        '<td class="mono" title=${r.label}>${shortPath(r.label)}</td>' in html
+    ), "recurring-inclusions label must be shortPath()-truncated with the full value in title="
+
+
+def test_cursor_listbox_scrolls_horizontally_and_truncates_paths(html: str) -> None:
+    # The Summarize/Rules file pickers (.cur-listbox > .cur-table) render a
+    # File column of absolute paths. The listbox must scroll horizontally on
+    # its own (overflow-x, alongside its existing overflow-y) instead of
+    # relying on the page to scroll, and the path itself must be
+    # shortPath()-truncated with the full path in a hover title.
+    assert (
+        ".cur-listbox { max-height:380px; overflow-y:auto; overflow-x:auto;" in html
+    ), "cur-listbox must scroll horizontally, not just vertically"
+    assert '<td class="mono" title=${c.path}>${shortPath(c.path)}</td>' in html
+    assert "title=${r.path + ' — review the diff'}" in html
+
+
+# --------------------------------------------------------------------------- #
+# Total opportunity tile — a 7th tile, first in the Dashboard's "Opportunities
+# to optimize token efficiency" row, summing the six per-analyzer figures.
+#
+# `totalOpportunityFigure()` is the one pure function that decides the sum and
+# its population; a static string match on the source would still pass if that
+# arithmetic or exclusion logic were wrong (the exact critique
+# test_lens_select_all_behaviour.py levels at grep-only tests), so it is
+# extracted straight out of the served index.html and run under node instead,
+# the same trick that module and test_lens_dashboard_states.py use.
+# --------------------------------------------------------------------------- #
+_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not available for JS evaluation")
+
+
+def _round_to_cents_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function roundToCents(n)")
+    end = src.index("\n}\n", start) + 2
+    return src[start:end]
+
+
+def _total_figure_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function totalOpportunityFigure")
+    end = src.index("// The TOTAL tile itself", start)
+    # totalOpportunityFigure calls roundToCents (the same helper fmtDashUsd
+    # uses) to round each contributor before summing -- pull it in too so
+    # this extraction doesn't drift from the real dependency.
+    return _round_to_cents_source() + "\n" + src[start:end]
+
+
+def _total_figure(tiles: list[dict]):
+    script = (
+        _total_figure_source()
+        + "\nconsole.log(JSON.stringify(totalOpportunityFigure(" + json.dumps(tiles) + ")));"
+    )
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+@_node
+def test_total_equals_the_plain_sum_of_actionable_contributors():
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 1528.89, "tokens": 100},
+        {"name": "resend", "state": "actionable", "usd": 374.33, "tokens": 200},
+        {"name": "downsize", "state": "actionable", "usd": 295.23, "tokens": 300},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "populated"
+    assert round(fig["totalUsd"], 2) == round(1528.89 + 374.33 + 295.23, 2)
+    assert fig["totalTokens"] == 600
+    assert fig["contributorCount"] == 3
+
+
+@_node
+def test_total_reconciles_with_the_sum_of_the_displayed_per_tile_figures():
+    # The total must equal what you get from adding the SIX RENDERED figures
+    # by hand, not a sum of raw values rounded once at the end -- those two
+    # differ whenever contributors' raw cents round independently. Fixture
+    # chosen so the two strategies disagree by a whole cent, unaffected by
+    # any binary floating-point boundary ambiguity (verified directly: raw
+    # sum 3.012 rounds once to 3.01, but each 1.004 individually rounds down
+    # to 1.00, so the sum of the three DISPLAYED figures is 3.00).
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 1.004, "tokens": 1},
+        {"name": "resend", "state": "actionable", "usd": 1.004, "tokens": 1},
+        {"name": "downsize", "state": "actionable", "usd": 1.004, "tokens": 1},
+    ]
+    fig = _total_figure(tiles)
+    # The sum of the values AS DISPLAYED (each tile renders $1.00 via
+    # fmtDashUsd's 2dp rounding) is $3.00 -- not the sum-then-round-once
+    # figure of $3.01 a naive raw sum would produce.
+    assert fig["totalUsd"] == 3.00
+    assert fig["totalUsd"] != round(1.004 + 1.004 + 1.004, 2)  # != 3.01
+
+
+@_node
+def test_an_absent_no_findings_analyzer_is_excluded_not_zeroed():
+    # Deadweight with no candidates renders 'No candidates', never a $0 tile
+    # (root CLAUDE.md anti-pattern 22). Its state carries no usd at all here,
+    # mirroring classifyFinding()'s real 'no_findings' shape, and the sum must
+    # come out identical to the same row with that tile removed entirely --
+    # proof it is excluded structurally (by state), not by a falsy usd check.
+    with_deadweight = [
+        {"name": "subagent", "state": "actionable", "usd": 100.0, "tokens": 10},
+        {"name": "deadweight", "state": "no_findings"},
+    ]
+    without_deadweight = [
+        {"name": "subagent", "state": "actionable", "usd": 100.0, "tokens": 10},
+    ]
+    with_fig = _total_figure(with_deadweight)
+    without_fig = _total_figure(without_deadweight)
+    assert with_fig["totalUsd"] == without_fig["totalUsd"] == 100.0
+    assert with_fig["contributorCount"] == without_fig["contributorCount"] == 1
+    # The excluded tile is still counted as a KNOWN (resolved) tile, just not
+    # a contributor -- it answered "nothing here", which is not the same as
+    # "not yet known".
+    assert with_fig["knownCount"] == 2
+
+
+@_node
+def test_an_at_ceiling_tile_contributes_nothing_to_the_sum():
+    # cache's positive "already at the ceiling" state carries a metric string,
+    # never a usd figure; it must be excluded the same way no_findings is.
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 50.0, "tokens": 5},
+        {"name": "cache", "state": "at_ceiling", "metric": "98% cache efficacy"},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["totalUsd"] == 50.0
+    assert fig["contributorCount"] == 1
+
+
+@_node
+def test_all_analyzers_unresolved_is_the_unknown_state_never_zero():
+    # Nothing has resolved yet -- the tile must render a skeleton, not a $0.00
+    # total (the worst possible placeholder: it reads as "no waste").
+    tiles = [
+        {"name": "subagent", "state": "not_ready", "hint": "Not run on Overview."},
+        {"name": "resend", "state": "not_ready", "hint": "Not run on Overview."},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "unknown"
+    assert fig["totalUsd"] == 0
+    assert fig["knownCount"] == 0
+
+
+@_node
+def test_every_analyzer_resolved_empty_is_the_empty_state():
+    # Every tile answered, none had a recoverable figure: this is the ONE
+    # legitimate home for empty-state copy, distinct from 'unknown'.
+    tiles = [
+        {"name": "subagent", "state": "no_findings"},
+        {"name": "deadweight", "state": "no_findings"},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "empty"
+    assert fig["totalUsd"] == 0
+    assert fig["contributorCount"] == 0
+    assert fig["knownCount"] == 2
+
+
+@_node
+def test_a_partially_resolved_row_discloses_its_coverage_not_a_full_claim():
+    # Some analyzers answered, some have not: the total must not claim to
+    # cover every tile in the row. unresolvedCount is how the renderer knows
+    # to disclose the partial population instead of publishing a total that
+    # reads as complete.
+    tiles = [
+        {"name": "subagent", "state": "actionable", "usd": 10.0, "tokens": 1},
+        {"name": "resend", "state": "not_ready", "hint": "Not run on Overview."},
+    ]
+    fig = _total_figure(tiles)
+    assert fig["state"] == "populated"
+    assert fig["totalUsd"] == 10.0
+    assert fig["unresolvedCount"] == 1
+    assert fig["totalCount"] == 2
+    assert fig["knownCount"] == 1
+
+
+def test_total_tile_is_first_in_the_row_and_visually_distinct(html: str) -> None:
+    # Rendered before tiles.map(), so it is the first child of .tile-grid; a
+    # dedicated CSS class carries the weight/border distinction (never the
+    # accent colour, which means "typeable/clickable" and this tile links
+    # nowhere).
+    assert (
+        "<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${tiles.map(t => {" in html
+    ), "the total tile must render before tiles.map() in the tile-grid"
+    assert ".rec-tile.total-tile" in html
+    assert ".rec-tile.total-tile .rec-amount { color: var(--text); }" in html
+
+
+def test_total_tile_cannot_render_a_dollar_figure_while_unresolved(html: str) -> None:
+    # The 'unknown' branch returns before any amount/hint computation touches
+    # fmtFramedSavings -- a skeleton, never a number, while nothing has
+    # resolved. Anchor on the guard clause and its skeleton markup.
+    fn = html[html.index("function TotalOpportunityTile("):]
+    fn = fn[: fn.index("\n}\n")]
+    assert "if (fig.state === 'unknown') {" in fn
+    idx_guard = fn.index("if (fig.state === 'unknown')")
+    idx_amount = fn.index("const amount")
+    assert idx_guard < idx_amount, "the unresolved guard must return before computing an amount"
+    assert 'class="rec-tile total-tile rec-skel" aria-hidden="true"' in fn
+
+
+def test_total_tile_comment_marks_the_sum_as_deliberate_and_scoped(html: str) -> None:
+    # The founder decision (naive sum now, netted rollup once `script` runs
+    # for a persona that reaches this row) must be recorded at the summing
+    # site, with no internal ticket id per root anti-pattern 11.
+    fn_start = html.index("function totalOpportunityFigure")
+    comment = html[html.index("// The TOTAL opportunity tile"): fn_start]
+    assert "PLAIN SUM" in comment
+    assert "netted cross-analyzer" in comment
+    assert "persona-disabled" in comment
+    import re
+    assert not re.search(r"#\d+", comment), "no internal ticket id in a source comment"
+
+
+def test_total_matches_the_displayed_per_tile_sum(html: str) -> None:
+    # roundToCents backs fmtDashUsd's own rounding (a tile's displayed
+    # figure) AND totalOpportunityFigure's summing step, from the same
+    # helper -- never two independent rounding expressions that could drift
+    # apart. Anchors both call sites plus the shared helper's definition.
+    assert "function roundToCents(n) {" in html
+    assert "return '$' + roundToCents(n).toLocaleString(" in html  # fmtDashUsd
+    assert (
+        "const totalUsd = roundToCents(contributors.reduce((sum, t) => sum + roundToCents(t.usd), 0));"
+        in html
+    )
+
+
+def test_opportunities_row_fits_seven_tiles_without_widening_the_shared_compact_grid(html: str) -> None:
+    # The Total tile makes this a 7-tile row (was 6), which orphaned the 7th
+    # (Deadweight) onto its own row at the shared .tile-grid.compact minmax.
+    # .opp-grid narrows just this row's minmax so all seven fit across at
+    # the normal content width; it must NOT touch the shared .compact rule
+    # (the health-glance row and this row's own loading skeleton also use
+    # it, and don't need narrowing), and both the answered-tiles grid and
+    # its loading skeleton must carry the class so neither reflows against
+    # the other when the real data lands.
+    assert ".tile-grid.compact.opp-grid { grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); }" in html
+    assert '.tile-grid.compact { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));' in html
+    assert 'class="tile-grid compact opp-grid"' in html
+    # Both call sites carry it: the scanning skeleton and the answered tiles.
+    assert html.count('class="tile-grid compact opp-grid"') == 2
+    # The health-glance row is a separate grid and must NOT be narrowed.
+    health = html[html.index('<div class="band-label">Health at a glance</div>'):]
+    health = health[: health.index("<!-- The HERO")]
+    assert 'class="tile-grid compact"' in health
+    assert "opp-grid" not in health
+
+
+def test_skeleton_tile_count_matches_the_seven_real_tiles(html: str) -> None:
+    # REC_SKELETON_TILES stood in for the row before the Total tile existed
+    # (6 placeholders for 6 real tiles). Left at 6 it would render one fewer
+    # skeleton box than the 7 real tiles that land, a visible reflow.
+    assert "const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5, 6];" in html
+    assert "const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];" not in html

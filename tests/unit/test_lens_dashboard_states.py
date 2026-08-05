@@ -445,9 +445,12 @@ def test_the_shimmer_primitive_honors_reduced_motion(html):
 # now accept as an override, defaulting to fmtCost everywhere else.
 def _fmt_dash_usd_source() -> str:
     src = _UI.read_text(encoding="utf-8")
+    start = src.index("function roundToCents(n)")
+    end = src.index("\n}\n", start) + 2
+    round_block = src[start:end]
     start = src.index("function fmtDashUsd(v)")
     end = src.index("\n}\n", start) + 2
-    return src[start:end]
+    return round_block + "\n" + src[start:end]
 
 
 def _dash_usd(v):
@@ -552,6 +555,7 @@ def _dedup_source() -> str:
 
     return "\n".join([
         block("function fmtCost(usd)"),
+        block("function roundToCents(n)"),
         block("function fmtDashUsd(v)"),
         block("function fmtTokens(n)"),
         block("function fmtFramedDollar(v, framing, dollarFmt = fmtCost)"),
