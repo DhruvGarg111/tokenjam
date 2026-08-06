@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -398,6 +398,82 @@ def _recoverable_overlap_note(recoverable: list[dict]) -> str:
     )
 
 
+# THE SPEND BAR'S DENOMINATOR. `total_recoverable_usd` is NOT a figure over the
+# window the caller asked for, and it never can be: it is read out of the stored
+# analyzer report, which is computed on the daemon's own schedule over its own
+# window (analyzers must never run per-request). Pairing it with the requested
+# window's `total_cost_usd` published two figures over two populations — a 7-day
+# total under a 30-day ceiling, which shaded 73% of a week's spend as overspend
+# using a month's estimate, and trends past 100% as the window narrows.
+#
+# The fix is to give the ceiling a denominator drawn from ITS OWN population
+# rather than rescaling either figure: same window, same agents. `agent_id` is
+# deliberately NOT applied — the stored report is corpus-wide, so filtering the
+# denominator to one agent would reintroduce the same mismatch on the other axis.
+#
+# Nor is the denominator persona-scoped, and that is not an oversight either. The
+# persona picker selects which ANALYZERS contribute (a lever set), not which
+# traffic is measured: `_collect_recoverable` filters findings, and every finding
+# is computed over the whole corpus. Scoping the denominator to the persona's own
+# traffic would divide a whole-corpus ceiling by a fraction of the spend it was
+# derived from. `recoverable_basis_note` says all of this on the bar itself.
+def _recoverable_window_bounds(scan: dict) -> tuple[datetime | None, datetime | None]:
+    """The window the stored report actually observed, as datetimes.
+
+    Prefers the cycle record's own `scan_since`/`scan_until` (the resolved
+    bounds the pass sealed). Falls back to `computed_at` minus `window_days` for
+    an artifact written before that record existed. Returns ``(None, None)``
+    when neither is available — the bounds are never invented, because a
+    denominator over a guessed window is the defect this exists to prevent.
+    """
+    def _parse(value) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        if isinstance(value, str) and value:
+            try:
+                dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return None
+
+    until = _parse(scan.get("scan_until")) or _parse(scan.get("computed_at"))
+    since = _parse(scan.get("scan_since"))
+    if since is None:
+        days = scan.get("window_days")
+        if until is not None and isinstance(days, (int, float)) and days > 0:
+            since = until - timedelta(days=float(days))
+    if since is None or until is None:
+        return None, None
+    return since, until
+
+
+def _recoverable_basis_note(
+    since_dt: datetime | None, until_dt: datetime | None, window_days,
+) -> str:
+    """What the bar's two figures cover, stated on the bar.
+
+    Prominence is the point: the mismatch this replaces was invisible precisely
+    because nothing on screen said which window the shaded region came from.
+    """
+    if since_dt is None or until_dt is None:
+        return (
+            "The last analyzer scan did not record the window it observed, so "
+            "this ceiling cannot be shown as a share of spend."
+        )
+    span = f"{since_dt.date().isoformat()} to {until_dt.date().isoformat()}"
+    days = f"{int(window_days)} days" if isinstance(window_days, (int, float)) else "window"
+    return (
+        f"Both figures cover every agent over the analyzer scan's own {days}, "
+        f"{span}. This bar does not follow the range selected above: the "
+        "recoverable estimate comes from the stored scan and is never recomputed "
+        "per request. The persona picker changes which analyzers contribute to "
+        "the ceiling, not which traffic is measured."
+    )
+
+
 @router.get("/cost/components")
 async def get_cost_components(
     request: Request,
@@ -422,7 +498,12 @@ async def get_cost_components(
     beside an analyzer list that had correctly dropped Subagent for the selected
     persona: two figures published together over two different populations
     (root anti-pattern 22b). The component BARS are unscoped and stay that way —
-    they are measured spend, which the persona picker does not reinterpret."""
+    they are measured spend, which the persona picker does not reinterpret.
+
+    `recoverable_basis_*` is the denominator the overlay's total may be drawn
+    against, and the ONLY one: same window, same agents as the stored report.
+    `total_cost_usd` answers the caller's window and is not a valid denominator
+    for it. See `_recoverable_window_bounds`."""
     db = request.app.state.db
     config = request.app.state.config
     if persona is not None and persona not in PERSONAS:
@@ -474,6 +555,29 @@ async def get_cost_components(
     )
     largest = recoverable[0] if recoverable else None
 
+    # The ceiling's OWN denominator (see _recoverable_window_bounds): measured
+    # spend over the stored report's window, across every agent, so the spend
+    # bar's two figures cover one population. Only computed when a report exists
+    # — with nothing measured there is no ceiling to give a share of, and a
+    # denominator published beside an unmeasured numerator is the zero-as-
+    # reassurance failure in a second costume.
+    rec_since_dt, rec_until_dt = _recoverable_window_bounds(scan)
+    basis_cost: float | None = None
+    basis_tokens: int | None = None
+    if known and rec_since_dt is not None:
+        if (
+            agent_id is None
+            and since_dt == rec_since_dt
+            and (until_dt or rec_until_dt) == rec_until_dt
+        ):
+            # The requested window IS the report's window: reuse the split
+            # already computed above rather than running the aggregate twice.
+            basis_cost, basis_tokens = total_cost, total_tokens
+        else:
+            basis = _component_costs(conn, None, rec_since_dt, rec_until_dt)
+            basis_cost = sum(v["cost_usd"] for v in basis.values())
+            basis_tokens = sum(v["tokens"] for v in basis.values())
+
     return {
         "components": components,
         "total_cost_usd": round(total_cost, 8),
@@ -493,6 +597,28 @@ async def get_cost_components(
         "total_recoverable_tokens": total_rec_tokens,
         "recoverable_additive": False,
         "recoverable_overlap_note": _recoverable_overlap_note(recoverable),
+        # THE ONLY DENOMINATOR `total_recoverable_usd` MAY BE DRAWN AGAINST.
+        # Measured spend over the SAME window and the SAME agents the stored
+        # report covered, so a caller cannot accidentally pair the ceiling with
+        # the requested window's total (which is what the spend bar did). `None`
+        # means the share is unknowable, never zero.
+        "recoverable_basis_cost_usd": (
+            round(basis_cost, 8) if basis_cost is not None else None
+        ),
+        "recoverable_basis_tokens": basis_tokens,
+        "recoverable_basis_since": (
+            int(rec_since_dt.timestamp()) if rec_since_dt is not None else None
+        ),
+        "recoverable_basis_until": (
+            int(rec_until_dt.timestamp()) if rec_until_dt is not None else None
+        ),
+        # Travels WITH the pair, exactly like `recoverable_overlap_note`: the
+        # window and scope disclosure is part of the claim, not decoration a
+        # renderer may drop.
+        "recoverable_basis_note": (
+            _recoverable_basis_note(rec_since_dt, rec_until_dt, scan["window_days"])
+            if known else ""
+        ),
         # The one entry in `recoverable` that is honest as a standalone claim:
         # it isn't a sum of anything, so it's the floor a reader can act on.
         "largest_recoverable_usd": largest["past_overspend_usd"] if largest else None,

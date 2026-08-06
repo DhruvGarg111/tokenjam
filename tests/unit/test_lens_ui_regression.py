@@ -923,34 +923,103 @@ def test_spend_is_the_deliberately_hidden_one_and_traces_is_sdk_only(
     # traces reach every persona through the session detail's Traces tab.
     assert "traces" in hidden["claude-code"]
     assert "traces" not in hidden["sdk"]
-    # Alerts / drift / budget are not top-level views any more, so they are in
-    # neither list — they are tabs of the Sessions screen instead.
-    for view in ("alerts", "drift", "budget"):
+    # Alerts / budget are not top-level views any more, so they are in neither
+    # list — they are tabs of the Sessions screen instead.
+    for view in ("alerts", "budget"):
         assert view not in hidden["claude-code"], view
         assert view not in hidden["sdk"], view
         assert view in html[html.index("const SESSIONS_SDK_TAB_VIEWS"):][:200], view
+    # Drift is in neither list either, but for the OPPOSITE reason: it is not
+    # gated per persona, it is un-surfaced for everyone. This loop used to
+    # include it and would have read as "correctly relocated" while the tab was
+    # gone, so the two cases are asserted separately.
+    assert "drift" not in hidden["claude-code"]
+    assert "drift" not in hidden["sdk"]
+    tab_views_line = html[html.index("const SESSIONS_SDK_TAB_VIEWS"):]
+    assert "drift" not in tab_views_line[: tab_views_line.index("\n")]
 
 
 def test_alerts_drift_budget_are_sessions_tabs_not_top_level_views(
     html: str,
 ) -> None:
-    """Relocated, not merely re-gated: their routes resolve to the Sessions
-    page, they render inside its SDK-services zone, and they are no longer
-    mounted as primary views of their own."""
-    # primaryKeyFor sends all three to the Sessions screen.
+    """Alerts and Budget are tabs of the Sessions screen. Drift is UN-SURFACED.
+
+    THIS TEST USED TO PIN THE STATE THAT WAS REMOVED. It asserted a Drift tab
+    was rendered in the SDK-services zone and that the Sessions nav row lit up
+    on `#/drift` -- i.e. it was an active defence of the surface the founder
+    decided to withdraw, and it would have failed the moment anyone withdrew it.
+    The assertions are INVERTED rather than deleted: alerts and budget stay
+    pinned as tabs, and Drift is pinned ABSENT from the strip so the removal
+    cannot silently come back.
+
+    UN-SURFACED IS NOT DELETED. `DriftView`, the `/drift` route, the detector
+    and its baselines all remain and are still covered by their own tests (see
+    `test_drift_empty_state_has_scannable_headline`, which passes on the KEPT
+    component). What is pinned here is that nothing renders it and nothing links
+    to it.
+    """
+    # primaryKeyFor sends the surviving tabs to the Sessions screen.
     assert "if (SESSIONS_SDK_TAB_VIEWS.has(v)) return 'sessions';" in html
-    # They are no longer keep-alive primary views (that would mount three panes
-    # the router can never activate).
+    # They are not keep-alive primary views (that would mount panes the router
+    # can never activate). DriftView must not return to that list either.
     for entry in ("['alerts',    AlertsView]", "['drift',     DriftView]",
                   "['budget',    BudgetView]"):
         assert entry not in html, f"{entry} must leave PRIMARY_VIEWS"
-    # StatusView renders them, inside the SDK-only zone.
+    # StatusView renders the surviving two, inside the SDK-only zone.
     assert "${sdkTab === 'alerts' ? html`<${AlertsView}" in html
-    assert "${sdkTab === 'drift' ? html`<${DriftView}" in html
     assert "${sdkTab === 'budget' ? html`<${BudgetView}" in html
-    # The Sessions nav row stays lit on any of them (comma-list data-view-alt).
-    assert 'data-view="sessions" data-view-alt="alerts,drift,budget"' in html
+    # THE REMOVED STATE, pinned absent: no Drift tab is rendered anywhere.
+    assert "${sdkTab === 'drift' ? html`<${DriftView}" not in html, (
+        "Drift is un-surfaced: the SDK zone must not render a Drift tab"
+    )
+    # The Sessions nav row stays lit on the surviving tabs, and only those.
+    assert 'data-view="sessions" data-view-alt="alerts,budget"' in html
+    assert 'data-view-alt="alerts,drift,budget"' not in html
     assert "(el.dataset.viewAlt || '').split(',')" in html
+
+
+def test_drift_is_unreachable_from_every_surface(html: str) -> None:
+    """The founder's decision, as a guard: Drift has no way in.
+
+    Every removal below is a separate door someone could reopen without
+    noticing the others, so they are asserted as one set rather than one at a
+    time: the tab registry, the route resolution, the page-title map, the
+    Dashboard health tile, and the zone heading's copy.
+    """
+    # The tab registry: not offered, and not a recognised sub-tab view.
+    assert "['drift', 'Drift']," not in html
+    assert "const SESSIONS_SDK_TAB_VIEWS = new Set(['alerts', 'budget']);" in html
+    # The hash still resolves, but to the Sessions screen, NOT to a Drift
+    # surface. A 404 would be a worse answer for an existing bookmark.
+    assert "const UNSURFACED_VIEWS = new Set(['drift']);" in html
+    assert "if (UNSURFACED_VIEWS.has(v)) return 'sessions';" in html
+    # No page title, so no surface can caption itself "Drift".
+    assert "drift: 'Drift'" not in html
+    # No health tile and no link to the route. The tile published a figure and
+    # a caption ("within baseline") straight onto the Dashboard.
+    assert 'label="Agents drifting"' not in html
+    assert 'href="#/drift"' not in html
+    # The zone heading's copy loses it too: the strip no longer offers drift.
+    assert "alerts, drift and caps across agents" not in html
+    assert "alerts and caps across agents" in html
+
+
+def test_the_drift_mechanism_is_kept_intact_behind_the_removed_surface(
+    html: str,
+) -> None:
+    """Un-surfacing, not deleting -- so re-surfacing is a wiring change.
+
+    Pinned as PRESENT so a later "this is dead code, nothing references it"
+    sweep has to argue with a test rather than a comment. The component, its
+    fetch, the signal helper and the Dashboard read that still feeds
+    `data_span` all stay.
+    """
+    assert "function DriftView({ params }) {" in html
+    assert "api('/drift', { agent_id: agentId || undefined })" in html
+    assert "function driftSignalCount(drift) {" in html
+    # The Dashboard read survives: it is this page's source for `data_span`,
+    # and it is asserted independently in test_lens_dashboard_states.py.
+    assert "const driftRead = useTriageRead(" in html
 
 
 def test_persona_gate_hides_nothing_until_the_persona_is_known(html: str) -> None:
@@ -1214,8 +1283,17 @@ def test_the_overspend_portion_cannot_render_while_its_fetch_is_unresolved(
     bar = bar[: bar.index("      ${/* ONE unified action list.")]
     # Gated on the overlay's OWN availability, not on a page-wide flag.
     assert "c.recoverable_available && c[overField] != null" in bar
-    # The shaded region requires the resolved state AND a real figure.
-    assert "${recKnown && over > 0 ? html`<span class=\"opt-spendbar-over\"" in bar
+    # The shaded region requires the resolved state AND a real figure. The gate
+    # TIGHTENED from `recKnown` to `basisKnown`: a shaded width is a SHARE, and
+    # a share needs a denominator over the same window and agents as the
+    # ceiling (`recoverable_basis_*`). `recKnown` alone let a known ceiling be
+    # drawn against whatever total the page happened to hold, which is the
+    # mismatched-population defect. `basisKnown` implies `recKnown`, so this is
+    # strictly stronger than what it replaced.
+    assert "const basisKnown = recKnown && basis != null && basis > 0;" in bar
+    assert "${basisKnown && over > 0 ? html`<span class=\"opt-spendbar-over\"" in bar
+    # THE LOOSER GATE, pinned absent.
+    assert "${recKnown && over > 0 ? html`<span class=\"opt-spendbar-over\"" not in bar
     # And it must be sized to the real proportion. Shipped once without this:
     # the CSS min-width (a legibility floor for a few-percent figure) was then
     # the ONLY width, so a 19% ceiling drew as 0.6% of the bar and the picture
@@ -1226,11 +1304,19 @@ def test_the_overspend_portion_cannot_render_while_its_fetch_is_unresolved(
     # would print a value the data never produced under a measured label, and
     # would hide the one thing that case tells you about the overlap.
     assert "const over = recKnown ? Math.max(0, c[overField]) : 0;" in bar
-    assert "Math.min(100, (over / total) * 100)" in bar
-    assert "const overExceedsSpend = recKnown && over > total;" in bar
+    # The proportion is taken against the CEILING'S OWN basis, never the page's
+    # total. `(over / total)` was the division that paired a 30-day estimate
+    # with a 7-day total and shaded 73% of a week's spend.
+    assert "Math.min(100, (over / basis) * 100)" in bar
+    assert "(over / total)" not in bar
+    assert "const overExceedsSpend = basisKnown && over > basis;" in bar
     assert "exceeds measured spend" in bar
+    # A ceiling whose share cannot be computed still shows its FIGURE; only the
+    # proportion is withheld. Suppressing a known number would be the opposite
+    # failure to the one above.
+    assert "share of spend unknown" in bar
     # Unresolved renders the skeleton class and the unknown glyph, not a zero.
-    assert "'opt-spendbar' + (recKnown ? '' : ' is-skeleton')" in bar
+    assert "'opt-spendbar' + (basisKnown ? '' : ' is-skeleton')" in bar
     assert "Overspend ceiling <b>${UNKNOWN_FIGURE}</b>" in bar
     # Comment prose names the forbidden literals to explain them, so the
     # check runs against code only.

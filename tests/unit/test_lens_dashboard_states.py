@@ -23,6 +23,7 @@ is unknown.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -319,12 +320,22 @@ def test_an_unknown_health_tile_says_which_kind_of_unknown_it_is(html):
 
 def test_every_health_tile_declares_the_status_of_its_source(html):
     # A tile without a status= defaults to 'ready' and would silently resume
-    # publishing derived zeros, so all five must pass one.
+    # publishing derived zeros, so every one of them must pass one. The count is
+    # four since the "Agents drifting" tile was removed with the rest of the
+    # Drift surface (founder decision, un-surfaced not deleted): pinned as a
+    # number so a tile that arrives without a status is still caught.
     start = html.index('<div class="section-band">Health at a glance</div>')
     end = html.index("<!-- The HERO", start)
     band = html[start:end]
-    assert band.count("<${HealthTile}") == 5
-    assert band.count("status=$") == 5
+    assert band.count("<${HealthTile}") == 4
+    assert band.count("status=$") == 4
+    # The removed tile, pinned absent: it published a figure and a reassuring
+    # caption ("within baseline") for a surface nothing else links to.
+    assert 'label="Agents drifting"' not in band
+    # Comment prose names the removed route to explain the removal, so the link
+    # check runs against code only.
+    band_code = re.sub(r"/\*.*?\*/", "", band, flags=re.S)
+    assert "#/drift" not in band_code
 
 
 def test_the_front_door_empty_card_requires_its_inputs_to_have_answered(html):

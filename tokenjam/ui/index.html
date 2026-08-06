@@ -2263,11 +2263,11 @@ code.md-code {
        injector can find them and always insert BEFORE Summarize. -->
   <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Summarize</a>
   <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Relearn</a>
-  <!-- Sessions covers alerts / drift / budget too: none of the three is
-       per-session, so they are tabs of this screen's SDK-services zone rather
-       than nav entries of their own (see SESSIONS_SDK_TABS). `data-view-alt` is
-       a comma list so this row stays lit on any of them. -->
-  <a href="#/sessions" class="nav-link" data-view="sessions" data-view-alt="alerts,drift,budget" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
+  <!-- Sessions covers alerts / budget too: neither is per-session, so they are
+       tabs of this screen's SDK-services zone rather than nav entries of their
+       own (see SESSIONS_SDK_TABS). `data-view-alt` is a comma list so this row
+       stays lit on either of them. -->
+  <a href="#/sessions" class="nav-link" data-view="sessions" data-view-alt="alerts,budget" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <!-- Traces sits in the flat Improve nav, not the Observe group: neither
        persona has a lens switcher, so an observe-group link is unreachable for
        both. It is hidden for claude-code by the per-view rule in the stylesheet
@@ -3431,13 +3431,13 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // switching to "SDK workflows" left a screenful of Claude Code cards under an
   // SDK heading. Persona-not-yet-known shows both zones rather than guessing.
   const showCodingZone = !personaKnown || persona !== 'sdk';
-  // Which SDK-services tab is open. Alerts / Drift / Budget are tabs of that
-  // zone now, not top-level pages (see SESSIONS_SDK_TABS); `routeView` carries
-  // which of their routes brought us here, defaulting to the services list.
+  // Which SDK-services tab is open. Alerts / Budget are tabs of that zone now,
+  // not top-level pages (see SESSIONS_SDK_TABS); `routeView` carries which of
+  // their routes brought us here, defaulting to the services list.
   const sdkTab = SESSIONS_SDK_TAB_VIEWS.has(routeView) ? routeView : 'services';
   // The "nothing here at all" state may only replace the page when there is
   // genuinely nothing else on it. Once the SDK-services zone renders, this
-  // screen also hosts the alerts / drift / budget tabs, and an empty service
+  // screen also hosts the alerts / budget tabs, and an empty service
   // list says nothing about whether an alert fired or a cap was set — swapping
   // the whole page for "No agents found" would take those away on the strength
   // of a different question's answer.
@@ -3633,13 +3633,20 @@ function StatusView({ params, persona, personaKnown, routeView }) {
     ` : null}
 
     ${/* THE SDK-SERVICES ZONE, now with its cross-agent surfaces attached.
-          Alerts, Drift and Budget used to be top-level nav entries that no
-          persona could actually open. None of the three is per-session — drift
-          is per-agent baselines, budget is spend caps, alerts fire across
-          agents — so they belong to the zone that lists the services, not to
-          the session cards above. The strip renders whenever the zone does,
-          including with no services live: an empty service list says nothing
-          about whether an alert fired or a baseline drifted.
+          Alerts and Budget used to be top-level nav entries that no persona
+          could actually open. Neither is per-session — budget is spend caps,
+          alerts fire across agents — so they belong to the zone that lists the
+          services, not to the session cards above. The strip renders whenever
+          the zone does, including with no services live: an empty service list
+          says nothing about whether an alert fired or a cap was set.
+
+          THE BASELINE-COMPARISON SURFACE IS UN-SURFACED, NOT DELETED (founder
+          decision). `DriftView`, the `/drift` route and the detector behind
+          them all remain; this zone simply no longer offers a tab for them and
+          nothing else links there. Re-surfacing is a wiring change: put the
+          entry back in SESSIONS_SDK_TABS and SESSIONS_SDK_TAB_VIEWS and render
+          the component here. Do NOT take the component's absence from this
+          strip as licence to delete it.
 
           The old five-row "Recent Alerts" table that used to close this page is
           gone, superseded by the Alerts tab beside it — one surface for alerts
@@ -3649,7 +3656,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
       <div class="section-gap"></div>
       <div class="zone-head">
         <span class="zone-title">SDK services</span>
-        <span class="zone-sub">unbounded telemetry · alerts, drift and caps across agents</span>
+        <span class="zone-sub">unbounded telemetry · alerts and caps across agents</span>
       </div>
       <div class="tab-bar" role="tablist">
         ${SESSIONS_SDK_TABS.map(([key, label]) => html`
@@ -3668,7 +3675,6 @@ function StatusView({ params, persona, personaKnown, routeView }) {
         <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} history=${sdkHistory} />
         <${SdkSessionHistory} history=${sdkHistory} framing=${data.framing} />` : null}
       ${sdkTab === 'alerts' ? html`<${AlertsView} params=${EMPTY_PARAMS} />` : null}
-      ${sdkTab === 'drift' ? html`<${DriftView} params=${EMPTY_PARAMS} />` : null}
       ${sdkTab === 'budget' ? html`<${BudgetView} params=${EMPTY_PARAMS} />` : null}
     ` : null}
   `;
@@ -8186,7 +8192,7 @@ function OptimizeView({ params, navParam, persona }) {
     ${/* The picker above scopes the SPEND chart; the analyzer findings come
           from the background scan's own window. Saying so beats letting a 7d
           picker imply the findings were measured over 7 days. */ ''}
-    ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px">Analyzer findings were computed over the last ${scan.windowDays} days by the background scan; the picker above scopes the spend chart.</div>` : null}
+    ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px">Analyzer findings were computed over the last ${scan.windowDays} days by the background scan. The spend bar below is drawn over that same window, so the picker above does not move it.</div>` : null}
 
     ${st.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
     ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
@@ -8201,7 +8207,8 @@ function OptimizeView({ params, navParam, persona }) {
       </div>` : null}
 
     ${!st.loading && scan.known && st.opt ? html`
-      ${/* ONE BAR. The whole width is measured spend for the window; the
+      ${/* ONE BAR. The whole width is measured spend over the ANALYZER SCAN's
+            window (not the window picker's — see `basis` below); the
             shaded region inside it is the overspend ceiling. It replaces the
             segmented input/output/cache-read/cache-write composition chart:
             that answered "what did the money go on", which is a question the
@@ -8236,19 +8243,39 @@ function OptimizeView({ params, navParam, persona }) {
         const recPending = !!c && !recKnown
           && (c.recoverable_status === 'never_run' || c.recoverable_status === 'computing'
               || c.recoverable_status === 'error' || c.recoverable_available === false);
-        const total = c ? (c[totalField] || 0) : 0;
-        if (!c || total <= 0) return null;
+        // THE DENOMINATOR IS THE CEILING'S OWN, NEVER THE PAGE'S. `total_cost_usd`
+        // answers the window in the picker above; the ceiling comes from the
+        // stored analyzer scan and answers the scan's window over every agent.
+        // Dividing one by the other published two populations as one ratio: a
+        // 7-day total under a 30-day ceiling shaded 73% of a week's spend as
+        // overspend, and narrower windows trend past 100%. `recoverable_basis_*`
+        // is measured spend over the SCAN's window and agents, so numerator and
+        // denominator now cover one population. It is null when the scan never
+        // recorded its bounds, and null is not zero: a share we cannot compute
+        // is shown as unknown, never as 0%.
+        const basisField = useTokens ? 'recoverable_basis_tokens' : 'recoverable_basis_cost_usd';
+        const basis = (c && c[basisField] != null) ? c[basisField] : null;
+        const basisKnown = recKnown && basis != null && basis > 0;
+        // What the "Total spend" legend names. With a ceiling on screen it is
+        // the ceiling's basis or nothing; with no ceiling there is no ratio to
+        // get wrong, so the page's own window is both honest and the more useful
+        // thing to show while the scan is still running.
+        const total = recKnown ? (basisKnown ? basis : null) : (c ? (c[totalField] || 0) : 0);
+        if (!c) return null;
+        if (!recKnown && total <= 0) return null;
         // The FIGURE is never clamped; only the WIDTH is. The ceiling sums
         // overlapping per-analyzer estimates, so it can legitimately come out
-        // larger than the window's measured spend — and when it does, that is
+        // larger than its window's measured spend — and when it does, that is
         // the single most important thing this surface can say about how much
         // the estimates overlap. Clamping the number would hide it and, worse,
         // would print a value the data never produced under a measured label.
         const over = recKnown ? Math.max(0, c[overField]) : 0;
-        const overPct = recKnown && total > 0 ? Math.min(100, (over / total) * 100) : 0;
-        const overExceedsSpend = recKnown && over > total;
+        // A shaded WIDTH is a share, so it may only be drawn when the share is
+        // known. Ceiling-without-basis renders the figure and no proportion.
+        const overPct = basisKnown ? Math.min(100, (over / basis) * 100) : 0;
+        const overExceedsSpend = basisKnown && over > basis;
         return html`
-        <div class="section-band">Where your spend went<span class="hint">· ${useTokens ? 'tokens' : 'measured spend'}, this window</span></div>
+        <div class="section-band">Where your spend went<span class="hint">· ${useTokens ? 'tokens' : 'measured spend'}, ${recKnown ? 'analyzer scan window' : 'this window'}</span></div>
         <div class="panel">
           <div class="panel-body">
             ${/* UNRESOLVED renders a flat skeleton bar with NO shaded region and
@@ -8256,28 +8283,39 @@ function OptimizeView({ params, navParam, persona }) {
                   because an unshaded bar reads as "no waste found", which is the
                   most reassuring thing this surface could possibly say and the
                   one it has no evidence for. */ ''}
-            <div class=${'opt-spendbar' + (recKnown ? '' : ' is-skeleton')}>
-              ${recKnown && over > 0 ? html`<span class="opt-spendbar-over"
+            <div class=${'opt-spendbar' + (basisKnown ? '' : ' is-skeleton')}>
+              ${basisKnown && over > 0 ? html`<span class="opt-spendbar-over"
                 style=${'width:' + overPct + '%'}
-                title=${'Overspend ceiling: ' + wasteFmtY(over) + ' of ' + wasteFmtY(total)}></span>` : null}
+                title=${'Overspend ceiling: ' + wasteFmtY(over) + ' of ' + wasteFmtY(basis)}></span>` : null}
             </div>
             <div class="opt-spendbar-legend">
               <span><span class="swatch" style="background:var(--tone-1)"></span>
-                Total spend <b>${wasteFmtY(total)}</b></span>
+                Total spend <b>${total == null ? UNKNOWN_FIGURE : wasteFmtY(total)}</b></span>
               ${recKnown ? html`
                 <span><span class="swatch" style="background:var(--warn)"></span>
                   Overspend ceiling <b>${wasteFmtY(over)}</b>
-                  <span class="pct">${overExceedsSpend ? 'exceeds measured spend'
+                  <span class="pct">${!basisKnown ? 'share of spend unknown'
+                    : overExceedsSpend ? 'exceeds measured spend'
                     : (overPct < 1 && over > 0 ? '<1' : overPct.toFixed(0)) + '%'}</span></span>`
               : html`
                 <span><span class="swatch" style="background:var(--surface2)"></span>
                   Overspend ceiling <b>${UNKNOWN_FIGURE}</b>
                   <span class="pct">${recPending ? 'not measured yet' : 'unknown'}</span></span>`}
             </div>
+            ${/* THE DISCLOSURE TRAVELS WITH THE PAIR. Both notes come off the
+                  payload beside the figures they qualify: the overlap note (the
+                  ceiling is not additive) and the basis note (which window and
+                  which agents both figures cover, and that the persona picker
+                  changes the lever set rather than the traffic). Neither is
+                  optional decoration; the window mismatch this bar used to
+                  carry was invisible precisely because nothing said which
+                  window the shaded region came from. */ ''}
             ${recKnown ? html`
               <div class="opt-spendbar-foot">
-                The shaded part is a ceiling across every analyzer, not a slice of the total you could bank.${c.recoverable_overlap_note ? ' ' + c.recoverable_overlap_note : ''}${overExceedsSpend ? ' Here that ceiling is larger than the window\u2019s measured spend, which is only possible because the estimates overlap; treat it as an upper bound, not an amount.' : ''}
-              </div>` : html`
+                The shaded part is a ceiling across every analyzer, not a slice of the total you could bank.${c.recoverable_overlap_note ? ' ' + c.recoverable_overlap_note : ''}${overExceedsSpend ? ' Here that ceiling is larger than its window\u2019s measured spend, which is only possible because the estimates overlap; treat it as an upper bound, not an amount.' : ''}
+              </div>
+              ${c.recoverable_basis_note ? html`
+              <div class="opt-spendbar-foot" style="margin-top:4px">${c.recoverable_basis_note}</div>` : null}` : html`
               <div class="opt-spendbar-foot">
                 ${c.recoverable_status === 'computing' ? 'The analyzer scan is still running, so no overspend figure exists for this window yet.'
                   : c.recoverable_status === 'error' ? 'The last analyzer scan failed, so nothing has been measured. This is not a report of zero waste.'
@@ -12720,7 +12758,7 @@ function PersonaEmptyGate({ persona, header, children }) {
 const VIEW_TITLES = {
   dashboard: 'Dashboard', optimize: 'Optimize',
   summarize: 'Summarize', rules: 'Relearn', traces: 'Traces', cost: 'Cost',
-  alerts: 'Alerts', drift: 'Drift', budget: 'Budget', faq: 'FAQ',
+  alerts: 'Alerts', budget: 'Budget', faq: 'FAQ',
 };
 function PersonaEmptyHeader({ viewKey }) {
   return html`
@@ -13014,7 +13052,6 @@ function DashboardView({ params, persona }) {
   const alertList = (alertsRead.data && alertsRead.data.alerts) || [];
   const relearnClusters = (relearnRead.data && relearnRead.data.finding
     && relearnRead.data.finding.clusters) || [];
-  const driftN = driftSignalCount(driftRead.data);
   const errTraces = traceList.filter(t => t.status_code === 'error').length;
 
   // Run-rate projection folded into a one-line caption under the explorer's KPI
@@ -13217,8 +13254,12 @@ function DashboardView({ params, persona }) {
                   <${HealthTile} label="Unread alerts" value=${alertList.length} attention=${alertList.length > 0}
                     status=${readStatus(alertsRead)}
                     href="#/alerts?unread=true" sub=${alertList.length ? alertList[0].severity : 'all clear'} />
-                  <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
-                    status=${readStatus(driftRead)} sub=${driftN ? 'review baselines' : 'within baseline'} />
+                  ${/* The "Agents drifting" tile is GONE from this band by
+                        founder decision, along with every other way in. The
+                        read behind it (`driftRead`) stays: it is this page's
+                        source for `data_span`, and `driftSignalCount` is still
+                        defined. Nothing renders its figure, and nothing links
+                        to #/drift. See UNSURFACED_VIEWS. */ ''}
                   <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
                     status=${budgetStatus}
                     sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
@@ -13310,13 +13351,18 @@ function primaryKeyFor(route) {
   // #/review deep-link aliases to the Dashboard rather than 404ing.
   if (v === 'overview' || v === 'analytics' || v === 'review') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
-  // Alerts / Drift / Budget are TABS of the Sessions screen's SDK-services
-  // zone, not screens of their own — none of the three is per-session (drift is
-  // per-agent baselines, budget is spend caps, alerts fire across agents), so
-  // they attach to the zone rather than to a session card. Their own hashes
-  // survive as the tab's address, which keeps every existing deep link and
-  // bookmark working; StatusView reads route.view to pick the open tab.
+  // Alerts / Budget are TABS of the Sessions screen's SDK-services zone, not
+  // screens of their own — neither is per-session (budget is spend caps, alerts
+  // fire across agents), so they attach to the zone rather than to a session
+  // card. Their own hashes survive as the tab's address, which keeps every
+  // existing deep link and bookmark working; StatusView reads route.view to
+  // pick the open tab.
   if (SESSIONS_SDK_TAB_VIEWS.has(v)) return 'sessions';
+  // An UN-SURFACED view's hash must not resolve to that surface. #/drift is a
+  // live route in every old bookmark and in this file's own history, so it
+  // aliases to Sessions rather than 404ing or reaching DriftView, which is
+  // still present in the bundle (see UNSURFACED_VIEWS).
+  if (UNSURFACED_VIEWS.has(v)) return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   if (v === 'optimize' && route.param === 'rules') return 'rules';
   if (v === 'optimize' && route.param === 'guide') return 'faq';
@@ -13399,10 +13445,20 @@ function personaHides(persona, view, known) {
 const SESSIONS_SDK_TABS = [
   ['services', 'Services'],
   ['alerts', 'Alerts'],
-  ['drift', 'Drift'],
   ['budget', 'Budget'],
 ];
-const SESSIONS_SDK_TAB_VIEWS = new Set(['alerts', 'drift', 'budget']);
+const SESSIONS_SDK_TAB_VIEWS = new Set(['alerts', 'budget']);
+
+// THE BASELINE-COMPARISON SURFACE IS UN-SURFACED, NOT DELETED (founder
+// decision). `DriftView`, `driftSignalCount`, the `/drift` endpoint, the
+// detector and its baselines all still exist and are still covered by their
+// tests. What was removed is every way a reader can ARRIVE at it: no nav entry,
+// no tab, no health tile, no link, and `#/drift` is now a silent alias for the
+// Sessions screen (see primaryKeyFor) so an old bookmark lands somewhere real
+// instead of resolving to the surface. Re-surfacing is a wiring change, not a
+// rebuild: add the entry back to the two lists above and render the component
+// in StatusView's SDK zone.
+const UNSURFACED_VIEWS = new Set(['drift']);
 
 // Whether a ROUTE is unreachable for this persona — the superset of
 // personaHides, covering the Sessions sub-tabs too. Those are not top-level
