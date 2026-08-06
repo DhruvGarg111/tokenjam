@@ -8052,15 +8052,25 @@ function OptimizeView({ params, navParam }) {
         </div>
         <div class="opt-card">
           <div class="opt-card-title">Summarize</div>
-          ${sf ? html`
-            <div class="opt-card-stats">
-              <div><div class="v">${sf.files || 0}</div><div class="l">files over budget</div></div>
-              <div><div class="v">~${fmtTokens(sfTok)}</div><div class="l">est. tokens per call</div></div>
-              <div><div class="v">${sfAvgPct}%</div><div class="l">avg prose reduction</div></div>
-            </div>`
-            : html`<div class="opt-card-stats">
+          ${/* Three states, gating on the summarize finding's own read. A scan
+                that ran and found nothing gets a sentence, not a row of zeros:
+                "0 files · ~0 tokens · 0%" is technically the known-empty truth
+                but it reads as a broken tile, and empty-state copy is the only
+                honest home for that state (root anti-pattern 22a). */ ''}
+          ${!sf ? html`<div class="opt-card-stats">
               <div class="shimmer" style="height:44px;width:100%"></div>
-            </div>`}
+            </div>`
+            : (sf.files || 0) === 0 ? html`
+              <div class="opt-card-body">
+                No instruction file is over budget in this scan. Nothing to
+                compress right now.
+              </div>`
+            : html`
+              <div class="opt-card-stats">
+                <div><div class="v">${sf.files}</div><div class="l">files over budget</div></div>
+                <div><div class="v">~${fmtTokens(sfTok)}</div><div class="l">est. tokens per call</div></div>
+                <div><div class="v">${sfAvgPct}%</div><div class="l">avg prose reduction</div></div>
+              </div>`}
           <div class="opt-card-acts">
             <a class="opt-card-link" href="#/optimize/summarize">Curate →</a>
             <span class="opt-card-note">every figure is an estimate</span>
