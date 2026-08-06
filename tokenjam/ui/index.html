@@ -8378,6 +8378,14 @@ function SummarizeView({ params }) {
   const candByPath = {};
   cands.forEach(c => { candByPath[c.path] = c; });
   const statusOf = c => stagedPaths.has(c.path) ? 'staged' : 'candidate';
+  // Landing stat-tile row: sums an already-fetched field across an
+  // already-fetched list (same reduce pattern `addedTok` below uses for the
+  // basket) — not a server-side computation redone in JS. Only meaningful
+  // once `scan` has actually resolved; the render site below gates on
+  // `scan != null` rather than defaulting this to 0 while still loading
+  // (root anti-pattern 22 — a naive sum over the empty pre-scan `cands`
+  // would otherwise paint "0 candidates" before the scan ever ran).
+  const totalEstTok = cands.reduce((s, c) => s + (c.est_tokens_saved || 0), 0);
 
   // ---- loaders (all core in-process) ----
   const loadCaps = async () => {
@@ -8688,6 +8696,7 @@ function SummarizeView({ params }) {
       <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b>. Click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
       ${dataErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${dataErr}</div></div>` : null}
       ${applyMsg ? html`<div class="opt-caveat" style=${'font-style:normal;color:' + (applyMsg.tone === 'warn' ? 'var(--warn)' : 'var(--success)')}>${applyMsg.text}</div>` : null}
+      <div class="section-band">Staged <span class="hint">· click a row for its diff</span></div>
       <div class="cur-filters">
         ${seg(rvState, setRvState, [{ v: 'all', t: 'All' }, { v: 'staged', t: 'Staged' }, { v: 'applied', t: 'Applied' }, { v: 'rejected', t: 'Rejected' }, { v: 'reverted', t: 'Reverted' }], 'State')}
         ${seg(rvKind, setRvKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
@@ -8781,11 +8790,21 @@ function SummarizeView({ params }) {
   // which tool to use.
   return html`
     <div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Optimize</a></div>
-    <div class="page-title">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
+    <div class="opt-head-row">
+      <div class="page-title" style="margin-bottom:0">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
+      <span class="opt-cli-chip">tj optimize summarize</span>
+      <span class="opt-mech-badge opt-mech-apply">${OPT_MECH_LABEL.apply}</span>
+    </div>
     <div class="sz-note">Rewrites prose only: code, tables, and <code>${'<tj-keep>'}</code> blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
     ${engine ? html`<div class="dim" style="font-size:12px;margin-top:4px">engine: ${engine} · <span class="sz-link" onClick=${() => setEngine(null)}>change</span></div>` : null}
 
-    <div class=${'cur-tally' + (addedList.length ? '' : ' empty')} onClick=${() => addedList.length && openModal('review')}>
+    ${scan ? html`<div class="opt-stats" style="margin:16px 0 0">
+      <div class="opt-stat-tile"><div class="opt-stat-v">${cands.length}</div><div class="opt-stat-l">candidate file${cands.length === 1 ? '' : 's'} over budget</div></div>
+      <div class="opt-stat-tile"><div class="opt-stat-v">~${fmtTokens(totalEstTok)}</div><div class="opt-stat-l">est. tok/call recoverable, all candidates</div></div>
+      <div class="opt-stat-tile"><div class="opt-stat-v">${staged.length}</div><div class="opt-stat-l">already staged, ready to review</div></div>
+    </div>` : html`<div class="opt-stats" style="margin:16px 0 0"><div class="shimmer" style="height:64px"></div></div>`}
+
+    <div class=${'cur-tally' + (addedList.length ? '' : ' empty')} onClick=${() => addedList.length && openModal('review')} style="margin-top:16px">
       <div class="cur-tally-head">
         <div class="cur-tally-count">${addedList.length} <small>file${addedList.length === 1 ? '' : 's'} added · ~${addedTok.toLocaleString()} tok/call saved (est.)</small></div>
         <div class="cur-tally-hint">${addedList.length ? 'click to review / remove' : 'check rows below, then Add →'}</div>
@@ -8796,6 +8815,7 @@ function SummarizeView({ params }) {
     ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI. <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
     ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:4px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone: <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
 
+    <div class="section-band">Candidates <span class="hint">· pick what to compress</span></div>
     <div class="cur-filters">
       ${seg(kind, setKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
       ${seg(scope, setScope, [{ v: 'all', t: 'All' }, { v: 'global', t: 'Global' }, { v: 'repo', t: 'Repo' }, { v: 'project', t: 'Project' }], 'Scope')}
