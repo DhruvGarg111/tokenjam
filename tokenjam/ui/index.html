@@ -2254,11 +2254,11 @@ code.md-code {
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="improve"><span class="icon">&#9889;</span> Optimize</a>
   <!-- Analyzer nav-children (#/optimize/<name>) are injected right here by App()
        — one per analyzer that has a real finding, in rank order — before the
-       static Summarize and Rules children below. See the nav-child injection
+       static Summarize and Relearn children below. See the nav-child injection
        effect in App(). The two static children carry data-optimize-static so the
        injector can find them and always insert BEFORE Summarize. -->
   <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Summarize</a>
-  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Rules</a>
+  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Relearn</a>
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
@@ -6299,12 +6299,12 @@ const ANALYZER_META = {
   trim:       { title: 'Trim',       hint: 'Trim low-value tokens from prompts' },
   reuse:      { title: 'Reuse',      hint: 'Reuse the plan instead of re-planning' },
   subagent:   { title: 'Subagent',   hint: 'Use a smaller model for subagents' },
-  // `relearn` is the analyzer's internal name; "Rules" is the outcome the user
-  // came for, and it is what the sidebar calls the surface this finding leads
-  // to. Two names for one thing made the Dashboard tile unfindable from the
-  // nav, so the label follows the outcome everywhere. The KEY stays `relearn`
-  // — this is a label change, not a route or registry change.
-  relearn:    { title: 'Rules',      hint: 'Turn recurring mistakes into a rule' },
+  // "Relearn" is the user-visible name of this surface everywhere — the tile
+  // here, the sidebar child, the page title, the FAQ entry. One name for one
+  // thing: two spellings made the Dashboard tile unfindable from the nav. The
+  // ROUTE (`#/optimize/rules`), the registry KEY (`relearn`) and the CLI group
+  // (`tj rules`) are unchanged — this is a label change only.
+  relearn:    { title: 'Relearn',    hint: 'Turn recurring mistakes into a rule' },
   verbosity:  { title: 'Verbosity',  hint: 'Rein in over-long outputs' },
   deadweight: { title: 'Deadweight', hint: 'Remove MCP servers you never call' },
   resend:     { title: 'Context resend', hint: 'Offload context instead of re-sending it' },
@@ -8034,13 +8034,13 @@ function OptimizeView({ params, navParam }) {
             that would read as "nothing to compress" (root anti-pattern 22). */ ''}
       <div class="opt-cards">
         <div class="opt-card">
-          <div class="opt-card-title">Rules</div>
+          <div class="opt-card-title">Relearn</div>
           <div class="opt-card-body">
             Recurring findings that end in a permanent instruction-file rule.
             Each one is a diff you approve before anything is written.
           </div>
           <div class="opt-card-acts">
-            <a class="opt-card-link" href="#/optimize/rules">Open Rules →</a>
+            <a class="opt-card-link" href="#/optimize/rules">Open Relearn →</a>
             <span class="opt-card-note">tj rules list</span>
           </div>
         </div>
@@ -8243,9 +8243,9 @@ const GUIDE_ENTRIES = {
         ],
       },
       relearn: {
-        // Same outcome-name rule as ANALYZER_META above: the key stays the
-        // analyzer's internal name, the label is what the user came for.
-        title: 'Rules',
+        // Same naming rule as ANALYZER_META above: the key stays the
+        // analyzer's internal name, the label the user reads is "Relearn".
+        title: 'Relearn',
         description: [
           'The same mistake, session after session: the agent runs into the same class of problem repeatedly across sessions and works it out again each time, because nothing carried the answer forward.',
           'The fix is to write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
@@ -8381,7 +8381,8 @@ function diffBlocks(diffText) {
   return out.filter(b => b.lines.some(l => l.trim()));
 }
 
-// Optimize ▸ Rules — the placed rule-write surface.
+// Optimize ▸ Relearn — the placed rule-write surface. (Route and component
+// name stay `rules`; "Relearn" is the label, see ANALYZER_META.)
 //
 // Four analyzers (downsize, resend, subagent, relearn) end in the same
 // artifact: a rule appended to a CLAUDE.md. The backend now decides WHICH
@@ -8450,8 +8451,34 @@ function RulesView() {
   // rollup through its contribution path, and this screen must not grow a
   // second, naive one (root anti-pattern 22b: two figures published together
   // have to cover the same population).
+  //
+  // ONE STRIP PER TAB, RENDERED INSIDE IT. These used to be a single strip in
+  // the page head, pinned to the pending population, so standing on "In place
+  // (2)" — two real rules, real figures — you read three zeros captioning them.
+  // A tile has to describe the list directly beneath it, so each tab now owns
+  // its own strip and its own vocabulary, and neither can caption the other's
+  // rows.
   const openDestPaths = new Set();
   openRules.forEach(r => (r.destinations || []).forEach(d => openDestPaths.add(d.path)));
+  // The done population splits by the two ROUTES the rows below already carry:
+  // tokenjam wrote it (a ledger knows), or it was already in the file. Derived
+  // as a complement rather than a second filter, so the two always add up to
+  // the population tile exactly — the three tiles cover one population, not two
+  // (root anti-pattern 22b).
+  const inPlaceWritten = inPlaceRules.filter(r => r.already_applied).length;
+  const inPlaceAlreadyThere = inPlaceRules.length - inPlaceWritten;
+
+  // One tile. `null` is "not yet known" and renders the skeleton — never a
+  // number, and never a 0 standing in for a read that has not landed (root
+  // anti-pattern 22). Each call site passes its OWN fetch's gate, so a tile
+  // reading `/rules/staged` does not borrow `/rules`'s resolution.
+  const statTile = (v, label) => html`
+    <div class="opt-stat-tile">
+      <div class="opt-stat-v">${v === null
+        ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
+        : v}</div>
+      <div class="opt-stat-l">${label}</div>
+    </div>`;
 
   const doStage = async (sig) => {
     setBusy(true); setMsg(null);
@@ -8514,7 +8541,13 @@ function RulesView() {
             nav-child of Optimize, which already shows its parent one line
             above it. */ ''}
       <div class="opt-head-row">
-        <div class="page-title" style="margin-bottom:0">Rules</div>
+        <div class="page-title" style="margin-bottom:0">Relearn</div>
+        ${/* `tj rules` is the group that drives THIS surface — list / show /
+              stage / apply / undo / applied / dismiss, one subcommand per
+              button below. `tj relearn` is the self-improve loop's eval-case
+              emitter and reaches none of it, so the label moving to Relearn
+              does not move the command. Group-level, like the sibling
+              analyzer pages' `tj optimize <name>`. */ ''}
         <span class="opt-cli-chip">tj rules</span>
         <span class="opt-mech-badge opt-mech-apply">${OPT_MECH_LABEL.apply}</span>
       </div>
@@ -8524,26 +8557,6 @@ function RulesView() {
         working directories your sessions recorded, so one rule can be a single
         write, or the same write into several of your projects, each with its
         own diff.
-      </div>
-      <div class="opt-stats">
-        <div class="opt-stat-tile">
-          <div class="opt-stat-v">${rules === null
-            ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
-            : openRules.length}</div>
-          <div class="opt-stat-l">rules waiting to be written</div>
-        </div>
-        <div class="opt-stat-tile">
-          <div class="opt-stat-v">${rules === null
-            ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
-            : openDestPaths.size}</div>
-          <div class="opt-stat-l">project files they would land in</div>
-        </div>
-        <div class="opt-stat-tile">
-          <div class="opt-stat-v">${staged === null
-            ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
-            : staged.length}</div>
-          <div class="opt-stat-l">staged, ready to review</div>
-        </div>
       </div>
       ${err ? html`<div class="panel" style="margin-top:var(--stack-gap)"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
       ${msg ? html`<div class="panel" style="margin-top:var(--stack-gap)"><div class="panel-body opt-line">${msg}</div></div>` : null}
@@ -8577,6 +8590,18 @@ function RulesView() {
       </div>
 
       ${tab === 'open' ? html`
+      ${/* Counted only when there is something to count. A known-empty tab gets
+            the sentence below and no strip at all: "0 rules waiting to be
+            written" is a true measurement that still reads as a broken tile,
+            and the empty state is the one honest home for that claim (root
+            anti-pattern 22a). Not-yet-known still gets the skeleton strip, so
+            the page does not jump when the fetch lands. */ ''}
+      ${rules === null || openRules.length > 0 ? html`
+        <div class="opt-stats">
+          ${statTile(rules === null ? null : openRules.length, 'rules waiting to be written')}
+          ${statTile(rules === null ? null : openDestPaths.size, 'project files they would land in')}
+          ${statTile(staged === null ? null : staged.length, 'staged, ready to review')}
+        </div>` : null}
       ${rules === null
           ? html`<div class="opt-line dim">Loading…</div>`
           : openRules.length === 0
@@ -8675,6 +8700,15 @@ function RulesView() {
             is what it cost (Critical Rule 32) — being fixed now does not un-spend
             it, and for an already-present rule that still recurs the figure is
             the interesting part, since it says the wording is not working. */ ''}
+      ${/* Same gate, this tab's vocabulary: how many are done, and by which of
+            the two routes. Suppressed entirely when the tab is known-empty —
+            the sentence below says it in words. */ ''}
+      ${rules === null || inPlaceRules.length > 0 ? html`
+        <div class="opt-stats">
+          ${statTile(rules === null ? null : inPlaceRules.length, 'rules in place')}
+          ${statTile(rules === null ? null : inPlaceWritten, 'written by tokenjam')}
+          ${statTile(rules === null ? null : inPlaceAlreadyThere, 'already in your instruction files')}
+        </div>` : null}
       ${rules === null
           ? html`<div class="opt-line dim">Loading…</div>`
           : inPlaceRules.length === 0
@@ -12398,7 +12432,7 @@ function PersonaEmptyGate({ persona, header, children }) {
 // bare banner. Titles keyed by primary-view key.
 const VIEW_TITLES = {
   dashboard: 'Dashboard', optimize: 'Optimize',
-  summarize: 'Summarize', rules: 'Rules', traces: 'Traces', cost: 'Cost',
+  summarize: 'Summarize', rules: 'Relearn', traces: 'Traces', cost: 'Cost',
   alerts: 'Alerts', drift: 'Drift', budget: 'Budget', faq: 'FAQ',
 };
 function PersonaEmptyHeader({ viewKey }) {
