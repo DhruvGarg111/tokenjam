@@ -5831,17 +5831,11 @@ function DriftView({ params }) {
   // nothing. Two of the three reasons are permanent for most users: interactive
   // coding agents are deliberately never baselined (the API applies the same
   // persona gate the detector does), and backfilled history never builds one.
+  // No blurb in THIS branch: the empty state below already states the baseline
+  // requirement at length, and repeating it directly above would say the same
+  // thing twice on the one page where a reader is least likely to skim.
   if (!agents.length) return html`
     <div class="page-title" style="margin-bottom:4px">Drift detection</div>
-    ${/* The one thing a reader has to know before any of this means anything:
-          drift is measured against an agent's OWN past, so it needs a baseline.
-          It used to be stated only inside the empty state, which is exactly the
-          reader who no longer needs it. */ ''}
-    <div class="opt-blurb" style="max-width:660px;margin:0 0 18px">
-      Drift compares a service against its own past behaviour, so it needs a
-      baseline: 10 or more completed sessions for one agent. Coding sessions and
-      backfilled history are never baselined.
-    </div>
     <div class="empty">
       <div>No drift baselines to compare against.</div>
       <div class="drift-empty-lead">Drift needs live SDK agents with 10+ completed sessions — Claude Code / Codex sessions and backfilled history aren't baselined.</div>
