@@ -1035,6 +1035,122 @@ def test_sessions_page_filters_both_zones_on_the_selected_persona(
     """The coding-session list was not persona-filtered at all: switching to
     "SDK workflows" left a screenful of Claude Code cards under an SDK heading.
     Both zones now gate, and neither gates on a not-yet-known persona."""
-    assert "const showSdkZone = !personaKnown || persona !== 'claude-code';" in html
+    # The SDK zone's rule moved into `showSdkZoneFor` so the render and the
+    # history fetch that feeds it read ONE rule; pin the rule, not where it is
+    # spelled inline.
+    assert "const showSdkZone = showSdkZoneFor(persona, personaKnown);" in html
+    assert "return !personaKnown || persona !== 'claude-code';" in html
     assert "const showCodingZone = !personaKnown || persona !== 'sdk';" in html
     assert "function StatusView({ params, persona, personaKnown, routeView })" in html
+
+
+# --------------------------------------------------------------------------- #
+# SDK session history — the SDK persona's historical surface.
+#
+# The live-services panel is bounded by SDK_DISCOVERY_WINDOW (7 days,
+# api/routes/status.py). That is deliberate and stays. What was missing is what
+# happens on the other side of it: the SDK persona's Sessions page rendered that
+# panel and nothing else, so an agent quiet for longer than the window left the
+# product, and the page said "No SDK services live right now" — a true statement
+# about the live window, sitting alone on the persona's ONLY session surface,
+# where it reads as "there is no record of your SDK work".
+# --------------------------------------------------------------------------- #
+def test_sdk_history_is_fed_by_the_persona_scoped_sessions_endpoint(
+    html: str,
+) -> None:
+    """A different question needs a different source. History must NOT come from
+    /status's live discovery — that is the very thing bounded by the window."""
+    assert "function SdkSessionHistory(" in html
+    assert "api('/sessions', { persona: 'sdk', limit: SDK_HISTORY_LIMIT })" in html
+    assert "const SDK_HISTORY_LIMIT = 50;" in html
+    # Rendered beneath the live panel, on the services tab, with the panel now
+    # ALWAYS rendering rather than being swapped out for a bare sentence.
+    assert "<${SdkServicesPanel} services=${sdkServices} framing=${data.framing} history=${sdkHistory} />" in html
+    assert "<${SdkSessionHistory} history=${sdkHistory} framing=${data.framing} />" in html
+    # The bare fallback that bypassed the panel entirely — and so WAS the whole
+    # page in the reported case — must be gone.
+    assert (
+        ': html`<div class="svc-empty">No SDK services live right now</div>'
+        not in html
+    ), "the bare live-empty fallback must not bypass the panel"
+
+
+def test_the_live_empty_claim_cannot_render_while_its_fetch_is_unresolved(
+    html: str,
+) -> None:
+    """THE pin for this class of bug: three states, gated on the history read's
+    OWN resolved flag, with the not-yet-known branch rendering a skeleton and
+    making no claim of any kind.
+
+    Order matters and is asserted: the unresolved branch must come FIRST, so a
+    fall-through can never reach an absence claim.
+    """
+    fn = html[html.index("function sdkLiveEmptyState(history) {"):]
+    fn = fn[: fn.index("\n}")]
+    # Not-yet-known is the first branch, and it renders a shimmer, not a claim.
+    assert fn.index("if (!history || !history.known)") < fn.index("shimmer")
+    assert fn.index("shimmer") < fn.index("No SDK")
+    # Known-and-empty is the ONLY place an absence claim lives, and it makes the
+    # claim the reader needs (nothing recorded at all), not the narrower
+    # live-window one.
+    assert "if (!history.sessions.length)" in fn
+    assert "No SDK or API traffic has been recorded on this machine yet" in fn
+    # Known-with-history keeps the live-window fact but never leaves it alone.
+    assert "No SDK services live right now. Earlier sessions are in the history below." in fn
+    # A failed read must not degrade into "empty" — `known` stays false.
+    assert ".catch(() => {});" in html
+
+
+def test_sdk_history_skeleton_publishes_no_count(html: str) -> None:
+    """The unresolved history list renders a table skeleton and no figure. A
+    zero here would read as "no SDK sessions", which is the reassurance the
+    unanswered read cannot support."""
+    fn = html[html.index("function SdkSessionHistory({ history, framing }) {"):]
+    fn = fn[: fn.index("\nfunction _flatlineSvg")]
+    head = fn[: fn.index("if (!history.sessions.length) return null;")]
+    assert "TableRowsSkeleton" in head
+    assert "session${rows.length" not in head, "no count may render before the read answers"
+    # The cap is disclosed rather than published as a total.
+    assert "history.capped" in fn
+    assert "capped: sessions.length >= SDK_HISTORY_LIMIT," in html
+
+
+def test_one_rule_decides_whether_the_sdk_zone_renders(html: str) -> None:
+    """The render and the fetch that feeds it must not disagree about whether
+    the zone exists — stated once, read twice."""
+    assert "function showSdkZoneFor(persona, personaKnown) {" in html
+    assert "return !personaKnown || persona !== 'claude-code';" in html
+    assert "const showSdkZone = showSdkZoneFor(persona, personaKnown);" in html
+    assert "if (!showSdkZoneFor(persona, personaKnown)) return undefined;" in html
+
+
+def test_no_view_references_a_binding_its_refactor_deleted(html: str) -> None:
+    """Relocating alerts out of this page deleted `const showAlerts = ...` and
+    left a reference to it inside `agentCard`.
+
+    Why it survived every existing guard: the reference sits in a row that only
+    evaluates when there IS an active coding card to draw, so a corpus with no
+    active session never reached it. And Preact does not surface the
+    ReferenceError — it swallows a re-render exception into its rerender queue,
+    so the entire page silently stops updating with an EMPTY console. The
+    symptom is a permanent skeleton, which reads as a slow fetch.
+
+    Pinned as a name-level check because a static grep cannot do scope analysis:
+    any identifier this file USES from that refactor must also be DECLARED in
+    it. Add to `retired` whenever a binding is removed.
+    """
+    # Comments are stripped first so the check can stay blunt (the identifier
+    # must not appear AT ALL) while the source is still free to explain the bug
+    # by name — the explanation is worth more than the convenience of a looser
+    # pattern that would miss the next reference shape.
+    code = re.sub(r"/\*.*?\*/", "", html, flags=re.S)
+    retired = ["showAlerts"]
+    for name in retired:
+        assert name not in code, (
+            f"`{name}` was deleted when alerts moved into the Sessions SDK zone; "
+            f"a surviving reference throws at render and silently freezes the "
+            f"whole Preact tree"
+        )
+    # The alerts row now gates on a binding that IS declared on this page.
+    assert "${a.active_alerts > 0 && showSdkZone ?" in html
+    assert "const showSdkZone = showSdkZoneFor(persona, personaKnown);" in html

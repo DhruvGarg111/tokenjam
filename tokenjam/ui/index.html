@@ -3102,12 +3102,122 @@ function _sdkErrClass(pct) {
 function _sdkErrColor(pct) {
   return pct > 0.5 ? 'var(--error)' : pct > 0 ? 'var(--warn)' : 'var(--success)';
 }
+// How many SDK sessions the history list asks for. A cap, disclosed as `N+`
+// where it bites — never rendered as a total (root anti-pattern 22b).
+const SDK_HISTORY_LIMIT = 50;
+
+// Whether the SDK-services zone renders, stated ONCE so the render and the
+// history fetch that feeds it cannot disagree about it. Not-yet-known shows the
+// zone rather than hiding it: hiding on an unresolved persona read is a claim
+// that this reader has no SDK side, which is exactly what is not known yet.
+function showSdkZoneFor(persona, personaKnown) {
+  return !personaKnown || persona !== 'claude-code';
+}
+
+// THREE states, gated on the history read's own fetch — never on a page-wide
+// flag, and never collapsed to two:
+//
+//   not yet known    a skeleton. No number, and emphatically no "no X" claim:
+//                    the read that would tell us has not answered.
+//   known and empty  the only place an absence claim is honest. Says the thing
+//                    the reader actually needs to know (nothing has ever been
+//                    recorded), not the narrower live-window fact.
+//   known, has rows  the live-window fact IS the right thing to say, because
+//                    the history sitting under it supplies what a bare
+//                    "nothing live" would have been read as denying.
+function sdkLiveEmptyState(history) {
+  if (!history || !history.known) {
+    return html`<div class="svc-empty"><span class="shimmer" style="display:inline-block;height:11px;width:220px;vertical-align:middle"></span></div>`;
+  }
+  if (!history.sessions.length) {
+    return html`<div class="svc-empty">No SDK or API traffic has been recorded on this machine yet. Instrument a workload with <span class="mono">@watch()</span> and it appears here.</div>`;
+  }
+  return html`<div class="svc-empty">No SDK services live right now. Earlier sessions are in the history below.</div>`;
+}
+
+// SDK SESSION HISTORY — the SDK zone's counterpart to the coding zone's
+// archive, and the reason it exists: the services panel above is keyed on a
+// LIVE-DISCOVERY WINDOW (`SDK_DISCOVERY_WINDOW`), so a service quiet for longer
+// than that dropped out of the panel and, since this page is the SDK persona's
+// only session surface, out of the product entirely.
+//
+// Deliberately NOT fixed by widening that window: `live` / `went quiet` /
+// `long-dormant` are defined against it, so widening changes what all three
+// words mean and only moves the cliff further out. An agent leaving the live
+// window should DEGRADE INTO HISTORY, which is exactly what the coding zone
+// already does with its archive.
+//
+// Fed by `GET /sessions?persona=sdk`, not by /status's live discovery — a
+// different question needs a different source, and that endpoint applies the
+// same agent_id-prefix bucketing `framing.agent_persona_mix` classifies with.
+// Rows are SESSIONS (like the coding archive), not agents, so a row is a real
+// thing to drill into rather than a second aggregate that could disagree with
+// the panel above.
+//
+// The column is `Started`, from `started_at`, and it stays a single basis on
+// purpose: an SDK service never closes, so `ended_at` is null for many of these
+// rows and a "last activity" column would silently mean two different things
+// depending on the row.
+function SdkSessionHistory({ history, framing }) {
+  if (!history || !history.known) {
+    return html`
+      <div class="section-gap"></div>
+      <div class="zone-head">
+        <span class="zone-title">Session history</span>
+        <span class="zone-sub">loading…</span>
+      </div>
+      <div class="panel">${TableRowsSkeleton(['Session', 'Agent', 'Cost', 'Tokens in / out', 'Tools', 'Errors', 'Started'], 4)}</div>`;
+  }
+  if (!history.sessions.length) return null;
+
+  const rows = history.sessions;
+  const agents = new Set(rows.map(s => s.agent_id).filter(Boolean));
+  return html`
+    <div class="section-gap"></div>
+    <div class="zone-head">
+      <span class="zone-title">Session history</span>
+      ${/* Both figures cover the SAME population — the rows rendered below —
+            and the cap is disclosed rather than passed off as a total. */ ''}
+      <span class="zone-sub">${rows.length}${history.capped ? '+' : ''} session${rows.length === 1 ? '' : 's'} · ${agents.size} agent${agents.size === 1 ? '' : 's'} · newest first${history.capped ? ' · showing the most recent ' + rows.length : ''}</span>
+    </div>
+    <div class="panel">
+      <div class="table-wrap"><table class="archive-list">
+        <thead><tr><th>Session</th><th>Agent</th><th class="num">Cost</th><th>Tokens in / out</th><th class="num">Tools</th><th class="num">Errors</th><th>Started</th></tr></thead>
+        <tbody>
+          ${rows.map(s => html`
+            <tr key=${s.session_id} class=${s.session_id ? 'clickable' : ''}
+                onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
+              <td class="a-id">${s.session_id ? s.session_id.slice(0, 8) : '-'}</td>
+              <td class="a-agent" title=${s.agent_id || ''}>${s.agent_id || '-'}</td>
+              <td class="num" style="color:var(--text);font-weight:600">${fmtFramedDollar(s.total_cost_usd, framing)}</td>
+              <td class="dim">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
+              <td class="num dim">${s.tool_call_count != null ? s.tool_call_count : '-'}</td>
+              <td class="num dim">${s.error_count != null ? s.error_count : '-'}</td>
+              <td class="dim">${s.started_at ? fmtAgo(s.started_at) : '-'}</td>
+            </tr>`)}
+        </tbody>
+      </table></div>
+    </div>`;
+}
+
 function _flatlineSvg(color) {
   return html`<svg class="svg-flat" width="120" height="24" viewBox="0 0 120 24" preserveAspectRatio="none">
     <line x1="0" y1="12" x2="120" y2="12" stroke=${color} stroke-width="1.2" stroke-dasharray="3 3"></line>
   </svg>`;
 }
-function SdkServicesPanel({ services, framing }) {
+// `history` is the SDK session-history read's state (see SdkSessionHistory), and
+// this panel needs it for ONE reason: to know whether it may make an absence
+// claim at all.
+//
+// "No SDK services live right now" is a true statement about the LIVE
+// DISCOVERY WINDOW (`SDK_DISCOVERY_WINDOW`, api/routes/status.py — 7 days), and
+// it was the only thing on the SDK persona's only session surface. A reader
+// with a workload that last ran twelve days ago saw it and concluded tokenjam
+// had no record of their SDK work at all, which is a different and much larger
+// claim than the sentence was making. So this panel may only say "nothing live"
+// once the history read has answered and can say what IS there — the same
+// two-figures-over-two-populations rule the rest of this file follows.
+function SdkServicesPanel({ services, framing, history }) {
   const live = services.filter(s => s.state === 'live');
   const inactive = services.filter(s => s.state !== 'live');
   const openTraces = (aid) => { location.hash = '#/traces?agent_id=' + encodeURIComponent(aid); };
@@ -3165,7 +3275,7 @@ function SdkServicesPanel({ services, framing }) {
         <span class="range"><span class="range-tag">last 24m · 1m step</span></span>
       </div>
       <div>
-        ${live.length ? live.map(svcRow) : html`<div class="svc-empty">No SDK services live right now</div>`}
+        ${live.length ? live.map(svcRow) : sdkLiveEmptyState(history)}
       </div>
     </div>
     ${inactive.length ? html`
@@ -3284,6 +3394,37 @@ function StatusView({ params, persona, personaKnown, routeView }) {
     setData(await api('/status'));
   }, []);
 
+  // SDK SESSION HISTORY, its OWN read with its OWN resolved flag. It is a
+  // separate state rather than a field on `data` precisely so the surfaces
+  // below gate on whether THIS fetch answered — `/status` answering says
+  // nothing about whether the history is known, and sharing one flag is how a
+  // panel ends up claiming an absence off an unresolved read.
+  //
+  // `known: false` is the initial state and it is load-bearing: no count and no
+  // "no X" copy may render until it flips.
+  const [sdkHistory, setSdkHistory] = useState({ known: false, sessions: [], capped: false });
+  useEffect(() => {
+    if (!showSdkZoneFor(persona, personaKnown)) return undefined;
+    let cancelled = false;
+    api('/sessions', { persona: 'sdk', limit: SDK_HISTORY_LIMIT })
+      .then(d => {
+        if (cancelled) return;
+        const sessions = (d && d.sessions) || [];
+        setSdkHistory({
+          known: true, sessions,
+          // The endpoint applies `limit` AFTER the persona filter, so a full
+          // page means there may be more — disclosed as `N+` rather than
+          // published as a total.
+          capped: sessions.length >= SDK_HISTORY_LIMIT,
+        });
+      })
+      // A FAILED read is not an empty one. Leaving `known` false keeps the
+      // skeleton up rather than letting a network error render as "no SDK
+      // traffic has ever been recorded".
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [persona, personaKnown]);
+
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
   // Restore scroll position when returning from a session/run detail page.
@@ -3296,7 +3437,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // two. Alerts reuse `personaHides` rather than a second persona literal, so
   // this page and the nav can never disagree about whether alerts exist for
   // the reader.
-  const showSdkZone = !personaKnown || persona !== 'claude-code';
+  const showSdkZone = showSdkZoneFor(persona, personaKnown);
   // The coding zone is the other half of the same decision, and it was missing:
   // this page rendered every coding session regardless of the picker, so
   // switching to "SDK workflows" left a screenful of Claude Code cards under an
@@ -3391,7 +3532,15 @@ function StatusView({ params, persona, personaKnown, routeView }) {
           ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time: the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
-          ${a.active_alerts > 0 && showAlerts ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
+          ${/* Gated on whether the reader can OPEN alerts at all. Alerts now
+                live in the SDK-services zone, so `showSdkZone` is the same
+                question — a claude-code card showing "2 active" would point at
+                a surface that persona has no route to.
+                This line referenced a `showAlerts` binding that was deleted
+                when alerts moved; the reference survived, and because it sits
+                inside `agentCard` it only evaluates when there IS an active
+                coding card to draw, so it never fired on a corpus with none. */ ''}
+          ${a.active_alerts > 0 && showSdkZone ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-foot">View details →</div>
         </div>`;
   };
@@ -3513,9 +3662,16 @@ function StatusView({ params, persona, personaKnown, routeView }) {
              aria-selected=${sdkTab === key}
              href=${key === 'services' ? '#/sessions' : '#/' + key}>${label}</a>`)}
       </div>
-      ${sdkTab === 'services' ? (sdkServices.length ? html`
-        <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />`
-        : html`<div class="svc-empty">No SDK services live right now</div>`) : null}
+      ${/* The panel ALWAYS renders, even with no discovered services: it owns
+            the live-window empty state, and that state now has to be decided
+            against the history read (see sdkLiveEmptyState). The bare
+            `<div class="svc-empty">No SDK services live right now</div>`
+            fallback that used to sit here bypassed the panel entirely, so on
+            the exact case the founder hit — SDK sessions present, none inside
+            the 7-day discovery window — that one sentence WAS the whole page. */ ''}
+      ${sdkTab === 'services' ? html`
+        <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} history=${sdkHistory} />
+        <${SdkSessionHistory} history=${sdkHistory} framing=${data.framing} />` : null}
       ${sdkTab === 'alerts' ? html`<${AlertsView} params=${EMPTY_PARAMS} />` : null}
       ${sdkTab === 'drift' ? html`<${DriftView} params=${EMPTY_PARAMS} />` : null}
       ${sdkTab === 'budget' ? html`<${BudgetView} params=${EMPTY_PARAMS} />` : null}
