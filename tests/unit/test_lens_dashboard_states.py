@@ -320,7 +320,7 @@ def test_an_unknown_health_tile_says_which_kind_of_unknown_it_is(html):
 def test_every_health_tile_declares_the_status_of_its_source(html):
     # A tile without a status= defaults to 'ready' and would silently resume
     # publishing derived zeros, so all five must pass one.
-    start = html.index('<div class="band-label">Health at a glance</div>')
+    start = html.index('<div class="section-band">Health at a glance</div>')
     end = html.index("<!-- The HERO", start)
     band = html[start:end]
     assert band.count("<${HealthTile}") == 5
@@ -377,10 +377,12 @@ def test_the_past_overspend_heading_has_no_estimated_badge(html):
     # than banning the class outright.
     # The heading text is followed by the band's own window statement
     # ("· over the last N days"), so anchor on the text rather than on a
-    # closing bracket that no longer sits immediately after it.
+    # closing bracket that no longer sits immediately after it. The heading
+    # uses the shared `.section-band` zone-heading primitive (lens redesign),
+    # not a page-local `.band-label`.
     idx = html.index(">Opportunities to optimize token efficiency")
     heading = html[idx - 400:idx + 400]
-    assert "band-label" in heading
+    assert "section-band" in heading
     assert "estimated-tag" not in heading
     assert 'Opportunities to optimize token efficiency <span class="estimated-tag"' not in html
     assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)

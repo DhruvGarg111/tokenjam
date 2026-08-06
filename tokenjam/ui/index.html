@@ -1230,12 +1230,11 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 
 /* Overview + Optimize (issue #114) */
 .ov-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-.band-label {
-  font-family: 'Geist Mono', monospace; font-size: 12px; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--text-dim); margin: 22px 0 10px;
-  display: flex; align-items: center; gap: 8px;
-}
-.band-window { text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
+/* Dashboard's own zone headings now use the shared `.section-band` primitive
+   (see its definition up with the token layer) rather than a page-local
+   `.band-label`/`.band-window` pair — the two were byte-for-byte the same
+   rule under a different name, and `.section-band .hint` covers the trailing
+   note span. */
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
 /* Merged Dashboard preview (#/dashboard prototype) — compact triage band so the
    tiles don't dominate the Analytics hero below them. */
@@ -1279,6 +1278,16 @@ a.rec-tile:hover .rec-go { color: var(--accent); transform: translateX(2px); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
+/* Share-of-recoverable bar (lens redesign): every actionable opportunity tile
+   shows its own share of the visible total, width-encoded, colored off the
+   rank/tone ramp so the tile's RANK (not its analyzer identity) decides the
+   color — the biggest tile is always --tone-1 (whitest), never a fixed
+   per-analyzer hue. Track uses the same thin-meter recipe as every other
+   progress bar in the design system (--surface3 track, 2px radius). */
+.rec-share { height: 4px; border-radius: 2px; background: var(--surface3); overflow: hidden; margin: 0 0 4px; }
+.rec-share > span { display: block; height: 100%; }
+.rec-share-label { font-family: 'Geist Mono', monospace; font-size: 10px; color: var(--text-faint); margin-bottom: 6px; }
+.tile-grid.compact .rec-share-label { font-size: 9.5px; }
 .rec-hint {
   font-size: 11px; color: var(--text-faint); line-height: 1.4;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
@@ -1399,8 +1408,24 @@ a.health-tile.attn { border-color: var(--warn); }
 }
 .band-msg p { margin: 0 0 9px; line-height: 1.5; max-width: 52ch; }
 .band-note { margin-top: 8px; font-size: 11.5px; color: var(--text-faint); line-height: 1.45; max-width: 52ch; }
-.band-stale { font-size: 12px; color: var(--warn); margin-bottom: 8px; }
-.band-stale .sz-link { margin-left: 6px; }
+/* Stale-scan banner (lens redesign): a bordered/tinted amber box, matching the
+   design's full-width alert-bar treatment, not bare colored text — this is
+   the honest-absence state that says "these are the last complete results",
+   so it earns the same visual weight as .band-msg.warn rather than reading
+   as a caption. 0.07 is a deliberately lower alpha than --tint-bg (a
+   full-width banner reads as too loud at the standard 0.15 badge alpha) —
+   verbatim design value, kept literal per the tint-alpha convention. */
+.band-stale {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: rgba(var(--warn-rgb), 0.07);
+  border: 1px solid rgba(var(--warn-rgb), var(--tint-border));
+  border-radius: var(--radius-panel);
+  padding: 10px var(--inset-x);
+  font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--warn);
+  margin-bottom: 14px;
+}
+.band-stale .sz-link { margin-left: 6px; color: var(--text); text-decoration: underline; }
+.band-stale .sz-link:hover { color: var(--text); }
 /* The reduced-motion guard for these placeholders is NOT here: it lives on
    `.shimmer` itself, up with the primitive's own definition, so every shimmer in
    the app inherits one guard. This block briefly carried a second copy of that
@@ -13430,7 +13455,7 @@ function DashboardView({ params, persona }) {
                       windows are one seam now (core/optimize/report_window.py)
                       and each surface still names it, because a figure whose
                       window the reader cannot see is not auditable. */ ''}
-                <div class="band-label">Opportunities to optimize token efficiency${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays}d</span>` : null}</div>
+                <div class="section-band">Opportunities to optimize token efficiency${scan.windowDays ? html`<span class="hint">· over the last ${scan.windowDays}d</span>` : null}</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -13478,42 +13503,67 @@ function DashboardView({ params, persona }) {
                 ${bandState === 'tiles' || bandState === 'none' || bandState === 'stale' ? html`
                 <div class="tile-grid compact opp-grid">
                   ${tiles.length === 0 ? html`<div class="empty">No overspend found.</div>`
-                    : html`<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${tiles.map(t => {
-                      const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-                      // ONLY a tile with a real finding is clickable (Option B,
-                      // founder-approved): it routes straight to that analyzer's
-                      // own detail sub-page (#/optimize/<name>), where the
-                      // number's evidence and fix live. Empty-state tiles
-                      // ("No candidates" / "Not ready") and the positive
-                      // at-ceiling tile stay rendered for transparency but are
-                      // NOT links — no href, no pointer, no hover — because there
-                      // is no detail page for them to open. Has-data is decided by
-                      // the SAME predicate the submenu + summary list use
-                      // (state === 'actionable' + a known detail analyzer).
-                      const hasPage = t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name);
-                      const href = '#/optimize/' + t.name;
-                      const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)
-                        : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
-                        : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
-                      const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok static' : 'rec-tile muted static');
-                      const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
-                      // Brief context so the tile says what the number means,
-                      // not just how big it is — the specific
-                      // not-ready reason when there is one, else what the
-                      // analyzer measures.
-                      const explain = t.state === 'not_ready' && t.hint ? t.hint : meta.hint;
-                      const inner = html`
-                        <div class="rec-name">${meta.title}</div>
-                        <div class=${amtCls}>${amount}</div>
-                        ${explain ? html`<div class="rec-hint">${explain}</div>` : null}`;
-                      return hasPage
-                        ? html`<a class=${cls} href=${href}>${inner}<span class="rec-go" aria-hidden="true">→</span></a>`
-                        : html`<div class=${cls}>${inner}</div>`;
-                    })}`}
+                    : html`<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${(() => {
+                      // Share-of-recoverable bar, rank-ordered: `tiles` already arrives
+                      // biggest-waste-first (rankTiles/finding_rank, server-side), so a
+                      // tile's RANK among the tiles that actually carry a figure is just
+                      // its position in that filtered subset — never re-derived from the
+                      // dollar amount, which would fight the server's own tie-breaking.
+                      // Reuses totalOpportunityFigure's contributor sum (same rounding as
+                      // the Total tile) so a share can never disagree with what the Total
+                      // tile displays it summing into. Color comes from the rank/tone
+                      // ramp (--tone-1..7, biggest = whitest), clamped at 7 — the same
+                      // convention as every other rank-ordered visual in this app.
+                      const fig = totalOpportunityFigure(tiles);
+                      let rank = 0;
+                      return tiles.map(t => {
+                        const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+                        // ONLY a tile with a real finding is clickable (Option B,
+                        // founder-approved): it routes straight to that analyzer's
+                        // own detail sub-page (#/optimize/<name>), where the
+                        // number's evidence and fix live. Empty-state tiles
+                        // ("No candidates" / "Not ready") and the positive
+                        // at-ceiling tile stay rendered for transparency but are
+                        // NOT links — no href, no pointer, no hover — because there
+                        // is no detail page for them to open. Has-data is decided by
+                        // the SAME predicate the submenu + summary list use
+                        // (state === 'actionable' + a known detail analyzer).
+                        const hasPage = t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name);
+                        const href = '#/optimize/' + t.name;
+                        const isContributor = t.state === 'actionable' && t.usd != null;
+                        const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing, fmtDashUsd)
+                          : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
+                          : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
+                        const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok static' : 'rec-tile muted static');
+                        const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
+                        // Brief context so the tile says what the number means,
+                        // not just how big it is — the specific
+                        // not-ready reason when there is one, else what the
+                        // analyzer measures.
+                        const explain = t.state === 'not_ready' && t.hint ? t.hint : meta.hint;
+                        let share = null;
+                        if (isContributor) {
+                          rank += 1;
+                          const tone = 'var(--tone-' + Math.min(rank, 7) + ')';
+                          const pct = fig.totalUsd > 0 ? (roundToCents(t.usd) / fig.totalUsd) * 100 : 0;
+                          share = html`
+                            <div class="rec-share"><span style="width:${pct}%;background:${tone}"></span></div>
+                            <div class="rec-share-label">${pct.toFixed(0)}% of recoverable</div>`;
+                        }
+                        const inner = html`
+                          <div class="rec-name">${meta.title}</div>
+                          <div class=${amtCls}>${amount}</div>
+                          ${share}
+                          ${explain ? html`<div class="rec-hint">${explain}</div>` : null}`;
+                        return hasPage
+                          ? html`<a class=${cls} href=${href}>${inner}<span class="rec-go" aria-hidden="true">→</span></a>`
+                          : html`<div class=${cls}>${inner}</div>`;
+                      });
+                    })()}`}
                 </div>` : null}
               </div>
               <div class="dash-col health-glance">
-                <div class="band-label">Health at a glance</div>
+                <div class="section-band">Health at a glance</div>
                 ${/* Every tile below carries the status of the read it is derived
                       from. Each one used to take its figure from a `.catch(() =>
                       <empty>)` fallback, so a failed read published a 0 with a
@@ -13544,7 +13594,7 @@ function DashboardView({ params, persona }) {
 
         <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
              once (Spend KPI tile + chart); the run-rate projection is the caption. -->
-        <div id="dash-explore" class="band-label" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="band-window">· slice and dice by model, agent, tool, provider and more</span></div>
+        <div id="dash-explore" class="section-band" style="margin-top:28px;padding-top:22px;border-top:1px solid var(--border)">Spend exploration <span class="hint">· slice and dice by model, agent, tool, provider and more</span></div>
         <div style="display:flex;align-items:center;gap:8px;margin:10px 0 2px"><span class="persona-bar-label">Window</span><div class="filters" style="margin:0">${winPicker}</div></div>
         <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
   `;

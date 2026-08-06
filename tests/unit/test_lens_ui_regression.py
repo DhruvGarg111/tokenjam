@@ -608,10 +608,13 @@ def test_total_tile_is_first_in_the_row_and_visually_distinct(html: str) -> None
     # Rendered before tiles.map(), so it is the first child of .tile-grid; a
     # dedicated CSS class carries the weight/border distinction (never the
     # accent colour, which means "typeable/clickable" and this tile links
-    # nowhere).
-    assert (
-        "<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${tiles.map(t => {" in html
-    ), "the total tile must render before tiles.map() in the tile-grid"
+    # nowhere). The per-tile share bar (lens redesign) wraps the map in an
+    # IIFE to compute the rank/tone ramp once, so anchor on render ORDER
+    # rather than a single unbroken substring.
+    assert "<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${" in html
+    idx_total = html.index("<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${")
+    idx_map = html.index("return tiles.map(t => {", idx_total)
+    assert idx_total < idx_map, "the total tile must render before tiles.map() in the tile-grid"
     assert ".rec-tile.total-tile" in html
     assert ".rec-tile.total-tile .rec-amount { color: var(--text); }" in html
 
@@ -670,7 +673,7 @@ def test_opportunities_row_fits_seven_tiles_without_widening_the_shared_compact_
     # Both call sites carry it: the scanning skeleton and the answered tiles.
     assert html.count('class="tile-grid compact opp-grid"') == 2
     # The health-glance row is a separate grid and must NOT be narrowed.
-    health = html[html.index('<div class="band-label">Health at a glance</div>'):]
+    health = html[html.index('<div class="section-band">Health at a glance</div>'):]
     health = health[: health.index("<!-- The HERO")]
     assert 'class="tile-grid compact"' in health
     assert "opp-grid" not in health
