@@ -529,8 +529,16 @@ def start_catch_up(
                 logger.warning("stale-active session sweep failed", exc_info=True)
             if on_done is not None:
                 on_done(result)
-        except Exception:
-            logger.warning("transcript catch-up failed", exc_info=True)
+        except Exception as exc:
+            # "Errors are logged, never raised" holds for a catch-up that
+            # failed. It must NOT hold for a DuckDB fatal: that invalidates the
+            # whole database instance rather than this thread's connection, so
+            # logging it as one job's warning leaves the request path dead with
+            # nothing reporting it.
+            from tokenjam.core.db import handle_if_fatal
+
+            if not handle_if_fatal(exc, what="transcript catch-up"):
+                logger.warning("transcript catch-up failed", exc_info=True)
         finally:
             if backend is not None:
                 try:
