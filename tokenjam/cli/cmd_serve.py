@@ -114,46 +114,35 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     from tokenjam.core.db import DuckDBBackend as _DuckDBBackend
     from tokenjam.core.optimize import scan_cycle
 
-    def _guard_fatal_db(label: str, run: "Callable[[], None]") -> None:
-        """Run a background job, and treat a fatal DuckDB error as a fatal.
+    def _guard_fatal_db(label: str, run: "Callable[[], object]") -> None:
+        """Dispatch a background job, treating a fatal DuckDB error as a fatal.
 
-        These jobs open their OWN `DuckDBBackend`, which is exactly why this
-        guard has to exist here. DuckDB caches database instances per path
-        within a process, so a background job's "own" connection is the same
-        instance the request path is using: a fatal raised while a scan
-        persists one agent-config row invalidates the web server's connections
-        too, and every route starts returning 500 on a daemon that is still
-        happily accepting requests. Nothing else in the process would notice —
-        the job is on a scheduler thread, so the exception has nowhere to go.
+        These jobs open their OWN `DuckDBBackend`, which is precisely why a
+        fatal in one is not contained to it: DuckDB caches database instances
+        per path within a process, so a background job's "own" connection is
+        the same instance the request path is using. A fatal raised while a
+        scan persists one agent-config row invalidates the web server's
+        connections too, and every route starts returning 500 on a daemon that
+        is still happily accepting requests.
 
-        Recovery closes every connection in the process and reopens them, which
-        is the only in-process recovery DuckDB permits, and rebuilds the table
-        whose index fault raised it so the next pass does not repeat it.
+        **This guard covers the DISPATCH only.** Both jobs are fire-and-forget:
+        they start a daemon thread and return, and each already swallows
+        exceptions inside that thread. So the fatal that caused the outage is
+        caught at those two handlers, not here — see `handle_if_fatal`, which
+        both now call. What is left for this guard is a failure on the dispatch
+        path itself, which would otherwise die unheard on a scheduler thread.
         """
-        from tokenjam.core.db import (
-            is_fatal_db_error,
-            note_fatal_db_error,
-            recover_invalidated_database,
-        )
+        from tokenjam.core.db import handle_if_fatal
 
         try:
             run()
         except Exception as exc:  # noqa: BLE001 - classified immediately below
-            if not is_fatal_db_error(exc):
+            if not handle_if_fatal(exc, what=label):
                 raise
-            note_fatal_db_error(exc)
             console.print(
                 f"[red]{label}: the database was invalidated by a fatal DuckDB "
-                f"error ({exc}). Re-establishing connections.[/red]"
+                f"error ({exc}); recovery was attempted. Check /health.[/red]"
             )
-            if recover_invalidated_database():
-                console.print("[green]Database connections re-established.[/green]")
-            else:
-                console.print(
-                    "[red]Recovery failed — this daemon can no longer read its "
-                    "database. /health now reports unhealthy; restart `tj serve` "
-                    "and run `tj doctor --repair`.[/red]"
-                )
 
     def _scan_cycle_job() -> None:
         # Resolved through the module (not a from-import) so the scheduled and

@@ -2290,6 +2290,36 @@ def clear_fatal_db_error() -> None:
         _FATAL_DB_ERROR = None
 
 
+def handle_if_fatal(exc: BaseException, *, what: str) -> bool:
+    """Whether ``exc`` was fatal; if so, record it and re-establish connections.
+
+    The hook for every broad `except Exception` that logs a failure and carries
+    on. Those handlers are correct for the errors they were written for and
+    catastrophic for this one, and the difference is invisible at the catch
+    site — which is how a fatal ends up swallowed by a `pass` on a background
+    thread while the request path quietly dies. Ask this first:
+
+        except Exception as exc:
+            if not handle_if_fatal(exc, what="the job"):
+                logger.warning("the job failed", exc_info=True)
+
+    Returns True when it handled a fatal (already logged, recovery attempted),
+    so the caller's ordinary logging is skipped rather than duplicated.
+    """
+    if not is_fatal_db_error(exc):
+        return False
+    note_fatal_db_error(exc)
+    if recover_invalidated_database():
+        logger.warning("%s: database connections re-established", what)
+    else:
+        logger.error(
+            "%s: the database could not be re-established; this process can no "
+            "longer read it. /health reports unhealthy until `tj serve` is "
+            "restarted and `tj doctor --repair` has run.", what,
+        )
+    return True
+
+
 def recover_invalidated_database(*, repair: bool = True) -> bool:
     """Re-establish every connection in this process; returns whether it worked.
 

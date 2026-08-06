@@ -29,6 +29,8 @@ repair that clears it.
 """
 from __future__ import annotations
 
+import time
+
 import duckdb
 import pytest
 from fastapi.testclient import TestClient
@@ -61,6 +63,10 @@ def backend(tmp_path):
     b = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
     yield b
     b.close()
+
+
+class _StubConfig:
+    """Stands in for TjConfig: the cycle raises before it reads any of it."""
 
 
 def _record(name: str = "CLAUDE.md") -> ConfigRecord:
@@ -248,6 +254,81 @@ def test_in_memory_backend_is_not_torn_down_by_recovery():
     recover_invalidated_database()
     row = mem.conn.execute("SELECT COUNT(*) FROM agent_config_files").fetchone()
     assert row[0] == 1
+
+
+# --- the broad `except Exception` handlers ---------------------------------
+#
+# Both background jobs are fire-and-forget: they start a daemon thread and
+# return, and each thread already swallows every exception ("never crash a
+# thread", "errors are logged, never raised"). That is right for a job that
+# failed and catastrophic for a fatal, and it is where the outage's exception
+# actually died — a guard around the DISPATCH would never have seen it.
+
+def test_handle_if_fatal_recovers_and_reports_it_handled(backend):
+    from tokenjam.core.db import handle_if_fatal
+
+    backend._teardown_connections()
+    assert handle_if_fatal(
+        duckdb.FatalException("FATAL Error: simulated"), what="a job"
+    ) is True
+    assert backend.check_health() is True
+    assert fatal_db_error() is None
+
+
+def test_handle_if_fatal_leaves_ordinary_failures_to_their_caller(backend):
+    """It must return False for anything else, or every job failure would
+    trigger a needless full teardown of the process's connections."""
+    from tokenjam.core.db import handle_if_fatal
+
+    assert handle_if_fatal(ValueError("a parse failed"), what="a job") is False
+    assert handle_if_fatal(
+        duckdb.ConstraintException("Duplicate key"), what="a job"
+    ) is False
+    assert backend.check_health() is True
+
+
+def test_transcript_catch_up_does_not_swallow_a_fatal(backend, monkeypatch):
+    """The catch-up thread's handler must escalate a fatal, not log a warning."""
+    from tokenjam.core import transcript_sync
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "tokenjam.core.db.handle_if_fatal",
+        lambda exc, what: (seen.append(what), True)[1],
+    )
+    monkeypatch.setattr(
+        transcript_sync, "run_catch_up",
+        lambda *a, **k: (_ for _ in ()).throw(
+            duckdb.FatalException("FATAL Error: Failed to delete all rows from index.")
+        ),
+    )
+    transcript_sync.start_catch_up(lambda: backend).join(10)
+    assert seen == ["transcript catch-up"]
+
+
+def test_scan_cycle_does_not_swallow_a_fatal(backend, monkeypatch):
+    """Same guard on the analyzer cycle's `except Exception` thread handler."""
+    from tokenjam.core.optimize import scan_cycle
+
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "tokenjam.core.db.handle_if_fatal",
+        lambda exc, what: (seen.append(what), True)[1],
+    )
+    # Raise the fatal from the first thing the cycle's thread body does with
+    # the database, so the real `except Exception` handler is what catches it.
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.cycle_provenance.begin_cycle",
+        lambda *a, **k: (_ for _ in ()).throw(
+            duckdb.FatalException("FATAL Error: Failed to delete all rows from index.")
+        ),
+    )
+    assert scan_cycle.trigger_scan_cycle(lambda: backend, _StubConfig(), force=True)
+    for _ in range(100):
+        if seen:
+            break
+        time.sleep(0.05)
+    assert seen == ["analyzer scan cycle"]
 
 
 # --- the health surface ----------------------------------------------------
