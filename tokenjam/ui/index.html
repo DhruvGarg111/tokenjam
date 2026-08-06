@@ -4544,8 +4544,8 @@ function TracesListView({ params }) {
   };
 
   return html`
-    <div class="page-title">Traces</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on a trace row for details</div>
+    <div class="page-title" style="margin-bottom:4px">Traces</div>
+    <div class="meta" style="margin-bottom:14px">Click a trace row for its waterfall</div>
     <div class="view-toggle" style="margin:0 0 12px">
       <button class=${sort === 'recent' ? 'active' : ''} onClick=${() => setFilter('sort', 'recent')}>Most recent</button>
       <button class=${sort === 'cost' ? 'active' : ''} onClick=${() => setFilter('sort', 'cost')}>Most expensive</button>
@@ -4567,31 +4567,40 @@ function TracesListView({ params }) {
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${() => load()}>Refresh</button>
     </div>
-    ${traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
-    ${outlierNote ? html`<div class="meta" style="margin-top:-8px">${outlierNote}</div>` : null}
+    ${/* Count and outlier rule as ONE caption, the way the design states them:
+          how much of the window you are looking at, then what the one badge on
+          the rows actually means. Two stacked `.meta` lines (the second pulled
+          up with a negative margin) read as two unrelated notes. */ ''}
+    ${(traces.length > 0 || outlierNote) ? html`<div class="meta" style="max-width:820px">
+      ${traces.length > 0 ? `Showing ${traces.length} of ${totalCount} traces` : ''}${(traces.length > 0 && outlierNote) ? ' · ' : ''}${outlierNote || ''}
+    </div>` : null}
     ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
       : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
+      <div class="panel">
       <div class="table-wrap"><table>
-        <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Cost (tokens) <span class="info-btn">i<span class="info-tip">Input + output tokens for this trace.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th>Spans</th><th></th></tr></thead>
+        <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Tokens <span class="info-btn">i<span class="info-tip">Input + output tokens for this trace.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th class="num">Spans</th><th></th></tr></thead>
         <tbody>
           ${dedup(traces).map(t => {
             const st = agentStatus[t.agent_id];
             return html`
             <tr class="clickable" onClick=${() => location.hash = '#/traces/' + t.trace_id} title=${'Trace ' + t.trace_id}>
               <td class="mono">${t.agent_id || '-'}</td>
-              <td>${friendlySpanName(t.name)}</td>
-              <td>${fmtAgo(t.start_time)}</td>
-              <td>${fmtDur(t.duration_ms)}</td>
+              <td class="dim">${friendlySpanName(t.name)}</td>
+              <td class="dim">${fmtAgo(t.start_time)}</td>
+              <td class="dim">${fmtDur(t.duration_ms)}</td>
               <td>${fmtTokens(_costVal(t, true) || 0)} tok${t.is_outlier ? html`<span class="badge badge-warning" style="margin-left:6px" title=${outlierTooltip()}>outlier</span>` : null}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
-              <td>${t.span_count}</td>
+              <td class="num dim">${t.span_count}</td>
               <td class="chevron">\u2192</td>
             </tr>
           `})}
         </tbody>
       </table></div>
-      ${traces.length < totalCount ? html`<button class="btn" onClick=${() => load({ append: true })}>Load more</button>` : null}
+      ${/* Pagination sits INSIDE the panel, under the rows it extends, rather
+            than as a loose button below the card. */ ''}
+      ${traces.length < totalCount ? html`<div class="panel-body" style="border-top:1px solid var(--border)"><button class="btn" onClick=${() => load({ append: true })}>Load more</button></div>` : null}
+      </div>
     `}
   `;
 }
