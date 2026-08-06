@@ -329,12 +329,6 @@ class OptimizeConfig:
     # section this is a SCOPE, not a sensitivity threshold — it decides which
     # filesystem is evidence, not how eager an analyzer is about it.
     projects_root: str | None = None
-    # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
-    # server needs to be configured-present in at least this many distinct
-    # sessions, with zero invocations across all of them, to be flagged dead.
-    # Default 5 (was 10) -- see MIN_SESSIONS_DEADWEIGHT's comment for the
-    # false-positive-rate reasoning behind the lowered bar.
-    min_sessions_deadweight: int = 5
     # deadweight (core/optimize/mcp_probe.py): whether the analyzer may MEASURE
     # each configured MCP server's tool schemas, which means STARTING that
     # server, sending it `initialize` + `tools/list`, and terminating it. That is
@@ -919,8 +913,6 @@ def _parse(raw: dict) -> TjConfig:
     optimize = OptimizeConfig(
         min_cluster_instances=optimize_raw.get(
             "min_cluster_instances", OptimizeConfig.min_cluster_instances),
-        min_sessions_deadweight=optimize_raw.get(
-            "min_sessions_deadweight", OptimizeConfig.min_sessions_deadweight),
         measure_mcp_schemas=bool(optimize_raw.get(
             "measure_mcp_schemas", OptimizeConfig.measure_mcp_schemas)),
         min_cache_input_tokens=optimize_raw.get(

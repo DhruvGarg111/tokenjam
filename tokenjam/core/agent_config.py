@@ -79,6 +79,12 @@ KIND_PLUGIN = "plugin"
 
 SCOPE_GLOBAL = "global"
 SCOPE_PROJECT = "project"
+#: An MCP server contributed by an installed plugin's own `.mcp.json`, as
+#: opposed to one a user declared directly (`SCOPE_GLOBAL` / `SCOPE_PROJECT`).
+#: Kept distinct so a plugin-contributed server's `config_id` can never
+#: collide with a user-declared one of the same name, and so a reader of the
+#: MCP dead-weight lane can tell the two apart without inspecting `detail`.
+SCOPE_PLUGIN = "plugin"
 
 #: Measurement states a record's ``measure_status`` can hold. ``""`` means the
 #: question was never asked. Every other value is a positive statement about an
@@ -1038,16 +1044,63 @@ def skill_listing_line(path: Path, fallback_name: str = "") -> str:
     return f"{label}: {body}"
 
 
-def _plugin_resident_chars(install_path: Path) -> tuple[int, int]:
-    """``(skill count, resident chars)`` for one installed plugin."""
+#: One skill or agent this plugin contributes to the always-resident listing.
+#: Commands are deliberately excluded — their standing context cost is near
+#: zero (Critical Rule 44 in the tokenjam CLAUDE.md family covers commands
+#: elsewhere; this module simply never prices them).
+@dataclass(frozen=True)
+class PluginComponentFile:
+    kind: str    # "skill" | "agent"
+    #: The slug an invocation is recorded under — a skill's own directory name,
+    #: an agent's filename stem. Matches
+    #: ``core/summarize/load_semantics.invocation_key`` so a caller can compare
+    #: this directly against an observed invocation without re-deriving it.
+    slug: str
+    #: This ONE component's own resident chars (its ``name: description``
+    #: line), never a body — see the module block comment above.
+    chars: int
+
+
+def _plugin_component_files(install_path: Path) -> list[PluginComponentFile]:
+    """Every skill and agent this plugin contributes, each priced on its own
+    ``name: description`` frontmatter line — never the body.
+
+    Agents get the identical treatment skills already had: a skill is invoked
+    by its directory name, an agent by its filename stem (same convention
+    ``load_semantics.invocation_key`` uses for the same two file classes).
+    """
     if not install_path.is_dir():
-        return 0, 0
-    count = 0
-    chars = 0
+        return []
+    rows: list[PluginComponentFile] = []
     for skill in sorted(install_path.rglob("SKILL.md")):
-        count += 1
-        chars += len(skill_listing_line(skill))
-    return count, chars
+        rows.append(PluginComponentFile(
+            kind="skill", slug=skill.parent.name, chars=len(skill_listing_line(skill)),
+        ))
+    for agent in sorted(install_path.rglob("agents/*.md")):
+        rows.append(PluginComponentFile(
+            kind="agent", slug=agent.stem,
+            chars=len(skill_listing_line(agent, fallback_name=agent.stem)),
+        ))
+    return rows
+
+
+def _plugin_mcp_server_names(install_path: Path) -> dict[str, dict[str, Any]]:
+    """``{server name: spec}`` this plugin's own ``.mcp.json`` declares.
+
+    Read-only, same shape as ``_mcp_server_names`` in
+    ``analyzers/deadweight.py`` but scoped to one plugin's install path
+    rather than a project root — the two never merge because a plugin's
+    servers are resident on a completely different gate (enabled + in-scope
+    plugin, not a session's recorded cwd).
+    """
+    data = _read_json_safe(install_path / ".mcp.json")
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return {}
+    return {
+        str(name): (spec if isinstance(spec, dict) else {})
+        for name, spec in servers.items() if str(name).strip()
+    }
 
 
 def scan_plugins(
@@ -1055,7 +1108,9 @@ def scan_plugins(
     claude_dir: Path | None = None,
     seen_at: datetime | None = None,
 ) -> list[ConfigRecord]:
-    """One record per installed plugin, gated on enablement and scope.
+    """One record per installed plugin, gated on enablement and scope, PLUS one
+    ``KIND_MCP_SERVER`` record per MCP server a RESIDENT plugin's own
+    ``.mcp.json`` declares.
 
     ``claude_dir`` is the ``~/.claude`` directory itself (not its parent), which
     is what ``core/optimize/scope.AnalyzerScope.claude_home`` carries.
@@ -1064,6 +1119,14 @@ def scan_plugins(
     Recording only the resident ones would make "this plugin is disabled" and
     "we never looked" the same absence, and the disabled ones are precisely what
     a user needs to see before enabling something large.
+
+    A plugin-contributed MCP server is enumerated here (scoped to the OWNING
+    plugin's residency, never the session's recorded cwd) but priced nowhere in
+    this module: sizing one means STARTING it, which is
+    ``core/optimize/mcp_probe``'s job, reached through the identical
+    ``resolve_schema_measurements`` path a user-declared server uses — never a
+    second pricing model. ``detail["plugin"]`` on each such record is the
+    origin tag a caller filters on.
     """
     at = seen_at or utcnow()
     root = claude_dir if claude_dir is not None else Path.home() / ".claude"
@@ -1084,7 +1147,10 @@ def scan_plugins(
             scope = str(install.get("scope") or "")
             install_path = Path(str(install.get("installPath") or ""))
             project_path = str(install.get("projectPath") or "")
-            skills, resident_chars = _plugin_resident_chars(install_path)
+            components = _plugin_component_files(install_path)
+            skills = sum(1 for c in components if c.kind == "skill")
+            agents = sum(1 for c in components if c.kind == "agent")
+            resident_chars = sum(c.chars for c in components)
             # BOTH gates, and the reason each verdict was reached, so a card can
             # explain itself instead of showing an unexplained zero.
             if not enabled:
@@ -1102,6 +1168,11 @@ def scan_plugins(
                 "install_path": str(install_path),
                 "version": str(install.get("version") or ""),
                 "skills": skills,
+                "agents": agents,
+                "components": (
+                    [{"kind": c.kind, "slug": c.slug, "chars": c.chars} for c in components]
+                    if resident else []
+                ),
                 "resident": resident,
                 "not_resident_because": why,
                 "resident_chars": resident_chars if resident else 0,
@@ -1122,6 +1193,29 @@ def scan_plugins(
                 detail=detail,
                 seq=len(records),
             ))
+            # Plugin-contributed MCP servers, gated on the SAME residency this
+            # plugin's skills/agents just resolved — a disabled or
+            # out-of-scope plugin's `.mcp.json` reaches nobody either.
+            if resident:
+                for name, spec in sorted(_plugin_mcp_server_names(install_path).items()):
+                    spec_detail = dict(spec)
+                    spec_detail["spec_hash"] = _hash_obj(spec)
+                    spec_detail["plugin"] = key
+                    serialized = json.dumps(spec, sort_keys=True, default=str)
+                    records.append(ConfigRecord(
+                        kind=KIND_MCP_SERVER,
+                        scope=SCOPE_PLUGIN,
+                        root="",
+                        name=name,
+                        path=str(install_path / ".mcp.json"),
+                        size_bytes=len(serialized),
+                        tokens=tokens_for_chars(len(serialized)),
+                        content_hash=spec_detail["spec_hash"],
+                        last_seen=at,
+                        subkind=str(spec.get("type") or ("stdio" if spec.get("command") else "")),
+                        detail=spec_detail,
+                        seq=len(records),
+                    ))
     return records
 
 
@@ -1224,12 +1318,14 @@ __all__ = [
     "PROJECT_MCP_RELPATHS",
     "PROJECT_SETTINGS_RELPATHS",
     "SCOPE_GLOBAL",
+    "SCOPE_PLUGIN",
     "SCOPE_PROJECT",
     "AgentConfigStore",
     "ConfigRecord",
     "MeasurementRow",
     "DuckDBAgentConfigStore",
     "InMemoryAgentConfigStore",
+    "PluginComponentFile",
     "catalog_global_paths",
     "catalog_project_paths",
     "ingest_agent_config",

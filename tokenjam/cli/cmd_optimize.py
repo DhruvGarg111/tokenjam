@@ -10,6 +10,7 @@ from rich.padding import Padding
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.cli.tj_status import TjCommand, tj_status
+from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
@@ -1185,10 +1186,17 @@ def _summarize_verbosity(f: Any) -> tuple[str, str] | None:
 
 
 def _summarize_deadweight(f: Any) -> tuple[str, str] | None:
-    dead = list(f.dead_servers) if f.dead_servers else []
-    if not dead:
+    unused = list(f.unused_servers) if f.unused_servers else []
+    unused_plugins = list(getattr(f, "unused_plugins", None) or [])
+    total = len(unused) + len(unused_plugins)
+    if not total:
         return None
-    return f"{_plural(len(dead), 'MCP server')} injected, never invoked", "which servers"
+    parts = []
+    if unused:
+        parts.append(_plural(len(unused), "MCP server"))
+    if unused_plugins:
+        parts.append(_plural(len(unused_plugins), "plugin"))
+    return f"{' + '.join(parts)} injected, never invoked", "which servers/plugins"
 
 
 def _summarize_placement(f: Any) -> tuple[str, str] | None:
@@ -2908,6 +2916,15 @@ def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
     gap is the story: on a real machine most of what is installed is switched
     off or scoped to one project and costs nothing, and a reader shown only a
     dollar figure has no way to know which of those they are looking at.
+
+    Three-state gating per plugin (never a number with no evidence behind
+    it): `unused` gets the priced row + disable arrow; `partial_use_no_fix`
+    names which components are unused and says plainly no fix is available
+    (enable/disable is whole-plugin only); `insufficient_history` renders as
+    "not enough history yet" — never a number, never a fix arrow. A plugin
+    with nothing measurable (no components, or only unmeasured MCP servers)
+    never reaches ANY of these three rows — see `PluginDeadweight.unused`'s
+    vacuous-truth guard — so a `$0` row with a disable arrow cannot render.
     """
     plugins = list(getattr(finding, "plugins", []) or [])
     if not plugins:
@@ -2918,11 +2935,17 @@ def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
         f"(the rest are disabled or scoped to one project and cost "
         f"nothing).[/dim]"
     )
-    for plugin in getattr(finding, "dead_plugins", []) or []:
+    for plugin in getattr(finding, "unused_plugins", []) or []:
+        # Guaranteed by the analyzer's own vacuous-truth guard, but re-asserted
+        # here rather than trusted blindly: a $0 row must never carry a
+        # disable arrow (Part C). If this ever fires it is a bug upstream,
+        # not a row worth printing.
+        if not plugin.estimated_tax_tokens_window:
+            continue
         console.print(
             f"       [bold]{plugin.name}[/bold] [dim]({plugin.skills} skill"
-            f"{'s' if plugin.skills != 1 else ''} listed every session)[/dim]  "
-            f"[yellow]{plugin.usage_count}[/yellow] recorded uses"
+            f"{'s' if plugin.skills != 1 else ''}, {plugin.agents} agent"
+            f"{'s' if plugin.agents != 1 else ''} listed every session)[/dim]"
         )
         if pricing_mode == "api" and plugin.estimated_tax_usd_window is not None:
             tax = (
@@ -2941,6 +2964,21 @@ def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
             console.print(f"          [dim]{_rich_escape(plugin.tax_construction)}[/dim]")
         if plugin.fix:
             console.print(f"          [yellow]→[/yellow] {_rich_escape(plugin.fix)}")
+    for plugin in getattr(finding, "plugins", []) or []:
+        if plugin.partial_use_no_fix:
+            console.print(
+                f"       [bold]{plugin.name}[/bold] [dim](some components used, "
+                f"some not)[/dim]"
+            )
+            console.print(f"          [dim]{_rich_escape(plugin.fix)}[/dim]")
+    insufficient = [p for p in plugins if p.resident and p.insufficient_history]
+    if insufficient:
+        names = ", ".join(p.name for p in insufficient)
+        console.print(
+            f"     [dim]Not enough session history yet to say whether "
+            f"{names} {'is' if len(insufficient) == 1 else 'are'} used "
+            f"(need {UNUSED_RECENCY_WINDOW_DAYS} days).[/dim]"
+        )
 
 
 def _render_deadweight(
@@ -2977,11 +3015,10 @@ def _render_deadweight(
             )
         return
 
-    if not finding.dead_servers:
-        # _rich_escape: the analyzer's own note names the config key in
-        # bracket form ("Lower [optimize] min_sessions_deadweight..."), which
-        # Rich would otherwise parse as an unknown style tag and silently
-        # drop from the printed line.
+    if not finding.unused_servers:
+        # _rich_escape: the analyzer's own note may name a config key in
+        # bracket form, which Rich would otherwise parse as an unknown style
+        # tag and silently drop from the printed line.
         for note in finding.notes:
             console.print(f"     [dim]{_rich_escape(note)}[/dim]")
         if not finding.notes:
@@ -2990,14 +3027,23 @@ def _render_deadweight(
                 f"server{'s' if finding.configured_servers != 1 else ''} were "
                 f"invoked at least once in this window.[/dim]"
             )
+        insufficient = [s for s in finding.servers if s.insufficient_history]
+        if insufficient:
+            names = ", ".join(s.name for s in insufficient)
+            console.print(
+                f"     [dim]Not enough session history yet to say whether "
+                f"{names} {'is' if len(insufficient) == 1 else 'are'} used "
+                f"(need {UNUSED_RECENCY_WINDOW_DAYS} days).[/dim]"
+            )
     else:
-        n = len(finding.dead_servers)
+        n = len(finding.unused_servers)
         console.print(
-            f"     • [bold]{n}[/bold] dead MCP server{'s' if n != 1 else ''} of "
+            f"     • [bold]{n}[/bold] unused MCP server{'s' if n != 1 else ''} of "
             f"[bold]{finding.configured_servers}[/bold] configured "
-            f"[dim](schemas injected every session, never called)[/dim]"
+            f"[dim](schemas injected every session, nothing fired in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days)[/dim]"
         )
-        for s in finding.dead_servers:
+        for s in finding.unused_servers:
             console.print(
                 f"       [bold]{s.name}[/bold] [dim]({s.scope} · {s.source})[/dim]  "
                 f"present in {s.sessions_present} session"

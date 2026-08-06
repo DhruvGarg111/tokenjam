@@ -829,23 +829,58 @@ DEADWEIGHT_REMOVE_SERVER = register(FixRecord(
 
 #: The plugin lane's fix. Same shape as the MCP one — an installed dependency
 #: paid for continuously — and the same one-line reversible edit, which is why
-#: it is a separate record rather than a widening of the server text: the file
-#: to edit and the key to flip are different, and a fix that names the wrong
-#: file is worse than one that says nothing.
+#: it is a separate record rather than a widening of the server text: the
+#: command to run is different, and a fix that names the wrong mechanism is
+#: worse than one that says nothing. Verified against the shipping CLI:
+#: enable/disable is whole-plugin only (`enabledPlugins` is a binary map) and
+#: the real command is `claude plugin disable <name>` — NOT a hand-edit of
+#: `~/.claude/settings.json`, which this record used to say (and was tagged
+#: `delivery="claude_md_rule"`, which it never was either: this is a CLI
+#: command the user runs themselves, not a rule written into an
+#: instruction file).
 DEADWEIGHT_DISABLE_PLUGIN = register(FixRecord(
     key="deadweight.disable_unused_plugin",
     text=(
-        "Set the plugin to false in `enabledPlugins` in "
-        "`~/.claude/settings.json`. Every skill an enabled plugin ships lists "
-        "its name and description into the context of every session before "
-        "anything is invoked, so a plugin that is never used is paying that "
-        "listing for nothing. Flipping the flag back on costs nothing and "
-        "keeps the plugin installed, so this is reversible in one line."
+        "Run `claude plugin disable <name>`. Every skill and agent an enabled "
+        "plugin ships lists its name and description into the context of "
+        "every session before anything is invoked, and any MCP server it "
+        "contributes injects its own tool schemas the same way, so a plugin "
+        "that is never used is paying that listing for nothing. Re-enabling "
+        "with `claude plugin enable <name>` costs nothing and keeps the "
+        "plugin installed, so this is reversible in one command."
     ),
-    delivery="claude_md_rule",
+    delivery="cli_command",
     personas=frozenset({PERSONA_CLAUDE_CODE}),
     analyzers=frozenset({"deadweight"}),
-    answers="enabled plugins whose skill listing is resident every session and never invoked",
+    answers=(
+        "enabled plugins whose skill/agent listing (and any contributed MCP "
+        "server) is resident every session and never invoked"
+    ),
+    lever=LEVER_AWARENESS,
+))
+
+#: The plugin lane's PARTIAL-use case. Enable/disable is whole-plugin only
+#: (verified against the shipping CLI, same fact `DEADWEIGHT_DISABLE_PLUGIN`
+#: rests on), so a plugin with some components used and some not has no clean
+#: fix: disabling it would remove a component something still relies on. A
+#: card that named unused components here but stayed silent about WHY no
+#: action follows would read as an oversight rather than a deliberate
+#: statement of the toggle's own shape.
+DEADWEIGHT_PLUGIN_PARTIAL_USE = register(FixRecord(
+    key="deadweight.plugin_partial_use_no_fix",
+    text=(
+        "Enable/disable is whole-plugin only, so a plugin with some "
+        "components used and some not has no fix on offer here: turning it "
+        "off would remove a component something else still relies on."
+    ),
+    delivery="cli_command",
+    personas=frozenset({PERSONA_CLAUDE_CODE}),
+    analyzers=frozenset({"deadweight"}),
+    answers=(
+        "plugins where some components fired in the recency window and some "
+        "did not, so the whole-plugin toggle has no fix that avoids breaking "
+        "the used component"
+    ),
     lever=LEVER_AWARENESS,
 ))
 
