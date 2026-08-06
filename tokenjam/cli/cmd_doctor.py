@@ -70,6 +70,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     above cannot see, and one that makes the retention DELETE unreliable.
     checks.append(_check_spans_indexes(ctx.obj["db"]))
 
+    # 9c. The agent-config PRIMARY KEY index. Same class of fault as 9b on a
+    #     different table, but it cannot be probed — see the check's docstring.
+    checks.append(_check_agent_config_index(ctx.obj["db"]))
+
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
 
@@ -594,6 +598,52 @@ def _check_spans_indexes(db: object) -> dict:
                        f"agree with the table."}
 
 
+def _check_agent_config_index(db: object) -> dict:
+    """Offer the agent-config PRIMARY KEY rebuild. Reports, never diagnoses.
+
+    The same index/table divergence `_check_spans_indexes` finds also happens
+    to the ART behind `agent_config_files.config_id`, where its consequences
+    are far worse: DuckDB raises it as a `FatalException`, which invalidates
+    the whole database instance and every connection in the process, so a
+    background analyzer pass can take the running web server's connections
+    down with it.
+
+    **There is deliberately no probe here, and that is not an omission.** The
+    fault is invisible to reads — a point lookup and a full scan agree on the
+    row count, which is exactly what the spans probe next door compares, so it
+    would report a clean bill of health on a table that is about to kill the
+    daemon. The only operation that exposes it is one that REMOVES an index
+    entry (`DELETE`, or the delete half of `INSERT OR REPLACE`), and that costs
+    the connection. Asking the question destroys the thing being asked about.
+
+    So this check states what it can support and no more, and exposes the
+    repair unconditionally instead of pretending to have diagnosed something.
+    That is affordable because the rebuild is idempotent, safe on a healthy
+    table, and cheap: this table holds one row per instruction file, hook and
+    MCP server, not per span.
+    """
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Agent-config index integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM agent_config_files").fetchone()
+    except duckdb.Error as e:
+        return {"name": "Agent-config index integrity", "level": "info",
+                "message": f"Skipped — agent-config table not readable: {e}"}
+    rows = row[0] if row else 0
+    return {
+        "name": "Agent-config index integrity",
+        "level": "info",
+        "message": f"Not probed — this fault is invisible to reads and the only "
+                   f"query that reveals it invalidates the database. "
+                   f"`tj doctor --repair` rebuilds the index from the "
+                   f"{rows} live row(s) regardless; it is a no-op when sound.",
+        "repair_action": "rebuild_agent_config_index",
+    }
+
+
 def _check_retention(config: object, db: object) -> dict:
     """Report the analysis span, the retention derived from it, and the last delete.
 
@@ -1087,6 +1137,7 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
         ensure_expected_columns,
         ensure_expected_tables,
         purge_sentinel_timestamp_rows,
+        repair_agent_config_index,
         repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
@@ -1394,6 +1445,34 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
                 console.print(
                     f"  [green]Spans table rebuilt — {before} rows preserved "
                     f"(verified: {after}).[/green]"
+                )
+            continue
+        if action == "rebuild_agent_config_index":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                before_row = conn.execute(
+                    "SELECT COUNT(*) FROM agent_config_files"
+                ).fetchone()
+                before = before_row[0] if before_row else 0
+                after = repair_agent_config_index(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Repair failed — {e}. If the database is locked, "
+                        f"stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                console.print(
+                    f"  [green]Agent-config index rebuilt — {before} rows "
+                    f"preserved (verified: {after}).[/green]"
                 )
 
 

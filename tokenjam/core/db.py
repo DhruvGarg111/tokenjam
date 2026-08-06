@@ -11,6 +11,7 @@ import os
 import tempfile
 import threading
 import uuid
+import weakref
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast, runtime_checkable
@@ -586,6 +587,17 @@ AGENT_CONFIG_FILES_TABLE_SQL = (
     ")"
 )
 
+# The table's secondary indexes, single-sourced beside the DDL for the same
+# reason `SPANS_INDEX_SQL` is: migration 22 and `repair_agent_config_index`
+# must create the SAME set, or a repaired table quietly loses an index that
+# nothing will ever put back (migrations are already recorded applied).
+AGENT_CONFIG_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
+    "ON agent_config_files(kind);\n"
+    "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
+    "ON agent_config_files(last_seen)"
+)
+
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -905,11 +917,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     # here precisely because taking it means STARTING the server, so it must
     # survive between analysis runs and be invalidated by the spec hash rather
     # than re-taken on a schedule.
-    (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n"
-     "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
-     "ON agent_config_files(kind);\n"
-     "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
-     "ON agent_config_files(last_seen)"),
+    (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n" + AGENT_CONFIG_INDEX_SQL),
 ]
 
 
@@ -2143,6 +2151,184 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CHECKPOINT")
 
 
+def repair_agent_config_index(conn: duckdb.DuckDBPyConnection) -> int:
+    """Rebuild ``agent_config_files`` so its PRIMARY KEY index matches its rows.
+
+    Returns the number of rows preserved. Idempotent, and safe on a healthy
+    database.
+
+    **Why a table rebuild and not a `DROP INDEX`.** `repair_spans_indexes`
+    fixes the same class of fault far more cheaply, but it only works on
+    SECONDARY indexes: they are named catalogue objects that can be dropped and
+    re-issued. The fault here is in the ART backing `config_id TEXT PRIMARY
+    KEY`, which is owned by the constraint and cannot be dropped while the
+    table exists. So the table's live rows are moved aside, the table is
+    recreated from the canonical DDL, and the rows are copied back — which
+    rebuilds the PRIMARY KEY index from the rows rather than trusting it.
+    Same DDL-preserving shape as `repair_spans_stats`, and for the same reason
+    a bare `CREATE TABLE … AS SELECT` will not do: a CTAS copies DATA ONLY and
+    would drop the PRIMARY KEY and both secondary indexes permanently.
+
+    **What the fault looks like.** The table reads correctly — a point lookup
+    and a full scan agree, so the count-based probe
+    `check_spans_index_corruption` uses cannot see it. It surfaces only on a
+    write that must REMOVE an index entry (`DELETE`, and the delete half of
+    `INSERT OR REPLACE`), as `Invalid Input Error: Failed to delete all rows
+    from index. Only deleted 0 out of 1 rows.` DuckDB raises that as a
+    `FatalException`, which invalidates the whole database instance — see
+    `is_fatal_db_error`. There is therefore NO non-destructive probe for it:
+    asking the question costs the connection, so this repair is reached from
+    the recovery path after a fatal, or run unconditionally by doctor, rather
+    than gated behind a check.
+    """
+    conn.execute("CREATE TABLE _agent_config_repair AS SELECT * FROM agent_config_files")
+    live_cols = conn.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_name = '_agent_config_repair' ORDER BY ordinal_position"
+    ).fetchall()
+    conn.execute("DROP TABLE agent_config_files")
+    conn.execute(AGENT_CONFIG_FILES_TABLE_SQL)
+    base_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'agent_config_files'"
+        ).fetchall()
+    }
+    for name, data_type in live_cols:
+        if name not in base_cols:
+            conn.execute(f'ALTER TABLE agent_config_files ADD COLUMN "{name}" {data_type}')
+    conn.execute("INSERT INTO agent_config_files BY NAME SELECT * FROM _agent_config_repair")
+    conn.execute("DROP TABLE _agent_config_repair")
+    for statement in AGENT_CONFIG_INDEX_SQL.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
+    conn.execute("CHECKPOINT")
+    row = conn.execute("SELECT COUNT(*) FROM agent_config_files").fetchone()
+    return int(row[0]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Fatal errors and database invalidation
+# ---------------------------------------------------------------------------
+#
+# A DuckDB `FatalException` is categorically different from every other error
+# this module handles, and the difference is not visible at the call site that
+# raises it. Verified against duckdb 1.5.5, holding one root connection, one
+# sibling cursor and one connection opened afterwards:
+#
+#   * The exception invalidates the whole DATABASE INSTANCE, not the connection
+#     that raised it. Every other cursor over that database starts raising
+#     `FATAL Error: Failed: database has been invalidated because of a previous
+#     fatal error. The database must be restarted prior to being used again.`
+#   * `duckdb.connect(same_path)` AFTERWARDS hands back the SAME dead instance
+#     — DuckDB caches instances per path within a process, so "just reconnect"
+#     is not a recovery. This is why a fatal raised on a background scan's own
+#     `DuckDBBackend` takes down the web server's unrelated connections too.
+#   * Closing EVERY connection to that path evicts the instance from that
+#     cache; the next `duckdb.connect` then opens a healthy database, in the
+#     same process, with no restart. That is the only in-process recovery, and
+#     it is why recovery has to be a property of the process rather than of one
+#     backend object — hence the registry below.
+#
+# The consequence for error handling: any `except Exception` that treats a
+# failure as skip-this-row-and-continue MUST re-check for a fatal first. After
+# a fatal there are no more rows to skip, only queries that will all fail, and
+# a handler that logs a per-record warning turns a hard stop into a process
+# that keeps serving traffic on a database it can no longer read.
+
+#: Text DuckDB uses for every post-fatal query on an invalidated instance.
+DATABASE_INVALIDATED_MESSAGE = "database has been invalidated"
+
+
+def is_fatal_db_error(exc: BaseException) -> bool:
+    """True when ``exc`` means the database instance is gone, not this row.
+
+    Matches on the exception TYPE and, as a backstop, on the invalidation text:
+    the type is authoritative, but the message check keeps the classification
+    correct if a fatal reaches us wrapped by an intermediate layer.
+    """
+    fatal_type = getattr(duckdb, "FatalException", None)
+    if fatal_type is not None and isinstance(exc, fatal_type):
+        return True
+    return DATABASE_INVALIDATED_MESSAGE in str(exc)
+
+
+# Every live `DuckDBBackend`, so recovery can close all of a path's connections
+# — the necessary condition for DuckDB to evict the invalidated instance.
+# Weak, so a backend that goes out of scope is not kept alive by being here.
+_LIVE_BACKENDS: "weakref.WeakSet[DuckDBBackend]" = weakref.WeakSet()
+_FATAL_LOCK = threading.RLock()
+#: Set when a fatal is observed anywhere in this process; cleared by a
+#: successful recovery. Process-wide because the invalidation is.
+_FATAL_DB_ERROR: str | None = None
+
+
+def note_fatal_db_error(exc: BaseException) -> None:
+    """Record that a fatal happened, so surfaces stop claiming to be healthy."""
+    global _FATAL_DB_ERROR
+    with _FATAL_LOCK:
+        if _FATAL_DB_ERROR is None:
+            _FATAL_DB_ERROR = f"{type(exc).__name__}: {exc}".split("\n")[0]
+    logger.error(
+        "database instance invalidated by a fatal DuckDB error (%s: %s); every "
+        "connection in this process is now dead until it is re-established",
+        type(exc).__name__, str(exc).split("\n")[0],
+    )
+
+
+def fatal_db_error() -> str | None:
+    """The recorded fatal, or None. Cheap; safe to call from a request path."""
+    with _FATAL_LOCK:
+        return _FATAL_DB_ERROR
+
+
+def clear_fatal_db_error() -> None:
+    global _FATAL_DB_ERROR
+    with _FATAL_LOCK:
+        _FATAL_DB_ERROR = None
+
+
+def recover_invalidated_database(*, repair: bool = True) -> bool:
+    """Re-establish every connection in this process; returns whether it worked.
+
+    Closes all registered backends' connections FIRST and only then reconnects
+    them, because a single surviving connection pins the invalidated instance
+    in DuckDB's per-path cache and every reconnect would hand back that same
+    dead instance (see the note above). In-memory backends are skipped: their
+    database IS their connection, so closing it discards the data, and there is
+    nothing on disk to reopen.
+
+    With ``repair``, rebuilds ``agent_config_files`` on the way back up. The
+    fault that causes this fatal is persistent — without the rebuild the very
+    next agent-config pass re-raises it and the recovery loops forever.
+    """
+    with _FATAL_LOCK:
+        backends = [b for b in _LIVE_BACKENDS if b.recoverable]
+        for backend in backends:
+            backend._teardown_connections()
+        ok = True
+        for backend in backends:
+            if not backend._reopen():
+                ok = False
+        if ok and repair:
+            for backend in backends:
+                try:
+                    repair_agent_config_index(backend.conn)
+                except duckdb.Error as exc:
+                    logger.error("agent-config index repair failed after recovery: %s", exc)
+                    ok = False
+                break  # one repair per path; all registered backends share it
+        if ok:
+            clear_fatal_db_error()
+            logger.warning(
+                "database connections re-established after a fatal DuckDB error; "
+                "the agent-config table was rebuilt so the fault does not recur",
+            )
+        return ok
+
+
 # ---------------------------------------------------------------------------
 # DuckDBBackend
 # ---------------------------------------------------------------------------
@@ -2185,9 +2371,25 @@ class DuckDBBackend:
     def __init__(self, config: StorageConfig) -> None:
         db_path = Path(config.path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path: str | None = str(db_path)
         self._conn = duckdb.connect(str(db_path))
         run_migrations(self._conn)
         self._local = threading.local()
+        # Every cursor `conn` has handed out. Recovery must close ALL of them —
+        # a `threading.local` cannot be enumerated from another thread, and one
+        # surviving connection is enough to keep an invalidated database
+        # instance alive in DuckDB's per-path cache (see `is_fatal_db_error`).
+        # `_generation` is how a thread notices its cursor belongs to a
+        # torn-down connection and lazily takes a fresh one.
+        self._cursors: list[duckdb.DuckDBPyConnection] = []
+        self._generation = 0
+        # Deliberately NOT `write_lock`. Connection lifecycle must not order
+        # against the write path: a writer that hits a fatal records it under
+        # `_FATAL_LOCK` while still on the write path, and recovery holds
+        # `_FATAL_LOCK` while tearing connections down — sharing one lock
+        # between the two would make that pair deadlock-able.
+        self._conn_lock = threading.RLock()
+        _LIVE_BACKENDS.add(self)
         # Serializes *writes* across threads. Reads use per-thread cursors and
         # stay lock-free (#124), but DuckDB uses optimistic concurrency control:
         # two transactions mutating the same table from different threads can
@@ -2220,10 +2422,76 @@ class DuckDBBackend:
         behavior is unchanged for them.
         """
         cur = getattr(self._local, "cursor", None)
-        if cur is None:
-            cur = self._conn.cursor()
+        if cur is None or getattr(self._local, "generation", None) != self._generation:
+            with self._conn_lock:
+                cur = self._conn.cursor()
+                self._cursors.append(cur)
             self._local.cursor = cur
+            self._local.generation = self._generation
         return cur
+
+    # -- connection health and recovery --
+    #
+    # See the module-level "Fatal errors and database invalidation" note for
+    # why recovery cannot be done by one backend alone, and why it works at all.
+
+    @property
+    def recoverable(self) -> bool:
+        """Whether this backend can be torn down and reopened from disk.
+
+        False for `InMemoryBackend`, whose database only exists inside its
+        connection — closing it would discard the data rather than recover it.
+        """
+        return self._db_path is not None
+
+    def check_health(self) -> bool:
+        """Whether this backend can still answer a query.
+
+        `SELECT 1` is enough: an invalidated instance fails it, which is what
+        makes a health probe able to tell "the process is up" apart from "the
+        process can still read its database". Never raises.
+        """
+        try:
+            self.conn.execute("SELECT 1").fetchone()
+        except Exception as exc:  # noqa: BLE001 - a probe reports, never raises
+            if is_fatal_db_error(exc):
+                note_fatal_db_error(exc)
+            return False
+        return True
+
+    def _teardown_connections(self) -> None:
+        """Close every connection this backend holds, ignoring close errors.
+
+        Errors are ignored deliberately: closing an already-invalidated handle
+        can itself raise, and a failure to close cleanly must not stop us from
+        closing the REST — the eviction only happens once they are all gone.
+        """
+        with self._conn_lock:
+            for cur in self._cursors:
+                try:
+                    cur.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._cursors.clear()
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            # Bump BEFORE reopening so any thread racing in on the old cursor
+            # is forced to take a fresh one rather than reusing a closed handle.
+            self._generation += 1
+
+    def _reopen(self) -> bool:
+        if self._db_path is None:
+            return False
+        try:
+            with self._conn_lock:
+                self._conn = duckdb.connect(self._db_path)
+                run_migrations(self._conn)
+            return self.check_health()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("could not re-establish the database connection: %s", exc)
+            return False
 
     # -- writes --
 
@@ -3565,8 +3833,11 @@ class DuckDBBackend:
         return spans_deleted, sessions_deleted
 
     def close(self) -> None:
-        # Closing the root connection tears down the database and all cursors.
-        self._conn.close()
+        # Every cursor explicitly, then the root connection. Closing the root
+        # alone does tear the cursors down, but DuckDB only evicts an
+        # invalidated instance from its per-path cache once no handle to it
+        # survives, and relying on GC for that makes recovery non-deterministic.
+        self._teardown_connections()
 
 
 # ---------------------------------------------------------------------------
@@ -3581,9 +3852,15 @@ class InMemoryBackend(DuckDBBackend):
         # connection share the same in-memory database, so the per-thread cursor
         # property (#124) works identically here — including cross-thread
         # visibility, which the threadpool-backed integration tests rely on.
+        # `_db_path = None` marks it unrecoverable: there is no file to reopen,
+        # so tearing the connection down would destroy the data, not restore it.
+        self._db_path = None
         self._conn = duckdb.connect(":memory:")
         run_migrations(self._conn)
         self._local = threading.local()
+        self._cursors = []
+        self._generation = 0
+        self._conn_lock = threading.RLock()
         # Inherited write methods take this lock (async-hooks concurrency, #124).
         self._write_lock = threading.RLock()
 
