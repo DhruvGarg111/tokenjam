@@ -1393,10 +1393,11 @@ def _plugin_rows(
         # component's `used` above is `None` (insufficient history) — never
         # mix that with a positive "unused" claim. `all()`/`any()` over an
         # EMPTY `components` list would otherwise read as vacuously unused
-        # (Critical Rule 42 in tokenjam's CLAUDE.md); `bool(components) and
-        # resident_tokens > 0` is the guard against exactly that (a plugin
-        # with zero skills/agents/servers, or only unmeasured MCP servers,
-        # has nothing priced and gets no verdict at all).
+        # (Critical Rule 42 in `.claude/rules/optimize-analyzers.md`);
+        # `bool(components) and resident_tokens > 0` is the guard against
+        # exactly that (a plugin with zero skills/agents/servers, or only
+        # unmeasured MCP servers, has nothing priced and gets no verdict at
+        # all).
         insufficient_history = resident and bool(components) and not recency.corpus_sufficient
         unused = False
         partial_use_no_fix = False

@@ -1046,8 +1046,7 @@ def skill_listing_line(path: Path, fallback_name: str = "") -> str:
 
 #: One skill or agent this plugin contributes to the always-resident listing.
 #: Commands are deliberately excluded — their standing context cost is near
-#: zero (Critical Rule 44 in the tokenjam CLAUDE.md family covers commands
-#: elsewhere; this module simply never prices them).
+#: zero, so this module simply never prices them.
 @dataclass(frozen=True)
 class PluginComponentFile:
     kind: str    # "skill" | "agent"

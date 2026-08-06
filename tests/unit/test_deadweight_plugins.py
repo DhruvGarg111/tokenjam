@@ -356,11 +356,11 @@ def test_a_plugin_with_zero_component_files_never_gets_a_priced_disable_row(tmp_
     install path carries no skill, agent or MCP server has NOTHING priced,
     so it must never render a `$0 tokens, disable it` row.
 
-    This is the vacuous-truth trap (Critical Rule 42 in tokenjam's
-    CLAUDE.md): `all(c.used is False for c in components)` over an EMPTY
-    `components` list is vacuously True in Python, and would otherwise read
-    as "every component agrees it's unused" for a plugin nothing was ever
-    measured for.
+    This is the vacuous-truth trap (Critical Rule 42 in
+    `.claude/rules/optimize-analyzers.md`): `all(c.used is False for c in
+    components)` over an EMPTY `components` list is vacuously True in
+    Python, and would otherwise read as "every component agrees it's
+    unused" for a plugin nothing was ever measured for.
     """
     root = tmp_path / ".claude"
     root.mkdir()
