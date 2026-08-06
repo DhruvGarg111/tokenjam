@@ -628,6 +628,23 @@ table.archive-list td.a-agent { max-width: 220px; overflow: hidden; text-overflo
 .panel-head .grip { color: var(--text-faint); }
 .panel-head .range { margin-left: auto; text-transform: none; letter-spacing: 0; }
 .panel-head .range-tag { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); }
+/* A data table INSIDE a `.panel`. The design draws every data grid as a
+   bordered card whose header row is the same tinted strip `.panel-head` uses,
+   so the table drops its own outer chrome and lets the panel supply the border
+   + radius. Only tables that opt in by sitting in a panel change; a bare
+   `<table>` elsewhere is untouched. The last body row's divider would double
+   against the panel border, so it is dropped. */
+.panel > .table-wrap > table > thead th { background: var(--surface2); font-size: 10.5px; letter-spacing: 0.05em; }
+.panel > .table-wrap > table > tbody > tr:last-child > td { border-bottom: none; }
+/* Numeric column: right-aligned in both the header and the body cell, so the
+   digits line up under their own label rather than under the next column. */
+th.num, td.num { text-align: right; }
+/* A secondary/derived figure in a data row — the design's grey cell. */
+td.dim { color: var(--text-dim); }
+/* The 12px mono caption that sits above a tab body, and the 11px faint note
+   that closes one. Both were re-written inline at every session-detail tab. */
+.tab-cap { font-size: 12px; color: var(--text-dim); margin: 0 0 12px; font-family: 'Geist Mono', monospace; line-height: 1.6; }
+.tab-foot { font-size: 11px; color: var(--text-faint); margin-top: 10px; font-family: 'Geist Mono', monospace; line-height: 1.6; }
 .svc-row { display: grid; grid-template-columns: 200px 82px 1fr 90px 120px; align-items: center; gap: 16px; padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); transition: background 0.12s; }
 .svc-row:last-child { border-bottom: none; }
 .svc-row.clickable { cursor: pointer; }
@@ -849,6 +866,24 @@ table.archive-list td.a-agent { max-width: 220px; overflow: hidden; text-overflo
 }
 .ses-tile .ses-tile-v { font-family: 'Geist Mono', monospace; font-size: 22px; font-weight: 700; }
 .ses-tile .ses-tile-l { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; }
+/* Models & context — the per-call input-token histogram, in its own panel with
+   the caption above the plot and the "0 … peak N" axis row below it. */
+.ctx-plot { display: flex; align-items: flex-end; gap: 2px; height: 90px; border-bottom: 1px solid var(--border); overflow: hidden; }
+.ctx-plot > i { display: block; flex: 1 1 0; min-width: 1px; background: var(--brand); opacity: 0.7; }
+.ctx-axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-top: 6px; font-family: 'Geist Mono', monospace; }
+/* Subagents — the right-sizing flag rides UNDER the subagent's name as a
+   tinted pill, not in a column of its own; the row tint and the pill are the
+   same signal, so a flagged row reads at a glance instead of by scanning to
+   the far edge of a wide table. */
+.sub-flag {
+  display: inline-block; margin-top: 5px; padding: 2px 7px;
+  border-radius: var(--radius-pill); font-size: 10px; font-family: 'Geist Mono', monospace;
+  background: rgba(var(--warn-rgb), var(--tint-bg)); color: var(--warn); white-space: nowrap;
+}
+.sub-flag + .sub-flag { margin-left: 5px; }
+/* Verbatim design value: a row tint deliberately lower than --tint-bg, since a
+   whole row at badge alpha reads as a warning banner. */
+tr.sub-flagged > td { background: rgba(var(--warn-rgb), 0.06); }
 
 /* Waterfall */
 .waterfall { margin: 16px 0; }
@@ -1594,32 +1629,31 @@ a.health-tile.attn { border-color: var(--warn); }
   white-space: pre-wrap;
   word-break: break-word;
 }
-.story-steps { display: flex; flex-direction: column; gap: 2px; }
-/* User prompt in the Timeline — just a distinct color (brand) so human asks
-   stand out from the agent's steps. No box, no label. */
-.story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand); white-space: pre-wrap; }
+/* An exchange = one human ask + the steps it produced. The design frames the
+   ask as a labelled callout and the steps as a bordered panel of flat rows, so
+   each exchange renders as that pair. It repeats: a session has many asks, and
+   pinning only the first one goes stale the moment the user types again. */
+.story-exchange + .story-exchange { margin-top: 20px; }
+.story-steps { display: block; }
+/* The clickable body of a long ask, inside the callout. */
 .story-ask.clickable { cursor: pointer; }
-/* grey speaker marker on asks, visually paired with the #n/time meta on steps */
-.story-ask-who { color: var(--text-dim); font-weight: 400; font-family: 'Geist Mono', monospace; font-size: 11px; }
-/* Compact single-line row (356 steps must stay scannable, not a wall of cards) */
-.story-step {
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-}
+/* Compact single-line row (356 steps must stay scannable, not a wall of cards).
+   Row geometry matches every other data row in the app: one shared horizontal
+   inset, a 1px bottom divider, no per-row radius or box. */
+.story-step { border-bottom: 1px solid var(--border); }
+.story-steps > .story-step:last-child { border-bottom: none; }
 /* Errored steps aren't boxed in red — the ✗ chip carries the signal, and the
    error message is shown in the expanded body (click to see why it failed). */
 .story-step-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: 10px;
+  padding: 9px var(--inset-x);
   cursor: pointer;
-  border-radius: 6px;
   font-size: 12px;
   min-width: 0;
 }
-.story-step-row:hover { background: var(--surface2); }
+.story-step-row:hover { background: rgba(var(--accent-rgb),0.03); }
 .story-caret {
   color: var(--text-dim);
   width: 10px;
@@ -1638,12 +1672,13 @@ a.health-tile.attn { border-color: var(--warn); }
   font-size: 11px;
   flex: 0 0 auto;
 }
-.story-retry { color: var(--warn); flex: 0 0 auto; font-size: 11px; }
+/* Pushed hard right, after the description — a retry is an annotation on the
+   step, not part of reading what the step did. */
+.story-retry { color: var(--warn); flex: 0 0 auto; font-size: 11px; font-family: 'Geist Mono', monospace; margin-left: auto; padding-left: 8px; }
 .story-model-tag {
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-family: 'Geist Mono', monospace;
-  font-size: 10px;
-  opacity: 0.7;
+  font-size: 11px;
   flex: 0 0 auto;
 }
 .story-line {
@@ -1653,14 +1688,16 @@ a.health-tile.attn { border-color: var(--warn); }
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
+  font-size: 13px;
 }
 .story-line.dim { color: var(--text-dim); font-style: italic; }
 /* A pure tool step (no narration) shows the tool's command/path inline instead
    of a dim "(no narration)" — rendered monospace so it reads as the action. */
 .story-line.tool { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 12px; }
-/* Expanded body */
+/* Expanded body — indented past the caret/number gutter so it hangs under the
+   description rather than under the row's left edge. */
 .story-step-body {
-  padding: 2px 8px 10px 26px;
+  padding: 2px var(--inset-x) 12px calc(var(--inset-x) + 26px);
 }
 .story-text {
   font-size: 13px;
@@ -1697,37 +1734,53 @@ a.health-tile.attn { border-color: var(--warn); }
 /* The transcript error message for a failed tool, shown in the expanded body. */
 .story-error { margin-top: 8px; padding: 8px 10px; border-left: 2px solid var(--error); background: rgba(238,0,0,0.05); border-radius: 0 6px 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
 .story-error-tool { display: block; color: var(--error); font-weight: 600; margin-bottom: 3px; }
+/* The "… N steps omitted …" divider — a full-width row in the step panel, not
+   a floating caption, so the gap it stands for reads as part of the list. */
 .story-omitted {
   text-align: center;
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-family: 'Geist Mono', monospace;
-  padding: 6px 0;
+  padding: 8px var(--inset-x);
+  border-bottom: 1px solid var(--border);
 }
+.story-steps > .story-omitted:last-child { border-bottom: none; }
+/* Honest-absence state for Approach / Timeline: this session HAS been fetched
+   and there is no transcript to rebuild a method from. Distinct from the
+   pre-fetch state, which renders nothing at all rather than claiming absence.
+   Boxed like every other known-and-empty surface so it reads as a resolved
+   answer, not as a caption that failed to load. */
 .story-unavailable {
   font-size: 12px;
   color: var(--text-dim);
   font-family: 'Geist Mono', monospace;
-  margin: -8px 0 12px;
+  line-height: 1.6;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  padding: var(--pad-card-y) var(--inset-x);
+  margin: 0 0 12px;
 }
-/* Nested subagent stories (the COMPLETE log of everything a session spawned) */
+/* Nested subagent stories (the COMPLETE log of everything a session spawned).
+   The expansion row reads as a link into the child's own steps — brand-colored
+   name on the left, step count and result hard right — rather than as a chip. */
 .story-subagent { margin-top: 8px; }
 .story-subagent-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 8px;
+  font-size: 12px;
   font-family: 'Geist Mono', monospace;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: var(--surface3);
-  border: 1px solid var(--border);
+  color: var(--brand);
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
   user-select: none;
 }
-.story-subagent-head.error { border-color: var(--error); }
-.story-subagent-caret { color: var(--brand); width: 10px; display: inline-block; }
-.story-subagent-label { font-weight: 600; }
-.story-subagent-meta { color: var(--text-dim); margin-left: auto; }
+.story-subagent-head.error { color: var(--error); }
+.story-subagent-head.error .story-subagent-caret { color: var(--error); }
+.story-subagent-caret { color: var(--brand); width: 10px; display: inline-block; flex: 0 0 auto; }
+.story-subagent-label { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.story-subagent-meta { color: var(--text-dim); margin-left: auto; white-space: nowrap; }
 .story-subagent-body {
   margin: 8px 0 4px 6px;
   padding-left: 12px;
@@ -1735,113 +1788,168 @@ a.health-tile.attn { border-color: var(--warn); }
 }
 
 /* Approach tab: the METHOD spine — how the agent attempted the work, with
-   recursive delegation expansion (ported from the approved mock; the mock's
-   hardcoded hexes are mapped onto the theme vars: brand→--brand, success→
-   --success, error→--error, task-pink→--chart-5, warn→--warn). */
-.ap-panel { border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); padding: 16px 18px; }
-.ap-head { border-bottom: 1px solid var(--border); padding-bottom: 13px; margin-bottom: 4px; }
-.ap-who { font-size: 14px; font-weight: 600; font-family: 'Geist Mono', monospace; }
-.ap-mandate { font-size: 12px; color: var(--text-dim); margin-top: 5px; }
-.ap-mandate b { color: var(--text); }
-.ap-outcome { font-size: 11.5px; color: var(--success); margin-top: 6px; }
-/* The spine: a continuous vertical line with each move's icon sitting on it. */
-.ap-spine { position: relative; margin: 8px 0 2px; padding-left: 26px; }
-.ap-spine::before { content: ''; position: absolute; left: 9px; top: 6px; bottom: 10px; width: 2px; background: var(--border); }
-.ap-move { position: relative; padding: 8px 0; }
-.ap-ic { position: absolute; left: -26px; top: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--surface3); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 10px; }
-/* Per-kind icon accents (direct child only, so nested moves keep their own). */
-.ap-move.ap-delegate > .ap-ic { border-color: var(--chart-5); color: var(--chart-5); }
-.ap-move.ap-verify > .ap-ic { border-color: var(--success); color: var(--success); }
-.ap-move.dead > .ap-ic { border-color: var(--error); color: var(--error); }
-.ap-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.ap-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); font-family: 'Geist Mono', monospace; }
-.ap-label { font-size: 13px; font-weight: 600; color: var(--text); }
-.ap-move.dead .ap-label, .ap-move.retry .ap-label { text-decoration: line-through; color: var(--text-dim); }
-.ap-revert { font-size: 9px; color: var(--error); border: 1px solid var(--error); border-radius: 9px; padding: 1px 6px; font-family: 'Geist Mono', monospace; }
-/* Source tag chip: agent's words (brand) vs structural (warn). No "distilled". */
-.ap-src { font-size: 9px; padding: 1px 6px; border-radius: 9px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); color: var(--text-dim); }
-.ap-src.words { color: var(--brand); border-color: var(--brand); }
-.ap-src.struct { color: var(--warn); border-color: var(--warn); }
-.ap-quote { font-size: 11.5px; color: var(--text-dim); font-style: italic; margin: 4px 0 0; border-left: 2px solid var(--border); padding-left: 9px; }
-.ap-ev { font-size: 10.5px; color: var(--text-faint); margin-top: 5px; font-family: 'Geist Mono', monospace; }
-.ap-ev-st.err { color: var(--error); }
-/* Delegation toggle — clickable, collapsed by default, recurses on open. */
-.ap-deleg { margin-top: 7px; border: 1px solid var(--chart-5); border-radius: 8px; background: var(--surface3); padding: 8px 10px; display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
-.ap-caret { color: var(--chart-5); font-size: 10px; width: 12px; transition: transform .15s; display: inline-block; }
-.ap-deleg.open .ap-caret { transform: rotate(90deg); }
-/* Nested child method (recursion): indent + a left depth rail. */
-.ap-nested { margin: 2px 0 4px 6px; padding: 10px 0 2px 14px; border-left: 2px solid var(--chart-5); }
-/* Cross-terminal children (M2b): a separate run-linked session, amber not pink,
-   spliced under its own divider so the eye reads it apart from in-session subs. */
-.ap-xterm-divider { margin: 16px 0 6px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--warn); font-family: 'Geist Mono', monospace; border-top: 1px solid var(--border); padding-top: 11px; }
-.ap-deleg.ap-xterm { border-color: var(--warn); }
-.ap-deleg.ap-xterm .ap-caret { color: var(--warn); }
-.ap-xterm-nested { border-left-color: var(--warn); }
-/* Two-column layout: the delegation-tree rail (left) + the focused method (right). */
-.ap-grid { display: grid; grid-template-columns: 268px 1fr; gap: 16px; }
-@media (max-width: 760px) { .ap-grid { grid-template-columns: 1fr; } }
-/* Left rail: every agent in the spawn tree, indented by depth. */
-.ap-rail { border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); padding: 12px; height: fit-content; }
-.ap-rail-h { margin: 0 0 3px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
-.ap-rail-sub { font-size: 10.5px; color: var(--text-faint); margin-bottom: 11px; }
-.ap-node { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: 7px; }
-.ap-node + .ap-node { margin-top: 2px; }
-.ap-node.d1 { margin-left: 14px; } .ap-node.d2 { margin-left: 28px; } .ap-node.d3 { margin-left: 42px; }
-.ap-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
-.ap-dot.is-main { background: var(--brand); } .ap-dot.is-sub { background: var(--chart-5); } .ap-dot.is-term { background: var(--warn); }
-.ap-nname { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; }
-.ap-nmeta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
-.ap-badge { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 10px; margin-top: 4px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); color: var(--text-dim); }
+   recursive delegation expansion.
+
+   This is the one place the design leaves tables and tiles behind for a
+   STRUCTURED-PROSE format, and the layout is what carries that: a fixed 20px
+   icon gutter running down the left, a full-width prose column beside it, and
+   a 1px divider between moves. The glyph in the gutter (• acted, ⑂ delegated,
+   ✗ dead end, ✅ verified) is the vocabulary — a reader scans the gutter to
+   find the shape of an attempt, then reads across. Everything a move knows
+   about ITSELF (where the line came from, what tools it touched, what it
+   delegated to) hangs below the prose as a caption, never beside it as a chip,
+   so the prose column stays one readable measure top to bottom.
+
+   Theme mapping for the design's hardcoded hexes: brand→--brand,
+   success→--success, error→--error, task-pink→--chart-5, warn→--warn. */
+
+/* Two columns: the delegation-tree rail (left) + the focused method (right).
+   The rail is capped rather than fluid — it lists names, and a wider rail just
+   steals measure from the prose that is the point of this tab. */
+.ap-grid { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: var(--stack-gap); align-items: start; }
+@media (max-width: 760px) { .ap-grid { grid-template-columns: minmax(0, 1fr); } }
+/* The rail and the method panel are adjacent `.panel` siblings, so the stacked-
+   panel margin would apply to the second one and drop it below the first. In a
+   grid the gap already does that job, in the right axis. */
+.ap-grid > .panel + .panel { margin-top: 0; }
+
+/* --- left: the delegation tree ---------------------------------------- */
+/* `.ap-rail` and `.ap-panel` are both `.panel` in the markup; these carry only
+   what is specific to each. */
+.ap-node {
+  display: flex; align-items: center; gap: 8px;
+  padding: var(--pad-head-y) var(--inset-x);
+  border-bottom: 1px solid var(--border);
+  font-family: 'Geist Mono', monospace; font-size: 12px;
+}
+/* Indent is spawn depth. Set on top of the row's own inset, not instead of it,
+   so a depth-0 node still lines up with the head strip above it. */
+.ap-node.d1 { padding-left: calc(var(--inset-x) + 14px); }
+.ap-node.d2 { padding-left: calc(var(--inset-x) + 28px); }
+.ap-node.d3 { padding-left: calc(var(--inset-x) + 42px); }
+.ap-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
+.ap-dot.is-main { background: var(--success); } .ap-dot.is-sub { background: var(--success); } .ap-dot.is-term { background: var(--warn); }
+/* Truncate rather than wrap. The rail is a fixed narrow column, so a long
+   hyphenated agent name wrapped into a four-line stack of fragments and the
+   tree stopped reading as a tree. The full name rides in the row's title=. */
+.ap-nname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-badge, .ap-ncost { flex: 0 0 auto; }
+/* Cost sits hard right on the row, faint — the rail ranks by name, and the
+   figure is there to answer "which branch was expensive", not to be read down. */
+.ap-ncost { margin-left: auto; color: var(--text-faint); font-size: 11px; white-space: nowrap; }
+/* Badges the rail keeps: live, cross-terminal, capped. A plain ended sidechain
+   carries no badge — see the render, which folds the default into title=. */
+.ap-badge { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: var(--radius-pill); font-family: 'Geist Mono', monospace; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
 .ap-badge.live { color: var(--success); border-color: var(--success); }
 .ap-badge.partial { color: var(--warn); border-color: var(--warn); }
 .ap-prov { font-size: 8.5px; color: var(--text-faint); font-family: 'Geist Mono', monospace; margin-top: 3px; }
-.ap-railcap { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim); line-height: 1.5; }
+.ap-railcap { padding: 12px var(--inset-x); font-size: 10.5px; color: var(--text-dim); line-height: 1.5; }
 .ap-railcap b { color: var(--text); }
-/* Header card: mandate (left) + a right-aligned stats column. */
-.ap-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
-.ap-rt { text-align: right; font-size: 10.5px; color: var(--text-dim); white-space: nowrap; font-family: 'Geist Mono', monospace; line-height: 1.7; }
-.ap-rt b { color: var(--text); }
-/* Rich delegation card: identity + depth + cost/status chips. */
-.ap-deleg-main { display: flex; flex-direction: column; }
-.ap-deleg-name { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; color: var(--text); }
-.ap-deleg-stats { margin-left: auto; font-size: 10px; color: var(--text-dim); font-family: 'Geist Mono', monospace; white-space: nowrap; }
+
+/* --- right: the mandate head strip ------------------------------------ */
+.ap-head { padding: 14px var(--inset-x); border-bottom: 1px solid var(--border); background: var(--surface2); }
+.ap-head-l { font-family: 'Geist Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 6px; }
+.ap-who { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+.ap-mandate { font-size: 13px; line-height: 1.55; text-wrap: pretty; }
+/* The counts read as one sentence across the head, not as a column stacked
+   beside the mandate — they describe the SAME attempt the mandate names. */
+.ap-stats { display: flex; gap: var(--stack-gap); flex-wrap: wrap; margin-top: 12px; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-dim); }
+.ap-body { padding: 14px var(--inset-x); }
+
+/* --- the spine -------------------------------------------------------- */
+.ap-spine { margin: 0; }
+.ap-move { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+/* The glyph gutter. Plain text on the page — no disc, no border — so the
+   column reads as a margin mark against the prose rather than a row of chips. */
+.ap-ic { font-family: 'Geist Mono', monospace; font-size: 12px; line-height: 1.5; text-align: center; color: var(--text-dim); }
+.ap-move.ap-delegate > .ap-ic { color: var(--brand); }
+.ap-move.ap-verify > .ap-ic { color: var(--success); }
+.ap-move.dead > .ap-ic { color: var(--error); }
+.ap-txt { min-width: 0; }
+.ap-label { font-size: 13px; line-height: 1.5; color: var(--text); text-wrap: pretty; }
+/* A dead end is DIMMED, not struck through: the line still says what was
+   attempted, and it is the ✗ in the gutter plus the source caption that say it
+   went nowhere. Strike-through made the one line you most need to read to
+   understand a wasted 20 minutes the hardest line on the page. */
+.ap-move.dead .ap-label, .ap-move.retry .ap-label { color: var(--text-dim); }
+/* Provenance caption. The words carry the meaning ("agent's own words" /
+   "structural inference"), so there is no colored chip and no legend needed
+   for them — the glyph legend at the foot covers the gutter instead. */
+.ap-src { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+.ap-src .err { color: var(--error); }
+.ap-quote { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-top: 4px; text-wrap: pretty; }
+.ap-ev { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; overflow-wrap: anywhere; }
+.ap-ev-st.err { color: var(--error); }
+
+/* --- delegation cards inside a move ----------------------------------- */
+/* Delegations sit in the prose column, indented under the line that spawned
+   them, and expand into the child's own spine (recursion runs through here). */
+.ap-deleg { margin-top: 7px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface2); padding: 8px 10px; display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.ap-deleg:hover { border-color: var(--brand); }
+.ap-caret { color: var(--brand); font-size: 10px; width: 12px; transition: transform .15s; display: inline-block; flex: 0 0 auto; }
+.ap-deleg.open { border-color: var(--brand); }
+.ap-deleg.open .ap-caret { transform: rotate(90deg); }
+.ap-nested { margin: 2px 0 4px 6px; padding: 10px 0 2px 14px; border-left: 2px solid var(--border); }
+.ap-deleg-main { display: flex; flex-direction: column; min-width: 0; }
+.ap-deleg-name { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; color: var(--text); overflow-wrap: anywhere; }
+.ap-deleg-stats { margin-left: auto; font-size: 10px; color: var(--text-faint); font-family: 'Geist Mono', monospace; white-space: nowrap; }
 .ap-deleg-note { font-size: 10px; color: var(--text-dim); font-style: italic; margin-top: 2px; }
-.ap-depthtag { font-size: 8.5px; color: var(--chart-5); border: 1px solid var(--chart-5); border-radius: 8px; padding: 0 5px; margin-left: 6px; font-family: 'Geist Mono', monospace; }
+.ap-depthtag { font-size: 8.5px; color: var(--text-dim); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 0 5px; margin-left: 6px; font-family: 'Geist Mono', monospace; }
 .ap-chead { font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
 .ap-chead b { color: var(--text); font-family: 'Geist Mono', monospace; }
 .ap-cmandate { font-size: 11px; color: var(--text-faint); margin-bottom: 4px; }
 .ap-cmandate i { color: var(--text-dim); }
-/* Source-of-each-line legend at the foot of the panel. */
-.ap-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim); align-items: center; }
-.ap-src.distill { color: var(--chart-6); border-color: var(--chart-6); }
-/* Collapsed conversational run — a fold marker for >4 consecutive chat-only
-   moves, so the method doesn't drown in Q&A narration. */
-.ap-collapse {
-  position: relative; margin: 2px 0 2px; padding: 5px 0 5px 2px; cursor: pointer;
-  font-size: 11px; color: var(--text-faint); font-family: 'Geist Mono', monospace;
-  font-style: italic; user-select: none; border-left: 2px dashed var(--border);
-  padding-left: 10px; margin-left: -1px;
-}
-.ap-collapse:hover { color: var(--text-dim); }
 /* Verify-flavored delegation (review/audit mandates) — green accent + chip. */
 .ap-deleg.ap-verify-deleg { border-color: var(--success); }
 .ap-deleg.ap-verify-deleg .ap-caret { color: var(--success); }
 .ap-verify-chip {
   display: inline-block; margin-left: 6px; font-size: 8.5px; color: var(--success);
-  border: 1px solid var(--success); border-radius: 8px; padding: 0 5px;
-  font-family: 'Geist Mono', monospace; vertical-align: 1px;
+  border: 1px solid rgba(var(--success-rgb), var(--tint-border)); border-radius: var(--radius-pill);
+  padding: 0 5px; font-family: 'Geist Mono', monospace; vertical-align: 1px;
 }
-/* Outcome block: 3-line clamp with a click-to-toggle "show all" (outcomes are
-   truncated server-side mid-word; the toggle keeps the header compact). */
+/* Cross-terminal children (M2b): a separate run-linked session, amber not
+   brand, spliced under its own divider so the eye reads it apart from
+   in-session subagents. */
+.ap-xterm-divider { margin: 16px 0 6px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--warn); font-family: 'Geist Mono', monospace; border-top: 1px solid var(--border); padding-top: 11px; }
+.ap-deleg.ap-xterm { border-color: var(--warn); }
+.ap-deleg.ap-xterm:hover, .ap-deleg.ap-xterm.open { border-color: var(--warn); }
+.ap-deleg.ap-xterm .ap-caret { color: var(--warn); }
+.ap-xterm-nested { border-left-color: var(--warn); }
+/* Collapsed conversational run — a fold marker for >4 consecutive chat-only
+   moves, so the method doesn't drown in Q&A narration. Aligned to the prose
+   column so the gutter stays a clean run of glyphs. */
+.ap-collapse {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 10px;
+  padding: 6px 0; border-bottom: 1px solid var(--border); cursor: pointer;
+  font-size: 11px; color: var(--text-faint); font-family: 'Geist Mono', monospace;
+  user-select: none;
+}
+.ap-collapse:hover { color: var(--text-dim); }
+
+/* --- outcome + legend, at the FOOT of the spine ----------------------- */
+/* The outcome closes the account of the attempt, so it sits after the last
+   move rather than in the header: you read what was attempted, then how, then
+   how it ended. */
+.ap-outcome { margin-top: 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: 12px 14px; }
+.ap-outcome-h { font-family: 'Geist Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--success); margin-bottom: 6px; }
+.ap-outcome .ap-outcome-body { font-size: 13px; color: var(--text-dim); line-height: 1.55; text-wrap: pretty; }
 .ap-outcome .ap-outcome-body.clamp {
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
   overflow: hidden;
 }
 .ap-outcome .ap-outcome-more {
-  display: inline-block; margin-top: 3px; cursor: pointer; font-size: 10.5px;
+  display: inline-block; margin-top: 5px; cursor: pointer; font-size: 10.5px;
   color: var(--text-faint); font-family: 'Geist Mono', monospace; user-select: none;
 }
 .ap-outcome .ap-outcome-more:hover { color: var(--success); }
+/* The glyph legend. It decodes the gutter, which is the one thing on this tab
+   a first-time reader cannot infer. */
+.ap-legend { display: flex; gap: var(--stack-gap); flex-wrap: wrap; margin-top: 12px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); align-items: center; }
+.ap-legend .g { font-size: 12px; margin-right: 4px; }
+.ap-legend .g.delegate { color: var(--brand); }
+.ap-legend .g.dead { color: var(--error); }
+.ap-legend .g.verify { color: var(--success); }
+.ap-legend .g.act { color: var(--text-dim); }
 /* Inline `code` in approach labels/quotes/outcome (rendered by mdInline). */
 code.md-code {
   font-family: 'Geist Mono', monospace; font-size: 0.92em;
@@ -3437,7 +3545,7 @@ function SubagentBlock({ subagent }) {
               <div class="story-callout-label">Task</div>
               <div class="story-callout-body">${subagent.task}</div>
             </div>` : null}
-          <div class="story-steps">${renderTimelineSteps(steps)}</div>
+          ${renderTimelineSteps(steps)}
           ${subagent.outcome ? html`
             <div class="story-callout" style="margin-top:8px">
               <div class="story-callout-label">Outcome</div>
@@ -3459,6 +3567,14 @@ function firstLine(text) {
 // Render a step list NEWEST-FIRST (data is canonical oldest-first; we reverse in
 // render only). prevModel is the chronologically-previous step's model so the
 // "model changed" dim tag tracks the real timeline, not the reversed order.
+//
+// The unit of the Timeline is the EXCHANGE: one human ask, then the steps it
+// produced. The design frames that as a labelled "Ask" callout over a bordered
+// panel of flat rows, and this emits exactly that pair, once per exchange. It
+// repeats rather than pinning a single ask at the top of the page: a session
+// gets many asks, and the first one stops describing the work almost at once.
+// Returns a list of `.story-exchange` blocks, each supplying its own panel —
+// callers must not wrap the result in another `.story-steps`.
 function renderTimelineSteps(steps) {
   // Newest ask on top (like an inbox), but each ask reads top-down in order —
   // the prompt, then its responses chronologically — so input/output pair the
@@ -3476,28 +3592,39 @@ function renderTimelineSteps(steps) {
   const out = [];
   for (let g = groups.length - 1; g >= 0; g--) {
     const grp = groups[g];
-    if (grp.ask != null) out.push(html`<${StoryAsk} prompt=${grp.ask} key=${'ask' + g} />`);
+    const rows = [];
     let prevModel = null;
     for (const { step, i } of grp.items) {
       if (step.omitted != null) {
-        out.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
+        rows.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
       } else {
-        out.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
+        rows.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
         prevModel = step.model || prevModel;
       }
     }
+    out.push(html`
+      <div class="story-exchange" key=${'ex' + g}>
+        ${grp.ask != null ? html`<${StoryAsk} prompt=${grp.ask} />` : null}
+        <div class="panel"><div class="story-steps">${rows}</div></div>
+      </div>`);
   }
   return out;
 }
 
-// A user prompt in the Timeline — the human ask that began an exchange, shown
-// in a distinct color (no box/label) so it reads as a section marker.
+// A user prompt in the Timeline — the human ask that began an exchange, in the
+// design's labelled callout so a prompt reads as a different KIND of thing from
+// the agent's steps rather than as a differently-coloured one. Long asks clamp
+// to a preview and toggle open on click.
 function StoryAsk({ prompt }) {
   const [expanded, setExpanded] = useState(false);
   const long = prompt.length > 200;
   const short = long ? prompt.slice(0, 200) + '…' : prompt;
-  /* grey "user: " prefix so asks carry a speaker marker like steps carry #n + time */
-  return html`<div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}><span class="story-ask-who">user: </span>${expanded ? prompt : short}</div>`;
+  return html`
+    <div class=${'story-callout story-ask' + (long ? ' clickable' : '')}
+         onClick=${long ? (() => setExpanded(e => !e)) : null}>
+      <div class="story-callout-label">Ask</div>
+      <div class="story-callout-body">${expanded ? prompt : short}</div>
+    </div>`;
 }
 
 function StoryStep({ step, prevModel }) {
@@ -3518,19 +3645,24 @@ function StoryStep({ step, prevModel }) {
   const hasMore = subagents.length > 0 || tools.length > 0 || (text && (step.text_truncated || text.indexOf('\n') !== -1 || text.length > preview.length));
   return html`
     <div class=${'story-step' + (step.is_error ? ' error' : '')}>
+      ${/* Row order follows the design: the meta a reader skims down the left
+            (caret, step number, time, model), then the description, then the
+            retry annotation pushed hard right. The tool chips are ours, not the
+            mock's, and sit just before the description because on a tool-only
+            step the description IS the tool's command. */ ''}
       <div class="story-step-row" onClick=${() => setExpanded(e => !e)}>
         <span class="story-caret">${hasMore ? (expanded ? '▾' : '▸') : ''}</span>
         <span class="story-step-n">#${step.n}</span>
         ${step.ts ? html`<span class="story-step-time" title=${step.ts}>${fmtAgo(step.ts)}</span>` : null}
-        ${step.is_retry ? html`<span class="story-retry" title="retry">↻</span>` : null}
+        ${showModel ? html`<span class="story-model-tag" title=${step.model}>${step.model}</span>` : null}
         ${tools.map(t => html`
           <span class=${'story-chip inline' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
             <span class="story-chip-name">${t.name}</span>
             <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
           </span>
         `)}
-        ${showModel ? html`<span class="story-model-tag" title=${step.model}>${step.model}</span>` : null}
         <span class=${'story-line' + (preview ? '' : (toolLine ? ' tool' : ' dim'))} title=${toolLine || ''}>${preview || toolLine || '(no narration)'}</span>
+        ${step.is_retry ? html`<span class="story-retry" title="retry">↺ retry</span>` : null}
       </div>
       ${expanded ? html`
         <div class="story-step-body">
@@ -3588,11 +3720,11 @@ function StorySection({ sessionId }) {
   // No repeated "Timeline" heading here — the active tab button already carries
   // the label (lens redesign; same for every other session-detail tab body).
   return html`
-    <div style="font-size:12px;color:var(--text-dim);margin:0 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first; each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+    <div class="tab-cap">The agent's own narration + tool calls, newest ask first; each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
 
     ${steps.length === 0
       ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
-      : html`<div class="story-steps">${renderTimelineSteps(steps)}</div>`}
+      : renderTimelineSteps(steps)}
   `;
 }
 
@@ -3702,12 +3834,16 @@ const isChatMove = (m) =>
   && !(m.evidence && m.evidence.length) && !(m.delegations && m.delegations.length)
   && !m.failed && !m.is_retry;
 
-// the ✓ outcome block — 3-line clamp with a click-to-toggle "show all".
+// The outcome callout, closing the spine: a green "✅ Outcome" heading over the
+// prose, 3-line clamp with a click-to-toggle "show all" (outcomes are truncated
+// server-side mid-word, so an unclamped one can run very long). ✅ is the fourth
+// glyph in the spine's vocabulary, and this is where it is spent.
 function ApproachOutcome({ text }) {
   const [open, setOpen] = useState(false);
   return html`
     <div class="ap-outcome">
-      <div class="ap-outcome-body ${open ? '' : 'clamp'}">✓ ${mdInline(text)}</div>
+      <div class="ap-outcome-h">✅ Outcome</div>
+      <div class="ap-outcome-body ${open ? '' : 'clamp'}">${mdInline(text)}</div>
       <span class="ap-outcome-more" onClick=${() => setOpen((o) => !o)}>${open ? '⌃ collapse' : '⌄ more'}</span>
     </div>`;
 }
@@ -3726,11 +3862,14 @@ function ApproachSpine({ moves }) {
       const id = 'run' + (runId++);
       const mid = runLen - 2;
       rows.push(html`<${ApproachMove} move=${moves[i]} key=${'a' + i} />`);
+      // The fold marker keeps the spine's two-column grid so its text lines up
+      // with the prose above and below it, and its gutter cell stays empty: a
+      // fold is not a move, so it must not put a glyph into the vocabulary.
       if (open[id]) {
         for (let k = i + 1; k < j - 1; k++) rows.push(html`<${ApproachMove} move=${moves[k]} key=${'m' + k} />`);
-        rows.push(html`<div class="ap-collapse" key=${id} onClick=${() => setOpen((o) => ({ ...o, [id]: false }))}>· collapse ${mid} conversational steps ⌃</div>`);
+        rows.push(html`<div class="ap-collapse" key=${id} onClick=${() => setOpen((o) => ({ ...o, [id]: false }))}><span></span><span>collapse ${mid} conversational steps ⌃</span></div>`);
       } else {
-        rows.push(html`<div class="ap-collapse" key=${id} onClick=${() => setOpen((o) => ({ ...o, [id]: true }))}>· ${mid} conversational steps ⌄</div>`);
+        rows.push(html`<div class="ap-collapse" key=${id} onClick=${() => setOpen((o) => ({ ...o, [id]: true }))}><span></span><span>${mid} conversational steps ⌄</span></div>`);
       }
       rows.push(html`<${ApproachMove} move=${moves[j - 1]} key=${'z' + (j - 1)} />`);
       i = j;
@@ -3772,18 +3911,34 @@ function ApproachMove({ move }) {
   const split = isDupe ? splitLeadSentence(quote) : null;
   const headline = isDupe ? split.head : rawLabel;
   const italic = isDupe ? split.rest : quote;
+  // The provenance caption, in words. It replaces the old colored source CHIP
+  // that sat beside the headline: a chip needed a legend of its own, competed
+  // with the glyph gutter for the reader's attention, and said less than the
+  // sentence does. The kind marker leads (a dead end is the thing you want to
+  // know first), then how tokenjam knows the line: the agent's own narration,
+  // or an inference from the transcript's structure.
+  const srcTxt = srcWords ? "agent's own words" : 'structural inference';
+  const srcBits = [];
+  if (kind === 'dead_end') srcBits.push('dead end · reverted');
+  else if (isRetry) srcBits.push('retry');
+  if (kind === 'delegate' && delegations.length) {
+    srcBits.push('structural inference · ' + delegations.length + ' dispatch' + (delegations.length === 1 ? '' : 'es'));
+  } else {
+    srcBits.push(srcTxt);
+  }
   return html`
     <div class="ap-move ap-${kind} ${isDead ? 'dead' : ''} ${isRetry ? 'retry' : ''}">
       <div class="ap-ic">${icon}</div>
-      <div class="ap-top">
-        <span class="ap-kind">${kind.replace('_', ' ')}</span>
-        ${isDelegateCard ? null : html`<span class="ap-label">${mdInline(headline)}</span>`}
-        ${(isDead || isRetry) ? html`<span class="ap-revert">${kind === 'dead_end' ? 'reverted · dead-end' : 'retry'}</span>` : null}
-        ${isDelegateCard ? null : html`<span class="ap-src ${srcWords ? 'words' : 'struct'}">${srcWords ? "agent's words" : 'structural'}</span>`}
+      <div class="ap-txt">
+        ${isDelegateCard ? null : html`<div class="ap-label">${mdInline(headline)}</div>`}
+        ${!isDelegateCard && italic ? html`<div class="ap-quote">${mdInline(italic)}</div>` : null}
+        ${/* Always rendered, including on a delegate card whose headline is
+              suppressed as redundant — a row that is only a glyph and a card
+              breaks the column of prose the gutter is read against. */ ''}
+        <div class="ap-src">${srcBits.join(' · ')}</div>
+        ${!isDelegateCard && ev.length ? html`<div class="ap-ev">▸ ${ev.map((e, i) => html`<span class="ap-ev-item">${i > 0 ? ' · ' : ''}${e.name} ${e.label}${e.status === 'error' ? html` <span class="ap-ev-st err">✗</span>` : null}</span>`)}</div>` : null}
+        ${delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)}
       </div>
-      ${!isDelegateCard && italic ? html`<div class="ap-quote">${mdInline(italic)}</div>` : null}
-      ${!isDelegateCard && ev.length ? html`<div class="ap-ev">▸ ${ev.map((e, i) => html`<span class="ap-ev-item">${i > 0 ? ' · ' : ''}${e.name} ${e.label}${e.status === 'error' ? html` <span class="ap-ev-st err">✗</span>` : null}</span>`)}</div>` : null}
-      ${delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)}
     </div>
   `;
 }
@@ -3859,13 +4014,14 @@ function ApproachCrossTerminal({ child }) {
 }
 
 // The left delegation-tree rail: every agent in the spawn tree (data.agents),
-// indented by depth, with a status dot, a meta line, a status badge, and a
-// provenance sub-line for in-session subagents.
+// indented by depth. One row per agent: status dot, name, and the cost hard
+// right. Tokens and depth ride in title= rather than on the row — the rail
+// answers "who was spawned, and which branch was expensive", and a second
+// figure per row turns a tree back into a table.
 function ApproachRail({ agents }) {
   return html`
-    <div class="ap-rail">
-      <h4 class="ap-rail-h">Delegation tree</h4>
-      <div class="ap-rail-sub">indent = spawn depth · each agent's method is rebuilt below</div>
+    <div class="panel ap-rail">
+      <div class="panel-head">Delegation tree</div>
       ${agents.map(a => {
         const isMain = a.depth === 0;
         // A cross-terminal child (M2b) is a separate run-linked session, not an
@@ -3874,8 +4030,9 @@ function ApproachRail({ agents }) {
         const isCapped = a.capture_completeness !== 'full';
         const dotClass = isMain ? 'is-main' : ((isCross || isCapped) ? 'is-term' : 'is-sub');
         const dCls = a.depth ? ('d' + Math.min(a.depth, 3)) : '';
-        const meta = (a.tokens != null ? fmtTokens(a.tokens) + ' tok' : ('depth ' + (a.depth || 0)))
-          + (a.cost_usd != null ? ' · ' + fmtCost(a.cost_usd) : '');
+        // Tokens + depth are the row's tooltip, not a second visible line.
+        const meta = 'depth ' + (a.depth || 0)
+          + (a.tokens != null ? ' · ' + fmtTokens(a.tokens) + ' tok' : '');
         let badgeCls = '', badgeTxt;
         if (isMain) { badgeCls = a.status === 'active' ? 'live' : ''; badgeTxt = a.status === 'active' ? '● live' : (a.status || 'completed'); }
         else if (isCross) { badgeCls = 'partial'; badgeTxt = a.capture_completeness === 'full' ? '⏏ ended · method kept' : 'session-level'; }
@@ -3889,21 +4046,27 @@ function ApproachRail({ agents }) {
         // fold them into the node's title=; keep badges only for the exceptions
         // (main/live, cross-terminal, capped/killed).
         const isPlainSub = !isMain && !isCross && !isCapped;
-        const showBadge = !isPlainSub;
-        const showProv = provLine && !isPlainSub;
-        const nodeTitle = isPlainSub ? (badgeTxt + ' · ' + provLine) : '';
+        // Same rule as the plain sidechain below: a badge earns its width only
+        // when it says something the default doesn't. A finished main agent is
+        // the default for any session you are reading after the fact, so only
+        // `● live` gets a badge — and the row keeps that width for the name.
+        const isPlainMain = isMain && a.status !== 'active';
+        const showBadge = !isPlainSub && !isPlainMain;
+        // The name is truncated on the row, so it leads the tooltip.
+        const nodeTitle = [a.name || '(unnamed)', meta, showBadge ? null : badgeTxt, provLine]
+          .filter(Boolean).join(' · ');
         return html`
           <div class="ap-node ${dCls}" title=${nodeTitle}>
-            <div class="ap-dot ${dotClass}"></div>
-            <div>
-              <div class="ap-nname">${a.name || '(unnamed)'}</div>
-              <div class="ap-nmeta">${meta}</div>
-              ${showBadge ? html`<span class="ap-badge ${badgeCls}">${badgeTxt}</span>` : null}
-              ${showProv ? html`<div class="ap-prov">${provLine}</div>` : null}
-            </div>
+            <span class="ap-dot ${dotClass}"></span>
+            <span class="ap-nname">${a.name || '(unnamed)'}</span>
+            ${showBadge ? html`<span class="ap-badge ${badgeCls}">${badgeTxt}</span>` : null}
+            ${/* Faint, hard right. A cost this rail cannot price is left blank
+                  rather than shown as $0.00 — an unpriced branch is not a free
+                  one, and a zero here would read as one. */ ''}
+            <span class="ap-ncost">${a.cost_usd != null ? fmtCost(a.cost_usd) : ''}</span>
           </div>`;
       })}
-      <div class="ap-railcap">Nodes below main were <b>killed</b> when done; their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
+      <div class="ap-railcap">Indent is spawn depth. Nodes below main were <b>killed</b> when done; their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
     </div>
   `;
 }
@@ -3944,35 +4107,54 @@ function ApproachSection({ sessionId }) {
   countVerify(spine);
   crossTerminal.forEach((c) => countVerify(c.spine));
   const meta = data.meta || {};
-  const statLine = (meta.cost_usd != null ? fmtCost(meta.cost_usd) : '$0.0000')
-    + ' · ' + (meta.tokens != null ? fmtTokens(meta.tokens) : '-') + ' tok';
+  // The counts read across the head as one sentence about the attempt, in the
+  // order a reader asks them: how much was done, how much was handed off, how
+  // much was wasted, how much was checked, what it cost.
+  const stats = [
+    counts.moves + ' move' + (counts.moves === 1 ? '' : 's'),
+    counts.delegations + ' delegation' + (counts.delegations === 1 ? '' : 's'),
+    counts.dead_ends + ' dead end' + (counts.dead_ends === 1 ? '' : 's'),
+    verifyCount + ' verif' + (verifyCount === 1 ? 'y' : 'ies'),
+    meta.cost_usd != null ? fmtCost(meta.cost_usd) : null,
+    meta.tokens != null ? fmtTokens(meta.tokens) + ' tok' : null,
+  ].filter(Boolean);
   // No repeated "Approach" heading here — the active tab button already
   // carries the label (lens redesign; same for every session-detail tab body).
   return html`
-    <div style="font-size:12px;color:var(--text-dim);margin:0 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it: the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
+    <div class="tab-cap">How the agent attempted it: the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
     <div class="ap-grid">
       <${ApproachRail} agents=${agents} />
-      <div class="ap-panel">
+      <div class="panel ap-panel">
         <div class="ap-head">
-          <div>
-            ${data.name ? html`<div class="ap-who">${data.name}</div>` : null}
-            ${data.task ? html`<div class="ap-mandate">mandate: <b>${mdInline(data.task)}</b></div>` : null}
-            ${data.outcome ? html`<${ApproachOutcome} text=${data.outcome} />` : null}
-          </div>
-          <div class="ap-rt"><b>${counts.moves}</b> moves<br/><b>${counts.delegations}</b> delegations<br/><b>${counts.dead_ends}</b> dead-ends<br/><b>${verifyCount}</b> verifies<br/>${statLine}</div>
+          ${data.name ? html`<div class="ap-who">${data.name}</div>` : null}
+          ${data.task ? html`
+            <div class="ap-head-l">Mandate</div>
+            <div class="ap-mandate">${mdInline(data.task)}</div>
+          ` : null}
+          <div class="ap-stats">${stats.map(x => html`<span>${x}</span>`)}</div>
         </div>
-        ${spine.length === 0
-          ? html`<div class="story-unavailable">Transcript found but no moves reconstructed.</div>`
-          : html`<${ApproachSpine} moves=${spine} />`}
-        ${crossTerminal.length ? html`
-          <div class="ap-xterm-divider">cross-terminal children</div>
-          ${crossTerminal.map(c => html`<${ApproachCrossTerminal} child=${c} />`)}
-        ` : null}
-        <div class="ap-legend">
-          <span><b>source of each line:</b></span>
-          <span><span class="ap-src words">agent's words</span> narration / TodoWrite</span>
-          <span><span class="ap-src struct">structural</span> revert / retry / spawn</span>
-          <span><span class="ap-src distill">distilled</span> LLM, opt-in</span>
+        <div class="ap-body">
+          ${spine.length === 0
+            ? html`<div class="story-unavailable">Transcript found but no moves reconstructed.</div>`
+            : html`<${ApproachSpine} moves=${spine} />`}
+          ${crossTerminal.length ? html`
+            <div class="ap-xterm-divider">cross-terminal children</div>
+            ${crossTerminal.map(c => html`<${ApproachCrossTerminal} child=${c} />`)}
+          ` : null}
+          ${/* The outcome closes the account: what was attempted (head), how
+                (spine), how it ended (here). It used to sit in the header,
+                above the moves it summarises. */ ''}
+          ${data.outcome ? html`<${ApproachOutcome} text=${data.outcome} />` : null}
+          ${/* The legend decodes the gutter, which is the one thing on this tab
+                a first-time reader cannot infer. The old legend explained the
+                source chips instead; those are now spelled out in words on
+                every row, so they need no key. */ ''}
+          <div class="ap-legend">
+            <span><span class="g act">•</span>acted</span>
+            <span><span class="g delegate">⑂</span>delegated</span>
+            <span><span class="g dead">✗</span>dead end</span>
+            <span><span class="g verify">✅</span>verified</span>
+          </div>
         </div>
       </div>
     </div>
@@ -4087,80 +4269,93 @@ function SessionDetailView({ sessionId }) {
 
     ${tab === 'models' ? html`
       ${(modelMix.length > 0 || contextSeries.length > 0) ? html`
-        <div style="font-size:12px;color:var(--text-dim);margin:0 0 12px;font-family:'Geist Mono',monospace">How this session split across models${data.turn_count ? ' · ' + data.turn_count + ' LLM call' + (data.turn_count === 1 ? '' : 's') : ''}</div>
+        <div class="tab-cap">How this session split across models${data.turn_count ? ' · ' + data.turn_count + ' LLM call' + (data.turn_count === 1 ? '' : 's') : ''}</div>
         ${modelMix.length > 0 ? html`
-          <div class="table-wrap"><table>
-            <thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th></tr></thead>
+          <div class="panel"><div class="table-wrap"><table>
+            <thead><tr><th>Model</th><th class="num">Calls</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache</th><th class="num">Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th></tr></thead>
             <tbody>
               ${modelMix.map(m => html`
                 <tr>
                   <td class="mono">${m.model}</td>
-                  <td>${m.calls}</td>
-                  <td>${fmtTokens(m.input_tokens)}</td>
-                  <td>${fmtTokens(m.output_tokens)}</td>
-                  <td>${m.cache_tokens ? fmtTokens(m.cache_tokens) : '-'}</td>
-                  <td>${fmtCost(m.cost_usd)}</td>
+                  <td class="num dim">${m.calls}</td>
+                  <td class="num dim">${fmtTokens(m.input_tokens)}</td>
+                  <td class="num dim">${fmtTokens(m.output_tokens)}</td>
+                  <td class="num dim">${m.cache_tokens ? fmtTokens(m.cache_tokens) : '-'}</td>
+                  <td class="num"><b>${fmtCost(m.cost_usd)}</b></td>
                 </tr>
               `)}
             </tbody>
-          </table></div>
+          </table></div></div>
         ` : null}
+        ${/* The histogram gets its own panel with the caption INSIDE it, above
+              the plot: the caption names what the bars are, and a caption
+              floating outside the card it explains reads as a page-level note
+              about the tab rather than a label on this chart. */ ''}
         ${contextSeries.length > 0 ? html`
-          <div style="margin-top:16px">
-            <div style="display:flex;align-items:flex-end;gap:2px;height:80px;padding:4px 0;border-bottom:1px solid var(--border);overflow:hidden">
+          <div class="panel"><div class="panel-body">
+            <div class="tab-cap">Input (context) tokens per LLM call over the session</div>
+            <div class="ctx-plot">
               ${contextSeries.map(p => html`
-                <div style=${'flex:1 1 0;min-width:1px;background:var(--brand);opacity:0.7;height:' + (ctxMax > 0 ? Math.max(2, Math.round((p.input_tokens / ctxMax) * 100)) : 2) + '%'} title=${fmtTokens(p.input_tokens) + ' input tokens' + (p.t ? ' · ' + fmtAgo(p.t) : '')}></div>
+                <i style=${'height:' + (ctxMax > 0 ? Math.max(2, Math.round((p.input_tokens / ctxMax) * 100)) : 2) + '%'} title=${fmtTokens(p.input_tokens) + ' input tokens' + (p.t ? ' · ' + fmtAgo(p.t) : '')}></i>
               `)}
             </div>
-            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:4px;font-family:'Geist Mono',monospace">
+            <div class="ctx-axis">
               <span>0</span>
               <span>peak ${fmtTokens(ctxMax)}</span>
             </div>
-            <div style="font-size:11px;color:var(--text-dim);margin-top:4px;font-family:'Geist Mono',monospace">Input (context) tokens per LLM call over the session.</div>
-          </div>
-        ` : html`<div style="font-size:12px;color:var(--text-dim);margin:8px 0 0;font-family:'Geist Mono',monospace">No LLM calls recorded.</div>`}
+          </div></div>
+        ` : html`<div class="tab-foot">No LLM calls recorded.</div>`}
       ` : html`<div class="empty">No LLM calls recorded for this session.</div>`}
     ` : null}
 
     ${tab === 'subagents' ? html`
-      <div style="font-size:12px;color:var(--text-dim);margin:0 0 12px;font-family:'Geist Mono',monospace">${subagents.total} subagent${subagents.total === 1 ? '' : 's'}${s.total_cost_usd > 0 ? ' · ' + Math.round(subagents.cost_usd / s.total_cost_usd * 100) + '% of session cost' : ''}${subagents.flagged ? ' · ' + subagents.flagged + ' flagged for right-sizing' : ''}</div>
+      <div class="tab-cap">${subagents.total} subagent${subagents.total === 1 ? '' : 's'}${s.total_cost_usd > 0 ? ' · ' + Math.round(subagents.cost_usd / s.total_cost_usd * 100) + '% of session cost' : ''}${subagents.flagged ? ' · ' + subagents.flagged + ' flagged for right-sizing' : ''}</div>
       ${subagents.rows.length > 0 ? html`
-        <div class="table-wrap"><table>
-          <thead><tr><th>Subagent</th><th>Model</th><th>Calls</th><th>Tools</th><th>Input</th><th>Cache</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th><th>Right-sizing</th></tr></thead>
+        ${/* The right-sizing flag rides UNDER the subagent's name as a tinted
+              pill rather than in a column of its own at the far edge of a wide
+              table: the row tint and the pill are one signal, and putting them
+              together is what makes a flagged row readable at a glance. */ ''}
+        <div class="panel"><div class="table-wrap"><table>
+          <thead><tr><th>Subagent</th><th>Model</th><th class="num">Calls</th><th class="num">Tools</th><th class="num">Input</th><th class="num">Cache</th><th class="num">Output</th><th class="num">Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th></tr></thead>
           <tbody>
             ${subagents.rows.map(r => html`
-              <tr style=${r.flags.length ? 'background:rgba(245,166,35,0.06)' : ''}>
-                <td class="mono">${r.sub_agent_id.slice(0, 12)}</td>
-                <td class="mono">${r.model}</td>
-                <td>${r.llm_calls}</td>
-                <td>${r.tool_calls}</td>
-                <td>${fmtTokens(r.input_tokens)}</td>
-                <td>${(r.cache_tokens + r.cache_write_tokens) ? fmtTokens(r.cache_tokens + r.cache_write_tokens) : '-'}</td>
-                <td>${fmtTokens(r.output_tokens)}</td>
-                <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
-                <td>${r.flags.length ? r.flags.map(f => html`<span style="color:#f5a623;font-size:11px;white-space:nowrap;margin-right:6px">${f.replace(/_/g, '-')}</span>`) : html`<span style="color:var(--text-dim)">-</span>`}</td>
+              <tr class=${r.flags.length ? 'sub-flagged' : ''}>
+                <td class="mono">
+                  <div>${r.sub_agent_id.slice(0, 12)}</div>
+                  ${r.flags.map(f => html`<span class="sub-flag">${f.replace(/_/g, '-')}</span>`)}
+                </td>
+                <td class="mono dim">${r.model}</td>
+                <td class="num dim">${r.llm_calls}</td>
+                <td class="num dim">${r.tool_calls}</td>
+                <td class="num dim">${fmtTokens(r.input_tokens)}</td>
+                <td class="num dim">${(r.cache_tokens + r.cache_write_tokens) ? fmtTokens(r.cache_tokens + r.cache_write_tokens) : '-'}</td>
+                <td class="num dim">${fmtTokens(r.output_tokens)}</td>
+                <td class="num"><b>${fmtFramedDollar(r.cost_usd, framing)}</b></td>
               </tr>
             `)}
           </tbody>
-        </table></div>
-        <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment; review before changing how subagents are dispatched.</div>
+        </table></div></div>
+        <div class="tab-foot">A candidate-flagging heuristic, not a quality judgment. Review before changing how subagents are dispatched.</div>
       ` : html`<div class="empty">No subagents in this session.</div>`}
     ` : null}
 
     ${tab === 'tools' ? html`
       ${tools.length > 0 ? html`
-        <div class="table-wrap"><table>
-          <thead><tr><th>Tool</th><th>Calls</th><th>Failed</th></tr></thead>
+        <div class="panel"><div class="table-wrap"><table>
+          <thead><tr><th>Tool</th><th class="num">Calls</th><th class="num">Failed</th></tr></thead>
           <tbody>
             ${tools.map(t => html`
               <tr>
                 <td class="mono">${t.tool_name}</td>
-                <td>${t.count}</td>
-                <td>${t.error_count ? html`<span style="color:var(--error)">${t.error_count}</span>` : '0'}</td>
+                <td class="num dim">${t.count}</td>
+                ${/* A zero here is a real, known measurement — dimmed, not
+                      hidden, and never blank. Only a nonzero count takes the
+                      error color, so the eye lands on the tools that failed. */ ''}
+                <td class=${t.error_count ? 'num' : 'num dim'} style=${t.error_count ? 'color:var(--error)' : ''}>${t.error_count || 0}</td>
               </tr>
             `)}
           </tbody>
-        </table></div>
+        </table></div></div>
       ` : html`<div class="empty">No tool calls recorded for this session.</div>`}
     ` : null}
 
@@ -4172,12 +4367,15 @@ function SessionDetailView({ sessionId }) {
             (multiple conversations, or live per-call ingest) keeps the list. */ ''}
       ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>`
         : traces.length === 1 ? html`
-          <div style="font-size:12px;color:var(--text-dim);margin:0 0 4px;font-family:'Geist Mono',monospace">One trace · ${traces[0].span_count} spans. Click a span for details.</div>
-          <${TraceDetailView} traceId=${traces[0].trace_id} embedded=${true} />`
+          ${/* One caption for the embedded waterfall, owned here — the embedded
+                TraceDetailView suppresses its own so the two don't stack. */ ''}
+          <div class="tab-cap">One trace · ${traces[0].span_count} spans · bars sized by tokens, and the costliest are marked, so a runaway span is findable without scanning by eye. Click a span for details.</div>
+          <${TraceDetailView} traceId=${traces[0].trace_id} embedded=${true} />
+          <div class="tab-foot">Tool spans carry no tokens; an empty bar is a tool call, not a missing measurement.</div>`
         : html`
-        <div style="font-size:12px;color:var(--text-dim);margin:0 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th><th>Result</th><th>Spans</th><th></th></tr></thead>
+        <div class="tab-cap">${traces.length} traces in this session. Click a trace row to drill into its waterfall.</div>
+        <div class="panel"><div class="table-wrap"><table>
+          <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th class="num">Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th><th>Result</th><th class="num">Spans</th><th></th></tr></thead>
           <tbody>
             ${traces.map(t => html`
               <tr class="clickable" onClick=${() => location.hash = '#/traces/' + t.trace_id} title=${'Trace ' + t.trace_id}>
@@ -4190,15 +4388,15 @@ function SessionDetailView({ sessionId }) {
                 <td>${fmtAgo(t.start_time)}</td>
                 ${/* Backfilled spans carry no per-span duration, so the SUM is 0;
                       an em dash is honest where "0ms" reads as an instant trace. */ ''}
-                <td>${t.duration_ms > 0 ? fmtDur(t.duration_ms) : '—'}</td>
-                <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
+                <td class="dim">${t.duration_ms > 0 ? fmtDur(t.duration_ms) : '—'}</td>
+                <td class="num">${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
                 <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
-                <td>${t.span_count}</td>
+                <td class="num dim">${t.span_count}</td>
                 <td class="chevron">→</td>
               </tr>
             `)}
           </tbody>
-        </table></div>
+        </table></div></div>
       `}
     ` : null}
 
@@ -4666,7 +4864,10 @@ function TraceDetailView({ traceId, embedded }) {
     ${embedded ? null : html`
       <button class="btn btn-back" onClick=${goBack}>\u2190 Back</button>
       <div class="page-title">Trace details for ${agentName}</div>`}
-    <div style="font-size:12px;color:var(--text-dim);margin:${embedded ? '0' : '-14px'} 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
+    ${/* Embedded in a session's Traces tab, the tab's own caption already says
+          "click a span for details" — printing it again here stacked two grey
+          mono lines saying the same thing above the waterfall. */ ''}
+    ${embedded ? null : html`<div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>`}
     <div class="wf-summary">
       <span>Total cost (tokens) <b>${wfTotalCostFramed}</b></span>
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
