@@ -308,10 +308,20 @@ def _rules_page() -> str:
     return src[start:src.index("\nfunction ", start + 10)]
 
 
-def test_the_rules_page_has_open_and_applied_tabs():
+def test_the_rules_page_has_pending_and_in_place_tabs():
+    """Two tabs, one per population: something to do, or something already done.
+
+    The LABELS moved (Open/Applied -> Pending/In place) when this page was
+    brought onto the lens design; the STATE KEYS did not, which is why the
+    `setTab` assertions are the ones that read unchanged. Both spellings are
+    pinned — the new one present, the old one absent — so a revert to the old
+    wording is a failure rather than a silent drift back.
+    """
     page = _rules_page()
-    assert "Open " in page
-    assert "Applied " in page
+    assert "Pending " in page
+    assert "In place " in page
+    assert "Open " not in page
+    assert "Applied (" not in page
     assert "setTab('open')" in page and "setTab('applied')" in page
 
 
@@ -335,7 +345,7 @@ def test_neither_tab_count_can_render_before_its_fetch_resolves():
     worst thing this page can say wrongly (root anti-pattern 22). Both counts sit
     behind `rules === null`."""
     page = _rules_page()
-    for label in ("Open ", "Applied "):
+    for label in ("Pending ", "In place "):
         idx = page.index(label)
         window = page[idx:idx + 400]
         assert "rules === null" in window, f"{label} count is not gated on its fetch"

@@ -52,3 +52,11 @@ A `font-family` name in CSS is not a loaded font; without an `@font-face` rule a
 template render as those literal characters to the reader. Write the character itself (`&`, `→`),
 or a JS escape (`→`). Grep `&[a-z]\+;\|&#[0-9]` inside `html\`` blocks before shipping copy.
 Entities in the SERVER-RENDERED sidebar markup are fine: that is real HTML, parsed by the browser.
+
+### Critical Rule 45 — Renaming UI copy: grep the SOURCE form, and run every UI-reading test
+
+Tests assert against `ui/index.html` as text, so they match the source, not the rendered output.
+Grepping `tests/` for `"Open ("` misses `assert "Open " in page` and the rename ships red. Grep the
+bare words, then run the whole set that reads the file:
+`grep -rln "index.html" tests/` — currently nine files, and they are cheap. Repair a broken guard by
+repinning it on the new wording AND asserting the old wording is absent, so a revert fails too.
