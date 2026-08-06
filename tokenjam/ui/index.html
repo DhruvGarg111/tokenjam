@@ -1200,6 +1200,41 @@ a.opt-find-row.link .opt-find-name { color: var(--accent); }
 .opt-act-fig { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); white-space: nowrap; text-align: right; }
 .opt-act-fig.dim { color: var(--text-dim); font-weight: 400; }
 .opt-act-btncell { text-align: right; }
+/* A check that ran and came back quiet still gets a row — never a hidden one —
+   but it is not competing for attention with a row that has money on it. */
+.opt-act-row.quiet { opacity: 0.65; }
+/* "Where your spend went": the measured spend split as ONE horizontal
+   rank-toned bar plus a legend. This replaces a two-bar chart whose second bar
+   stacked past overspend by analyzer — which is exactly what the Recommended
+   actions list directly below states, one row per analyzer with its own
+   figure, so the chart was a picture of the table under it. Same rank/tone
+   ramp (--tone-1..7, biggest = whitest) as every other ranked visual here. */
+.opt-spendbar { display: flex; height: 26px; border-radius: var(--radius-pill); overflow: hidden; gap: 2px; }
+.opt-spendbar > span { display: block; height: 100%; }
+.opt-spendbar-legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-dim); }
+.opt-spendbar-legend > span { display: inline-flex; align-items: center; gap: 7px; }
+.opt-spendbar-legend .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
+.opt-spendbar-legend b { color: var(--text); font-weight: 600; }
+.opt-spendbar-legend .pct { color: var(--text-faint); }
+.opt-spendbar-foot { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); margin-top: 12px; line-height: 1.5; }
+/* The three closing cards: the two file-write actions that carry no per-window
+   dollar of their own (Rules, Summarize) and the applied ledger. They were rows
+   in the action list above, where a row with no figure read as a check that had
+   found nothing. */
+.opt-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--stack-gap); margin-top: var(--stack-gap); align-items: stretch; }
+.opt-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: var(--pad-card-y) var(--inset-x); }
+.opt-card-title { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+.opt-card-body { font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+.opt-card-stats { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0 0; }
+.opt-card-stats .v { font-family: 'Geist Mono', monospace; font-size: 22px; font-weight: 700; }
+.opt-card-stats .l { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
+.opt-card-acts { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+.opt-card-link { font-family: 'Geist Mono', monospace; font-size: 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 6px 11px; color: var(--text); }
+.opt-card-link:hover { border-color: var(--accent); }
+.opt-card-note { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); line-height: 1.5; align-self: center; }
+.opt-applied-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); font-family: 'Geist Mono', monospace; font-size: 12px; }
+.opt-applied-row:last-of-type { border-bottom: none; }
+.opt-applied-row .est { color: var(--success); }
 .opt-review-btn {
   font-family: 'Geist', sans-serif; font-size: 12px; font-weight: 600; color: var(--accent);
   border: 1px solid rgba(var(--accent-rgb), 0.4); border-radius: 6px; padding: 3px 11px;
@@ -1520,6 +1555,26 @@ a.health-tile.attn { border-color: var(--warn); }
    them, matching the uppercase zone labels the Dashboard already uses. */
 .rules-zone { margin: 22px 0 10px; font-family: 'Geist Mono', monospace; font-size: 11px;
   text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+/* One proposed rule, as a card: title + delivery + figure on one row, then the
+   destination it would land in, then the placement basis, then the rule text
+   itself, then the actions. The rule text is NOT behind a disclosure any more
+   — the words about to be written into a file the user owns are the whole
+   point of the card, so hiding them behind "Show rule text" put the decision
+   one click away from the evidence it needs. */
+.rule-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: 14px var(--inset-x); margin-bottom: 12px; }
+.rule-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.rule-head b { font-size: 13.5px; }
+.rule-meta { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); }
+.rule-usd { margin-left: auto; font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; }
+.rule-usd.dim { font-weight: 400; }
+.rule-dest { font-size: 12.5px; color: var(--text-dim); margin-top: 6px; line-height: 1.55; }
+.rule-dest.ok { color: var(--success); }
+.rule-basis { font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-faint); margin-top: 4px; line-height: 1.6; }
+.rule-basis .mono { display: block; }
+.rule-text { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 11px; margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+.rule-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 11px; align-items: center; }
+.rule-acts .cur-btn { font-size: 12px; padding: 6px 12px; }
+.rule-foot { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); line-height: 1.6; max-width: 700px; margin-top: 18px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
    The card's own inline `border` wins over a plain class rule, so this needs
@@ -2937,118 +2992,6 @@ function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
-// Cost-by-component + recoverable-waste overlay (#211, the differentiator).
-// TWO ordinal columns: "Cost" stacked by the four token components (measured
-// spend) and "Recoverable (est.)" stacked by analyzer (estimated waste). They
-// are SEPARATE bars — recoverable is never subtracted from cost and never
-// called "saved" (Critical Rule 14). `costSegs` = [{label,value,color}],
-// `recSegs` = [{title,value,...}] already framed ($ or tokens) by the caller.
-// Stacking reuses the back-to-front cumulative-bars trick; each series is
-// non-zero in only ONE column, so per-column stacks stay independent.
-function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, useTokens = false, height = 220 }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    if (!ref.current || !window.uPlot) return;
-    // Axis ticks want a SHORT, rounded label — the full-precision fmtY (4dp,
-    // e.g. "$4000.0000") is ~10 chars and overflows the fixed y-gutter, so
-    // uPlot right-clips it and every tick collapses to "0.0000" (#670). Keep
-    // fmtY for the tooltip/total (which have room) and give the axis its own
-    // compact formatter. Tokens already abbreviate via fmtTokens, so only the
-    // dollar path needs a no-decimals / k-suffix rounding.
-    const fmtAxisY = useTokens
-      ? fmtTokens
-      : (v) => (v >= 1000 ? '$' + (v / 1000).toFixed(1) + 'k' : '$' + Math.round(v));
-    const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
-    const grid = cssVar('--border') || '#1f1f1f';
-    const tick = cssVar('--text-dim') || '#a1a1a1';
-    const width = ref.current.clientWidth || 600;
-    const xs = [0, 1];                          // Spend | Overspend
-    // Drop ZERO-value segments before building the cumulative bars (#251). The
-    // back-to-front stacking trick plots each segment's CUMULATIVE total as a
-    // full bar; a zero-value segment carries the running cumulative (unchanged
-    // by its 0) and so paints a full-height bar in its own color OVER the real
-    // stack (the cache-write=0 → full-height-purple bug). Filtering first keeps
-    // every plotted bar tied to a real, non-zero contribution.
-    const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);
-    const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);
-    // Per-column cumulative (within-column) so the back-to-front bars stack
-    // independently; 0 in the other column → invisible there.
-    const series = [{}];
-    const cols = [];                            // data columns (cumulative)
-    const meta = [];                            // {label, color, raw, col}
-    let accC = 0;
-    costSegsNZ.forEach((s, i) => {
-      accC += (s.value || 0);
-      cols.push([accC, 0]);
-      meta.push({ label: s.label, color: s.color || palette[i % palette.length], raw: s.value || 0, col: 0 });
-    });
-    let accR = 0;
-    recSegsNZ.forEach((s, i) => {
-      accR += (s.value || 0);
-      cols.push([0, accR]);
-      meta.push({ label: s.title, color: palette[(costSegsNZ.length + i) % palette.length], raw: s.value || 0, col: 1 });
-    });
-    // Draw tallest cumulative first (within each column) so shorter bars paint
-    // on top. Sort indices by cumulative descending; cross-column order is moot.
-    const order = meta.map((_, i) => i).sort((a, b) => {
-      const ca = cols[a][meta[a].col], cb = cols[b][meta[b].col];
-      return cb - ca;
-    });
-    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
-      ? window.uPlot.paths.bars({ size: [0.5, 80] }) : undefined;
-    const chartData = [xs, ...order.map(k => cols[k])];
-    order.forEach(k => {
-      series.push({ label: meta[k].label, stroke: meta[k].color, fill: meta[k].color,
-        width: 0, paths: barsPath, points: { show: false },
-        value: (u, v) => (v == null ? '-' : fmtY(v)) });
-    });
-    const opts = {
-      width, height, legend: { show: false },
-      cursor: { x: false, y: false, points: { show: false } },
-      plugins: [componentWasteTooltip(meta, fmtY)],
-      scales: { x: { time: false, range: [-0.5, 1.5] } },
-      axes: [
-        { stroke: tick, grid: { show: false }, ticks: { stroke: grid },
-          splits: [0, 1], values: () => ['Spend', 'Overspend'] },
-        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 64, values: (u, vals) => vals.map(fmtAxisY) },
-      ],
-      series,
-    };
-    const plot = new window.uPlot(opts, chartData, ref.current);
-    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
-    window.addEventListener('resize', onResize);
-    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
-  }, [costSegs, recSegs, useTokens, height]);
-  return html`<div class="chart" ref=${ref}></div>`;
-}
-
-// Tooltip for the component-waste chart: lists the segments of the hovered
-// column with their raw (un-cumulated) framed values.
-function componentWasteTooltip(meta, fmtFn) {
-  let tip;
-  return { hooks: {
-    init: (u) => {
-      tip = document.createElement('div'); tip.className = 'u-tip'; tip.style.display = 'none';
-      u.over.appendChild(tip);
-      u.over.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
-    },
-    setCursor: (u) => {
-      const idx = u.cursor.idx;
-      if (idx == null) { tip.style.display = 'none'; return; }
-      const col = u.data[0][idx];               // 0 = Cost, 1 = Recoverable
-      const title = col === 0 ? 'Spend by component' : 'Overspend by analyzer';
-      let rows = '';
-      meta.forEach(m => {
-        if (m.col !== col || !m.raw) return;
-        rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${m.color}"></span>${m.label}: ${fmtFn(m.raw)}</div>`;
-      });
-      tip.innerHTML = `<div class="u-tip-date">${title}</div>${rows || '<div class="u-tip-row">—</div>'}`;
-      tip.style.display = 'block';
-      tip.style.left = u.cursor.left + 'px'; tip.style.top = u.cursor.top + 'px';
-    },
-  } };
-}
 
 // Per-analyzer legend-wording override for the component-waste chart/legend,
 // keyed by the API's stable `analyzer` registry name (never `title`, which is
@@ -6266,7 +6209,12 @@ const ANALYZER_META = {
   trim:       { title: 'Trim',       hint: 'Trim low-value tokens from prompts' },
   reuse:      { title: 'Reuse',      hint: 'Reuse the plan instead of re-planning' },
   subagent:   { title: 'Subagent',   hint: 'Use a smaller model for subagents' },
-  relearn:    { title: 'Relearn',    hint: 'Turn recurring mistakes into a rule' },
+  // `relearn` is the analyzer's internal name; "Rules" is the outcome the user
+  // came for, and it is what the sidebar calls the surface this finding leads
+  // to. Two names for one thing made the Dashboard tile unfindable from the
+  // nav, so the label follows the outcome everywhere. The KEY stays `relearn`
+  // — this is a label change, not a route or registry change.
+  relearn:    { title: 'Rules',      hint: 'Turn recurring mistakes into a rule' },
   verbosity:  { title: 'Verbosity',  hint: 'Rein in over-long outputs' },
   deadweight: { title: 'Deadweight', hint: 'Remove MCP servers you never call' },
   resend:     { title: 'Context resend', hint: 'Offload context instead of re-sending it' },
@@ -7765,12 +7713,18 @@ function OptimizeView({ params, navParam }) {
   const detailTiles = st.opt ? recoverableTiles(st.opt).filter(t => t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name)) : [];
 
   // Unified "Recommended actions" rows — one digestible section that replaces the
-  // chart's per-analyzer waste-list, the standalone Rules and Summarize boxes, and
-  // the old Findings list (three surfaces that listed the same analyzers). One row
-  // per analyzer/action: a short hint, its figure, and a Review button when there
-  // is a detail page to act on. Money analyzers first (biggest-waste-first via
-  // recoverableTiles' finding_rank), then Summarize and Rules — the two file-write
-  // actions that carry no per-window dollar of their own.
+  // chart's per-analyzer waste-list and the old Findings list. One row per
+  // analyzer: a short hint, its figure, and a Review button when there is a
+  // detail page to act on, biggest-waste-first via recoverableTiles'
+  // finding_rank. A check that ran and came back quiet keeps its row (never
+  // hidden — that is how an unrun check becomes indistinguishable from a clean
+  // one) but is dimmed rather than ranked against the rows carrying money.
+  //
+  // Rules and Summarize are NOT rows here any more. Neither carries a
+  // per-window dollar, so both rendered in the figure column as a blank or a
+  // token estimate sitting under a row of dollar amounts — reading as an
+  // analyzer that found nothing. They are file-write actions with their own
+  // surfaces, and they close the page as their own cards instead.
   const actRows = recoverableTiles(st.opt)
     .filter(t => order.indexOf(t.name) !== -1)
     .map(t => {
@@ -7782,20 +7736,19 @@ function OptimizeView({ params, navParam }) {
       return {
         key: t.name, title: m.title,
         hint: (t.state === 'not_ready' && t.hint) ? t.hint : m.hint,
-        fig, figDim: !actionable,
+        fig, figDim: !actionable, quiet: !actionable,
         href: (actionable && detailSet.has(t.name)) ? ('#/optimize/' + t.name) : null,
       };
     });
-  if (sf && sf.files > 0) actRows.push({
-    key: 'summarize', title: 'Summarize', hint: 'Compress oversized prompt files',
-    fig: '~' + fmtTokens(sfTok) + ' tok/call', figDim: false, href: '#/optimize/summarize',
-  });
-  // Rules always offers its own surface (the per-project write review); it carries
-  // no per-window dollar of its own, so it shows a plain Review affordance.
-  actRows.push({
-    key: 'rules', title: 'Rules', hint: 'Turn repeated findings into permanent CLAUDE.md rules',
-    fig: '', figDim: true, href: '#/optimize/rules',
-  });
+
+  // Spend-by-component share bar: biggest component first so the rank/tone ramp
+  // reads left-to-right, and every percentage divides the SAME total the legend
+  // amounts add up to (root anti-pattern 22b — two figures published together
+  // have to cover one population).
+  const spendSegs = waste
+    ? waste.costSegs.filter(s => (s.value || 0) > 0).slice().sort((a, b) => b.value - a.value)
+    : [];
+  const spendTotal = spendSegs.reduce((s, c) => s + c.value, 0);
 
   // DETAIL SUB-PAGE (`#/optimize/<analyzer>`): render THAT analyzer's section
   // alone, reusing the exact OptimizeFinding card the summary used to stack. A
@@ -7886,6 +7839,16 @@ function OptimizeView({ params, navParam }) {
       </div>
       <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
     </div>
+    ${/* What this page is, in one line. Deliberately carries no total: the
+          per-analyzer figures below overlap (two checks can price the same
+          session), so adding them into a headline here would publish a
+          different, larger number than the netted one the Dashboard and the
+          Review inbox both read off the server. */ ''}
+    <div class="opt-blurb" style="margin:0 0 16px;max-width:660px">
+      Every analyzer your setup can act on, and what each one found. The ones
+      carrying a figure are ranked biggest first; the rest ran and came back
+      quiet.
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         ${windowOptionsWithCurrent(st.opt && st.opt.data_span ? st.opt.data_span.available_days : null, since)
@@ -7919,23 +7882,36 @@ function OptimizeView({ params, navParam }) {
       </div>` : null}
 
     ${!st.loading && scan.known && st.opt ? html`
-      ${waste ? html`
-        <div class="chart-card">
-          <div class="chart-head">
-            <div class="chart-title">Spend by component + past overspend ${useTokens ? '(tokens)' : ''}</div>
-            <div class="chart-meta">
-              <span class="chart-total">${useTokens ? (fmtTokens(st.comp.total_tokens || 0) + ' tokens') : fmtFramedDollar(st.comp.total_cost_usd || 0, compFraming)}</span>
+      ${spendSegs.length ? html`
+        <div class="section-band">Where your spend went<span class="hint">· ${useTokens ? 'tokens' : 'measured spend'}, this window</span></div>
+        <div class="panel">
+          <div class="panel-body">
+            <div class="opt-spendbar">
+              ${spendSegs.map((s, i) => html`<span key=${s.label}
+                style=${'width:' + (spendTotal > 0 ? (s.value / spendTotal) * 100 : 0) + '%;background:var(--tone-' + Math.min(i + 1, 7) + ')'}
+                title=${s.label}></span>`)}
             </div>
+            <div class="opt-spendbar-legend">
+              ${spendSegs.map((s, i) => html`<span key=${s.label}>
+                <span class="swatch" style=${'background:var(--tone-' + Math.min(i + 1, 7) + ')'}></span>
+                ${s.label} <b>${wasteFmtY(s.value)}</b>
+                <span class="pct">${spendTotal > 0 ? ((s.value / spendTotal) * 100).toFixed(0) : 0}%</span>
+              </span>`)}
+            </div>
+            ${/* What the split is FOR, in one line: it is measured spend, and
+                  the money already lost inside it is itemised per analyzer in
+                  the list below rather than stacked into a second bar here. The
+                  server's own overlap note stays verbatim — it is the reason
+                  those per-analyzer figures must not simply be added up. */ ''}
+            <div class="opt-spendbar-foot">
+              What you already overspent inside this is itemised per analyzer below: money the window has already been billed for, not a projection of future savings.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}
+            </div>
+            ${st.comp && st.comp.largest_recoverable_analyzer ? html`
+              <div class="opt-spendbar-foot" style="margin-top:4px">
+                Biggest single cause: <b style="color:var(--text)">${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.
+              </div>` : null}
+            ${wasteDominant ? html`<div class="opt-spendbar-foot" style="margin-top:4px">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
           </div>
-          <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} useTokens=${useTokens} height=${220} />
-          <div class="chart-foot">
-            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>what you already overspent</b>, stacked by analyzer: money the window has already been billed for, not a projection of future savings.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
-          </div>
-          ${st.comp && st.comp.largest_recoverable_analyzer ? html`
-          <div class="chart-foot" style="margin-top:2px">
-            <span class="dim">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
-          </div>` : null}
-          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window. The per-analyzer breakdown is in <b>Recommended actions</b> below.</div>` : null}
         </div>` : null}
 
       ${/* ONE unified action list. Each analyzer/action is a compact row —
@@ -7947,11 +7923,11 @@ function OptimizeView({ params, navParam }) {
             for transparency (cache at ceiling, ran-found-nothing) but carry no
             Review button. Replaces the old waste-list + Rules/Summarize/Findings
             sections, which listed the same analyzers three times. */ ''}
-      <section class="opt-section" id="opt-actions">
-        <div class="opt-title"><span>Recommended actions <span class="dim" style="font-weight:400;font-size:12px">· open one to see its evidence and apply the fix</span></span></div>
+      <div class="section-band">Recommended actions<span class="hint">· biggest first</span></div>
+      <section class="panel" id="opt-actions">
         <div class="opt-act-list">
           ${actRows.map(r => html`
-            <div class="opt-act-row" key=${r.key}>
+            <div class=${'opt-act-row' + (r.quiet ? ' quiet' : '')} key=${r.key}>
               <span class="opt-act-name">${r.title}</span>
               <span class="opt-act-hint">${r.hint}</span>
               <span class=${r.figDim ? 'opt-act-fig dim' : 'opt-act-fig'}>${r.fig}</span>
@@ -7959,6 +7935,64 @@ function OptimizeView({ params, navParam }) {
             </div>`)}
         </div>
       </section>
+
+      ${/* The two file-write actions plus the applied ledger, as their own
+            cards. Each states what it holds rather than borrowing the action
+            list's dollar column, which neither of them has anything to put in.
+            Every count gates on its own fetch: `sf` null is "the summarize scan
+            has not resolved", which renders no number at all rather than a 0
+            that would read as "nothing to compress" (root anti-pattern 22). */ ''}
+      <div class="opt-cards">
+        <div class="opt-card">
+          <div class="opt-card-title">Rules</div>
+          <div class="opt-card-body">
+            Recurring findings that end in a permanent instruction-file rule.
+            Each one is a diff you approve before anything is written.
+          </div>
+          <div class="opt-card-acts">
+            <a class="opt-card-link" href="#/optimize/rules">Open Rules →</a>
+            <span class="opt-card-note">tj rules list</span>
+          </div>
+        </div>
+        <div class="opt-card">
+          <div class="opt-card-title">Summarize</div>
+          ${sf ? html`
+            <div class="opt-card-stats">
+              <div><div class="v">${sf.files || 0}</div><div class="l">files over budget</div></div>
+              <div><div class="v">~${fmtTokens(sfTok)}</div><div class="l">est. tokens per call</div></div>
+              <div><div class="v">${sfAvgPct}%</div><div class="l">avg prose reduction</div></div>
+            </div>`
+            : html`<div class="opt-card-stats">
+              <div class="shimmer" style="height:44px;width:100%"></div>
+            </div>`}
+          <div class="opt-card-acts">
+            <a class="opt-card-link" href="#/optimize/summarize">Curate →</a>
+            <span class="opt-card-note">every figure is an estimate</span>
+          </div>
+        </div>
+        <div class="opt-card">
+          <div class="opt-card-title">Applied so far</div>
+          ${/* No skeleton branch here: this whole block only renders once
+                `st.loading` is false, and `load()` resolves the backups read in
+                the same pass as the report — so by the time this paints, an
+                empty list is a KNOWN empty, which is the only state allowed to
+                say "nothing has been applied yet". */ ''}
+          ${sfAppliedN === 0
+              ? html`<div class="opt-card-body">Nothing has been applied yet. A rewrite you approve on Summarize is recorded here with the estimate it carried at the time.</div>`
+              : html`
+                ${(st.bk || []).filter(b => (b.est_tokens_saved || 0) > 0).map(b => html`
+                  <div class="opt-applied-row" key=${b.path || b.backup_path}>
+                    <span>${shortPath(b.path || b.backup_path || '')}</span>
+                    <span class="est">~${fmtTokens(b.est_tokens_saved)} tok/call</span>
+                  </div>`)}
+                <div class="opt-card-note" style="margin-top:10px;display:block">
+                  ${sfAppliedN} file${sfAppliedN === 1 ? '' : 's'} · ~${fmtTokens(sfApplied)} tok/call, ${sfPctApplied}% of what has been found.
+                </div>`}
+          <div class="opt-card-note" style="margin-top:10px;display:block">
+            est. at apply time, never re-measured: a point-in-time snapshot, not a realized saving.
+          </div>
+        </div>
+      </div>
 
       ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
@@ -8104,7 +8138,9 @@ const GUIDE_ENTRIES = {
         ],
       },
       relearn: {
-        title: 'Relearn',
+        // Same outcome-name rule as ANALYZER_META above: the key stays the
+        // analyzer's internal name, the label is what the user came for.
+        title: 'Rules',
         description: [
           'The same mistake, session after session: the agent runs into the same class of problem repeatedly across sessions and works it out again each time, because nothing carried the answer forward.',
           'The fix is to write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
@@ -8245,7 +8281,6 @@ function RulesView() {
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [open, setOpen] = useState(null);         // signature whose detail is expanded
   const [preview, setPreview] = useState(null);   // { signature, applied, skipped }
   const [tab, setTab] = useState('open');         // 'open' | 'applied'
 
@@ -8282,6 +8317,16 @@ function RulesView() {
   const allRules = rules || [];
   const inPlaceRules = allRules.filter(r => r.already_applied || r.already_present);
   const openRules = allRules.filter(r => !r.already_applied && !r.already_present);
+
+  // Stat tiles, in the analyzer-detail shell's vocabulary. Deliberately COUNTS,
+  // never a summed dollar figure: the rules on this page come from four
+  // different analyzers whose `past_overspend_usd` populations overlap, so a
+  // total here would double-count the same recovery — relearn reaches the
+  // rollup through its contribution path, and this screen must not grow a
+  // second, naive one (root anti-pattern 22b: two figures published together
+  // have to cover the same population).
+  const openDestPaths = new Set();
+  openRules.forEach(r => (r.destinations || []).forEach(d => openDestPaths.add(d.path)));
 
   const doStage = async (sig) => {
     setBusy(true); setMsg(null);
@@ -8335,17 +8380,48 @@ function RulesView() {
 
   return html`
     <div class="view">
-      <div class="page-title">Rules</div>
-      ${/* No "back to Optimize" link: Rules is a nav-child of Optimize, so the
-            sidebar already shows its parent one line above it whenever this
-            page is open. A second route back was noise trailing the
-            description. */ ''}
-      <div class="opt-line dim">
-        Permanent CLAUDE.md rules the analyzers propose, and the project files
-        each one would be written into.
+      ${/* The analyzer-detail shell, so this page stops reading as a different
+            product from the eleven `#/optimize/<name>` pages: the same head row
+            (title · CLI chip · mechanism badge), the same blurb, the same stat
+            tile grid. No breadcrumb chip strip: those chips address the eleven
+            analyzer detail pages, and this screen is not one of them — it is
+            the cross-analyzer write queue, reached from the sidebar as a
+            nav-child of Optimize, which already shows its parent one line
+            above it. */ ''}
+      <div class="opt-head-row">
+        <div class="page-title" style="margin-bottom:0">Rules</div>
+        <span class="opt-cli-chip">tj rules</span>
+        <span class="opt-mech-badge opt-mech-apply">${OPT_MECH_LABEL.apply}</span>
       </div>
-      ${err ? html`<div class="panel"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
-      ${msg ? html`<div class="panel"><div class="panel-body opt-line">${msg}</div></div>` : null}
+      <div class="opt-blurb">
+        Four analyzers end in the same artifact: a rule appended to an
+        instruction file. tokenjam picks which files each one lands in from the
+        working directories your sessions recorded, so one rule can be a single
+        write, or the same write into several of your projects, each with its
+        own diff.
+      </div>
+      <div class="opt-stats">
+        <div class="opt-stat-tile">
+          <div class="opt-stat-v">${rules === null
+            ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
+            : openRules.length}</div>
+          <div class="opt-stat-l">rules waiting to be written</div>
+        </div>
+        <div class="opt-stat-tile">
+          <div class="opt-stat-v">${rules === null
+            ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
+            : openDestPaths.size}</div>
+          <div class="opt-stat-l">project files they would land in</div>
+        </div>
+        <div class="opt-stat-tile">
+          <div class="opt-stat-v">${staged === null
+            ? html`<span class="shimmer" style="display:inline-block;width:44px;height:20px;border-radius:4px"></span>`
+            : staged.length}</div>
+          <div class="opt-stat-l">staged, ready to review</div>
+        </div>
+      </div>
+      ${err ? html`<div class="panel" style="margin-top:var(--stack-gap)"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
+      ${msg ? html`<div class="panel" style="margin-top:var(--stack-gap)"><div class="panel-body opt-line">${msg}</div></div>` : null}
 
       ${/* TWO POPULATIONS, TWO TABS. This page used to be one "On offer" zone
             listing every rule, including the ones the write budget refused, each
@@ -8362,14 +8438,14 @@ function RulesView() {
             back until the fetch resolves — a "(0)" painted mid-flight reads as a
             settled "you have nothing", which is the worst thing this page can
             say wrongly (root anti-pattern 22). */ ''}
-      <div class="tabs" role="tablist">
+      <div class="tabs" role="tablist" style="margin-top:var(--stack-gap)">
         <button class="tab ${tab === 'open' ? 'active' : ''}" role="tab" aria-selected=${tab === 'open'} onClick=${() => setTab('open')}>
-          Open ${rules === null
+          Pending ${rules === null
             ? html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`
             : html`(${openRules.length})`}
         </button>
         <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>
-          Applied ${rules === null
+          In place ${rules === null
             ? html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`
             : html`(${inPlaceRules.length})`}
         </button>
@@ -8387,56 +8463,62 @@ function RulesView() {
             : openRules.map(r => {
                 const dests = r.destinations || [];
                 const st = stagedBySig[r.signature] || [];
-                return html`<div key=${r.signature} class="opt-section inbox-row" style="display:block">
-                  <div style="display:flex;align-items:center;gap:10px">
+                // Primary action, one per card, in the order the flow actually
+                // runs: stage the diffs, then write them. A rule with no
+                // resolved destination has no writer at all, so its primary
+                // action is to take the text away — the same "hands you the
+                // fix" fallback the analyzer pages use when no apply path
+                // exists, rather than a disabled button implying one does.
+                const primary = st.length
+                  ? html`<button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(r.signature)}>Approve &amp; write</button>`
+                  : (r.offered && !r.dismissed && dests.length)
+                    ? html`<button class="cur-btn primary" disabled=${busy} onClick=${() => doStage(r.signature)}>Stage diffs</button>`
+                    : null;
+                return html`<div key=${r.signature} class="rule-card">
+                  <div class="rule-head">
                     <b>${r.title || r.signature}</b>
-                    <span class="dim" style="font-size:12px">${r.analyzer} · ${
+                    <span class="rule-meta">${r.analyzer} · ${
                       (deliveryKinds[r.delivery] && deliveryKinds[r.delivery].label)
                         || deliveryLabel(r.delivery)}</span>
-                    <span style="margin-left:auto">
-                      ${r.past_overspend_usd == null
-                        ? html`<span class="dim">—</span>`
-                        : html`<span>${fmtUsd(r.past_overspend_usd)}</span>`}
-                    </span>
+                    ${r.past_overspend_usd == null
+                      ? html`<span class="rule-usd dim">—</span>`
+                      : html`<span class="rule-usd">${fmtUsd(r.past_overspend_usd)}</span>`}
                   </div>
-                  <div class="opt-line dim">
+                  <div class="rule-dest">
                     ${dests.length === 0
                       ? 'No destination resolved: no session it was derived from recorded a working directory that still exists.'
                       : dests.length === 1
                         ? html`Writes into <span class="mono" title=${dests[0].path}>${shortPath(dests[0].path)}</span> <span class="dim">(${dests[0].scope})</span>`
                         : html`Writes into ${dests.length} project files`}
                   </div>
-                  ${dests.length > 1 ? html`<div class="opt-line dim">
-                    ${dests.map(d => html`<div class="mono" title=${d.path}>· ${shortPath(d.path)}${d.sessions ? ` (${d.sessions} session${d.sessions === 1 ? '' : 's'})` : ''}</div>`)}
-                  </div>` : null}
-                  ${r.placement_basis ? html`<div class="opt-line dim">${r.placement_basis}</div>` : null}
-                  ${r.placement_coverage_note ? html`<div class="opt-line dim">${r.placement_coverage_note}</div>` : null}
+                  ${dests.length > 1 || r.placement_basis || r.placement_coverage_note ? html`
+                    <div class="rule-basis">
+                      ${r.placement_basis ? html`<div>${r.placement_basis}</div>` : null}
+                      ${dests.length > 1 ? dests.map(d => html`<span class="mono" title=${d.path}>· ${shortPath(d.path)}${d.sessions ? ` (${d.sessions} session${d.sessions === 1 ? '' : 's'})` : ''}</span>`) : null}
+                      ${r.placement_coverage_note ? html`<div>${r.placement_coverage_note}</div>` : null}
+                    </div>` : null}
                   ${/* No "Not on offer: <reason>" line any more. A rule the budget
                         declined is not in this list at all — the gate sits below
                         the surface now — so the only state worth stating here is
                         the user's own: they dismissed it. */ ''}
                   ${r.dismissed
-                    ? html`<div class="opt-line dim"><b>Dismissed.</b> ${r.blocked_reason}</div>`
+                    ? html`<div class="rule-dest"><b>Dismissed.</b> ${r.blocked_reason}</div>`
                     : null}
-                  <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-                    <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
-                      ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
-                    </button>
-                    ${r.offered && !r.dismissed && dests.length ? html`
-                      <button class="cur-btn" disabled=${busy} onClick=${() => doStage(r.signature)}>Stage diffs</button>` : null}
+                  ${/* The exact words that would be appended, shown outright. */ ''}
+                  <div class="rule-text">${r.artifact_text}</div>
+                  ${st.length ? html`<div class="rule-basis">
+                    ${st.map(s => html`<span class="mono" title=${s.path}>
+                      ${s.applyable ? '✓' : '!'} ${shortPath(s.path)}${s.applyable ? '' : `: ${s.reason}`}
+                    </span>`)}
+                  </div>` : null}
+                  <div class="rule-acts">
+                    ${primary}
+                    ${st.length ? html`<button class="cur-btn" disabled=${busy} onClick=${() => doPreview(r.signature)}>Preview diffs (${st.length})</button>` : null}
+                    <${CopySnippetButton} text=${r.artifact_text} />
                     ${r.dismissed
                       ? html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, true)}>Bring back</button>`
                       : html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, false)}>Dismiss</button>`}
-                    ${st.length ? html`
-                      <button class="cur-btn" disabled=${busy} onClick=${() => doPreview(r.signature)}>Preview (${st.length})</button>
-                      <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(r.signature)}>Apply</button>` : null}
                   </div>
-                  ${open === r.signature ? html`<pre class="sz-copybox" style="margin-top:10px">${r.artifact_text}</pre>` : null}
-                  ${st.length ? html`<div class="opt-line dim" style="margin-top:6px">
-                    ${st.map(s => html`<div class="mono" title=${s.path}>
-                      ${s.applyable ? '✓' : '!'} ${shortPath(s.path)}${s.applyable ? '' : `: ${s.reason}`}
-                    </div>`)}
-                  </div>` : null}
                 </div>`;
               })}
 
@@ -8473,31 +8555,27 @@ function RulesView() {
           : inPlaceRules.length === 0
             ? html`<div class="empty compact">No rules are in place yet. Nothing here has been written, and nothing matching was found in your instruction files.</div>`
             : inPlaceRules.map(r => html`
-                <div key=${r.signature} class="opt-section inbox-row" style="display:block">
-                  <div style="display:flex;align-items:center;gap:10px">
+                <div key=${r.signature} class="rule-card">
+                  <div class="rule-head">
                     <b>${r.title || r.signature}</b>
-                    <span class="dim" style="font-size:12px">${r.analyzer}</span>
-                    <span style="margin-left:auto">
-                      ${r.past_overspend_usd == null
-                        ? html`<span class="dim">—</span>`
-                        : html`<span>${fmtUsd(r.past_overspend_usd)}</span>`}
-                    </span>
+                    <span class="rule-meta">${r.analyzer} · ${r.already_applied ? 'applied by tokenjam' : 'already in your instruction files'}</span>
+                    ${r.past_overspend_usd == null
+                      ? html`<span class="rule-usd dim">—</span>`
+                      : html`<span class="rule-usd">${fmtUsd(r.past_overspend_usd)}</span>`}
                   </div>
                   ${r.already_applied
-                    ? html`<div class="opt-line" style="color:var(--success)">✓ Applied by tokenjam.</div>`
-                    : html`<div class="opt-line" style="color:var(--success)">
+                    ? html`<div class="rule-dest ok">✓ Applied by tokenjam.</div>`
+                    : html`<div class="rule-dest ok">
                         ✓ Already in your instruction files${r.presence_path ? html` · <span class="mono" title=${r.presence_path}>${shortPath(r.presence_path)}</span>` : null}
                       </div>
                       ${/* The model's own evidence, shown rather than summarised:
                             this verdict is an inference, and a reader who did not
                             make it needs the file's words to check it against. */ ''}
-                      ${r.presence_evidence ? html`<div class="opt-line dim">Found: ${r.presence_evidence}</div>` : null}`}
-                  <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-                    <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
-                      ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
-                    </button>
+                      ${r.presence_evidence ? html`<div class="rule-basis">Found: ${r.presence_evidence}</div>` : null}`}
+                  <div class="rule-text">${r.artifact_text}</div>
+                  <div class="rule-acts">
+                    <${CopySnippetButton} text=${r.artifact_text} />
                   </div>
-                  ${open === r.signature ? html`<pre class="sz-copybox" style="margin-top:10px">${r.artifact_text}</pre>` : null}
                 </div>`)}
 
       ${/* The file-level undo surface, kept beneath the rows. It answers a
@@ -8516,6 +8594,16 @@ function RulesView() {
                   : html` <span class="dim">(${a.reason})</span>`}
               </div>`)}`}
       ` : null}
+
+      ${/* The standing terms of this screen, kept at the foot of both tabs:
+            what pressing a button does, what it costs to keep a rule around,
+            and why one is offered at all. */ ''}
+      <div class="rule-foot">
+        Nothing is written until you press it. Every write is git-commit or
+        gzip-backup reversible, and a rule is context you pay for on every
+        session; tokenjam offers one only when the recovery it prevents costs
+        more than the rule does.
+      </div>
     </div>`;
 }
 
