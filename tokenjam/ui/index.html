@@ -3368,11 +3368,11 @@ function StatusView({ params, persona }) {
               badge. */ ''}
         <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}${s.status === 'stale' ? html` <span class="badge badge-stale" style="margin-left:4px">stale</span>` : null}</td>
         <td class="a-agent" title=${s.agent_id || ''}>${s.agent_id || '-'}</td>
-        <td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
-        <td>${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
-        <td>${dur}</td>
-        <td>${s.tool_call_count != null ? s.tool_call_count : '-'}</td>
-        <td>${endedLabel}</td>
+        <td class="num" style="color:var(--text);font-weight:600">${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
+        <td class="dim">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
+        <td class="dim">${dur}</td>
+        <td class="num dim">${s.tool_call_count != null ? s.tool_call_count : '-'}</td>
+        <td class="dim">${endedLabel}</td>
         <td class="row-actions">
           ${s.session_id ? html`
             <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Details →</a>` : null}
@@ -3415,21 +3415,26 @@ function StatusView({ params, persona }) {
       `) : html`
         <div style="font-size:12px;color:var(--text-dim);margin:8px 0 4px;font-family:'Geist Mono',monospace">No active coding sessions</div>`}
 
+      ${/* The archive is a zone of this screen, not a drawer. It used to be a
+            `<details>` the reader had to open, which made the closed sessions
+            — most of what this screen holds — a click away behind a strip that
+            read like a header. It is now a zone head plus the same
+            `.panel > .table-wrap > table` head-strip every other data grid in
+            the app uses. */ ''}
       ${codingArchived.length > 0 ? html`
-        <details class="archive-block" open>
-          <summary>
-            <span class="tw">▶</span>
-            <span>Archived</span>
-            <span class="a-count">(closed / stale) · ${archivedCountLabel(codingArchived.length, data.archived_total)}</span>
-            <span class="a-hint"></span>
-          </summary>
+        <div class="section-gap"></div>
+        <div class="zone-head">
+          <span class="zone-title">Archived</span>
+          <span class="zone-sub">closed / stale · ${archivedCountLabel(codingArchived.length, data.archived_total)}</span>
+        </div>
+        <div class="panel">
           <div class="table-wrap"><table class="archive-list">
-            <thead><tr><th>Session</th><th>Agent</th><th>Cost</th><th>Tokens (in / out)</th><th>Duration</th><th>Tool calls</th><th>Ended</th><th></th></tr></thead>
+            <thead><tr><th>Session</th><th>Agent</th><th class="num">Cost</th><th>Tokens in / out</th><th>Duration</th><th class="num">Tools</th><th>Ended</th><th></th></tr></thead>
             <tbody>
               ${codingArchived.map(archRow)}
             </tbody>
           </table></div>
-        </details>` : null}
+        </div>` : null}
     ` : null}
 
     ${sdkServices.length && showSdkZone ? html`
