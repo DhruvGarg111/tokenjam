@@ -611,8 +611,13 @@ def test_total_tile_is_first_in_the_row_and_visually_distinct(html: str) -> None
     # nowhere). The per-tile share bar (lens redesign) wraps the map in an
     # IIFE to compute the rank/tone ramp once, so anchor on render ORDER
     # rather than a single unbroken substring.
-    assert "<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${" in html
-    idx_total = html.index("<${TotalOpportunityTile} tiles=${tiles} framing=${framing} />${")
+    #
+    # `fig` (not `tiles`) is what the tile now takes: it is the SAME netted,
+    # server-computed rollup figure the Dashboard hero above this row reads,
+    # rather than a client-side sum of the six sibling tiles' own figures —
+    # see `rollupFigure()` / the comment above `totalOpportunityFigure()`.
+    assert "<${TotalOpportunityTile} fig=${rollupFig} framing=${framing} />${" in html
+    idx_total = html.index("<${TotalOpportunityTile} fig=${rollupFig} framing=${framing} />${")
     idx_map = html.index("return tiles.map(t => {", idx_total)
     assert idx_total < idx_map, "the total tile must render before tiles.map() in the tile-grid"
     assert ".rec-tile.total-tile" in html
@@ -656,6 +661,129 @@ def test_total_matches_the_displayed_per_tile_sum(html: str) -> None:
         "const totalUsd = roundToCents(contributors.reduce((sum, t) => sum + roundToCents(t.usd), 0));"
         in html
     )
+
+
+# --------------------------------------------------------------------------- #
+# `rollupFigure()` — what the Total opportunity tile AND the Dashboard hero
+# now render instead of `totalOpportunityFigure(tiles)`'s plain sum. This is
+# the JS-level pin for the netting fix: the figure must come straight off the
+# wire's `past_overspend_usd` (GET /relearn/cost-proposals, already netted
+# server-side via `_net_cross_analyzer_session_overlap`), never re-derived by
+# adding per-analyzer figures client-side — which is exactly what would
+# double-count once `reuse` and `script` (both cluster on the identical
+# repeated-tool-sequence shape) are enabled together for one persona (`sdk`).
+# --------------------------------------------------------------------------- #
+def _rollup_figure_source() -> str:
+    src = _UI.read_text(encoding="utf-8")
+    start = src.index("function rollupFigure(read)")
+    end = src.index("\n}\n", start) + 2
+    return src[start:end]
+
+
+def _rollup_figure(read: dict):
+    script = (
+        _rollup_figure_source()
+        + "\nconsole.log(JSON.stringify(rollupFigure(" + json.dumps(read) + ")));"
+    )
+    proc = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        capture_output=True, text=True, check=True,
+    )
+    return json.loads(proc.stdout.strip())
+
+
+@_node
+def test_rollup_figure_is_unknown_before_any_complete_read_lands():
+    assert _rollup_figure({"phase": "loading", "data": None})["state"] == "unknown"
+
+
+@_node
+def test_rollup_figure_is_unknown_for_a_store_that_never_computed():
+    # A 'never_run' payload answers the HTTP request but never set
+    # `computed_at` -- it must not read as a measured empty answer (root
+    # CLAUDE.md anti-pattern 22: an un-run scan is not an all-clear).
+    data = {"status": "never_run", "computed_at": None, "past_overspend": {}}
+    fig = _rollup_figure({"phase": "ready", "data": data})
+    assert fig["state"] == "unknown"
+    assert fig["totalUsd"] == 0
+
+
+@_node
+def test_rollup_figure_reads_the_wire_total_verbatim_never_a_client_side_sum():
+    # The whole point of the fix: `totalUsd` is `past_overspend_usd` as
+    # published, never re-summed from `by_analyzer`. Chosen so a naive
+    # client-side sum of the two contributors (50.0 + 73.45 = 123.45) would
+    # happen to match here on its own -- the assertion that matters is the
+    # LAST one, proving this function never performs that addition at all.
+    data = {
+        "status": "ready",
+        "computed_at": "2026-05-30T00:00:00Z",
+        "past_overspend": {
+            "past_overspend_usd": 123.45,
+            "past_overspend_tokens": 999,
+            "proposal_count": 3,
+            "token_proposal_count": 3,
+            "deduplicated_proposal_count": 4,
+            "by_analyzer": [
+                {"analyzer": "reuse", "usd": 50.0, "tokens": 400, "count": 1},
+                {"analyzer": "script", "usd": 73.45, "tokens": 599, "count": 2},
+            ],
+        },
+    }
+    fig = _rollup_figure({"phase": "ready", "data": data})
+    assert fig["state"] == "populated"
+    assert fig["totalUsd"] == 123.45
+    assert fig["totalTokens"] == 999
+    assert fig["dedupedCount"] == 4
+    assert fig["byAnalyzer"] == data["past_overspend"]["by_analyzer"]
+
+
+@_node
+def test_rollup_figure_double_counted_overlap_would_be_visible_if_ever_reintroduced():
+    # Guards against a regression back to the old naive-sum shape: if
+    # `rollupFigure` ever started re-summing `by_analyzer` instead of trusting
+    # the server's own `past_overspend_usd`, this fixture (reuse and script
+    # both claiming the SAME 20 sessions before netting, netted total well
+    # below their raw sum) would silently start reporting the bigger, wrong
+    # number. Mirrors the overlap shape
+    # test_dashboard_hero_netted_rollup.py proves on the real wire.
+    data = {
+        "status": "ready",
+        "computed_at": "2026-05-30T00:00:00Z",
+        "past_overspend": {
+            "past_overspend_usd": 60.0,   # the server's netted figure
+            "past_overspend_tokens": 500,
+            "proposal_count": 2,
+            "token_proposal_count": 2,
+            "deduplicated_proposal_count": 2,
+            "by_analyzer": [
+                # Raw, pre-netting figures a naive client-side sum would add
+                # to 100.0 -- strictly more than the netted total above.
+                {"analyzer": "reuse", "usd": 50.0, "tokens": 300, "count": 1},
+                {"analyzer": "script", "usd": 50.0, "tokens": 300, "count": 1},
+            ],
+        },
+    }
+    fig = _rollup_figure({"phase": "ready", "data": data})
+    naive_sum = sum(a["usd"] for a in data["past_overspend"]["by_analyzer"])
+    assert fig["totalUsd"] == 60.0
+    assert fig["totalUsd"] < naive_sum
+
+
+@_node
+def test_rollup_figure_is_empty_only_once_a_completed_pass_found_nothing():
+    data = {
+        "status": "ready",
+        "computed_at": "2026-05-30T00:00:00Z",
+        "past_overspend": {
+            "past_overspend_usd": 0, "past_overspend_tokens": 0,
+            "proposal_count": 0, "token_proposal_count": 0,
+            "deduplicated_proposal_count": 0, "by_analyzer": [],
+        },
+    }
+    fig = _rollup_figure({"phase": "ready", "data": data})
+    assert fig["state"] == "empty"
+    assert fig["totalUsd"] == 0
 
 
 def test_opportunities_row_fits_seven_tiles_without_widening_the_shared_compact_grid(html: str) -> None:
