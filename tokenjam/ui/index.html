@@ -255,22 +255,31 @@ code, .mono {
    an "all" link is already immune — this margin just seats it as a header item
    above the switch. */
 .sidebar a.nav-link[data-lens="all"] { margin-bottom: 8px; }
-/* Persona gating. A coding-agent user has no Observe lens at all, so the
-   lens switcher is hidden rather than left as a control with one option:
-   showing a toggle that cannot toggle reads as a broken affordance. An SDK
-   user keeps both lenses and loses only the two Claude-Code-specific pages.
+/* Persona gating. Neither persona has an Observe lens, so the lens switcher is
+   hidden for both rather than left as a control with one option: showing a
+   toggle that cannot toggle reads as a broken affordance. Everything a persona
+   still sees therefore lives in one flat Improve nav.
    `!important` because the route effect writes an inline `display` on
-   nav-children, which would otherwise win over these rules. */
-.sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
+   nav-children, which would otherwise win over these rules.
+
+   THESE RULES MIRROR PERSONA_HIDDEN_VIEWS — one entry per hidden view, keyed on
+   data-view, so a rule reads as the list entry it enforces. They match on
+   `[data-persona="..."]`, which syncNavState leaves EMPTY until the persona is
+   settled: an unresolved read hides nothing, the same rule personaHides
+   follows. */
 .sidebar[data-persona="claude-code"] .lens-switch { display: none; }
-/* SDK persona: byte-for-byte the SAME sidebar the coding-agent persona shows.
-   Switching "Viewing as" changes ONLY the page data / empty-state, never the
-   nav items. Both personas use one flat Improve nav — no Improve/Observe lens
-   toggle, and the Observe pages (Traces/Cost/Alerts/Drift/Budget) are hidden
-   (they're in PERSONA_HIDDEN_VIEWS for sdk too, matching CC). Review inbox and
-   Sessions render for SDK exactly as they do for CC. */
-.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }
 .sidebar[data-persona="sdk"] .lens-switch { display: none; }
+/* The whole Observe group is unreachable for both personas (no switcher), so
+   an observe-lens link is dead markup for either of them. Spend is the only
+   row left in that group and it is hidden deliberately — see
+   PERSONA_HIDDEN_DELIBERATE, and PERSONA_HIDDEN_VIEWS' `cost` entry for both
+   personas. */
+.sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
+.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }
+/* Traces: SDK only. It is the standalone CROSS-SESSION browser; per-session
+   traces reach every persona through the session detail's Traces tab, which is
+   ungated. So this hides a second door, never the only one. */
+.sidebar[data-persona="claude-code"] a.nav-link[data-view="traces"] { display: none !important; }
 /* The Dashboard's health band is Observe-shaped: unread alerts, agents
    drifting, budgets at risk. A coding-agent user has no Observe lens, so the
    band summarises pages they cannot open. Hidden for that persona rather than
@@ -2259,7 +2268,18 @@ code.md-code {
        injector can find them and always insert BEFORE Summarize. -->
   <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Summarize</a>
   <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Relearn</a>
-  <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
+  <!-- Sessions covers alerts / drift / budget too: none of the three is
+       per-session, so they are tabs of this screen's SDK-services zone rather
+       than nav entries of their own (see SESSIONS_SDK_TABS). `data-view-alt` is
+       a comma list so this row stays lit on any of them. -->
+  <a href="#/sessions" class="nav-link" data-view="sessions" data-view-alt="alerts,drift,budget" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
+  <!-- Traces sits in the flat Improve nav, not the Observe group: neither
+       persona has a lens switcher, so an observe-group link is unreachable for
+       both. It is hidden for claude-code by the per-view rule in the stylesheet
+       — a coding-agent user reaches per-session traces from the session
+       detail's Traces tab, which is ungated, and has no use for the
+       cross-session browser. -->
+  <a href="#/traces" class="nav-link" data-view="traces" data-lens="improve"><span class="icon">&diamond;</span> Traces</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
        child of Optimize this entry was invisible from Traces / Cost / Alerts /
@@ -2272,15 +2292,13 @@ code.md-code {
        rather than a live data view: it reads no window, has no filters, and
        does not belong interleaved with the screens that do. -->
   <a href="#/faq" class="nav-link nav-reference" data-view="faq" data-lens="improve"><span class="icon">?</span> FAQ</a>
-  <a href="#/traces" class="nav-link" data-view="traces" data-lens="observe"><span class="icon">&diamond;</span> Traces</a>
-  <!-- One money entry. Cost and Budget are the two halves of the same question
-       (what you spent, and what you capped) and are now two tabs of one Spend
-       screen, so two sibling nav rows both marked $ sent a reader looking for
-       the ceiling to the wrong page. `data-view-alt` keeps this row lit while
-       the Budget tab is open. -->
-  <a href="#/cost" class="nav-link" data-view="cost" data-view-alt="budget" data-lens="observe"><span class="icon">$</span> Spend</a>
-  <a href="#/alerts" class="nav-link" data-view="alerts" data-lens="observe"><span class="icon">!</span> Alerts</a>
-  <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
+  <!-- Spend is HIDDEN FOR BOTH PERSONAS, on purpose — see
+       PERSONA_HIDDEN_DELIBERATE for the reason, which is where a view hidden
+       everywhere has to record why. The row stays in the markup (rather than
+       being deleted) because the screen is built, routed and populated; only
+       its place in the nav is the product decision. Budget is no longer its
+       companion tab: it moved to the Sessions screen with alerts and drift. -->
+  <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Spend</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
@@ -3239,14 +3257,13 @@ function TableRowsSkeleton(headers, rowCount) {
 // ============================
 // Status View
 // ============================
-function StatusView({ params, persona }) {
+function StatusView({ params, persona, personaKnown, routeView }) {
   // Optional single-agent filter via URL (#112), filtered client-side.
   // The Status screen is two content-defined zones (#306): coding sessions
   // (bounded work → archived list) and SDK services (unbounded telemetry →
   // inactive list). Content, not a user toggle, decides what renders.
   const agentId = readParam(params, 'agent_id', '');
   const [data, setData] = useState(null);
-  const [alerts, setAlerts] = useState([]);
   // Inline session-card rename (#306): which session's title is being edited,
   // its working value, and a ref so the input autofocuses + selects on open.
   const [editingId, setEditingId] = useState(null);
@@ -3259,13 +3276,12 @@ function StatusView({ params, persona }) {
     }
   }, [editingId]);
 
+  // `/alerts` is no longer fetched here: the five-row teaser that used to close
+  // this page is replaced by the Alerts TAB in the SDK-services zone, which
+  // renders AlertsView and does its own read. Two reads of the same endpoint on
+  // one screen is how a teaser and a page end up disagreeing.
   const load = useCallback(async () => {
-    const [s, a] = await Promise.all([
-      api('/status'),
-      api('/alerts', { since: '24h' }),
-    ]);
-    setData(s);
-    setAlerts((a.alerts || []).slice(0, 5));
+    setData(await api('/status'));
   }, []);
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
@@ -3280,9 +3296,23 @@ function StatusView({ params, persona }) {
   // two. Alerts reuse `personaHides` rather than a second persona literal, so
   // this page and the nav can never disagree about whether alerts exist for
   // the reader.
-  const showSdkZone = persona !== 'claude-code';
-  const showAlerts = !personaHides(persona, 'alerts');
-  if (!data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
+  const showSdkZone = !personaKnown || persona !== 'claude-code';
+  // The coding zone is the other half of the same decision, and it was missing:
+  // this page rendered every coding session regardless of the picker, so
+  // switching to "SDK workflows" left a screenful of Claude Code cards under an
+  // SDK heading. Persona-not-yet-known shows both zones rather than guessing.
+  const showCodingZone = !personaKnown || persona !== 'sdk';
+  // Which SDK-services tab is open. Alerts / Drift / Budget are tabs of that
+  // zone now, not top-level pages (see SESSIONS_SDK_TABS); `routeView` carries
+  // which of their routes brought us here, defaulting to the services list.
+  const sdkTab = SESSIONS_SDK_TAB_VIEWS.has(routeView) ? routeView : 'services';
+  // The "nothing here at all" state may only replace the page when there is
+  // genuinely nothing else on it. Once the SDK-services zone renders, this
+  // screen also hosts the alerts / drift / budget tabs, and an empty service
+  // list says nothing about whether an alert fired or a cap was set — swapping
+  // the whole page for "No agents found" would take those away on the strength
+  // of a different question's answer.
+  if (!showSdkZone && !data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
   // Coding zone = interactive coding agents (cards) + coding archive.
@@ -3409,12 +3439,16 @@ function StatusView({ params, persona }) {
         <div class="page-title" style="margin:0">Sessions</div>
         <${PersonaPicker} bare=${true} />
       </div>
-      ${(codingAgents.length || codingArchived.length) ? html`
+      ${/* The count describes the CODING zone, so it may only appear when that
+            zone does. Viewing as SDK it read "5 active · 50 of 5,741 archived"
+            above a page with no coding sessions on it — a figure published
+            beside a population it does not cover (root anti-pattern 22b). */ ''}
+      ${showCodingZone && (codingAgents.length || codingArchived.length) ? html`
         <span class="zone-count" style="align-self:center">${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived</span>` : null}
     </div>
     ${agentId ? html`<div style="font-size:12px;color:var(--text-dim);margin:2px 0 16px;font-family:'Geist Mono',monospace">Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a></div>` : null}
 
-    ${(codingAgents.length || codingArchived.length) ? html`
+    ${showCodingZone && (codingAgents.length || codingArchived.length) ? html`
       ${showSdkZone ? html`
         <div class="zone-head">
           <span class="zone-title">Coding sessions</span>
@@ -3454,26 +3488,37 @@ function StatusView({ params, persona }) {
         </div>` : null}
     ` : null}
 
-    ${sdkServices.length && showSdkZone ? html`
-      <div class="section-gap"></div>
-      <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />
-    ` : null}
+    ${/* THE SDK-SERVICES ZONE, now with its cross-agent surfaces attached.
+          Alerts, Drift and Budget used to be top-level nav entries that no
+          persona could actually open. None of the three is per-session — drift
+          is per-agent baselines, budget is spend caps, alerts fire across
+          agents — so they belong to the zone that lists the services, not to
+          the session cards above. The strip renders whenever the zone does,
+          including with no services live: an empty service list says nothing
+          about whether an alert fired or a baseline drifted.
 
-    ${alerts.length > 0 && showAlerts ? html`
+          The old five-row "Recent Alerts" table that used to close this page is
+          gone, superseded by the Alerts tab beside it — one surface for alerts
+          on this screen rather than a teaser and a page disagreeing about how
+          many there are. */ ''}
+    ${showSdkZone ? html`
       <div class="section-gap"></div>
-      <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Title</th><th>Agent</th></tr></thead>
-        <tbody>
-          ${alerts.map(a => html`
-            <tr><td>${fmtAgo(a.fired_at)}</td>
-            <td><span class="badge badge-${a.severity}">${a.severity}</span></td>
-            <td>${friendlyAlertType(a.type)}</td>
-            <td>${a.title}</td>
-            <td class="mono">${a.agent_id || '-'}</td></tr>
-          `)}
-        </tbody>
-      </table></div>
+      <div class="zone-head">
+        <span class="zone-title">SDK services</span>
+        <span class="zone-sub">unbounded telemetry · alerts, drift and caps across agents</span>
+      </div>
+      <div class="tab-bar" role="tablist">
+        ${SESSIONS_SDK_TABS.map(([key, label]) => html`
+          <a key=${key} class=${'tab' + (sdkTab === key ? ' active' : '')} role="tab"
+             aria-selected=${sdkTab === key}
+             href=${key === 'services' ? '#/sessions' : '#/' + key}>${label}</a>`)}
+      </div>
+      ${sdkTab === 'services' ? (sdkServices.length ? html`
+        <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />`
+        : html`<div class="svc-empty">No SDK services live right now</div>`) : null}
+      ${sdkTab === 'alerts' ? html`<${AlertsView} params=${EMPTY_PARAMS} />` : null}
+      ${sdkTab === 'drift' ? html`<${DriftView} params=${EMPTY_PARAMS} />` : null}
+      ${sdkTab === 'budget' ? html`<${BudgetView} params=${EMPTY_PARAMS} />` : null}
     ` : null}
   `;
 }
@@ -5349,16 +5394,14 @@ const COST_GROUP_BY_LABELS = {
   prompt_version: 'Prompt version',
 };
 
-// The two halves of the Spend screen as one tab bar, defined once and used by
-// both CostView and BudgetView so the same screen cannot grow two different
-// headers. Anchors rather than buttons: each tab is a real route a reader can
-// open in a new tab or link to, which a click handler on a <button> would take
-// away.
-const SPEND_TABS = (active) => html`
-  <div class="tabs" role="tablist" style="margin-bottom:16px">
-    <a class=${'tab' + (active === 'cost' ? ' active' : '')} role="tab" aria-selected=${active === 'cost'} href="#/cost">What you spent</a>
-    <a class=${'tab' + (active === 'budget' ? ' active' : '')} role="tab" aria-selected=${active === 'budget'} href="#/budget">Ceilings & caps</a>
-  </div>`;
+// SPEND_TABS is gone with the pairing it expressed. Budget was the "Ceilings &
+// caps" half of the Spend screen; it now lives in the Sessions screen's
+// SDK-services zone, because a spend cap is a property of the services being
+// watched rather than of the spend report. That leaves Spend with one half, and
+// a one-tab tab bar is a control that cannot control anything — so neither page
+// renders a tab bar now. The `#/budget` route survives as the Sessions Budget
+// tab's address (see primaryKeyFor), so every existing link still lands
+// somewhere correct.
 
 function CostView({ params }) {
   const DEFAULTS = { since: DEFAULT_SINCE, group_by: 'total', agent_id: '' };
@@ -5535,7 +5578,6 @@ function CostView({ params }) {
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
       Spend <${PlanBadge} framing=${framing} />
     </div>
-    ${SPEND_TABS('cost')}
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         ${windowOptionsWithCurrent(costResp && costResp.data_span ? costResp.data_span.available_days : null, since)
@@ -6110,8 +6152,7 @@ function BudgetView({ params }) {
   // instead, same pattern the Dashboard uses for its own /cost failures.
   if (error && !data) return html`<div class="empty err">${error}</div>`;
   if (!data) return html`
-    <div class="page-title" style="margin-bottom:4px">Spend</div>
-    ${SPEND_TABS('budget')}
+    <div class="page-title" style="margin-bottom:4px">Budget</div>
     ${TableRowsSkeleton(['Scope', 'Daily (USD)', ''], 6)}`;
 
   // Two zones per the Budget-page redesign (see api/routes/budget.py):
@@ -6133,11 +6174,11 @@ function BudgetView({ params }) {
   ])).sort();
 
   return html`
-    ${/* Budget is the "Ceilings & caps" half of Spend, not a separate screen:
-          same title, same tab bar, so a reader moving between what they spent
-          and what they capped never leaves the page they clicked. */ ''}
-    <div class="page-title" style="margin-bottom:4px">Spend</div>
-    ${SPEND_TABS('budget')}
+    ${/* Budget renders as a TAB of the Sessions screen's SDK-services zone, not
+          as a screen of its own: a spend cap is not per-session, it is a
+          property of the services that zone lists. Its own heading is scoped
+          accordingly — the page title above it is "Sessions". */ ''}
+    <div class="page-title" style="margin-bottom:4px">Budget</div>
     ${error ? html`
       <div class="band-msg err" style="margin-bottom:14px">
         <b>Couldn't refresh budget data.</b>
@@ -6803,6 +6844,12 @@ function useAutoRefresh(scan, reload) {
   }, [seconds, reload]);
 }
 
+// What an analyzer says when the selected persona has a lever for it but the
+// stored pass never ran it. Deliberately a statement about the SCAN, not about
+// the corpus — it makes no claim either way about what is there.
+const PERSONA_UNANSWERED_HINT =
+  'Not yet scanned for this persona. The next background pass folds it in.';
+
 function recoverableTiles(opt) {
   // A cold store yields NO tiles, and the caller must render the cold branch
   // rather than an empty grid — see scanState() above.
@@ -6810,11 +6857,20 @@ function recoverableTiles(opt) {
   const disabled = new Set(opt.persona_disabled_analyzers || []);
   const out = [];
   const skipped = new Set(opt.skipped_analyzers || []);
+  // NOT-YET-KNOWN, and a third thing entirely from `disabled` beside it. These
+  // are analyzers the SELECTED persona has a lever for that the stored pass
+  // never dispatched (see `persona_unanswered_analyzers` on the /optimize
+  // route). A gated analyzer vanishes because there is nothing to say; an
+  // unanswered one has an answer nobody has computed yet, and rendering it as
+  // "No candidates" would be a clean bill of health this report cannot give.
+  const unanswered = new Set(opt.persona_unanswered_analyzers || []);
   const f = opt.findings || {};
   // Downsize always gets a tile — it runs unconditionally; a null typed slot
   // means "ran, no candidates", not "missing" (issue #126).
   if (!disabled.has('downsize')) {
-    out.push({ name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
+    out.push(unanswered.has('downsize')
+      ? { name: 'downsize', state: 'not_ready', hint: PERSONA_UNANSWERED_HINT }
+      : { name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
   }
   Object.keys(f).forEach(k => {
     if (disabled.has(k)) return;
@@ -6825,6 +6881,10 @@ function recoverableTiles(opt) {
     if (!(k in f) && k !== 'downsize') {
       out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview. Open the Optimize tab.' });
     }
+  });
+  unanswered.forEach(k => {
+    if (disabled.has(k) || skipped.has(k) || k === 'downsize' || (k in f)) return;
+    out.push({ name: k, state: 'not_ready', hint: PERSONA_UNANSWERED_HINT });
   });
   return rankTiles(out, opt.finding_rank);
 }
@@ -7665,7 +7725,7 @@ function RecommendationsPanel({ rec }) {
     </section>`;
 }
 
-function OptimizeView({ params, navParam }) {
+function OptimizeView({ params, navParam, persona }) {
   // `navParam` is the path segment after `#/optimize/` (e.g. `downsize`).
   // summarize/rules/guide route to their OWN primary views (see primaryKeyFor),
   // so any navParam that reaches here is an ANALYZER name and means "render only
@@ -7687,12 +7747,20 @@ function OptimizeView({ params, navParam }) {
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
     try {
-      const opt = await api('/optimize', { since, agent_id: agentId || undefined });
+      // `persona` is the SELECTED one, not the corpus's dominant one. The route
+      // gates the analyzer set for what was asked, so the cards, the ranked
+      // list and the gated-analyzer state below all describe the persona the
+      // reader is actually looking at.
+      const opt = await api('/optimize', { since, agent_id: agentId || undefined, persona });
       let cmp = null;
       if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined }).catch(() => null);
       // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
       // failure must not blank the Optimize screen.
-      const comp = await api('/cost/components', { since, agent_id: agentId || undefined }).catch(() => null);
+      // SAME persona as the /optimize read above. These two render as one
+      // answer on this screen — the analyzer rows and, right above them, the
+      // "biggest single cause" line drawn from this overlay. Scoping only one
+      // of them named an analyzer the row list had correctly dropped.
+      const comp = await api('/cost/components', { since, agent_id: agentId || undefined, persona }).catch(() => null);
       // Applied summaries (for the Summarize box's applied-vs-outstanding progress).
       const bk = await api('/summarize/backups').then(r => r.backups || []).catch(() => []);
       // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
@@ -7707,7 +7775,10 @@ function OptimizeView({ params, navParam }) {
       const proposalAnalyzers = new Set(proposals.map(p => p.analyzer));
       setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers, proposals });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
-  }, [since, agentId, compare]);
+    // `persona` is a real dependency, not decoration: switching the picker has
+    // to re-read, or the page keeps rendering the previous persona's analyzer
+    // set under the new persona's name.
+  }, [since, agentId, compare, persona]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -7762,6 +7833,10 @@ function OptimizeView({ params, navParam }) {
   // would be a row pointing at a lever the reader does not have. Filtering the
   // order list here covers every such branch at once, including future ones.
   const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);
+  // The THIRD state (see PERSONA_UNANSWERED_HINT): a lever exists for this
+  // persona but no pass has computed it. Kept out of `personaGated` on purpose
+  // — these rows stay, they just cannot claim a result yet.
+  const personaUnanswered = new Set((st.opt && st.opt.persona_unanswered_analyzers) || []);
   const order = OPT_DETAIL_ORDER.filter(n => !personaGated.has(n));
   const compFraming = st.comp ? st.comp.framing : framing;
   // LOCAL only -- subscription no longer suppresses (product decision: tj
@@ -7886,6 +7961,21 @@ function OptimizeView({ params, navParam }) {
           <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
         </div>
         <div class="opt-persona-gated">This analyzer doesn't run for the selected persona — no lever exists for it here, so tokenjam skips the scan rather than showing a diagnostic there's nothing you can act on. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div>
+      `;
+    }
+    // NOT-YET-KNOWN, checked immediately after the gated branch and before
+    // `hasCard` for the same reason: this analyzer DOES apply to the selected
+    // persona, but the stored pass never ran it, so there is no finding to
+    // read an empty state from. Falling through would print "may have been
+    // resolved, or this window has no candidates" — a result claim for a scan
+    // that never happened.
+    if (personaUnanswered.has(detailName)) {
+      return html`
+        ${crumbs}
+        <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+          <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
+        </div>
+        <div class="opt-persona-gated">${PERSONA_UNANSWERED_HINT} This analyzer does apply to the selected persona, so this is not "nothing found" — it is "not measured yet". <a class="sz-link" href="#/optimize">Back to Optimize →</a></div>
       `;
     }
     const hasCard = st.opt && (detailName === 'downsize'
@@ -12528,6 +12618,9 @@ function DashboardView({ params, persona }) {
   const optInFlight = useRef(false);
   const optRun = useRef(0);       // generation counter; stale settles are dropped
   const optTimer = useRef(null);
+  // The persona the data currently on screen was fetched AS, so a switch can be
+  // told from a plain refresh (see loadOptimize).
+  const optPersonaRef = useRef(persona);
 
   const armOptWait = useCallback(() => {
     const run = optRun.current;
@@ -12552,7 +12645,16 @@ function DashboardView({ params, persona }) {
     optInFlight.current = true;
     // Keep any answer we already hold while refreshing: a slow refresh must not
     // blank numbers that are still the last complete result.
-    setOptState(s => ({ phase: 'loading', data: s.data, error: null }));
+    //
+    // EXCEPT across a persona switch, where the answer we hold is an answer to
+    // a different question. Keeping it would leave the previous persona's
+    // figures on screen under the new persona's label until the read lands —
+    // a populated surface asserting something its data does not support. A
+    // persona switch is therefore a NOT-YET-KNOWN state (skeletons), not a
+    // stale-but-shown one.
+    const personaChanged = optPersonaRef.current !== persona;
+    optPersonaRef.current = persona;
+    setOptState(s => ({ phase: 'loading', data: personaChanged ? null : s.data, error: null }));
     armOptWait();
 
     const resolve = (next) => {
@@ -12565,11 +12667,14 @@ function DashboardView({ params, persona }) {
     // stays attached past the timeout and fills the band in on its own. The page
     // recovers without the user doing anything, rather than stranding them on a
     // timeout notice for an answer that did eventually arrive.
-    api('/optimize', { since, fast: 'true' }).then(
+    // AS THE SELECTED PERSONA — the Dashboard's tiles used to ignore the picker
+    // entirely, so a reader viewing as SDK saw a recoverable-waste band built
+    // from the claude-code gate.
+    api('/optimize', { since, fast: 'true', persona }).then(
       data => resolve(() => ({ phase: 'ready', data, error: null })),
       err => resolve(s => ({ phase: 'error', data: s.data, error: err.message || String(err) })),
     );
-  }, [since, armOptWait]);
+  }, [since, persona, armOptWait]);
 
   // Two different next moves behind one control, because the two unknown states
   // have two different causes. On a TIMEOUT the sweep is still running, so the
@@ -12949,11 +13054,15 @@ function DashboardView({ params, persona }) {
 // Observe nav (Greptile P1). A view with no entry resolves to `null` in the
 // route-sync effect, which then PRESERVES whatever lens is active rather than
 // forcing a switch.
+// alerts / drift / budget are 'improve' because they are no longer pages of
+// their own: they render inside the Sessions screen's SDK-services zone, and
+// Sessions is an Improve page. Leaving them mapped to 'observe' would flip the
+// sidebar to a lens neither persona has the moment one of those tabs opened.
 const VIEW_LENS = {
   status: 'improve', sessions: 'improve', runs: 'improve',
   faq: 'improve', optimize: 'improve',
-  traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
-  budget: 'observe',
+  alerts: 'improve', drift: 'improve', budget: 'improve',
+  traces: 'improve', cost: 'observe',
 };
 
 // ============================
@@ -12972,14 +13081,15 @@ const PRIMARY_VIEWS = [
   ['sessions',  StatusView],
   ['traces',    TracesListView],
   ['cost',      CostView],
-  ['alerts',    AlertsView],
-  ['drift',     DriftView],
   ['optimize',  OptimizeView],
   ['summarize', SummarizeView],
   ['rules',     RulesView],
-  ['budget',    BudgetView],
   ['faq',       AnalyzerGuideView],
 ];
+// AlertsView / DriftView / BudgetView are deliberately NOT primary views any
+// more: primaryKeyFor resolves their routes to 'sessions', and StatusView
+// renders them inside its SDK-services zone. Leaving them here would mount
+// three panes the router can never activate, each firing its own boot fetch.
 const PRIMARY_KEYS = new Set(PRIMARY_VIEWS.map(([k]) => k));
 const EMPTY_PARAMS = new URLSearchParams();
 const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
@@ -13003,6 +13113,13 @@ function primaryKeyFor(route) {
   // #/review deep-link aliases to the Dashboard rather than 404ing.
   if (v === 'overview' || v === 'analytics' || v === 'review') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
+  // Alerts / Drift / Budget are TABS of the Sessions screen's SDK-services
+  // zone, not screens of their own — none of the three is per-session (drift is
+  // per-agent baselines, budget is spend caps, alerts fire across agents), so
+  // they attach to the zone rather than to a session card. Their own hashes
+  // survive as the tab's address, which keeps every existing deep link and
+  // bookmark working; StatusView reads route.view to pick the open tab.
+  if (SESSIONS_SDK_TAB_VIEWS.has(v)) return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
   if (v === 'optimize' && route.param === 'rules') return 'rules';
   if (v === 'optimize' && route.param === 'guide') return 'faq';
@@ -13030,10 +13147,8 @@ function detailNodeFor(route) {
 }
 
 // Which views each persona is offered. A coding-agent user (Claude Code, and
-// Codex once it is supported) is not shown the Observe lens at all: it is the
-// SDK/observability suite and none of it ends in an edit they can make. An SDK
-// user gets both lenses, minus the two surfaces that only exist because a
-// coding agent leaves transcripts on disk.
+// Codex once it is supported) is not shown the observability suite at all: none
+// of it ends in an edit they can make. An SDK user keeps it.
 //
 // This is a VIEW filter over one dataset, never a claim about the data. It
 // hides pages; it never changes a number, and it never implies the hidden
@@ -13043,14 +13158,64 @@ function detailNodeFor(route) {
 // duplicated it into JS, and a regression test forbids that shape outright.
 // These are VIEW names, an entirely different concern from the analyzer gate,
 // but the guard is worth keeping blunt.)
+//
+// `alerts` / `drift` / `budget` are ABSENT from both lists and that is not an
+// oversight: they are no longer top-level views at all. None of them is
+// per-session (drift is per-agent baselines, budget is spend caps, alerts fire
+// across agents), so they live inside the Sessions page's SDK-services zone,
+// which is itself SDK-only — see SESSIONS_SDK_TABS and primaryKeyFor. Their
+// visibility is therefore decided by that zone, not here.
 const PERSONA_HIDDEN_VIEWS = {
-  'claude-code': ['traces', 'cost', 'alerts', 'drift', 'budget'],
-  'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget'],
+  'claude-code': ['traces', 'cost'],
+  'sdk': ['cost'],
 };
 
-function personaHides(persona, view) {
+// A view hidden under EVERY persona key is reachable by nobody, and that state
+// is indistinguishable from the defect where a list was copied to a second
+// persona by mistake — the next reader "fixes" it back. So a view hidden
+// everywhere ON PURPOSE has to record WHY here, and a regression test fails if
+// one is hidden under every key without an entry.
+const PERSONA_HIDDEN_DELIBERATE = {
+  cost: 'Spend (and the Budget cap it pairs with) stays hidden for both '
+      + 'personas for now: it reports what was spent rather than terminating in '
+      + 'a fix, which is the bar every surface in this product has to clear. '
+      + 'The screens are built and routed — this is a product decision to keep '
+      + 'them out of the nav, not a page that does not work.',
+};
+
+// `known` is the third state and it is why this takes three arguments. Until
+// the persona read lands, the answer is NOT-YET-KNOWN, and hiding on an
+// unresolved read applies a real persona's rules to a reader who may not be
+// that persona — the page silently loses entries it should have. Hiding
+// nothing is the honest default: a view that appears and then goes away is
+// recoverable, a view the reader never learns exists is not.
+function personaHides(persona, view, known) {
+  if (!known) return false;
   const hidden = PERSONA_HIDDEN_VIEWS[persona];
   return !!(hidden && hidden.indexOf(view) !== -1);
+}
+
+// The Sessions page's SDK-only sub-tabs. Each is a real route (so a deep link
+// and a bookmark keep working) that primaryKeyFor resolves to the Sessions
+// page, where it renders inside the SDK-services zone rather than as a
+// top-level nav entry of its own.
+const SESSIONS_SDK_TABS = [
+  ['services', 'Services'],
+  ['alerts', 'Alerts'],
+  ['drift', 'Drift'],
+  ['budget', 'Budget'],
+];
+const SESSIONS_SDK_TAB_VIEWS = new Set(['alerts', 'drift', 'budget']);
+
+// Whether a ROUTE is unreachable for this persona — the superset of
+// personaHides, covering the Sessions sub-tabs too. Those are not top-level
+// views, so they are not in PERSONA_HIDDEN_VIEWS; they are reachable exactly
+// when the SDK-services zone that hosts them is, i.e. not for claude-code.
+// Same not-yet-known rule: an unresolved persona redirects nobody.
+function personaHidesRoute(persona, view, known) {
+  if (!known) return false;
+  if (SESSIONS_SDK_TAB_VIEWS.has(view)) return persona === 'claude-code';
+  return personaHides(persona, view, known);
 }
 
 /** The persona switcher, pinned above every page.
@@ -13111,13 +13276,18 @@ function PersonaBar() {
 // so both the route-sync effect and the nav-child injection effect (which adds
 // Optimize children mid-session) can re-apply the same rules to the DOM as it
 // stands right now. Pure DOM work — reads no React state beyond its args.
-function syncNavState(view, param, persona) {
+function syncNavState(view, param, persona, personaKnown) {
   const sidebar = document.querySelector('.sidebar');
   const lens = (persona === 'claude-code' || persona === 'sdk')
     ? 'improve'
     : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
-  if (sidebar) sidebar.dataset.persona = persona;
-  document.body.dataset.persona = persona;
+  // EMPTY until the persona is settled, so every `[data-persona="..."]` CSS
+  // hide rule fails to match and the nav shows everything. The same
+  // not-yet-known rule personaHides follows, applied to the half of the gating
+  // that lives in CSS — a placeholder persona must not silently remove rows.
+  const personaAttr = personaKnown ? persona : '';
+  if (sidebar) sidebar.dataset.persona = personaAttr;
+  document.body.dataset.persona = personaAttr;
   if (sidebar) sidebar.dataset.lens = lens;
   document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
   document.querySelectorAll('.nav-link').forEach(el => {
@@ -13139,8 +13309,12 @@ function syncNavState(view, param, persona) {
       // own — Spend covers Budget, which is a tab of that screen rather than a
       // sibling entry. Without it the sidebar goes dark on the Budget tab and
       // the reader loses where they are.
-      const alt = el.dataset.viewAlt || '';
-      el.classList.toggle('active', (v === view && !childActive) || (alt !== '' && alt === view));
+      // `data-view-alt` is a COMMA LIST, not one name: Sessions now covers
+      // alerts / drift / budget, which are tabs of that screen rather than
+      // sibling entries. A single-value comparison went dark on every one of
+      // them and the reader lost where they were.
+      const alt = (el.dataset.viewAlt || '').split(',').filter(Boolean);
+      el.classList.toggle('active', (v === view && !childActive) || alt.indexOf(view) !== -1);
     }
   });
 }
@@ -13153,6 +13327,14 @@ function App() {
   // or a "you have none of these" claim off an unanswered fetch.
   const [personaInfo, setPersonaInfo] = useState({ known: false, detected: 'unknown', counts: null });
   const [personaOverride, setPersonaOverride] = useState(null);
+  // WHETHER the persona is settled, tracked separately from WHAT it is. The
+  // picker needs a concrete value to render at all times, so `persona` still
+  // falls back to a real key before the read lands — but that fallback must
+  // never be allowed to HIDE anything, because it is a placeholder rather than
+  // an answer. Everything that gates on persona takes `personaKnown` alongside
+  // it and treats false as "hide nothing" (see personaHides). An explicit user
+  // choice is settled by definition, whether or not the fetch has landed.
+  const personaKnown = personaOverride != null || personaInfo.known;
   const persona = personaOverride
     || (personaInfo.known && PERSONA_HIDDEN_VIEWS[personaInfo.detected] ? personaInfo.detected : 'claude-code');
   const setPersona = (p) => setPersonaOverride(p);
@@ -13177,6 +13359,10 @@ function App() {
   //      workflows cost nothing", and every child would otherwise assert the
   //      second. This also covers analyzers gated for the persona (e.g. Subagent
   //      under SDK), since a no-data persona yields no children at all.
+  //   3. It asks the SERVER for the report AS the selected persona
+  //      (`GET /optimize?persona=...`), so the analyzer set it derives from is
+  //      gated for what the reader is looking at rather than for whichever
+  //      persona happens to dominate the corpus.
   // The dynamic analyzer children come from the SAME stored /optimize artifact
   // every other surface reads (optimizeDetailAnalyzers already drops
   // persona_disabled_analyzers + non-actionable findings), so the submenu, the
@@ -13192,24 +13378,15 @@ function App() {
     // blank a real submenu on the first paint.
     if (personaHasNoData === true) { setOptNav({ dynamic: [], showSummarize: false, showRules: false }); return; }
     let cancelled = false;
-    api('/optimize', { fast: 'true' })
+    api('/optimize', { fast: 'true', persona })
       .then(d => {
         if (cancelled || !d) return;
-        // The stored /optimize report is gated for its OWN dominant persona
-        // (d.persona), NOT the client-side toggle — the endpoint keys off the
-        // window's data, not the selected persona. On a machine with data for
-        // BOTH personas, deriving the submenu from a report whose persona
-        // doesn't match the selection would surface the wrong persona's gates
-        // (Greptile, #671). We can't trust it, so show an EMPTY submenu (the
-        // detail pages stay reachable from the Optimize page itself) rather than
-        // wrong entries. On a single-persona machine d.persona equals the
-        // selected persona and this is a no-op; the SDK-on-a-CC-machine case is
-        // already covered by the personaHasNoData gate above. The full fix
-        // (thread the selected persona to /optimize) is deferred.
-        if (d.persona && d.persona !== persona) {
-          setOptNav({ dynamic: [], showSummarize: false, showRules: false });
-          return;
-        }
+        // No mismatch check any more, and none is needed: the request names the
+        // SELECTED persona, and the route gates the analyzer set for THAT
+        // persona rather than for the corpus's dominant one. The workaround
+        // this replaced could only blank the submenu on a mismatch — it had no
+        // way to compute the right entries, so a machine with data for both
+        // personas showed nothing at all for the non-dominant one.
         // Summarize earns its child only when the scan found candidates;
         // Rules is gated on the persona having data (its own /rules content is
         // fetched by RulesView — the nav only needs "does this persona have a
@@ -13274,8 +13451,8 @@ function App() {
     // which the route-sync effect below computes but only over the DOM as it was
     // when it last ran. Cheap and idempotent; keeps a newly-injected child from
     // flashing in the wrong state until the next route change.
-    syncNavState(route.view, route.param || '', persona);
-  }, [optNav, persona]);
+    syncNavState(route.view, route.param || '', persona, personaKnown);
+  }, [optNav, persona, personaKnown]);
 
   useEffect(() => {
     const handler = () => setRoute(getRoute());
@@ -13320,11 +13497,11 @@ function App() {
     // A trace DETAIL (traces/<trace_id>) is a legitimate drill-in from a
     // session's Traces tab even for a persona whose sidebar hides the top-level
     // Traces LIST. Redirect only the hidden list pages, never a specific trace.
-    if (personaHides(persona, route.view) && !(route.view === 'traces' && route.param)) {
+    if (personaHidesRoute(persona, route.view, personaKnown) && !(route.view === 'traces' && route.param)) {
       history.replaceState(null, '', '#/dashboard');
       setRoute(getRoute());
     }
-  }, [persona, route.view]);
+  }, [persona, personaKnown, route.view]);
 
   // Update active nav link + reveal nested children of the active section +
   // keep the Improve/Observe lens pill in sync with the current route (self-
@@ -13337,8 +13514,8 @@ function App() {
   // without it the attribute would only refresh on a ROUTE change, leaving the
   // sidebar on the previous persona's pages after a persona switch alone.
   useEffect(() => {
-    syncNavState(route.view, route.param || '', persona);
-  }, [route.view, route.param, persona]);
+    syncNavState(route.view, route.param || '', persona, personaKnown);
+  }, [route.view, route.param, persona, personaKnown]);
 
   const primaryKey = primaryKeyFor(route);
   const detail = detailNodeFor(route);
@@ -13418,9 +13595,16 @@ function App() {
       // drives OptimizeView's summary-vs-single-analyzer-detail split; other
       // views ignore it.
       const navParam = isActive ? route.param : null;
+      // The raw route VIEW, for the one page whose content depends on which of
+      // several routes resolved to it: Sessions hosts the alerts / drift /
+      // budget tabs, and `navParam` cannot carry that (those routes have no
+      // path segment). Active-only, same rule as navParam — a kept-alive
+      // hidden pane must not react to a route meant for another.
+      const routeView = isActive ? route.view : null;
       return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}>
         <${PersonaEmptyGate} persona=${persona} header=${html`<${PersonaEmptyHeader} viewKey=${key} />`}>
-          <${Comp} params=${vp} persona=${persona} navParam=${navParam} />
+          <${Comp} params=${vp} persona=${persona} personaKnown=${personaKnown}
+                   navParam=${navParam} routeView=${routeView} />
         <//>
       </div>`;
     })}

@@ -399,7 +399,7 @@ def recompute_now(
     with _LAST_RUN_LOCK:
         _LAST_RUN_MONOTONIC = time.monotonic()
     try:
-        from tokenjam.core.optimize import build_report, report_to_dict
+        from tokenjam.core.optimize import GATED_PERSONAS, build_report, report_to_dict
         from tokenjam.utils.time_parse import utcnow
 
         record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle(
@@ -424,7 +424,19 @@ def recompute_now(
         # replaced.
         record = record.with_window(since_dt, until_dt, days)
         try:
-            report = build_report(db=db, config=config, since=since_dt, until=until_dt)
+            # ONE artifact, EITHER persona. The dashboard's "Viewing as" picker
+            # asks for a persona the corpus may not be dominated by, and no
+            # request path may run an analyzer to answer that (the whole reason
+            # this store exists). So the background pass selects the UNION of
+            # what each gated persona has a lever for, and the route narrows to
+            # the requested one on read (`runner.findings_for_persona`). The
+            # report's own `persona` is untouched — it still records what the
+            # corpus IS, and every persona-scoped derivation keys off the
+            # requested persona rather than off what happened to be dispatched.
+            report = build_report(
+                db=db, config=config, since=since_dt, until=until_dt,
+                personas=GATED_PERSONAS,
+            )
         except Exception as exc:  # noqa: BLE001 - stored, never propagated
             return write_report_error(f"{type(exc).__name__}: {exc}", path, config=config)
         # SEALED, NOT RE-DERIVED. `build_report` resolves the window's dominant

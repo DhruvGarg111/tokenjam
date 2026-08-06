@@ -372,3 +372,127 @@ def test_review_inbox_still_gates_placement_for_claude_code():
     )
     rep = OptimizeReport(window=w, persona="claude-code", findings={"placement": placement})
     assert cost_proposals_from_report(rep) == []
+
+
+# --------------------------------------------------------------------------- #
+# The two gate surfaces must agree — for EVERY persona, not just the two the
+# tests above happen to name.
+#
+# `runner.PERSONA_DISABLED_ANALYZERS` decides what gets DISPATCHED;
+# `cost_proposals.COST_ANALYZERS` / `cost_analyzers_for_persona` decides what
+# reaches the Review inbox. They are independent selection surfaces over one
+# decision, and nothing structural forces them to agree — `cost_analyzers_for_
+# persona` merely happens to call the same helper today. `test_cost_analyzers_
+# mirror_the_gate` above checks the two personas it names by hand; these check
+# the PROPERTY, so a third persona key, or a reimplementation of either side
+# that reintroduces a literal list, fails immediately.
+# --------------------------------------------------------------------------- #
+def test_the_two_gate_surfaces_agree_for_every_persona():
+    from tokenjam.core.framing import PERSONAS
+
+    # Every persona the classifier can produce, plus every key the gate map
+    # carries, plus a name that is neither (the unlisted-persona path).
+    for persona in (*PERSONAS, *PERSONA_DISABLED_ANALYZERS, "not-a-persona"):
+        disabled = disabled_analyzers_for_persona(persona)
+        scoped = cost_analyzers_for_persona(persona)
+        # Exact, both directions: nothing the dispatch gate drops survives into
+        # the inbox surface, and nothing it keeps is dropped there.
+        assert set(scoped) == set(COST_ANALYZERS) - set(disabled), persona
+        # Order is preserved, so the inbox's own ranking cannot be perturbed by
+        # the filter.
+        assert scoped == tuple(n for n in COST_ANALYZERS if n not in disabled), persona
+
+
+def test_every_gated_name_is_either_a_registry_entry_or_a_named_sub_check():
+    """A gate entry that matches nothing silently protects nothing.
+
+    `placement` is the one legitimate non-registry name (the `downsize`
+    analyzer attaches it as a sub-check and reads the same map to skip it). Any
+    OTHER unmatched name is a typo that disables an analyzer nobody has — which
+    reads, from every surface, exactly like a working gate.
+    """
+    known = set(ANALYZER_REGISTRY) | {"placement"}
+    for persona, names in PERSONA_DISABLED_ANALYZERS.items():
+        unknown = set(names) - known
+        assert not unknown, f"{persona} gates unknown analyzer(s): {sorted(unknown)}"
+
+
+# --------------------------------------------------------------------------- #
+# Serving one stored report AS a persona other than the corpus's dominant one.
+# --------------------------------------------------------------------------- #
+def test_a_multi_persona_pass_runs_the_union_and_records_what_it_ran(
+    db, cfg, monkeypatch,
+):
+    """The daemon's pass has to answer for EITHER side of the persona picker
+    off ONE artifact, because no request path may run an analyzer.
+
+    So `personas` gates on the INTERSECTION of the named personas' disabled
+    sets — a name only stays skipped when nobody can act on it — and the report
+    records what it actually dispatched, so a reader can tell "ran and found
+    nothing" from "never invoked".
+    """
+    _seed(db, "claude-code-proj")
+    invoked: list[str] = []
+    for name, fn in list(ANALYZER_REGISTRY.items()):
+        def _wrapped(ctx, _name=name, _fn=fn):
+            invoked.append(_name)
+            return _fn(ctx)
+        monkeypatch.setitem(ANALYZER_REGISTRY, name, _wrapped)
+
+    report = build_report(
+        db, cfg, since=utcnow() - timedelta(days=30),
+        personas=["claude-code", "sdk"],
+    )
+
+    # Still a claude-code corpus — widening the analyzer set must not restate
+    # what the window IS.
+    assert report.persona == "claude-code"
+    # The union: nothing is gated, because the two personas' reasons are
+    # disjoint (no-lever vs no-input), so each name is actionable for one side.
+    assert set(invoked) == set(ANALYZER_REGISTRY)
+    assert set(report.computed_analyzers) == set(ANALYZER_REGISTRY)
+    assert report.computed_for_personas == ["claude-code", "sdk"]
+    # Including the ones a single-persona claude-code pass would have skipped.
+    assert NO_LEVER_REGISTRY_NAMES <= set(invoked)
+
+
+def test_the_default_pass_is_unchanged_and_still_records_its_selection(db, cfg):
+    """`personas=None` is the old behaviour exactly — one persona asked, one
+    persona answered — and the CLI depends on that."""
+    _seed(db, "claude-code-proj")
+    report = build_report(db, cfg, since=utcnow() - timedelta(days=30))
+
+    assert report.persona == "claude-code"
+    assert report.computed_for_personas == ["claude-code"]
+    assert NO_LEVER.isdisjoint(report.computed_analyzers)
+    assert set(report.computed_analyzers) == set(ANALYZER_REGISTRY) - NO_LEVER
+
+
+def test_findings_for_persona_narrows_a_union_report_back_down():
+    """The read-side half of the gate: a report computed for both personas is
+    sliced per request, so a surface serving one persona can never render a
+    finding for a lever that persona does not have."""
+    from tokenjam.core.optimize import findings_for_persona
+
+    findings = {name: object() for name in ANALYZER_REGISTRY}
+    for persona in ("claude-code", "sdk"):
+        sliced = findings_for_persona(findings, persona)
+        disabled = disabled_analyzers_for_persona(persona)
+        assert set(sliced) == set(findings) - set(disabled), persona
+    # An unclassified persona keeps everything (the conservative default).
+    assert set(findings_for_persona(findings, "mixed")) == set(findings)
+
+
+def test_intersection_gate_is_empty_for_the_two_shipped_personas():
+    """Named explicitly because it is the property the whole design rests on:
+    the claude-code gate is about a missing LEVER and the sdk gate about a
+    missing INPUT, so the two sets are disjoint and their intersection is empty.
+    A future gate entry shared by both personas would start being skipped in the
+    daemon's pass too — which is correct, and this test is where that shows up.
+    """
+    from tokenjam.core.optimize import GATED_PERSONAS, disabled_analyzers_for_personas
+
+    assert set(GATED_PERSONAS) == set(PERSONA_DISABLED_ANALYZERS)
+    assert disabled_analyzers_for_personas(GATED_PERSONAS) == frozenset()
+    # No personas named disables nothing, matching the unlisted-persona default.
+    assert disabled_analyzers_for_personas([]) == frozenset()

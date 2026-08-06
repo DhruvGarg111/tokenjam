@@ -413,6 +413,22 @@ class OptimizeReport:
     # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
     # recompute it from a bare `conn`.
     persona:   str = "unknown"
+    #: The analyzer names this pass actually DISPATCHED. Without it a reader
+    #: cannot tell "this analyzer ran and found nothing" from "this analyzer was
+    #: never invoked", and that distinction becomes load-bearing the moment a
+    #: report is served for a persona other than :attr:`persona`: an analyzer
+    #: the requested persona has a lever for, which this pass never ran, is
+    #: NOT-YET-KNOWN and must render as such rather than as an empty result
+    #: (root anti-pattern 22). Empty means "this report predates the field", not
+    #: "nothing ran" — a consumer must degrade to "unknown", never to "none".
+    computed_analyzers: list = field(default_factory=list)
+    #: The personas whose gates were honored when :attr:`computed_analyzers` was
+    #: selected. A pass run for several personas (the daemon's, which computes
+    #: the union so one stored artifact can answer for either side of the
+    #: "Viewing as" picker) lists them all; a single-persona pass lists just its
+    #: own. This is what tells a route whether it may answer a request for a
+    #: persona other than :attr:`persona` at all.
+    computed_for_personas: list = field(default_factory=list)
     # Why the filesystem-reading analyzers (deadweight, relearn, summarize)
     # scanned nothing, when they scanned nothing — see
     # `core/optimize/scope.py`. `None` means they DID scan, which is a

@@ -34,12 +34,18 @@ from tokenjam.api.deps import require_api_key, require_relearn_write_auth
 from tokenjam.cli.cmd_optimize import _rank_findings
 from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
+    PERSONAS,
     WindowSummary,
     agent_persona_mix,
     compute_framing,
     plan_tier_mix,
 )
-from tokenjam.core.optimize import disabled_analyzers_for_persona, report_store
+from tokenjam.core.optimize import (
+    ANALYZER_REGISTRY,
+    disabled_analyzers_for_persona,
+    findings_for_persona,
+    report_store,
+)
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
@@ -67,6 +73,15 @@ def get_optimize(
     ),
     budget_provider: str | None = Query(None),
     budget_usd: float | None = Query(None),
+    persona: str | None = Query(
+        None,
+        description="Serve the report AS this persona (one of core.framing."
+                    "PERSONAS). The analyzer set is gated for the REQUESTED "
+                    "persona, not only for the corpus's dominant one, so the "
+                    "dashboard's 'Viewing as' picker gets an answer that is "
+                    "correct for what it is showing. Omitted = the stored "
+                    "report's own dominant persona.",
+    ),
     fast: bool = Query(
         False,
         description="Accepted for backwards compatibility and ignored: no "
@@ -80,6 +95,20 @@ def get_optimize(
     keys merged alongside it. When the store is cold or has only ever failed,
     the envelope comes back on its own with `report_available: false` — the
     caller renders "not yet computed", never a zero.
+
+    **`persona` is a VIEW of one stored artifact, never a second computation.**
+    No analyzer runs here at any speed, so a per-persona request cannot be
+    answered by recomputing — and it must not be answered by serving the
+    dominant persona's findings under the requested persona's name either. The
+    daemon's pass therefore dispatches the UNION of what each gated persona has
+    a lever for (`runner.build_report`'s `personas`), stores ONE report, and
+    this route narrows it: findings the requested persona has no lever for are
+    dropped, `persona_disabled_analyzers` names them, and
+    `persona_unanswered_analyzers` names the ones the requested persona DOES
+    have a lever for that this pass never dispatched. That last list is the
+    honest "not yet known" channel (root anti-pattern 22) — a surface renders it
+    as unresolved, never as "found nothing". It is empty on a report written by
+    a build that computes the union, and non-empty only for one written before.
     """
     db = request.app.state.db
     config = request.app.state.config
@@ -96,9 +125,19 @@ def get_optimize(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
 
+    # An unrecognised persona is a 400, never a silent fallback to the dominant
+    # one: a caller that mistypes it would otherwise be served a report gated
+    # for a persona it did not ask for, with nothing on the wire saying so.
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
+
     envelope = report_store.stored_report_block(config)
     envelope["requested_since"] = since
     envelope["requested_findings"] = list(finding) if finding else None
+    envelope["requested_persona"] = persona
     envelope["scan_interval_hours"] = getattr(config.optimize, "scan_interval_hours", None)
     envelope["scan_enabled"] = getattr(config.optimize, "scan_enabled", True)
     envelope["ui_poll_seconds"] = getattr(config.optimize, "scan_ui_poll_seconds", 0)
@@ -130,24 +169,56 @@ def get_optimize(
         # wrote — and omit only the derivations that need typed objects.
         payload["finding_rank"] = []
         payload["persona_disabled_analyzers"] = []
+        payload["persona_unanswered_analyzers"] = []
         payload["skipped_analyzers"] = []
         return payload
 
+    # The persona this response is ANSWERING FOR. `report.persona` stays on the
+    # payload untouched (it is what the corpus IS, and the CLI round-trips it);
+    # everything gated below keys off `view_persona`, which is what the reader
+    # asked to see.
+    view_persona = persona or report.persona
+    payload["report_persona"] = report.persona
+    payload["view_persona"] = view_persona
+
     # `fast` no longer skips anything (nothing runs here), so nothing is
     # "skipped for speed". The key stays for wire compatibility.
-    persona_disabled = disabled_analyzers_for_persona(report.persona)
+    persona_disabled = disabled_analyzers_for_persona(view_persona)
     payload["skipped_analyzers"] = []
     # The names the persona gate dropped, so the UI can tell "ran, found
     # nothing" (render the empty state) from "not run for this persona"
     # (render nothing at all).
     payload["persona_disabled_analyzers"] = sorted(persona_disabled)
 
+    # NOT-YET-KNOWN, kept strictly separate from both of the above. These are
+    # analyzers the requested persona HAS a lever for and this pass never
+    # dispatched, so this report holds no answer about them — which is not the
+    # same claim as "they found nothing" and must not render as one (root
+    # anti-pattern 22). `computed_analyzers` is empty on a report written before
+    # the field existed; an empty list there means "unknown", so nothing is
+    # declared unanswered rather than everything being.
+    computed = set(getattr(report, "computed_analyzers", None) or [])
+    payload["persona_unanswered_analyzers"] = sorted(
+        (set(ANALYZER_REGISTRY) - persona_disabled) - computed,
+    ) if computed else []
+
+    # SLICED FOR THE REQUESTED PERSONA. Dropping them here rather than leaving
+    # it to the client is what makes every consumer of this payload correct by
+    # construction: a surface that forgets to read
+    # `persona_disabled_analyzers` can no longer render a finding for a lever
+    # this persona does not have.
+    payload["findings"] = findings_for_persona(payload.get("findings") or {}, view_persona)
+    if "downsize" in persona_disabled:
+        payload["downgrade"] = None
+
     # Biggest-waste-first ranking — the same `_rank_findings` the CLI's text
     # view ranks by, so the web doesn't fall back to Object.keys() insertion
     # order. `share` of None means "no quantified estimate" (unranked), which
     # is NOT zero — the UI must not sort those away as de-minimis.
     payload["finding_rank"] = [
-        {"name": name, "share": share} for name, share in _rank_findings(report, None)
+        {"name": name, "share": share}
+        for name, share in _rank_findings(report, None)
+        if name not in persona_disabled
     ]
 
     # Plan-tier / persona mix are cheap direct queries (no analyzer), so they

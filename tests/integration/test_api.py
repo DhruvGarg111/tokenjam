@@ -868,6 +868,185 @@ async def test_optimize_payload_reports_persona_disabled_analyzers(db, client, c
     assert "trim" not in data.get("skipped_analyzers", [])
 
 
+async def test_optimize_serves_a_requested_persona_not_only_the_dominant_one(
+    db, client, config,
+):
+    """The "Viewing as" picker asks for a persona the corpus may not be
+    dominated by, and no request path may run an analyzer to answer that. One
+    stored report therefore has to answer for either side, sliced per request.
+
+    This is the whole point of threading the persona to the server: before it,
+    every persona-looking affordance in the UI keyed off the STORED report's own
+    dominant persona, so a claude-code-dominant machine viewed as SDK showed the
+    claude-code gate under an SDK label.
+    """
+    from datetime import timedelta
+
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(6):
+        started = utcnow() - timedelta(days=i + 1)
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"ccp-{i}", plan_tier="api",
+            started_at=started,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider="anthropic", model="claude-opus-4-7",
+            input_tokens=4000, output_tokens=800, cost_usd=0.12,
+            session_id=f"ccp-{i}", start_time=started,
+        ))
+
+    _warm_scan(db, config)
+
+    cc = (await client.get("/api/v1/optimize?since=30d&persona=claude-code")).json()
+    sdk = (await client.get("/api/v1/optimize?since=30d&persona=sdk")).json()
+
+    # The corpus is unchanged by the question asked of it.
+    assert cc["persona"] == sdk["persona"] == "claude-code"
+    assert cc["report_persona"] == sdk["report_persona"] == "claude-code"
+    assert cc["view_persona"] == "claude-code"
+    assert sdk["view_persona"] == "sdk"
+
+    # Each response is gated for the REQUESTED persona.
+    assert {"cache", "cache-recommend", "trim", "verbosity", "reuse"} <= set(
+        cc["persona_disabled_analyzers"]
+    )
+    assert set(sdk["persona_disabled_analyzers"]) == {
+        "deadweight", "subagent", "summarize",
+    }
+
+    # And the findings are SLICED to match, so a surface that forgets to read
+    # the disabled list still cannot render an unactionable card.
+    for payload in (cc, sdk):
+        gated = set(payload["persona_disabled_analyzers"])
+        assert gated.isdisjoint(payload.get("findings") or {})
+        assert gated.isdisjoint(
+            r["name"] for r in payload.get("finding_rank") or []
+        )
+
+    # The two answers genuinely differ — otherwise the slicing above could be
+    # passing vacuously on an empty report.
+    assert (set(cc["findings"]) - set(sdk["findings"])) == {
+        "deadweight", "subagent", "summarize",
+    } & set(cc["findings"])
+    assert {"cache", "trim", "verbosity", "reuse"} & set(sdk["findings"])
+
+    # Nothing is UNANSWERED: the daemon's pass ran the union, so both personas
+    # are fully covered by the one stored artifact.
+    assert cc["persona_unanswered_analyzers"] == []
+    assert sdk["persona_unanswered_analyzers"] == []
+
+
+async def test_optimize_rejects_an_unknown_persona(client):
+    """A mistyped persona must not be silently served as the dominant one —
+    the caller would get a report gated for a persona it did not ask for, with
+    nothing on the wire saying so."""
+    resp = await client.get("/api/v1/optimize?since=30d&persona=sdkk")
+    assert resp.status_code == 400
+    assert "sdkk" in resp.json()["detail"]
+
+
+async def test_sessions_list_scopes_to_one_persona(db, client):
+    """The session list had no persona scoping at all. Bucketing is the SAME
+    agent_id-prefix rule framing.agent_persona_mix uses, never a second one."""
+    from datetime import timedelta
+
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(4):
+        db.upsert_session(make_session(
+            agent_id="claude-code-proj", session_id=f"psn-cc-{i}",
+            started_at=utcnow() - timedelta(hours=i + 1),
+        ))
+    for i in range(2):
+        db.upsert_session(make_session(
+            agent_id="billing-service", session_id=f"psn-sdk-{i}",
+            started_at=utcnow() - timedelta(hours=i + 10),
+        ))
+
+    def _ids(payload):
+        return {s["session_id"] for s in payload["sessions"]}
+
+    everything = _ids((await client.get("/api/v1/sessions")).json())
+    assert {f"psn-cc-{i}" for i in range(4)} <= everything
+    assert {f"psn-sdk-{i}" for i in range(2)} <= everything
+
+    cc = (await client.get("/api/v1/sessions?persona=claude-code")).json()
+    assert {f"psn-cc-{i}" for i in range(4)} <= _ids(cc)
+    assert not (_ids(cc) & {f"psn-sdk-{i}" for i in range(2)})
+
+    sdk = (await client.get("/api/v1/sessions?persona=sdk")).json()
+    assert {f"psn-sdk-{i}" for i in range(2)} <= _ids(sdk)
+    assert not (_ids(sdk) & {f"psn-cc-{i}" for i in range(4)})
+
+    # An unclassified persona filters nothing, matching the analyzer gate's own
+    # conservative default.
+    assert _ids((await client.get("/api/v1/sessions?persona=mixed")).json()) == everything
+
+    # `limit` applies AFTER the persona filter. Capping in SQL first would
+    # return whatever survived out of the newest N overall — indistinguishable
+    # from "that is all there is".
+    limited = (await client.get("/api/v1/sessions?persona=sdk&limit=2")).json()
+    assert len(limited["sessions"]) == 2
+    assert _ids(limited) == {f"psn-sdk-{i}" for i in range(2)}
+
+    assert (await client.get("/api/v1/sessions?persona=nope")).status_code == 400
+
+
+async def test_cost_components_overlay_is_scoped_to_the_requested_persona(
+    db, client, config,
+):
+    """The overlay and the analyzer rows render as ONE answer on the Optimize
+    screen — the row list, and the "biggest single cause" line drawn from this
+    endpoint directly above it. Scoping only the rows named `Subagent` as the
+    biggest cause under an SDK view that had correctly dropped Subagent: two
+    figures published together over two different populations.
+
+    The component BARS stay unscoped, and that is the point of checking them:
+    they are measured spend, which the persona picker does not reinterpret.
+    """
+    from datetime import timedelta
+
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(6):
+        started = utcnow() - timedelta(days=i + 1)
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"ccc-{i}", plan_tier="api",
+            started_at=started,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider="anthropic", model="claude-opus-4-7",
+            input_tokens=4000, output_tokens=800, cost_usd=0.12,
+            session_id=f"ccc-{i}", start_time=started,
+        ))
+
+    _warm_scan(db, config)
+
+    cc = (await client.get("/api/v1/cost/components?since=30d&persona=claude-code")).json()
+    sdk = (await client.get("/api/v1/cost/components?since=30d&persona=sdk")).json()
+
+    def _analyzers(payload):
+        return {r["analyzer"] for r in payload.get("recoverable") or []}
+
+    assert not (_analyzers(cc) & {"cache", "trim", "verbosity", "reuse", "script"})
+    assert not (_analyzers(sdk) & {"deadweight", "subagent", "summarize"})
+    # The largest-opportunity pointer is drawn from index 0 of that same list,
+    # so scoping the list is what keeps the pointer honest.
+    if cc.get("largest_recoverable_analyzer"):
+        assert cc["largest_recoverable_analyzer"] in _analyzers(cc)
+    if sdk.get("largest_recoverable_analyzer"):
+        assert sdk["largest_recoverable_analyzer"] in _analyzers(sdk)
+
+    # Measured spend is NOT persona-scoped — the picker changes which fixes
+    # apply, never what was billed.
+    assert cc["components"] == sdk["components"]
+
+    assert (
+        await client.get("/api/v1/cost/components?since=30d&persona=nope")
+    ).status_code == 400
+
+
 async def test_budget_framing_reflects_configured_subscription_plan(db):
     """The budget surface has no window, so framing falls back to the
     declared plan in config (#110)."""

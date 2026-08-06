@@ -10,6 +10,7 @@ from tokenjam.api.deps import require_api_key
 from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
 from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
+    PERSONAS,
     WindowSummary,
     compute_framing,
     plan_determination_mix,
@@ -313,7 +314,7 @@ def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     return comp
 
 
-def _collect_recoverable(report) -> list[dict]:
+def _collect_recoverable(report, *, persona: str | None = None) -> list[dict]:
     """Registry-driven per-analyzer recoverable list (#211 overlay).
 
     Iterates the typed downgrade slot + every wave-2 finding carrying the #111
@@ -344,8 +345,25 @@ def _collect_recoverable(report) -> list[dict]:
             "caveat": getattr(finding, "caveat", "") or "",
         })
 
-    add("downsize", getattr(report, "downgrade", None))
-    for name, finding in (getattr(report, "findings", None) or {}).items():
+    # PERSONA-SCOPED, because "every finding carrying the field" is no longer the
+    # same set as "every finding this reader can act on": the daemon's pass
+    # computes the union across personas so one stored report can answer for
+    # either side of the persona picker (`runner.build_report`'s `personas`), so
+    # a claude-code window's stored report now legitimately carries `reuse` /
+    # `verbosity` / `script` findings. Summing those into this overlay would
+    # publish recoverable dollars against levers this persona does not have.
+    # Same map both halves of the gate read (ANALYZER-PERSONA-MATRIX.md §6).
+    from tokenjam.core.optimize import disabled_analyzers_for_persona, findings_for_persona
+
+    # The REQUESTED persona when the caller named one, else the corpus's own —
+    # so this overlay covers the same population as the analyzer list rendered
+    # beside it on the Optimize screen.
+    view_persona = persona or str(getattr(report, "persona", "") or "unknown")
+    if "downsize" not in disabled_analyzers_for_persona(view_persona):
+        add("downsize", getattr(report, "downgrade", None))
+    for name, finding in findings_for_persona(
+        getattr(report, "findings", None) or {}, view_persona,
+    ).items():
         if name == "downsize":
             continue
         if hasattr(finding, "past_overspend_usd"):
@@ -386,6 +404,7 @@ async def get_cost_components(
     agent_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
+    persona: str | None = None,
 ) -> dict:
     """Cost-by-component split + per-analyzer recoverable-waste overlay (#211).
 
@@ -394,9 +413,23 @@ async def get_cost_components(
     registry-driven, carrying the analyzer's own caveat verbatim. "Estimated
     recoverable" is never conflated with the measured cost and never called
     "saved" (Critical Rule 14). Every figure routes through the framing block so
-    subscription/local users see token-share, not raw dollars."""
+    subscription/local users see token-share, not raw dollars.
+
+    `persona` scopes the OVERLAY to the analyzers that persona has a lever for,
+    the same way `GET /optimize?persona=` does — the two are rendered on one
+    screen and read as one answer. Without it this endpoint named the corpus's
+    dominant persona's biggest opportunity ("Biggest single cause: Subagent")
+    beside an analyzer list that had correctly dropped Subagent for the selected
+    persona: two figures published together over two different populations
+    (root anti-pattern 22b). The component BARS are unscoped and stay that way —
+    they are measured spend, which the persona picker does not reinterpret."""
     db = request.app.state.db
     config = request.app.state.config
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     try:
         since_dt = parse_since(since) if since else None
         until_dt = parse_since(until) if until else None
@@ -424,7 +457,9 @@ async def get_cost_components(
 
     scan = report_store.stored_report_block(config)
     stored = report_store.stored_report(config)
-    recoverable: list[dict] = _collect_recoverable(stored) if stored is not None else []
+    recoverable: list[dict] = (
+        _collect_recoverable(stored, persona=persona) if stored is not None else []
+    )
 
     # A cold store contributes NO overlay and says so via `recoverable_status`.
     # The totals below stay `None` rather than 0.0 in that case: a `$0.00`

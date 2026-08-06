@@ -11,6 +11,7 @@ import logging
 
 from dataclasses import asdict
 from datetime import datetime
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from tokenjam.core.config import TjConfig
@@ -195,6 +196,45 @@ def disabled_analyzers_for_persona(persona: str) -> frozenset[str]:
     return PERSONA_DISABLED_ANALYZERS.get(persona, frozenset())
 
 
+#: The personas a stored report has to be able to ANSWER FOR, not just the one
+#: its corpus resolves to. The dashboard's "Viewing as" picker lets a reader ask
+#: for either side, and the report is computed once in the background — so the
+#: daemon's pass selects analyzers for all of these at once (see
+#: :func:`disabled_analyzers_for_personas`) and the route slices per request.
+#: Derived from the gate map so a third gated persona is covered automatically.
+GATED_PERSONAS: tuple[str, ...] = tuple(PERSONA_DISABLED_ANALYZERS)
+
+
+def disabled_analyzers_for_personas(personas: Sequence[str]) -> frozenset[str]:
+    """Analyzers no persona in ``personas`` has an applicable fix for.
+
+    The INTERSECTION, deliberately — a name only stays gated when *every*
+    requested persona lacks a lever for it. Anything one of them can act on has
+    to run, or the report cannot answer for that persona and a surface asking on
+    its behalf gets an absence it must not read as a result.
+
+    Empty ``personas`` disables nothing, matching the conservative default
+    :func:`disabled_analyzers_for_persona` already takes for an unclassified
+    window.
+    """
+    sets = [disabled_analyzers_for_persona(p) for p in personas]
+    if not sets:
+        return frozenset()
+    return frozenset(set.intersection(*(set(s) for s in sets)))
+
+
+def findings_for_persona(findings: Mapping[str, Any], persona: str) -> dict:
+    """``findings`` with the ones ``persona`` has no lever for removed.
+
+    The read-side counterpart of the dispatch-side skip gate, for a report that
+    was computed for a WIDER persona set than the one being served. Same map,
+    same reasons — a caller must never hand-roll this filter, or the two halves
+    of the gate drift (`ANALYZER-PERSONA-MATRIX.md` §6).
+    """
+    disabled = disabled_analyzers_for_persona(persona)
+    return {k: v for k, v in (findings or {}).items() if k not in disabled}
+
+
 THIN_DATA_DAYS = 7
 
 
@@ -252,6 +292,7 @@ def build_report(
     findings: list[str] | None = None,
     budget_provider_filter: str | None = None,
     budget_usd_override: float | None = None,
+    personas: Sequence[str] | None = None,
 ) -> OptimizeReport:
     """
     Build a complete OptimizeReport.
@@ -259,6 +300,15 @@ def build_report(
     `findings`:
       - None  -> run all registered analyzers in ANALYZER_ORDER
       - list  -> run only the named analyzers (must be keys in ANALYZER_REGISTRY)
+
+    `personas`:
+      - None  -> gate on the window's own dominant persona (the default, and
+        what every direct caller wants: one persona asked, one persona answered)
+      - list  -> gate on the INTERSECTION of those personas' disabled sets, so
+        the report can answer for any of them. This is for the DAEMON, whose one
+        stored artifact has to serve a UI that lets the reader switch persona.
+        The report still records its own dominant `persona`; what widens is only
+        which analyzers were dispatched, recorded on `computed_analyzers`.
 
     Analyzers are executed in ANALYZER_ORDER, never in caller-supplied order,
     so dependent analyzers (e.g. budget-projection reading the downgrade
@@ -331,7 +381,20 @@ def build_report(
     # COST_ANALYZERS recompute, the status teaser) funnels through this one
     # choke point, so none of them can reintroduce a finding this persona
     # cannot act on. See PERSONA_DISABLED_ANALYZERS for the per-name reasons.
-    selected -= disabled_analyzers_for_persona(persona)
+    #
+    # `personas` widens WHICH personas the gate is resolved for, never which
+    # persona the report claims to be: a pass asked to answer for both sides of
+    # the picker keeps only the names NEITHER side can act on. The read side
+    # narrows again per request (`findings_for_persona`), so the widening can
+    # only ever make an answer available, never leak an unactionable finding to
+    # a persona — every serving path still funnels through the same map.
+    gate_personas = list(personas) if personas else [persona]
+    selected -= disabled_analyzers_for_personas(gate_personas)
+    # WHAT ACTUALLY RAN, recorded before dispatch so a consumer can distinguish
+    # "ran and found nothing" from "never invoked" without re-deriving the gate
+    # against a persona that may not be the one it is serving.
+    report.computed_for_personas = list(gate_personas)
+    report.computed_analyzers = sorted(selected & set(ANALYZER_REGISTRY.keys()))
 
     def _dispatch(name: str, analyzer: Any) -> None:
         """Run one analyzer, and DISCLOSE it if it fails.

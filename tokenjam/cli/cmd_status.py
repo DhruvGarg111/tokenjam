@@ -218,18 +218,28 @@ def _recoverable_teaser(config) -> str | None:
         return None
     try:
         from tokenjam.core.optimize import report_store
-        from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+        from tokenjam.core.optimize.cost_proposals import cost_analyzers_for_persona
 
         report = report_store.stored_report(config)
         if report is None:
             return _COLD_TEASER
+        # PERSONA-SCOPED membership, not the raw `COST_ANALYZERS` tuple. The
+        # daemon's pass now dispatches the union across personas so one stored
+        # report answers for either side of the dashboard's persona picker
+        # (`runner.build_report`'s `personas`), which means a claude-code
+        # window's report can carry findings that persona has no lever for.
+        # Teasing the largest of THOSE would point a user at a fix they cannot
+        # apply.
+        cost_analyzers = set(cost_analyzers_for_persona(
+            str(getattr(report, "persona", "") or "unknown"),
+        ))
         estimates: list[tuple[float, int]] = []
         if report.downgrade is not None:
             usd = report.downgrade.past_overspend_usd
             if usd is not None:
                 estimates.append((usd, getattr(report.downgrade, "past_overspend_tokens", None) or 0))
         for name, finding in (report.findings or {}).items():
-            if name not in COST_ANALYZERS:
+            if name not in cost_analyzers:
                 continue
             usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:

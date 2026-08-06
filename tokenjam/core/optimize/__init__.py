@@ -29,9 +29,12 @@ from tokenjam.core.optimize import report_store
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY, register
 from tokenjam.core.optimize.runner import (
     ANALYZER_ORDER,
+    GATED_PERSONAS,
     PERSONA_DISABLED_ANALYZERS,
     build_report,
     disabled_analyzers_for_persona,
+    disabled_analyzers_for_personas,
+    findings_for_persona,
     report_from_dict,
     report_to_dict,
     summarize_window,
@@ -67,6 +70,7 @@ from tokenjam.core.optimize.analyzers.model_downgrade import (
 __all__ = [
     "ANALYZER_ORDER",
     "ANALYZER_REGISTRY",
+    "GATED_PERSONAS",
     "PERSONA_DISABLED_ANALYZERS",
     "AnalyzerContext",
     "BudgetProjection",
@@ -87,6 +91,8 @@ __all__ = [
     "audit_opus_quota",
     "build_report",
     "disabled_analyzers_for_persona",
+    "disabled_analyzers_for_personas",
+    "findings_for_persona",
     "project_budget",
     "register",
     "report_from_dict",

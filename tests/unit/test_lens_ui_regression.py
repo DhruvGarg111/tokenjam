@@ -15,6 +15,7 @@ follow-ups: opt-in light payload, lazy per-span attributes, capped/pinned rows).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -282,19 +283,47 @@ def test_switch_back_is_a_clickable_control_calling_the_persona_setter(html: str
     assert "location.reload" not in notice
 
 
-def test_sdk_sidebar_is_identical_to_claude_code(html: str) -> None:
-    """Switching persona changes ONLY the page data / empty-state, never the
-    sidebar items: the SDK sidebar is byte-for-byte the same as claude-code —
-    flat Improve nav, no lens toggle, observe suite hidden, Review inbox +
-    Sessions shown."""
-    # No Improve/Observe lens toggle for SDK (same as CC).
+def test_sdk_sidebar_differs_from_claude_code_only_where_sdk_has_a_lever(
+    html: str,
+) -> None:
+    """SDK and claude-code share one flat Improve nav; SDK additionally keeps
+    the surfaces that only make sense for a deployed service.
+
+    THIS TEST USED TO ENFORCE THE DEFECT. It asserted the two personas' hidden
+    lists were byte-for-byte identical — which pinned `traces`, `cost`,
+    `alerts`, `drift` and `budget` as hidden under EVERY persona key, i.e. as
+    views no user of any kind could reach. The five screens were built, routed
+    and populated the whole time; only the gate was wrong, and a green suite was
+    defending it. The assertion is INVERTED rather than deleted: the shared
+    parts stay pinned as present, and the identical-lists state is now pinned as
+    ABSENT so it cannot come back.
+    """
+    # Still shared: neither persona has a lens toggle, so both hide it.
+    assert '.sidebar[data-persona="claude-code"] .lens-switch { display: none; }' in html
     assert '.sidebar[data-persona="sdk"] .lens-switch { display: none; }' in html
-    # The observe suite is hidden for SDK — via the observe-lens hide rule AND
-    # the same PERSONA_HIDDEN_VIEWS list CC uses.
-    assert '.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }' in html
-    assert "'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget']," in html
+    # THE BAD STATE, pinned absent: the two persona keys must not carry the same
+    # list, and the observe suite must not be hidden wholesale for SDK.
+    assert "'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget']," not in html, (
+        "SDK must not hide the same five views claude-code does — that left no "
+        "persona able to reach any of them"
+    )
+    # The correct state, pinned present. Spend is the only view hidden for BOTH,
+    # and it carries a recorded reason (see the deliberate-hide test below).
+    assert "'claude-code': ['traces', 'cost']," in html
+    assert "'sdk': ['cost']," in html
+    # Traces is SDK-only, hidden for claude-code by its own per-view rule rather
+    # than by a blanket lens hide (per-session traces stay reachable for every
+    # persona from the session detail's Traces tab).
+    assert (
+        '.sidebar[data-persona="claude-code"] a.nav-link[data-view="traces"] '
+        '{ display: none !important; }' in html
+    )
+    # Alerts / Drift are no longer top-level nav entries at all — they moved
+    # into the Sessions screen's SDK-services zone.
+    assert '<a href="#/alerts" class="nav-link" data-view="alerts"' not in html
+    assert '<a href="#/drift" class="nav-link" data-view="drift"' not in html
     # The predecessor's SDK-specific forcing of observe links visible, and its
-    # hiding of Review inbox + Sessions, must be gone — SDK now mirrors CC.
+    # hiding of Review inbox + Sessions, must still be gone.
     assert 'a.nav-link[data-lens="observe"] { display: flex !important; }' not in html
     assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="review"]' not in html
     assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"]' not in html
@@ -345,7 +374,9 @@ def test_optimize_detail_route_renders_a_single_analyzer(html: str) -> None:
     # OptimizeView takes navParam (the path segment after #/optimize/) and, when
     # present, renders only that analyzer's OptimizeFinding detail card plus a
     # back link — not the whole stacked page.
-    assert "function OptimizeView({ params, navParam })" in html
+    # `persona` joins the signature: the view reads the report AS the selected
+    # persona rather than as whichever one the corpus happens to be dominated by.
+    assert "function OptimizeView({ params, navParam, persona })" in html
     assert "const detailName = navParam || null;" in html
     assert "if (detailName) {" in html
     assert "← Back to Optimize" in html
@@ -813,3 +844,197 @@ def test_skeleton_tile_count_matches_the_seven_real_tiles(html: str) -> None:
     # skeleton box than the 7 real tiles that land, a visible reflow.
     assert "const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5, 6];" in html
     assert "const REC_SKELETON_TILES = [0, 1, 2, 3, 4, 5];" not in html
+
+
+# --------------------------------------------------------------------------- #
+# Persona VIEW gate — which pages each persona is offered.
+#
+# The defect this section guards against is structural rather than cosmetic: a
+# view listed under EVERY persona key is reachable by nobody, and it reads
+# exactly like a view that was deliberately shelved. Five built, routed and
+# populated screens sat in that state, and a green suite was defending it.
+# --------------------------------------------------------------------------- #
+def _persona_hidden_views(html: str) -> dict[str, list[str]]:
+    """Parse ``PERSONA_HIDDEN_VIEWS`` out of the UI source.
+
+    Parsed rather than re-declared: a test carrying its own copy of the map
+    passes while the map says something else, which is the whole failure mode
+    here. The literal is plain arrays of single-quoted names by construction
+    (there is a separate guard forbidding a Set literal), so a small regex is
+    enough and a shape change fails loudly instead of silently matching nothing.
+    """
+    body = html[html.index("const PERSONA_HIDDEN_VIEWS = {"):]
+    body = body[: body.index("};")]
+    out: dict[str, list[str]] = {}
+    for line in body.splitlines():
+        m = re.match(r"\s*'([a-z-]+)'\s*:\s*\[(.*)\]\s*,", line)
+        if m:
+            out[m.group(1)] = re.findall(r"'([a-z-]+)'", m.group(2))
+    assert out, "PERSONA_HIDDEN_VIEWS must parse — its literal shape changed"
+    return out
+
+
+def _persona_hidden_deliberate(html: str) -> set[str]:
+    body = html[html.index("const PERSONA_HIDDEN_DELIBERATE = {"):]
+    body = body[: body.index("};")]
+    return set(re.findall(r"^\s{2}([a-z-]+):", body, re.M))
+
+
+def test_no_view_is_hidden_for_every_persona_without_a_recorded_reason(
+    html: str,
+) -> None:
+    """THE pin for the hidden-views defect.
+
+    A view hidden under every persona key cannot be opened by anyone. That is a
+    legitimate product decision (Spend is one), but it is indistinguishable from
+    the bug where a list was copied onto a second persona by mistake — so a
+    deliberate one must record WHY in PERSONA_HIDDEN_DELIBERATE. Anything hidden
+    everywhere with no entry there fails here.
+    """
+    hidden = _persona_hidden_views(html)
+    assert set(hidden) == {"claude-code", "sdk"}, (
+        "a new persona key changes what 'hidden for everyone' means — update "
+        "this guard deliberately"
+    )
+    hidden_everywhere = set.intersection(*(set(v) for v in hidden.values()))
+    recorded = _persona_hidden_deliberate(html)
+    assert hidden_everywhere <= recorded, (
+        f"{sorted(hidden_everywhere - recorded)} is hidden for every persona "
+        f"with no reason recorded in PERSONA_HIDDEN_DELIBERATE — either it is "
+        f"deliberate and must say so, or the gate is wrong"
+    )
+    # And the deliberate list may not grow beyond what is actually hidden
+    # everywhere: a stale entry would license a future blanket hide.
+    assert recorded <= hidden_everywhere, (
+        f"{sorted(recorded - hidden_everywhere)} records a deliberate blanket "
+        f"hide for a view that is not hidden everywhere"
+    )
+
+
+def test_spend_is_the_deliberately_hidden_one_and_traces_is_sdk_only(
+    html: str,
+) -> None:
+    """The decided target state, named explicitly rather than only set-wise."""
+    hidden = _persona_hidden_views(html)
+    # Spend: hidden for both, on purpose.
+    assert "cost" in hidden["claude-code"] and "cost" in hidden["sdk"]
+    assert "cost" in _persona_hidden_deliberate(html)
+    # Traces: the standalone cross-session browser is SDK-only. Per-session
+    # traces reach every persona through the session detail's Traces tab.
+    assert "traces" in hidden["claude-code"]
+    assert "traces" not in hidden["sdk"]
+    # Alerts / drift / budget are not top-level views any more, so they are in
+    # neither list — they are tabs of the Sessions screen instead.
+    for view in ("alerts", "drift", "budget"):
+        assert view not in hidden["claude-code"], view
+        assert view not in hidden["sdk"], view
+        assert view in html[html.index("const SESSIONS_SDK_TAB_VIEWS"):][:200], view
+
+
+def test_alerts_drift_budget_are_sessions_tabs_not_top_level_views(
+    html: str,
+) -> None:
+    """Relocated, not merely re-gated: their routes resolve to the Sessions
+    page, they render inside its SDK-services zone, and they are no longer
+    mounted as primary views of their own."""
+    # primaryKeyFor sends all three to the Sessions screen.
+    assert "if (SESSIONS_SDK_TAB_VIEWS.has(v)) return 'sessions';" in html
+    # They are no longer keep-alive primary views (that would mount three panes
+    # the router can never activate).
+    for entry in ("['alerts',    AlertsView]", "['drift',     DriftView]",
+                  "['budget',    BudgetView]"):
+        assert entry not in html, f"{entry} must leave PRIMARY_VIEWS"
+    # StatusView renders them, inside the SDK-only zone.
+    assert "${sdkTab === 'alerts' ? html`<${AlertsView}" in html
+    assert "${sdkTab === 'drift' ? html`<${DriftView}" in html
+    assert "${sdkTab === 'budget' ? html`<${BudgetView}" in html
+    # The Sessions nav row stays lit on any of them (comma-list data-view-alt).
+    assert 'data-view="sessions" data-view-alt="alerts,drift,budget"' in html
+    assert "(el.dataset.viewAlt || '').split(',')" in html
+
+
+def test_persona_gate_hides_nothing_until_the_persona_is_known(html: str) -> None:
+    """A not-yet-known persona must apply NO hiding rules.
+
+    The old fallback resolved an unknown persona to a concrete one, so an
+    unresolved read silently applied a real persona's hiding rules to a reader
+    who might be the other persona. Both halves of the gate — the JS predicate
+    and the CSS attribute it pairs with — now key on `known`.
+    """
+    assert "function personaHides(persona, view, known) {" in html
+    assert "if (!known) return false;" in html
+    # The CSS half: syncNavState leaves data-persona EMPTY until settled, so no
+    # [data-persona="..."] rule can match.
+    assert "const personaAttr = personaKnown ? persona : '';" in html
+    assert "sidebar.dataset.persona = personaAttr;" in html
+    # The old unconditional write must be gone.
+    assert "sidebar.dataset.persona = persona;" not in html
+    # An explicit user choice counts as settled even before the fetch lands.
+    assert "const personaKnown = personaOverride != null || personaInfo.known;" in html
+
+
+# --------------------------------------------------------------------------- #
+# Persona ANALYZER gate — the selected persona reaches the server.
+# --------------------------------------------------------------------------- #
+def test_optimize_reads_are_scoped_to_the_selected_persona(html: str) -> None:
+    """Every /optimize read names the persona the reader picked.
+
+    The picker used to be pure client-side state that never left the browser, so
+    the Optimize submenu, the analyzer cards, the persona-gated chip and the
+    Dashboard tiles all keyed off the STORED report's own dominant persona.
+    """
+    # OptimizeView, the Dashboard band, and App()'s submenu effect.
+    assert "api('/optimize', { since, agent_id: agentId || undefined, persona })" in html
+    assert "api('/optimize', { since, fast: 'true', persona })" in html
+    assert "api('/optimize', { fast: 'true', persona })" in html
+    # Persona is a real refetch dependency in both readers.
+    assert "}, [since, agentId, compare, persona]);" in html
+    assert "}, [since, persona, armOptWait]);" in html
+
+
+def test_the_blank_the_submenu_on_mismatch_workaround_is_gone(html: str) -> None:
+    """The workaround could only BLANK the submenu when the stored report's
+    persona differed from the selection — it had no way to compute the right
+    entries, so a machine with data for both personas showed nothing at all for
+    the non-dominant one. Threading the persona to the server replaces it."""
+    assert "if (d.persona && d.persona !== persona) {" not in html
+    assert "(thread the selected persona to /optimize) is deferred" not in html
+    assert "is deferred." not in html
+
+
+def test_a_persona_switch_does_not_keep_the_previous_personas_figures(
+    html: str,
+) -> None:
+    """Stale-but-shown is the right call for a refresh and the wrong call for a
+    persona switch: the numbers on screen answer a different question, so the
+    surface must go back to not-yet-known rather than relabel them."""
+    assert "const personaChanged = optPersonaRef.current !== persona;" in html
+    assert "data: personaChanged ? null : s.data" in html
+
+
+def test_an_unanswered_analyzer_is_a_third_state_not_an_empty_result(
+    html: str,
+) -> None:
+    """`persona_unanswered_analyzers` — a lever this persona HAS, that the
+    stored pass never ran. It must render as unresolved, never as "No
+    candidates", which would be a clean bill of health nothing measured."""
+    assert "opt.persona_unanswered_analyzers" in html
+    assert "st.opt.persona_unanswered_analyzers" in html
+    assert "const PERSONA_UNANSWERED_HINT =" in html
+    # It resolves to the not-ready tile state, which is already excluded from
+    # every published total (see totalOpportunityFigure).
+    assert "{ name: k, state: 'not_ready', hint: PERSONA_UNANSWERED_HINT }" in html
+    # And it gets its own detail-page branch, checked before the generic
+    # "ran, found nothing" one.
+    assert "if (personaUnanswered.has(detailName)) {" in html
+
+
+def test_sessions_page_filters_both_zones_on_the_selected_persona(
+    html: str,
+) -> None:
+    """The coding-session list was not persona-filtered at all: switching to
+    "SDK workflows" left a screenful of Claude Code cards under an SDK heading.
+    Both zones now gate, and neither gates on a not-yet-known persona."""
+    assert "const showSdkZone = !personaKnown || persona !== 'claude-code';" in html
+    assert "const showCodingZone = !personaKnown || persona !== 'sdk';" in html
+    assert "function StatusView({ params, persona, personaKnown, routeView })" in html
