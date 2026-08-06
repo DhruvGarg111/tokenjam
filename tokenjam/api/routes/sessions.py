@@ -37,7 +37,7 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _child_sessions, _run_sessions
-from tokenjam.core.alerts import is_interactive_coding_agent
+from tokenjam.core.alerts import agent_display_name, is_interactive_coding_agent
 from tokenjam.core.db import (
     delete_session_label,
     session_active_seconds,
@@ -161,6 +161,9 @@ async def list_sessions(
         {
             "session_id": r[0],
             "agent_id": r[1],
+            # Display only; `agent_id` beside it stays the identity. See
+            # `alerts.agent_display_name`.
+            "agent_display_name": agent_display_name(r[1]),
             "started_at": r[2].isoformat() if r[2] else None,
             "total_cost_usd": float(r[3]) if r[3] else 0.0,
             "input_tokens": r[4] or 0,
@@ -671,6 +674,9 @@ async def get_session_detail(request: Request, session_id: str):
         "session": {
             "session_id": session.session_id,
             "agent_id": session.agent_id,
+            # Display only; the session-detail header falls back to this when
+            # the session has no user-set label.
+            "agent_display_name": agent_display_name(session.agent_id),
             "label": session.service_instance_id,
             "namespace": session.service_namespace,
             "run_id": session.run_id,

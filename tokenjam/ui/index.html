@@ -285,30 +285,15 @@ code, .mono {
    band summarises pages they cannot open. Hidden for that persona rather than
    left pointing at nothing. */
 body[data-persona="claude-code"] .health-glance { display: none; }
-/* Pinned above every page: the persona decides which pages exist, so it
-   cannot live inside one of them. */
-/* Floated rather than a block of its own: App() renders this once, above every
-   view, but each view renders its own <h1>. A block here would always sit on a
-   separate line above the heading. Floating it lets the heading that follows
-   share the line, without every page having to render the switcher itself (and
-   without the switcher's position depending on each page's own header markup,
-   which differs: some carry a plan badge, a range picker and a Rescan button,
-   some carry nothing). Headings that are flex rows establish their own
-   formatting context and sit beside the float rather than under it. */
-/* Floated RIGHT, so it lands at the far end of whatever heading row follows
-   it. App() renders this once, above every view, but each view renders its own
-   <h1>; a block here would always take a line of its own above the heading.
-   Floating lets the heading share the line without every page having to render
-   the switcher itself, and without its position depending on each page's own
-   header markup (some carry a plan badge, a range picker and a Rescan button,
-   some carry nothing). Headings that are flex rows establish their own
-   formatting context and shrink to sit beside the float rather than run under
-   it, which is why a page's own right-aligned controls land just inside this
-   rather than overlapping it. It floats right rather than left because as a
-   left float it sat BEFORE the page title, so the reader met a global control
-   before learning which page they were on, and any prose paragraph following
-   the heading wrapped its first line around it. */
-.persona-bar { float: right; margin: 0 0 10px 18px; }
+/* The persona picker has ONE position: inside the header of each page that
+   shows it (see PERSONA_PICKER_VIEWS). There is no app-level floated bar any
+   more. The rationale the deleted rules carried was about making a global
+   control share a line with each page's own <h1> without every page having to
+   render it — which worked, but at the cost of the control sitting top-right on
+   the pages that took the float and top-left beside the title on the pages that
+   rendered it inline. One control cannot have two positions, and a reader
+   navigating between those pages watches it jump. The pages that show it now
+   all render it themselves, so the position is decided once. */
 .persona-pick { display: inline-flex; align-items: center; gap: 8px; }
 .persona-bar-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
 .persona-bar-note { font-size: 12px; color: var(--text-faint); }
@@ -1219,8 +1204,18 @@ a.opt-find-row.link .opt-find-name { color: var(--accent); }
    actions list directly below states, one row per analyzer with its own
    figure, so the chart was a picture of the table under it. Same rank/tone
    ramp (--tone-1..7, biggest = whitest) as every other ranked visual here. */
-.opt-spendbar { display: flex; height: 26px; border-radius: var(--radius-pill); overflow: hidden; gap: 2px; }
+/* ONE bar: the full width is total spend, and the shaded region inside it is
+   the overspend ceiling. No gap between the two parts, because a gap would read
+   as two adjacent quantities rather than one contained in the other. */
+.opt-spendbar { display: flex; height: 26px; border-radius: var(--radius-pill); overflow: hidden; background: var(--tone-1); }
 .opt-spendbar > span { display: block; height: 100%; }
+/* The overspend region. `min-width` is the whole reason this is a separate
+   rule: this figure is routinely a few percent of the total, and a faithful
+   percentage width rounds to a sliver that cannot be seen or hovered. The
+   floor is a LEGIBILITY floor on a region whose real magnitude is always
+   printed beside it in the legend, never a re-scaling of the number. */
+.opt-spendbar > span.opt-spendbar-over { background: var(--warn); min-width: 6px; }
+.opt-spendbar.is-skeleton { background: var(--surface2); }
 .opt-spendbar-legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-dim); }
 .opt-spendbar-legend > span { display: inline-flex; align-items: center; gap: 7px; }
 .opt-spendbar-legend .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; flex-shrink: 0; }
@@ -3029,63 +3024,22 @@ function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null
 
 
 // Per-analyzer legend-wording override for the component-waste chart/legend,
-// keyed by the API's stable `analyzer` registry name (never `title`, which is
-// display text). `placement` is the one entry today (CLAUDE.md anti-pattern
-// #22): its `past_overspend_usd`/`_tokens` is a PRICE difference on
-// the SAME tokens (the Batch API bills the same work at half rate, freeing
-// nothing), so its legend row must never wear the plain past-overspend
-// wording/tag every sibling analyzer shares here — this mirrors the wording
-// already used on its own card in `OptimizeFinding`. `apiOnly: true` also
-// drops the segment from this overlay entirely off api pricing, matching
-// that same card's `pricing_mode === 'api'` gate: off that plan there is no
-// dollar figure to show at all (batch's discount is an api-billed lever the
-// plan can't pull), and in token framing its count means "size of the
-// affected workload," not tokens freed, so showing it as "recoverable"
-// tokens would be exactly as dishonest as showing the dollar figure.
-const WASTE_LEGEND_OVERRIDE = {
-  placement: { tagText: 'estimated price difference', tagClass: 'price-diff-tag', apiOnly: true },
-};
+// `WASTE_LEGEND_OVERRIDE` is deleted with them. It carried one entry, for
+// `placement`, whose purpose was to keep the Batch-API lever off this overlay
+// on non-api pricing and to stop its legend row wearing the plain
+// past-overspend wording every sibling analyzer used. Both rules still hold and
+// both are still enforced where they are actually rendered: `placement`'s own
+// card in `OptimizeFinding` gates on `pricing_mode === 'api'` and carries the
+// "estimated price difference" wording itself. The override existed only to
+// mirror that onto a legend that no longer exists.
 
-// Build the cost-by-component + recoverable overlay from a /cost/components
-// response. `useTokens` (true only for LOCAL -- no marginal cost to price at
-// all) swaps measured cost $ → token volume and recoverable $ → recoverable
-// tokens, so the whole surface respects plan-tier framing. `isApi` gates
-// `WASTE_LEGEND_OVERRIDE` entries marked `apiOnly`. Returns null when
-// there's nothing to show.
-function buildComponentWaste(resp, useTokens, isApi) {
-  if (!resp || !resp.components) return null;
-  const costSegs = resp.components.map(c => ({
-    label: c.label, value: useTokens ? (c.tokens || 0) : (c.cost_usd || 0),
-  }));
-  const recSegs = (resp.recoverable || [])
-    .filter(r => {
-      const ov = WASTE_LEGEND_OVERRIDE[r.analyzer];
-      return !(ov && ov.apiOnly && !isApi);
-    })
-    .map(r => ({
-      title: r.title, component: r.component, analyzer: r.analyzer,
-      value: useTokens ? (r.past_overspend_tokens || 0) : (r.past_overspend_usd || 0),
-      usd: r.past_overspend_usd, tokens: r.past_overspend_tokens,
-      basis: r.estimate_basis || '', caveat: r.caveat || '',
-    }))
-    .filter(r => r.value > 0);
-  const totalCost = costSegs.reduce((s, c) => s + c.value, 0);
-  if (totalCost <= 0 && recSegs.length === 0) return null;
-  return { costSegs, recSegs };
-}
-
-// When one token component is essentially all the measured spend (>95%), the
-// stacked "Cost" bar reads as a single block — so surface a small explanatory
-// split label rather than leaving the reader to guess (#251). Returns null when
-// no component dominates that strongly.
-function dominantSplit(costSegs) {
-  const segs = (costSegs || []).filter(s => (s.value || 0) > 0);
-  const total = segs.reduce((s, c) => s + (c.value || 0), 0);
-  if (total <= 0 || segs.length < 2) return null;
-  const top = segs.reduce((a, b) => (b.value > a.value ? b : a), segs[0]);
-  const pct = (100 * top.value) / total;
-  return pct > 95 ? { label: top.label, pct: pct.toFixed(1) } : null;
-}
+// `buildComponentWaste` and `dominantSplit` lived here and are deleted with the
+// segmented composition chart they existed for. Both took the /cost/components
+// response apart into per-component bar segments (input / output / cache read /
+// cache write) and a ">95% of spend is one component" label for when that stack
+// collapsed to a single block. The spend surface is now ONE bar whose width is
+// the total and whose shaded region is the overspend ceiling, so there are no
+// segments to build and no dominance to explain. Nothing else called either.
 
 // ============================
 // SDK Services zone (#306)
@@ -3102,6 +3056,39 @@ function _sdkErrClass(pct) {
 function _sdkErrColor(pct) {
   return pct > 0.5 ? 'var(--error)' : pct > 0 ? 'var(--warn)' : 'var(--success)';
 }
+// The name to SHOW for an agent, with the tool prefix already stripped by the
+// server (`alerts.agent_display_name`). The stripping RULE lives there, beside
+// the prefix list that defines what an interactive coding agent is, so it
+// cannot drift from the classifier; this side only supplies the fallback for a
+// payload written before the field existed.
+//
+// `agent_id` remains the identity everywhere it matters — every link, filter,
+// query parameter and dedup key on this page still uses it, and every rendered
+// name carries it as a `title` so the full id is one hover away.
+function agentName(row) {
+  return (row && (row.agent_display_name || row.agent_id)) || '-';
+}
+
+// Stripping a shared prefix can make two DIFFERENT agents render identically:
+// `claude-code-api` and `codex-api` both shorten to `api`. That is a list-level
+// property, so it cannot be decided per row on the server. Any short name
+// claimed by more than one id in the SAME list reverts to the full id for every
+// row involved, so two rows never present as the same thing.
+function disambiguateAgentNames(rows) {
+  const byName = new Map();
+  for (const r of rows || []) {
+    const n = agentName(r);
+    if (!byName.has(n)) byName.set(n, new Set());
+    byName.get(n).add(r && r.agent_id);
+  }
+  const out = new Map();
+  for (const r of rows || []) {
+    const n = agentName(r);
+    out.set(r && r.agent_id, byName.get(n).size > 1 ? (r.agent_id || n) : n);
+  }
+  return out;
+}
+
 // How many SDK sessions the history list asks for. A cap, disclosed as `N+`
 // where it bites — never rendered as a total (root anti-pattern 22b).
 const SDK_HISTORY_LIMIT = 50;
@@ -3171,6 +3158,7 @@ function SdkSessionHistory({ history, framing }) {
   if (!history.sessions.length) return null;
 
   const rows = history.sessions;
+  const names = disambiguateAgentNames(rows);
   const agents = new Set(rows.map(s => s.agent_id).filter(Boolean));
   return html`
     <div class="section-gap"></div>
@@ -3188,7 +3176,7 @@ function SdkSessionHistory({ history, framing }) {
             <tr key=${s.session_id} class=${s.session_id ? 'clickable' : ''}
                 onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
               <td class="a-id">${s.session_id ? s.session_id.slice(0, 8) : '-'}</td>
-              <td class="a-agent" title=${s.agent_id || ''}>${s.agent_id || '-'}</td>
+              <td class="a-agent" title=${s.agent_id || ''}>${names.get(s.agent_id) || agentName(s)}</td>
               <td class="num" style="color:var(--text);font-weight:600">${fmtFramedDollar(s.total_cost_usd, framing)}</td>
               <td class="dim">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
               <td class="num dim">${s.tool_call_count != null ? s.tool_call_count : '-'}</td>
@@ -3227,7 +3215,7 @@ function SdkServicesPanel({ services, framing, history }) {
     return html`
       <div class="svc-row clickable" title="Open service traces & cost"
            onClick=${() => openTraces(s.agent_id)}>
-        <div class="svc-name"><span class="status-dot live"></span>${s.agent_id}</div>
+        <div class="svc-name" title=${s.agent_id || ''}><span class="status-dot live"></span>${agentName(s)}</div>
         <div class="svc-metric">$${(s.today_cost || 0).toFixed(2)}<span class="unit">/day</span></div>
         <div class="spark-wrap">
           <div class="spark-col" style="flex:1;min-width:1px">
@@ -3256,7 +3244,7 @@ function SdkServicesPanel({ services, framing, history }) {
       <div class=${'inact-row clickable ' + (quiet ? 'quiet' : 'dormant')}
            title=${quiet ? 'Was steady and just stopped; check for an incident' : 'Long silent; likely decommissioned'}
            onClick=${() => openTraces(s.agent_id)}>
-        <div class="inact-name"><span class="status-dot ${dotCls}"></span>${s.agent_id}</div>
+        <div class="inact-name" title=${s.agent_id || ''}><span class="status-dot ${dotCls}"></span>${agentName(s)}</div>
         <div><span class=${'inact-tag ' + tagCls}>${tag}</span></div>
         <div class="inact-flat">${_flatlineSvg(flatColor)}<span class="inact-flatline">${extra}</span></div>
         <div class="inact-meta"><span class="inact-seen">${seen}</span><br/>$${(s.today_cost || 0).toFixed(2)}<span class="unit"> today</span></div>
@@ -3461,6 +3449,11 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // are content-defined, not a user-selected view (#306).
   const codingAgents = agents.filter(a => a.kind === 'coding');
   const codingArchived = (data.archived || []).filter(s => s.kind === 'coding' && (!agentId || s.agent_id === agentId));
+  // Short names, disambiguated WITHIN each list: the cards and the archive are
+  // two lists, so each resolves its own collisions rather than sharing a map
+  // that could shorten a name in one on the strength of the other's contents.
+  const cardNames = disambiguateAgentNames(codingAgents);
+  const archNames = disambiguateAgentNames(codingArchived);
 
   // Group coding tiles by project (service.namespace). Agents whose telemetry
   // carried no namespace fall under "Ungrouped".
@@ -3502,7 +3495,9 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   };
 
   const agentCard = (a) => {
-    const displayName = a.label || a.agent_id;
+    // The card's own name: a user-set label wins, else the agent's display
+    // name (project without the tool prefix), never the raw id.
+    const displayName = a.label || cardNames.get(a.agent_id) || agentName(a);
     const isEditing = a.session_id && editingId === a.session_id;
     const startEdit = a.session_id
       ? (e) => { e.preventDefault(); e.stopPropagation(); setEditValue(displayName); setEditingId(a.session_id); }
@@ -3563,7 +3558,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
               ending cleanly — is a genuinely different state, so it alone keeps a
               badge. */ ''}
         <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}${s.status === 'stale' ? html` <span class="badge badge-stale" style="margin-left:4px">stale</span>` : null}</td>
-        <td class="a-agent" title=${s.agent_id || ''}>${s.agent_id || '-'}</td>
+        <td class="a-agent" title=${s.agent_id || ''}>${archNames.get(s.agent_id) || agentName(s)}</td>
         <td class="num" style="color:var(--text);font-weight:600">${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
         <td class="dim">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
         <td class="dim">${dur}</td>
@@ -4389,7 +4384,13 @@ function SessionDetailView({ sessionId }) {
   const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
   const isLocal = s.pricing_mode === 'local';
   const framing = data.framing || null;
-  const title = s.label || s.agent_id;
+  // Same rule as the Sessions lists: a user-set label wins, else the agent's
+  // display name. One record, so there is no list to disambiguate against.
+  const title = s.label || s.agent_display_name || s.agent_id;
+  // Whether this session has a real compute-time figure. `> 0` rather than
+  // `!= null`: see the tile below for why a zero sum is absence, not a
+  // measurement.
+  const hasActiveCompute = s.active_seconds != null && s.active_seconds > 0;
 
   return html`
     ${backBtn}
@@ -4414,9 +4415,34 @@ function SessionDetailView({ sessionId }) {
         <div class="ses-tile-v">${s.tool_call_count}</div>
         <div class="ses-tile-l">tool calls</div>
       </div>
+      ${/* COMPUTE TIME WHEN THERE IS ONE, TOKENS WHEN THERE IS NOT — and the
+            label always names the figure beside it, so the tile can never
+            present tokens under a compute-time heading.
+
+            `active_seconds` is SUM(duration_ms) over the session's spans
+            (`core/db.session_active_seconds`), and duration_ms is populated for
+            some ingested spans and not others. It is not a per-persona split:
+            measured on a real corpus, SDK sessions carry it in full while
+            coding sessions carry it for a minority, with the share falling in
+            recent months. So the fallback is decided per SESSION, not per
+            persona, and both personas can take either branch.
+
+            Zero is treated as absent rather than shown as `0s`. A sum of
+            durations that lands on zero means the spans recorded no duration,
+            not that the session did no work, and `0s` states the second. The
+            dash this replaced was honest but useless; a wrong number is worse
+            than either, which is why nothing here derives a duration from
+            adjacent timestamps (that measures wall clock, which the tile beside
+            this one already shows, and the two diverge sharply on a resumed
+            session). */ ''}
       <div class="ses-tile">
-        <div class="ses-tile-v">${s.active_seconds != null ? fmtDurLong(s.active_seconds * 1000) : '-'}</div>
-        <div class="ses-tile-l">active (compute time)</div>
+        ${hasActiveCompute ? html`
+          <div class="ses-tile-v">${fmtDurLong(s.active_seconds * 1000)}</div>
+          <div class="ses-tile-l">active (compute time)</div>
+        ` : html`
+          <div class="ses-tile-v">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</div>
+          <div class="ses-tile-l">tokens in / out <span class="info-btn">i<span class="info-tip">Compute time is unavailable for this session: its spans carry no recorded duration. Tokens are shown instead rather than a blank tile.</span></span></div>
+        `}
       </div>
       <div class="ses-tile">
         <div class="ses-tile-v">${fmtDurLong(s.duration_seconds != null ? s.duration_seconds * 1000 : null)}</div>
@@ -6241,7 +6267,12 @@ function BudgetView({ params }) {
   // reach the outer .catch below. That catch names WHICH request failed and
   // its status rather than surfacing api()'s bare `API <status>` message.
   const load = () => Promise.all([
-    api('/budget').catch(e => { throw new Error('/budget failed: ' + e.message); }),
+    // SDK-SCOPED at the source. Budgets are an SDK-workflow feature and this
+    // screen is a tab of the Sessions SDK-services zone, so the coding-tool
+    // caps are dropped server-side rather than filtered here — a view that
+    // forgot the filter would otherwise publish caps for agents this surface
+    // does not cover.
+    api('/budget', { persona: 'sdk' }).catch(e => { throw new Error('/budget failed: ' + e.message); }),
     api('/alerts', { type: 'cost_budget_daily', since: '24h' })
       .then(d => d.alerts || [])
       .catch(() => []),
@@ -6311,13 +6342,12 @@ function BudgetView({ params }) {
     <div class="page-title" style="margin-bottom:4px">Budget</div>
     ${TableRowsSkeleton(['Scope', 'Daily (USD)', ''], 6)}`;
 
-  // Two zones per the Budget-page redesign (see api/routes/budget.py):
-  // coding-tool groups (one row per TOOL, summed across every member
-  // agent_id, e.g. every claude-code-<project> variant) and SDK workflow
-  // agents (one row per declared agent_id, unchanged). Neither zone reads
-  // the legacy top-level `defaults`/`agents` keys — those exist only so an
-  // old, already-shipped client build doesn't crash.
-  const codingGroups = Object.entries(data.coding.groups || {});
+  // ONE zone. The coding-tool zone is gone by product decision: a budget is a
+  // spend cap on a deployed workload, so budgets are an SDK-workflow feature
+  // and a coding-agent cap has nowhere honest to render here. The server
+  // already returns no coding groups for this scope; not reading them is the
+  // second half of the same decision, so neither side alone can put one back.
+  // The legacy top-level `defaults`/`agents` keys are still not read.
   const sdkAgents = Object.entries(data.sdk.agents || {});
   const providerBudgets = data.provider_budgets || {};
   // Every provider we know about: configured + the one deep-linked from
@@ -6343,42 +6373,7 @@ function BudgetView({ params }) {
       </div>` : null}
     ${provider ? html`<div class="filters"><button class="btn" onClick=${() => navigate('budget', {}, {})}>provider: ${provider} ✕</button></div>` : null}
 
-    <div style="font-size:13px;font-weight:600;margin-bottom:8px">Coding-tool budget caps</div>
-    <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
-      One daily ceiling per coding tool (Claude Code, Codex), checked against every session that
-      tool runs today summed together, including every Claude Code project variant under one row.
-      Enforcement runs at session end, not the instant spend crosses the line. Clear a field or
-      enter 0 to remove a limit. Changes are written to your config file immediately.
-    </div>
-    <div class="panel"><div class="table-wrap"><table>
-      <thead><tr><th>Tool</th><th>Daily (USD)</th><th></th></tr></thead>
-      <tbody>
-        <${DailyBudgetRow}
-          scope="defaults_coding"
-          label="defaults"
-          daily=${data.coding.defaults.daily_usd}
-          onSave=${handleSave}
-        />
-        ${codingGroups.map(([gid, g]) => html`
-          <${DailyBudgetRow}
-            key=${gid}
-            scope=${'group:' + gid}
-            label=${gid}
-            sublabel=${g.members.length > 1 ? g.members.length + ' agent ids merged into this cap' : null}
-            daily=${g.configured.daily_usd}
-            effectiveDaily=${g.effective.daily_usd}
-            onSave=${handleSave}
-          />
-        `)}
-        ${codingGroups.length === 0 ? html`
-          <tr><td colspan="3" class="empty-cell">
-            No coding-tool sessions recorded yet. Run Claude Code or Codex once to register it.
-          </td></tr>
-        ` : null}
-      </tbody>
-    </table></div></div>
-
-    <div style="font-size:13px;font-weight:600;margin-top:28px;margin-bottom:8px">SDK workflow budget caps</div>
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px">SDK workflow budget caps</div>
     <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
       One daily ceiling per SDK-declared workflow agent, checked at session end. A per-session cap
       already set in your config file keeps being enforced; it is no longer editable from this
@@ -7998,10 +7993,7 @@ function OptimizeView({ params, navParam, persona }) {
   // LOCAL only -- subscription no longer suppresses (product decision: tj
   // does not differentiate subscription-billed from API-billed users).
   const useTokens = !!compFraming && compFraming.pricing_mode === 'local';
-  const compIsApi = !!compFraming && compFraming.pricing_mode === 'api';
-  const waste = buildComponentWaste(st.comp, useTokens, compIsApi);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
-  const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;
 
   // Summarize (Track A) box — the honest DEC-032 tile set (files · est tokens
   // recoverable/call · avg prose reduction), rendered straight from the filesystem
@@ -8061,15 +8053,6 @@ function OptimizeView({ params, navParam, persona }) {
         href: (actionable && detailSet.has(t.name)) ? ('#/optimize/' + t.name) : null,
       };
     });
-
-  // Spend-by-component share bar: biggest component first so the rank/tone ramp
-  // reads left-to-right, and every percentage divides the SAME total the legend
-  // amounts add up to (root anti-pattern 22b — two figures published together
-  // have to cover one population).
-  const spendSegs = waste
-    ? waste.costSegs.filter(s => (s.value || 0) > 0).slice().sort((a, b) => b.value - a.value)
-    : [];
-  const spendTotal = spendSegs.reduce((s, c) => s + c.value, 0);
 
   // DETAIL SUB-PAGE (`#/optimize/<analyzer>`): render THAT analyzer's section
   // alone, reusing the exact OptimizeFinding card the summary used to stack. A
@@ -8218,37 +8201,95 @@ function OptimizeView({ params, navParam, persona }) {
       </div>` : null}
 
     ${!st.loading && scan.known && st.opt ? html`
-      ${spendSegs.length ? html`
+      ${/* ONE BAR. The whole width is measured spend for the window; the
+            shaded region inside it is the overspend ceiling. It replaces the
+            segmented input/output/cache-read/cache-write composition chart:
+            that answered "what did the money go on", which is a question the
+            per-analyzer list below already answers in the only terms that lead
+            anywhere, an actual fix.
+
+            THE CLAIM THIS BAR MUST NOT MAKE. `recoverable_additive` is false:
+            the per-analyzer estimates are computed from overlapping angles on
+            the same sessions, so the total is a CEILING across analyzers rather
+            than a slice of spend anyone could bank. Drawing it as a filled
+            portion of a total makes it look like a measured sub-amount, so the
+            server's own overlap note sits directly under the bar rather than
+            somewhere the eye skips, and the legend names the region "ceiling"
+            rather than a recoverable amount. The largest single line is the one
+            entry that IS honest standalone (it is not a sum of anything), so it
+            stays one click away as the safest number to act on first. */ ''}
+      ${(() => {
+        const c = st.comp;
+        // Gated on the OVERLAY's own state, never on the page. The component
+        // total is a live query and is known as soon as this read lands; the
+        // recoverable figure comes from the stored analyzer report and can be
+        // cold long after. Two sources, two states, and only one of them may
+        // license a claim about waste.
+        // BOTH figures read the same basis. A local-pricing reader sees tokens
+        // rather than dollars (framing), and taking the total from the dollar
+        // field while formatting it as tokens would print a spend figure under
+        // a token label — the two are not interchangeable and the payload
+        // carries both.
+        const totalField = useTokens ? 'total_tokens' : 'total_cost_usd';
+        const overField = useTokens ? 'total_recoverable_tokens' : 'total_recoverable_usd';
+        const recKnown = !!(c && c.recoverable_available && c[overField] != null);
+        const recPending = !!c && !recKnown
+          && (c.recoverable_status === 'never_run' || c.recoverable_status === 'computing'
+              || c.recoverable_status === 'error' || c.recoverable_available === false);
+        const total = c ? (c[totalField] || 0) : 0;
+        if (!c || total <= 0) return null;
+        // The FIGURE is never clamped; only the WIDTH is. The ceiling sums
+        // overlapping per-analyzer estimates, so it can legitimately come out
+        // larger than the window's measured spend — and when it does, that is
+        // the single most important thing this surface can say about how much
+        // the estimates overlap. Clamping the number would hide it and, worse,
+        // would print a value the data never produced under a measured label.
+        const over = recKnown ? Math.max(0, c[overField]) : 0;
+        const overPct = recKnown && total > 0 ? Math.min(100, (over / total) * 100) : 0;
+        const overExceedsSpend = recKnown && over > total;
+        return html`
         <div class="section-band">Where your spend went<span class="hint">· ${useTokens ? 'tokens' : 'measured spend'}, this window</span></div>
         <div class="panel">
           <div class="panel-body">
-            <div class="opt-spendbar">
-              ${spendSegs.map((s, i) => html`<span key=${s.label}
-                style=${'width:' + (spendTotal > 0 ? (s.value / spendTotal) * 100 : 0) + '%;background:var(--tone-' + Math.min(i + 1, 7) + ')'}
-                title=${s.label}></span>`)}
+            ${/* UNRESOLVED renders a flat skeleton bar with NO shaded region and
+                  NO figure. It must not render a zero-width portion or a $0.00,
+                  because an unshaded bar reads as "no waste found", which is the
+                  most reassuring thing this surface could possibly say and the
+                  one it has no evidence for. */ ''}
+            <div class=${'opt-spendbar' + (recKnown ? '' : ' is-skeleton')}>
+              ${recKnown && over > 0 ? html`<span class="opt-spendbar-over"
+                style=${'width:' + overPct + '%'}
+                title=${'Overspend ceiling: ' + wasteFmtY(over) + ' of ' + wasteFmtY(total)}></span>` : null}
             </div>
             <div class="opt-spendbar-legend">
-              ${spendSegs.map((s, i) => html`<span key=${s.label}>
-                <span class="swatch" style=${'background:var(--tone-' + Math.min(i + 1, 7) + ')'}></span>
-                ${s.label} <b>${wasteFmtY(s.value)}</b>
-                <span class="pct">${spendTotal > 0 ? ((s.value / spendTotal) * 100).toFixed(0) : 0}%</span>
-              </span>`)}
+              <span><span class="swatch" style="background:var(--tone-1)"></span>
+                Total spend <b>${wasteFmtY(total)}</b></span>
+              ${recKnown ? html`
+                <span><span class="swatch" style="background:var(--warn)"></span>
+                  Overspend ceiling <b>${wasteFmtY(over)}</b>
+                  <span class="pct">${overExceedsSpend ? 'exceeds measured spend'
+                    : (overPct < 1 && over > 0 ? '<1' : overPct.toFixed(0)) + '%'}</span></span>`
+              : html`
+                <span><span class="swatch" style="background:var(--surface2)"></span>
+                  Overspend ceiling <b>${UNKNOWN_FIGURE}</b>
+                  <span class="pct">${recPending ? 'not measured yet' : 'unknown'}</span></span>`}
             </div>
-            ${/* What the split is FOR, in one line: it is measured spend, and
-                  the money already lost inside it is itemised per analyzer in
-                  the list below rather than stacked into a second bar here. The
-                  server's own overlap note stays verbatim — it is the reason
-                  those per-analyzer figures must not simply be added up. */ ''}
-            <div class="opt-spendbar-foot">
-              What you already overspent inside this is itemised per analyzer below: money the window has already been billed for, not a projection of future savings.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}
-            </div>
-            ${st.comp && st.comp.largest_recoverable_analyzer ? html`
+            ${recKnown ? html`
+              <div class="opt-spendbar-foot">
+                The shaded part is a ceiling across every analyzer, not a slice of the total you could bank.${c.recoverable_overlap_note ? ' ' + c.recoverable_overlap_note : ''}${overExceedsSpend ? ' Here that ceiling is larger than the window\u2019s measured spend, which is only possible because the estimates overlap; treat it as an upper bound, not an amount.' : ''}
+              </div>` : html`
+              <div class="opt-spendbar-foot">
+                ${c.recoverable_status === 'computing' ? 'The analyzer scan is still running, so no overspend figure exists for this window yet.'
+                  : c.recoverable_status === 'error' ? 'The last analyzer scan failed, so nothing has been measured. This is not a report of zero waste.'
+                  : 'No analyzer scan has completed yet, so no overspend figure exists for this window. This is not a report of zero waste.'}
+              </div>`}
+            ${recKnown && c.largest_recoverable_analyzer ? html`
               <div class="opt-spendbar-foot" style="margin-top:4px">
-                Biggest single cause: <b style="color:var(--text)">${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.
+                Biggest single cause: <b style="color:var(--text)">${fmtFramedSavings(c.largest_recoverable_usd, c.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(c.largest_recoverable_analyzer, since)}>${(ANALYZER_META[c.largest_recoverable_analyzer] && ANALYZER_META[c.largest_recoverable_analyzer].title) || capitalize(c.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else, so it's the safest number to act on first.
               </div>` : null}
-            ${wasteDominant ? html`<div class="opt-spendbar-foot" style="margin-top:4px">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
           </div>
-        </div>` : null}
+        </div>`;
+      })()}
 
       ${/* ONE unified action list. Each analyzer/action is a compact row —
             title, one-line hint, its figure, and a Review button that opens the
@@ -13413,19 +13454,27 @@ function PersonaPicker({ bare } = {}) {
     </span>`;
 }
 
-// Views that render `PersonaPicker` themselves, as the FIRST item of their own
-// header-right group so it reads before the controls that scope the page (the
-// window picker, then Rescan). App() must not also float the fallback for
-// these, or the switcher appears twice. Anything not listed here has no
-// header-right group of its own and gets the floated fallback instead.
-const VIEWS_WITH_PERSONA_SLOT = new Set(['dashboard', 'optimize', 'sessions', 'review']);
-
-// The fallback for every page with no header-right group of its own. Floated
-// so it shares the line with a heading that follows it in source, rather than
-// taking a row above every such page.
-function PersonaBar() {
-  return html`<div class="persona-bar"><${PersonaPicker} /></div>`;
-}
+// THE views that show the persona picker, and the ONLY ones. Each renders it
+// itself, in its own header beside the page title.
+//
+// This used to be a list of views with a header slot, with every OTHER view
+// getting a floated fallback bar instead — which put the same control top-LEFT
+// beside the title on some pages and top-RIGHT on others, so it moved as the
+// reader navigated. The fallback is deleted rather than restyled: a control
+// that has to be positioned twice will drift twice.
+//
+// Membership is decided by whether the persona changes what the page SHOWS, not
+// by whether the page has somewhere convenient to put a dropdown. Traces, FAQ,
+// Relearn and Summarize read no persona and render identically for either one,
+// so a picker there is a control that changes nothing — worse than an
+// inconsistent one, because it invites the reader to believe the page responded.
+// Spend is absent for the same reason plus a stronger one: it is hidden from
+// both personas (see PERSONA_HIDDEN_DELIBERATE).
+//
+// `review` was in the predecessor of this list and is gone: that route has
+// aliased to the Dashboard since the Review page was retired, so the entry
+// matched no view at all.
+const PERSONA_PICKER_VIEWS = new Set(['dashboard', 'optimize', 'sessions']);
 
 // Reconcile the sidebar to the current route + persona: active-highlight, reveal
 // the active section's nav-children, and keep the lens pill in sync. Module-level
@@ -13724,13 +13773,12 @@ function App() {
   // detail drill-in (mounted fresh, keyed by id) overlays the hidden stack.
   const personaCtx = { persona, detected: personaInfo.detected, known: personaInfo.known,
                        counts: personaInfo.counts, onChange: setPersona };
-  // The floated fallback is suppressed for views that render the picker inside
-  // their own header-right group; a detail drill-in never has one, so it always
-  // takes the fallback regardless of which primary view is behind it.
-  const ownsPersonaSlot = !detail && VIEWS_WITH_PERSONA_SLOT.has(primaryKey);
+  // No app-level picker of any kind. Each of PERSONA_PICKER_VIEWS renders its
+  // own, in its own header beside its own title, so the control has exactly one
+  // position in the product. A detail drill-in shows none: a session or trace is
+  // one record, and the persona does not reinterpret it.
   return html`
     <${PersonaCtx.Provider} value=${personaCtx}>
-    ${ownsPersonaSlot ? null : html`<${PersonaBar} />`}
     ${PRIMARY_VIEWS.map(([key, Comp]) => {
       if (!mounted.has(key)) return null;
       const isActive = !detail && key === primaryKey;

@@ -6,7 +6,7 @@ from datetime import timedelta, timezone
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.alerts import is_interactive_coding_agent
+from tokenjam.core.alerts import agent_display_name, is_interactive_coding_agent
 from tokenjam.core.transcript import (
     resolve_projects_root,
     session_transcript_mtime,
@@ -167,6 +167,11 @@ def _build_archive(
             continue
         archived.append({
             "agent_id": s.agent_id,
+            # DISPLAY ONLY, resolved here so every surface that shows this name
+            # shows the same one. `agent_id` stays the identity beside it and is
+            # what links, filters and dedup keys use — see
+            # `alerts.agent_display_name`.
+            "agent_display_name": agent_display_name(s.agent_id),
             "kind": "coding" if is_interactive_coding_agent(s.agent_id) else "sdk",
             "namespace": namespace,
             "session_id": s.session_id,
@@ -273,6 +278,7 @@ def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
 
             services.append({
                 "agent_id": aid,
+                "agent_display_name": agent_display_name(aid),
                 "kind": "sdk",
                 "namespace": _project_for(config, aid),
                 "state": state,
@@ -395,6 +401,7 @@ async def get_status(
                 sess_alerts = len(active_alerts)
             agents_data.append({
                 "agent_id": aid,
+                "agent_display_name": agent_display_name(aid),
                 "kind": "coding" if is_interactive_coding_agent(aid) else "sdk",
                 "namespace": namespace,
                 "status": _live_status(session, idle_threshold, projects_root),

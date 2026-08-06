@@ -1154,3 +1154,161 @@ def test_no_view_references_a_binding_its_refactor_deleted(html: str) -> None:
     # The alerts row now gates on a binding that IS declared on this page.
     assert "${a.active_alerts > 0 && showSdkZone ?" in html
     assert "const showSdkZone = showSdkZoneFor(persona, personaKnown);" in html
+
+
+# --------------------------------------------------------------------------- #
+# The persona picker has ONE position.
+# --------------------------------------------------------------------------- #
+def test_the_persona_picker_has_exactly_one_placement_mechanism(html: str) -> None:
+    """It used to have two: an in-header slot for four named views, and a
+    floated fallback bar for every other view. The fallback was `float: right`,
+    so the same control sat beside the title on some pages and at the far right
+    on others, and moved as the reader navigated.
+
+    The fallback is DELETED rather than restyled. A control positioned in two
+    places will drift in two places.
+    """
+    assert "const PERSONA_PICKER_VIEWS = new Set(['dashboard', 'optimize', 'sessions']);" in html
+    # The float, its component, and the app-level render site are all gone.
+    assert "function PersonaBar(" not in html
+    assert "VIEWS_WITH_PERSONA_SLOT" not in html
+    assert ".persona-bar { float: right" not in html
+    assert "${ownsPersonaSlot ? null : html`<${PersonaBar} />`}" not in html
+
+
+def test_the_picker_is_absent_from_views_the_persona_does_not_change(
+    html: str,
+) -> None:
+    """A control that changes nothing is worse than a misplaced one: it invites
+    the reader to believe the page responded to it.
+
+    Traces, FAQ, Relearn and Summarize read no persona and render identically
+    for either, so they show no picker. Asserted structurally — none of those
+    components takes a `persona` prop — so the day one of them becomes
+    persona-aware, this test is what says the picker has to come back with it.
+    """
+    for view in ("dashboard", "optimize", "sessions"):
+        assert f"'{view}'" in html[html.index("const PERSONA_PICKER_VIEWS"):][:200]
+    for fn in ("function TracesListView(", "function AnalyzerGuideView(",
+               "function RulesView(", "function SummarizeView("):
+        sig = html[html.index(fn):][: len(fn) + 60]
+        assert "persona" not in sig, f"{fn} now takes a persona; give it a picker"
+
+
+# --------------------------------------------------------------------------- #
+# Spend: one bar, total wide, overspend shaded inside it.
+# --------------------------------------------------------------------------- #
+def test_the_overspend_portion_cannot_render_while_its_fetch_is_unresolved(
+    html: str,
+) -> None:
+    """THE pin. The bar's width is a live query; the shaded region comes from
+    the stored analyzer report and can be cold long after. Two sources, two
+    states, and only one of them may license a claim about waste.
+
+    An unshaded bar reads as "no waste found" — the most reassuring thing this
+    surface could say and the one it has least evidence for. So the unresolved
+    state renders a skeleton bar with no region and no figure, never a
+    zero-width portion and never a zero amount.
+    """
+    bar = html[html.index("      ${(() => {\n        const c = st.comp;"):]
+    bar = bar[: bar.index("      ${/* ONE unified action list.")]
+    # Gated on the overlay's OWN availability, not on a page-wide flag.
+    assert "c.recoverable_available && c[overField] != null" in bar
+    # The shaded region requires the resolved state AND a real figure.
+    assert "${recKnown && over > 0 ? html`<span class=\"opt-spendbar-over\"" in bar
+    # And it must be sized to the real proportion. Shipped once without this:
+    # the CSS min-width (a legibility floor for a few-percent figure) was then
+    # the ONLY width, so a 19% ceiling drew as 0.6% of the bar and the picture
+    # contradicted the legend beside it.
+    assert "style=${'width:' + overPct + '%'}" in bar
+    # Only the WIDTH clamps. The ceiling sums overlapping estimates, so it can
+    # legitimately exceed the window's measured spend; clamping the FIGURE
+    # would print a value the data never produced under a measured label, and
+    # would hide the one thing that case tells you about the overlap.
+    assert "const over = recKnown ? Math.max(0, c[overField]) : 0;" in bar
+    assert "Math.min(100, (over / total) * 100)" in bar
+    assert "const overExceedsSpend = recKnown && over > total;" in bar
+    assert "exceeds measured spend" in bar
+    # Unresolved renders the skeleton class and the unknown glyph, not a zero.
+    assert "'opt-spendbar' + (recKnown ? '' : ' is-skeleton')" in bar
+    assert "Overspend ceiling <b>${UNKNOWN_FIGURE}</b>" in bar
+    # Comment prose names the forbidden literals to explain them, so the
+    # check runs against code only.
+    bar_code = re.sub(r"/\*.*?\*/", "", bar, flags=re.S)
+    assert "$0.00" not in bar_code and ">0%<" not in bar_code
+
+
+def test_the_bar_carries_its_own_overlap_disclosure(html: str) -> None:
+    """`recoverable_additive` is false: the estimates overlap, so the total is a
+    CEILING across analyzers, not a slice of spend anyone could bank. Drawn as a
+    filled portion of a total it looks like a measured sub-amount, so the
+    server's own note travels WITH the bar rather than living where the eye
+    skips, and the legend says "ceiling" rather than naming a recoverable
+    amount."""
+    bar = html[html.index("      ${(() => {\n        const c = st.comp;"):]
+    bar = bar[: bar.index("      ${/* ONE unified action list.")]
+    assert "c.recoverable_overlap_note" in bar
+    assert "not a slice of the total you could bank" in bar
+    assert "Overspend ceiling" in bar
+    # The one standalone-honest figure stays reachable.
+    assert "largest_recoverable_analyzer" in bar
+    # Both figures read the SAME basis; a local-pricing reader must not get a
+    # dollar total formatted as tokens.
+    assert "const totalField = useTokens ? 'total_tokens' : 'total_cost_usd';" in bar
+    assert "const overField = useTokens ? 'total_recoverable_tokens' : 'total_recoverable_usd';" in bar
+    # The retired segmented composition chart and its helpers are gone.
+    assert "function buildComponentWaste(" not in html
+    assert "function dominantSplit(" not in html
+    assert "spendSegs" not in html
+
+
+# --------------------------------------------------------------------------- #
+# Session names show the project, not the raw prefixed agent id.
+# --------------------------------------------------------------------------- #
+def test_rendered_session_names_strip_the_tool_prefix_but_keep_the_id(
+    html: str,
+) -> None:
+    """Display only. `agent_id` stays the identity for links, filters and dedup
+    keys, and every rendered name carries it as a `title`."""
+    assert "function agentName(row)" in html
+    assert "row.agent_display_name || row.agent_id" in html
+    # The stripping RULE is server-side (beside the prefix list that defines
+    # what a coding agent is), so the UI cannot grow a second copy of it.
+    # Comments are stripped first: the helpers explain themselves with a
+    # worked example that names a prefix, and the explanation is worth more
+    # than a looser pattern.
+    code = re.sub(r"/\*.*?\*/", "", html, flags=re.S)
+    code = "\n".join(l for l in code.splitlines() if not l.strip().startswith("//"))
+    helpers = code[code.index("function agentName(row)"):]
+    helpers = helpers[: helpers.index("const SDK_HISTORY_LIMIT")]
+    assert "claude-code" not in helpers, "the prefix rule must stay server-side"
+    # Every list that renders a name uses the helper, and keeps the id on hover.
+    assert '<td class="a-agent" title=${s.agent_id || \'\'}>${names.get(s.agent_id) || agentName(s)}</td>' in html
+    assert '<td class="a-agent" title=${s.agent_id || \'\'}>${archNames.get(s.agent_id) || agentName(s)}</td>' in html
+    assert "const displayName = a.label || cardNames.get(a.agent_id) || agentName(a);" in html
+    assert "const title = s.label || s.agent_display_name || s.agent_id;" in html
+    # Collisions are a LIST property, so they are resolved per list.
+    assert "function disambiguateAgentNames(rows)" in html
+    assert "const cardNames = disambiguateAgentNames(codingAgents);" in html
+    assert "const archNames = disambiguateAgentNames(codingArchived);" in html
+
+
+# --------------------------------------------------------------------------- #
+# The active-compute tile falls back to tokens rather than a dash.
+# --------------------------------------------------------------------------- #
+def test_the_compute_tile_never_renders_a_zero_duration(html: str) -> None:
+    """A sum of span durations that lands on zero means the spans recorded no
+    duration, not that the session did no work. `0s` states the second."""
+    assert "const hasActiveCompute = s.active_seconds != null && s.active_seconds > 0;" in html
+    tile = html[html.index("      <div class=\"ses-tile\">\n        ${hasActiveCompute ? html`"):]
+    tile = tile[: tile.index("</div>\n      <div class=\"ses-tile\">")]
+    # The compute branch is the ONLY one carrying the compute label, and the
+    # fallback's label names the figure it actually shows.
+    assert "active (compute time)" in tile
+    assert "tokens in / out" in tile
+    compute_at = tile.index("active (compute time)")
+    tokens_at = tile.index("tokens in / out")
+    assert tile.index("fmtDurLong(s.active_seconds * 1000)") < compute_at
+    assert tile.index("fmtTokens(s.input_tokens)") < tokens_at
+    # The old unconditional dash is gone.
+    assert "${s.active_seconds != null ? fmtDurLong(s.active_seconds * 1000) : '-'}" not in html

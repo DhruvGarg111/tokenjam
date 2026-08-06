@@ -84,6 +84,47 @@ def is_interactive_coding_agent(agent_id: str | None) -> bool:
     return any(agent_id.startswith(p) for p in _INTERACTIVE_AGENT_PREFIXES)
 
 
+def agent_display_name(agent_id: str | None) -> str | None:
+    """The name to SHOW for an agent: the project, without the tool prefix.
+
+    ``claude-code-tokenjam`` renders as ``tokenjam``. Ingest stamps the tool
+    into the id (``core/backfill.py``'s ``_agent_id_from_cwd``), so every row on
+    a coding corpus otherwise repeats the same twelve characters before the only
+    part that differs, and the part that differs is the part being read.
+
+    **Display only.** The caller keeps ``agent_id`` for identity — filters,
+    links, query parameters, dedup keys — and this never travels in place of it.
+    It reads the SAME ``_INTERACTIVE_AGENT_PREFIXES`` that decides whether an
+    agent is an interactive coding agent at all, so the set cannot drift from
+    the classifier the way a second literal list in the UI would.
+
+    Three cases the corpus actually contains, each decided rather than left to
+    fall out of a ``removeprefix`` call:
+
+    * ``claude-code-tokenjam`` -> ``tokenjam``. The intended case.
+    * ``claude-code`` (no suffix at all, and common) -> ``claude-code``,
+      unchanged. There is no project to show, and the honest answer is the tool
+      that ran. Never the empty string: a blank cell reads as missing data.
+    * ``codex-app-server`` -> ``app-server``. The remainder is not a folder, but
+      it is still the specific thing that ran and it is what distinguishes the
+      row, so it is kept verbatim rather than special-cased into something
+      prettier and less true.
+
+    An SDK agent id is returned untouched: nothing prefixes it, and its id IS
+    its declared name.
+    """
+    if not agent_id:
+        return agent_id
+    for prefix in _INTERACTIVE_AGENT_PREFIXES:
+        if agent_id == prefix:
+            return agent_id
+        if agent_id.startswith(prefix + "-"):
+            # `or agent_id` covers a trailing-separator id (`claude-code-`),
+            # which would otherwise strip to nothing.
+            return agent_id[len(prefix) + 1:] or agent_id
+    return agent_id
+
+
 def _is_tool_execution(span: NormalizedSpan) -> bool:
     """True only for real tool-execution spans (``gen_ai.tool.call``).
 
