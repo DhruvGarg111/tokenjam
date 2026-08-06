@@ -31,6 +31,24 @@
 <link rel="stylesheet" href="/ui/vendor/uplot.css">
 <script src="/ui/vendor/uplot.js"></script>
 <style>
+/* Geist + Geist Mono: vendored variable woff2 (SIL OFL), served locally
+   under /ui/vendor/fonts/ via the /ui/vendor StaticFiles mount — no CDN,
+   per Critical Rule 18. One variable file per family covers the whole
+   weight range this stylesheet references (400/500/600/700 throughout). */
+@font-face {
+  font-family: 'Geist';
+  src: url('/ui/vendor/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/ui/vendor/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
 :root {
   /* Dark theme (default) — Vercel-style monochrome, matches tokenjam.dev */
   --bg: #000;
@@ -47,7 +65,6 @@
   --warn: #f5a623;
   --error: #ee0000;
   --success: #0ce490;
-  --info: #3d8eff;
   /* Chart series palette (issue #113). Re-read by uPlot at draw time so charts
      re-theme. Series colors must read in both light and dark. Expanded to 12
      hues (#234) so colorFor()'s name-hash rarely collides on real data; spaced
@@ -81,6 +98,42 @@
   --pad-row-y: 11px;    /* vertical padding of a list or table body row */
   --pad-head-y: 10px;   /* vertical padding of a head strip / table header */
   --stack-gap: 16px;    /* vertical gap between two stacked cards or panels */
+
+  /* ---- Radius scale (lens redesign) --------------------------------------
+     Exactly three radii in the whole system: panel/card, control
+     (button/select/input/snippet block), pill (status/severity badge).
+     Theme-invariant, like the spacing scale above — defined once here only. */
+  --radius-panel: 8px;
+  --radius-control: 6px;
+  --radius-pill: 4px;
+
+  /* ---- Rank/tone ramp (lens redesign) ------------------------------------
+     Monochrome descending-lightness ramp for RANK-ORDERED visuals (the
+     dashboard's "recoverable now" stacked bar + legend dots, opportunity-row
+     tone squares/mini-bars). Index 1 = biggest/first. Consumers index by
+     sort position only, never by category; overflow past index 7 clamps to
+     --tone-7. */
+  --tone-1: #ededed;
+  --tone-2: #c8c8c8;
+  --tone-3: #a1a1a1;
+  --tone-4: #7d7d7d;
+  --tone-5: #5c5c5c;
+  --tone-6: #3f3f3f;
+  --tone-7: #2e2e2e;
+
+  /* ---- Tinted badge/border alpha convention (lens redesign) --------------
+     Pair an -rgb triplet with an alpha token: rgba(var(--warn-rgb), var(--tint-bg)).
+     --tint-bg is the DEFAULT badge-background alpha (0.15) — a handful of
+     verbatim design call sites use a lower alpha for a deliberate distinction
+     (0.12 idle-vs-stale, 0.07 a full-width banner, 0.06 a row tint); use the
+     literal value directly at those sites rather than overloading this token.
+     --tint-border is the soft-tinted border alpha (caveat/attention cards). */
+  --brand-rgb: 61,142,255;
+  --success-rgb: 12,228,144;
+  --warn-rgb: 245,166,35;
+  --error-rgb: 238,0,0;
+  --tint-bg: 0.15;
+  --tint-border: 0.4;
 }
 [data-theme="light"] {
   --bg: #fff;
@@ -97,7 +150,6 @@
   --warn: #c47e0c;
   --error: #cc0000;
   --success: #0a8050;
-  --info: #0070f3;
   --chart-1: #0070f3;
   --chart-2: #0a8050;
   --chart-3: #c47e0c;
@@ -110,6 +162,22 @@
   --chart-10: #ea580c;
   --chart-11: #c026d3;
   --chart-12: #0284c7;
+
+  /* Rank/tone ramp, light — same role as the dark :root ramp above, derived
+     dark-on-light (index 1 = darkest/most prominent) rather than copied. */
+  --tone-1: #000000;
+  --tone-2: #2e2e2e;
+  --tone-3: #4d4d4d;
+  --tone-4: #666666;
+  --tone-5: #999999;
+  --tone-6: #c2c2c2;
+  --tone-7: #dcdcdc;
+
+  /* RGB triplets for the light-theme accent values (--brand is unchanged
+     between themes, so --brand-rgb isn't redeclared here). */
+  --success-rgb: 10,128,80;
+  --warn-rgb: 196,126,12;
+  --error-rgb: 204,0,0;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -308,6 +376,29 @@ body[data-persona="claude-code"] .health-glance { display: none; }
   margin-bottom: 20px;
   color: var(--text);
 }
+/* Section band label — a standalone page-section header ABOVE a panel (not
+   a panel's own head strip, which is `.panel-head`). New shared primitive
+   from the lens redesign token layer, for screens to adopt as they're
+   restyled; existing per-screen zone labels (`.rules-zone`, the dashboard's
+   own zone headings, etc.) predate it and are left alone here — this pass
+   is token-and-shell only, not a screen-body sweep. */
+.section-band {
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin: 26px 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-band .hint {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-faint);
+  font-weight: 400;
+}
 
 /* Cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--stack-gap); margin-bottom: 24px; }
@@ -480,7 +571,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .badge-closed, .badge-neutral { background: rgba(140,140,140,0.15); color: var(--text-dim); }
 .badge-critical { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-warning { background: rgba(245,166,35,0.15); color: var(--warn); }
-.badge-info { background: rgba(61,142,255,0.15); color: var(--info); }
+.badge-info { background: rgba(61,142,255,0.15); color: var(--brand); }
 
 /* Split zones — Status screen (#306) */
 .zone-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 14px; }
@@ -1212,7 +1303,7 @@ a.rec-tile:hover .rec-go { color: var(--accent); transform: translateX(2px); }
    of number (see budget-projection framing). */
 .forecast-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
+  letter-spacing: 0.04em; color: var(--brand); border: 1px solid var(--brand);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
 /* Distinct from .estimated-tag on purpose (CLAUDE.md anti-pattern #22, trap
@@ -1221,7 +1312,7 @@ a.rec-tile:hover .rec-go { color: var(--accent); transform: translateX(2px); }
    must never read as a plain past-overspend figure like its siblings. */
 .price-diff-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
+  letter-spacing: 0.04em; color: var(--brand); border: 1px solid var(--brand);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
 /* Past overspend — deliberately NOT an opportunity treatment. Every "here is
@@ -1484,7 +1575,7 @@ a.health-tile.attn { border-color: var(--warn); }
 .story-chip-name { font-weight: 600; }
 .story-chip-label { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .story-chip-status { margin-left: 2px; }
-.story-chip-status.ok { color: var(--info); }
+.story-chip-status.ok { color: var(--brand); }
 .story-chip-status.error { color: var(--error); }
 /* The transcript error message for a failed tool, shown in the expanded body. */
 .story-error { margin-top: 8px; padding: 8px 10px; border-left: 2px solid var(--error); background: rgba(238,0,0,0.05); border-radius: 0 6px 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
