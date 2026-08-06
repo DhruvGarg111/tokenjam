@@ -5357,7 +5357,7 @@ const COST_GROUP_BY_LABELS = {
 const SPEND_TABS = (active) => html`
   <div class="tabs" role="tablist" style="margin-bottom:16px">
     <a class=${'tab' + (active === 'cost' ? ' active' : '')} role="tab" aria-selected=${active === 'cost'} href="#/cost">What you spent</a>
-    <a class=${'tab' + (active === 'budget' ? ' active' : '')} role="tab" aria-selected=${active === 'budget'} href="#/budget">Ceilings &amp; caps</a>
+    <a class=${'tab' + (active === 'budget' ? ' active' : '')} role="tab" aria-selected=${active === 'budget'} href="#/budget">Ceilings & caps</a>
   </div>`;
 
 function CostView({ params }) {
@@ -8591,7 +8591,7 @@ function RulesView() {
                 // fix" fallback the analyzer pages use when no apply path
                 // exists, rather than a disabled button implying one does.
                 const primary = st.length
-                  ? html`<button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(r.signature)}>Approve &amp; write</button>`
+                  ? html`<button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(r.signature)}>Approve & write</button>`
                   : (r.offered && !r.dismissed && dests.length)
                     ? html`<button class="cur-btn primary" disabled=${busy} onClick=${() => doStage(r.signature)}>Stage diffs</button>`
                     : null;
@@ -13110,7 +13110,14 @@ function App() {
         setOptNav({
           dynamic: optimizeDetailAnalyzers(d),
           showSummarize: hasSummarize,
-          showRules: personaHasNoData === false,
+          // `usePersonaHasNoData` returns null while `/persona` has not
+          // answered (or answered `known:false`), and `null === false` is
+          // false — so an unresolved read HID the Rules entry outright. Hiding
+          // a nav row is a claim that this persona has no rules to write, which
+          // is exactly the claim a not-yet-known state may not make (root
+          // anti-pattern 22); the honest default for a route that exists is to
+          // show it. Only a positive "this persona has no data" hides it now.
+          showRules: personaHasNoData !== true,
         });
       })
       .catch(() => { if (!cancelled) setOptNav({ dynamic: [], showSummarize: false, showRules: false }); });

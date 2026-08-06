@@ -45,3 +45,10 @@ a `tj serve` restart to take effect; tests read the file from disk directly and 
 ### Critical Rule 43 — Webfont verification in CSS
 
 A `font-family` name in CSS is not a loaded font; without an `@font-face` rule and a vendored file, the browser silently falls back and the stylesheet reads as valid. Verify a webfont with `document.fonts.check()` in a real browser, never by static CSS inspection.
+
+### Critical Rule 44 — Never write an HTML entity into an `html` template literal
+
+`htm` assigns text content; it does not parse entities. `&amp;`, `&rarr;`, `&#8594;` inside a
+template render as those literal characters to the reader. Write the character itself (`&`, `→`),
+or a JS escape (`→`). Grep `&[a-z]\+;\|&#[0-9]` inside `html\`` blocks before shipping copy.
+Entities in the SERVER-RENDERED sidebar markup are fine: that is real HTML, parsed by the browser.
