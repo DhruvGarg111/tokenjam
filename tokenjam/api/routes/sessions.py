@@ -37,7 +37,11 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _child_sessions, _run_sessions
-from tokenjam.core.db import delete_session_label, set_session_label
+from tokenjam.core.db import (
+    delete_session_label,
+    session_active_seconds,
+    set_session_label,
+)
 from tokenjam.core.distill import _default_cache_dir, distill_titles_cached, peek_cached_titles
 from tokenjam.core.method_capture import capture_session_method, load_session_method
 from tokenjam.core.framing import (
@@ -648,6 +652,7 @@ async def get_session_detail(request: Request, session_id: str):
                 session.ended_at.isoformat() if session.ended_at else None
             ),
             "duration_seconds": session.duration_seconds,
+            "active_seconds": session_active_seconds(db.conn, session_id),
             "total_cost_usd": (
                 float(session.total_cost_usd)
                 if session.total_cost_usd is not None else 0.0

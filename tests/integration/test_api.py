@@ -1964,6 +1964,8 @@ async def test_session_detail_returns_rollup_tools_and_traces(tmp_path):
         # Two distinct conversation_ids across the session's spans.
         assert sess["conversation_count"] == 2
         assert sess["active_alerts"] == 1
+        # Active (compute) time: sum of the three spans' durations (800ms each).
+        assert sess["active_seconds"] == pytest.approx(2.4)
 
         # Tool breakdown: Read (ok) + Bash (1 failure).
         tools = {t["tool_name"]: t for t in body["tools"]}
@@ -2020,6 +2022,8 @@ async def test_session_detail_subscription_plan_tier(tmp_path):
         sess = resp.json()["session"]
         assert sess["plan_tier"] == "max_20x"
         assert sess["pricing_mode"] == "subscription"
+        # No spans recorded for this session -> omit rather than show 0.
+        assert sess["active_seconds"] is None
     finally:
         db.close()
 
