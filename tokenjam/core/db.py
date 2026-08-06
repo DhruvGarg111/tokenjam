@@ -598,6 +598,12 @@ AGENT_CONFIG_INDEX_SQL = (
     "ON agent_config_files(last_seen)"
 )
 
+#: (index name, indexed column), for the integrity check and the repair.
+AGENT_CONFIG_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_agent_config_kind",      "kind"),
+    ("idx_agent_config_last_seen", "last_seen"),
+)
+
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -2032,9 +2038,17 @@ def check_spans_index_corruption(
     * **inconsistent** — the index answers a point lookup with fewer rows than
       the table holds. Probed the same way the stats check probes: take a value
       known to be present, ask for it once in a form an index can serve and once
-      in a form it cannot (``CAST(col AS VARCHAR)`` is an expression over the
-      column, so no index applies — and unlike the stats check's ``LIKE`` trick
-      it works for ``start_time`` too).
+      in a form it cannot.
+
+      **The unindexable form must be ``CAST(col AS VARCHAR) || ''``, not a bare
+      ``CAST``.** Four of the five columns here are already ``VARCHAR``, so
+      casting them is a no-op the planner discards — the index then serves BOTH
+      sides and the probe compares a damaged index against itself, reporting
+      sound whatever the damage. Only ``start_time`` was ever really being
+      tested. Concatenating an empty string is a real expression over the
+      column for every type, so it always forces the scan. Demonstrated on a
+      damaged index elsewhere in this schema: the equality form answered 7
+      where the table held 94, and the bare-``CAST`` form also answered 7.
 
     An empty table, an unreadable column, or a column holding only NULLs
     contributes nothing: this reports what it can demonstrate, never suspicion.
@@ -2071,7 +2085,7 @@ def check_spans_index_corruption(
                 ).fetchone()
                 scanned_row = conn.execute(
                     f"SELECT COUNT(*) FROM spans "
-                    f"WHERE CAST({column} AS VARCHAR) = CAST($1 AS VARCHAR)",
+                    f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
                     [value],
                 ).fetchone()
             except duckdb.Error:
@@ -2151,55 +2165,107 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CHECKPOINT")
 
 
-def repair_agent_config_index(conn: duckdb.DuckDBPyConnection) -> int:
-    """Rebuild ``agent_config_files`` so its PRIMARY KEY index matches its rows.
+def check_agent_config_index_corruption(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[tuple[str, str]]:
+    """The ``agent_config_files`` secondary indexes that disagree with the table.
 
-    Returns the number of rows preserved. Idempotent, and safe on a healthy
-    database.
+    Returns ``(index name, what is wrong)`` pairs; empty means both are sound.
 
-    **Why a table rebuild and not a `DROP INDEX`.** `repair_spans_indexes`
-    fixes the same class of fault far more cheaply, but it only works on
-    SECONDARY indexes: they are named catalogue objects that can be dropped and
-    re-issued. The fault here is in the ART backing `config_id TEXT PRIMARY
-    KEY`, which is owned by the constraint and cannot be dropped while the
-    table exists. So the table's live rows are moved aside, the table is
-    recreated from the canonical DDL, and the rows are copied back — which
-    rebuilds the PRIMARY KEY index from the rows rather than trusting it.
-    Same DDL-preserving shape as `repair_spans_stats`, and for the same reason
-    a bare `CREATE TABLE … AS SELECT` will not do: a CTAS copies DATA ONLY and
-    would drop the PRIMARY KEY and both secondary indexes permanently.
+    **The fault, and what it costs.** DuckDB's explicit non-unique ART indexes
+    can reach a persisted state where they no longer agree with the table's
+    rows. The PRIMARY KEY is NOT affected — dropping just these two indexes
+    makes the table fully writable again, which is what identifies which index
+    is at fault. Upstream, still open at the time of writing:
+    https://github.com/duckdb/duckdb/issues/23645
 
-    **What the fault looks like.** The table reads correctly — a point lookup
-    and a full scan agree, so the count-based probe
-    `check_spans_index_corruption` uses cannot see it. It surfaces only on a
-    write that must REMOVE an index entry (`DELETE`, and the delete half of
-    `INSERT OR REPLACE`), as `Invalid Input Error: Failed to delete all rows
-    from index. Only deleted 0 out of 1 rows.` DuckDB raises that as a
-    `FatalException`, which invalidates the whole database instance — see
-    `is_fatal_db_error`. There is therefore NO non-destructive probe for it:
-    asking the question costs the connection, so this repair is reached from
-    the recovery path after a fatal, or run unconditionally by doctor, rather
-    than gated behind a check.
+    It breaks reads and writes differently, and the read half is the quieter
+    danger. A write that must REMOVE an index entry (`DELETE`, and the delete
+    half of `INSERT OR REPLACE`) fails loudly with `Invalid Input Error: Failed
+    to delete all rows from index. Only deleted 0 out of 1 rows.` — raised as a
+    `FatalException`, which invalidates the whole database instance (see
+    `is_fatal_db_error`). But an ordinary `WHERE kind = 'instruction'` served by
+    a damaged index simply returns FEWER ROWS than the table holds, with no
+    error at all, so every analyzer reading this table silently under-reports
+    the config surface.
+
+    **Why the probe multiplies by an empty string.** Ask the same question in a
+    form an index can serve and one it cannot, and compare. Picking the second
+    form is the whole difficulty: `CAST(col AS VARCHAR)` is NOT sufficient for a
+    column that is ALREADY `VARCHAR`, because the cast is a no-op the planner
+    discards, leaving the index serving both sides — the probe then compares a
+    damaged index against itself and reports it sound. Concatenating an empty
+    string is a real expression over the column for every type, so it always
+    forces the scan. Verified against a genuinely damaged index: on `kind`, the
+    equality form answered 7 where the table held 94, and the bare-CAST form
+    also answered 7, while the concatenated form answered 94.
     """
-    conn.execute("CREATE TABLE _agent_config_repair AS SELECT * FROM agent_config_files")
-    live_cols = conn.execute(
-        "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_name = '_agent_config_repair' ORDER BY ordinal_position"
-    ).fetchall()
-    conn.execute("DROP TABLE agent_config_files")
-    conn.execute(AGENT_CONFIG_FILES_TABLE_SQL)
-    base_cols = {
-        row[0]
-        for row in conn.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'agent_config_files'"
-        ).fetchall()
-    }
-    for name, data_type in live_cols:
-        if name not in base_cols:
-            conn.execute(f'ALTER TABLE agent_config_files ADD COLUMN "{name}" {data_type}')
-    conn.execute("INSERT INTO agent_config_files BY NAME SELECT * FROM _agent_config_repair")
-    conn.execute("DROP TABLE _agent_config_repair")
+    try:
+        conn.execute("SELECT 1 FROM agent_config_files LIMIT 0").fetchall()
+        present = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT index_name FROM duckdb_indexes() "
+                "WHERE table_name = 'agent_config_files'"
+            ).fetchall()
+        }
+    except duckdb.Error:
+        return []
+
+    faults: list[tuple[str, str]] = []
+    for index_name, column in AGENT_CONFIG_INDEXES:
+        if index_name not in present:
+            faults.append((index_name, "absent from the catalogue"))
+            continue
+        try:
+            sample = conn.execute(
+                f"SELECT {column} FROM agent_config_files "
+                f"WHERE {column} IS NOT NULL LIMIT 3"
+            ).fetchall()
+        except duckdb.Error:
+            continue
+        for (value,) in sample:
+            try:
+                indexed_row = conn.execute(
+                    f"SELECT COUNT(*) FROM agent_config_files WHERE {column} = $1",
+                    [value],
+                ).fetchone()
+                scanned_row = conn.execute(
+                    f"SELECT COUNT(*) FROM agent_config_files "
+                    f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
+                    [value],
+                ).fetchone()
+            except duckdb.Error:
+                break
+            indexed = indexed_row[0] if indexed_row else 0
+            scanned = scanned_row[0] if scanned_row else 0
+            if indexed < scanned:
+                faults.append((
+                    index_name,
+                    f"returns {indexed} of {scanned} matching row(s)",
+                ))
+                break
+    return faults
+
+
+def repair_agent_config_index(conn: duckdb.DuckDBPyConnection) -> int:
+    """Drop and recreate both ``agent_config_files`` secondary indexes.
+
+    Returns the row count, which the repair never changes — the table's rows
+    are the source of truth and are not touched, so a rebuilt index can only
+    agree with them. Idempotent, and safe on a healthy database.
+
+    Same shape as `repair_spans_indexes`, and deliberately NOT the table
+    rebuild `repair_spans_stats` does: the damage is confined to these two
+    explicit non-unique indexes (see `check_agent_config_index_corruption`), so
+    dropping and re-issuing them from the canonical DDL is sufficient and
+    leaves the PRIMARY KEY, the rows and the schema entirely alone. Verified on
+    a damaged database: after this, every previously-fatal upsert succeeds, the
+    heal survives a `CHECKPOINT` and reopen, and the PRIMARY KEY still rejects a
+    duplicate.
+    """
+    for index_name, _ in AGENT_CONFIG_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
     for statement in AGENT_CONFIG_INDEX_SQL.split(";"):
         statement = statement.strip()
         if statement:
@@ -2354,7 +2420,7 @@ def recover_invalidated_database(*, repair: bool = True) -> bool:
             clear_fatal_db_error()
             logger.warning(
                 "database connections re-established after a fatal DuckDB error; "
-                "the agent-config table was rebuilt so the fault does not recur",
+                "the agent-config indexes were rebuilt so the fault does not recur",
             )
         return ok
 

@@ -599,49 +599,50 @@ def _check_spans_indexes(db: object) -> dict:
 
 
 def _check_agent_config_index(db: object) -> dict:
-    """Offer the agent-config PRIMARY KEY rebuild. Reports, never diagnoses.
+    """Secondary-index integrity on the agent-config table.
 
-    The same index/table divergence `_check_spans_indexes` finds also happens
-    to the ART behind `agent_config_files.config_id`, where its consequences
-    are far worse: DuckDB raises it as a `FatalException`, which invalidates
-    the whole database instance and every connection in the process, so a
-    background analyzer pass can take the running web server's connections
-    down with it.
+    The same fault `_check_spans_indexes` looks for, on a different table,
+    where one cause does two independent harms:
 
-    **There is deliberately no probe here, and that is not an omission.** The
-    fault is invisible to reads — a point lookup and a full scan agree on the
-    row count, which is exactly what the spans probe next door compares, so it
-    would report a clean bill of health on a table that is about to kill the
-    daemon. The only operation that exposes it is one that REMOVES an index
-    entry (`DELETE`, or the delete half of `INSERT OR REPLACE`), and that costs
-    the connection. Asking the question destroys the thing being asked about.
-
-    So this check states what it can support and no more, and exposes the
-    repair unconditionally instead of pretending to have diagnosed something.
-    That is affordable because the rebuild is idempotent, safe on a healthy
-    table, and cheap: this table holds one row per instruction file, hook and
-    MCP server, not per span.
+    * **Reads silently under-report.** A `WHERE kind = ...` served by a damaged
+      index returns fewer rows than the table holds, with no error at all, so
+      every analyzer reading this table understates the user's config surface.
+    * **Writes are fatal.** A statement that must REMOVE an index entry raises
+      a DuckDB `FatalException`, which invalidates the whole database instance
+      and every connection in the process — so a background analyzer pass can
+      take the running web server down with it.
     """
+    from tokenjam.core.db import (
+        AGENT_CONFIG_INDEXES,
+        check_agent_config_index_corruption,
+    )
+
     conn = getattr(db, "conn", None)
     if conn is None:
         return {"name": "Agent-config index integrity", "level": "info",
-                "message": "Skipped — CLI is running through the HTTP API "
+                "message": "Skipped \u2014 CLI is running through the HTTP API "
                            "fallback (stop `tj serve` to access the DB directly)."}
     try:
-        row = conn.execute("SELECT COUNT(*) FROM agent_config_files").fetchone()
+        faults = check_agent_config_index_corruption(conn)
     except duckdb.Error as e:
         return {"name": "Agent-config index integrity", "level": "info",
-                "message": f"Skipped — agent-config table not readable: {e}"}
-    rows = row[0] if row else 0
-    return {
-        "name": "Agent-config index integrity",
-        "level": "info",
-        "message": f"Not probed — this fault is invisible to reads and the only "
-                   f"query that reveals it invalidates the database. "
-                   f"`tj doctor --repair` rebuilds the index from the "
-                   f"{rows} live row(s) regardless; it is a no-op when sound.",
-        "repair_action": "rebuild_agent_config_index",
-    }
+                "message": f"Skipped \u2014 could not probe the indexes: {e}"}
+    if faults:
+        detail = "; ".join(f"{name} {reason}" for name, reason in faults)
+        return {
+            "name": "Agent-config index integrity",
+            "level": "error",
+            "message": f"Index damage on the agent-config table \u2014 {detail}. "
+                       f"Analyzers reading this table under-report the config "
+                       f"surface, and the next write that removes an index "
+                       f"entry will invalidate the database and 500 every "
+                       f"route. Run `tj doctor --repair` to rebuild them from "
+                       f"the table (no data is moved).",
+            "repair_action": "rebuild_agent_config_index",
+        }
+    return {"name": "Agent-config index integrity", "level": "ok",
+            "message": f"All {len(AGENT_CONFIG_INDEXES)} secondary indexes on "
+                       f"agent_config_files agree with the table."}
 
 
 def _check_retention(config: object, db: object) -> dict:
@@ -1471,8 +1472,8 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
                 continue
             if not output_json:
                 console.print(
-                    f"  [green]Agent-config index rebuilt — {before} rows "
-                    f"preserved (verified: {after}).[/green]"
+                    f"  [green]Agent-config indexes rebuilt from the table — "
+                    f"{before} rows untouched (verified: {after}).[/green]"
                 )
 
 

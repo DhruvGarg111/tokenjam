@@ -37,7 +37,9 @@ from fastapi.testclient import TestClient
 
 from tokenjam.core.agent_config import ConfigRecord, DuckDBAgentConfigStore
 from tokenjam.core.db import (
+    AGENT_CONFIG_INDEXES,
     DuckDBBackend,
+    check_agent_config_index_corruption,
     clear_fatal_db_error,
     fatal_db_error,
     is_fatal_db_error,
@@ -430,23 +432,26 @@ def test_repair_agent_config_index_is_safe_on_an_empty_table(conn):
     assert repair_agent_config_index(conn) == 0
 
 
-def test_repair_agent_config_index_keeps_the_primary_key_and_both_indexes(conn):
-    """A `CREATE TABLE … AS SELECT` rebuild would drop all three permanently.
-
-    Migrations are already recorded applied, so nothing would put them back —
-    and losing the PRIMARY KEY turns every re-scan into duplicate rows.
-    """
+def test_repair_agent_config_index_recreates_both_indexes(conn):
+    """Dropping without re-issuing would leave the table permanently unindexed:
+    the migrations are already recorded applied, so nothing else puts them back."""
     _seed(conn, 3)
+    conn.execute("DROP INDEX idx_agent_config_kind")
     repair_agent_config_index(conn)
-
     names = {
         r[0] for r in conn.execute(
             "SELECT index_name FROM duckdb_indexes() "
             "WHERE table_name = 'agent_config_files'"
         ).fetchall()
     }
-    assert {"idx_agent_config_kind", "idx_agent_config_last_seen"} <= names
+    assert {name for name, _ in AGENT_CONFIG_INDEXES} <= names
 
+
+def test_repair_agent_config_index_leaves_the_primary_key_enforced(conn):
+    """The repair touches only the two secondary indexes. The PRIMARY KEY is
+    not the damaged one and must come through untouched."""
+    _seed(conn, 3)
+    repair_agent_config_index(conn)
     with pytest.raises(duckdb.ConstraintException):
         conn.execute(
             "INSERT INTO agent_config_files "
@@ -458,8 +463,8 @@ def test_repair_agent_config_index_keeps_the_primary_key_and_both_indexes(conn):
 def test_repair_agent_config_index_leaves_the_table_writable(conn):
     """The point of the repair: DELETE and INSERT OR REPLACE work afterwards.
 
-    These are the two statements the corrupt index makes fatal, so a repair
-    that did not restore them would clear nothing.
+    These are the two statements a damaged index makes fatal, so a repair that
+    did not restore them would clear nothing.
     """
     _seed(conn, 4)
     repair_agent_config_index(conn)
@@ -475,13 +480,42 @@ def test_repair_agent_config_index_leaves_the_table_writable(conn):
     assert rows == [("id-0", 0), ("id-2", 99), ("id-3", 3)]
 
 
-def test_repair_agent_config_index_preserves_columns_added_by_later_migrations(conn):
-    """The rebuild tracks the LIVE schema, not just the canonical DDL."""
-    conn.execute("ALTER TABLE agent_config_files ADD COLUMN future_col TEXT")
-    _seed(conn, 2)
-    conn.execute("UPDATE agent_config_files SET future_col = 'kept'")
-    repair_agent_config_index(conn)
-    rows = conn.execute(
-        "SELECT future_col FROM agent_config_files ORDER BY config_id"
-    ).fetchall()
-    assert rows == [("kept",), ("kept",)]
+# --- the integrity probe ---------------------------------------------------
+
+def test_check_reports_no_faults_on_a_healthy_table(conn):
+    _seed(conn, 10)
+    assert check_agent_config_index_corruption(conn) == []
+
+
+def test_check_reports_an_absent_index(conn):
+    _seed(conn, 4)
+    conn.execute("DROP INDEX idx_agent_config_kind")
+    faults = check_agent_config_index_corruption(conn)
+    assert ("idx_agent_config_kind", "absent from the catalogue") in faults
+
+
+def test_check_is_quiet_on_an_empty_table(conn):
+    """Nothing to compare is not evidence of damage."""
+    assert check_agent_config_index_corruption(conn) == []
+
+
+def test_probe_uses_a_form_the_index_cannot_serve(conn):
+    """The subtle half, and the reason this probe nearly did not work.
+
+    `CAST(col AS VARCHAR)` is a NO-OP on a column that is already VARCHAR, so
+    the planner discards it and the index serves both sides of the comparison —
+    a probe built on it compares a damaged index against itself and reports
+    sound whatever the damage. Concatenating an empty string is a real
+    expression for every type. This pins that the scan form still agrees with
+    a GROUP BY (which no index can serve) on a healthy table, so the two forms
+    are genuinely answering the same question.
+    """
+    _seed(conn, 12)
+    truth = dict(conn.execute(
+        "SELECT kind, COUNT(*) FROM agent_config_files GROUP BY 1"
+    ).fetchall())
+    scanned = conn.execute(
+        "SELECT COUNT(*) FROM agent_config_files "
+        "WHERE CAST(kind AS VARCHAR) || '' = CAST('instruction' AS VARCHAR)"
+    ).fetchone()[0]
+    assert scanned == truth["instruction"] == 12
