@@ -21,6 +21,7 @@ from tokenjam.core.optimize import (
     build_report,
     disabled_analyzers_for_persona,
 )
+from tokenjam.core.optimize import runner as runner_mod
 from tokenjam.core.optimize.analyzers.batch_placement import BatchPlacementFinding
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
@@ -55,13 +56,14 @@ assert NO_LEVER == {
 # "invoked" and never appears in `report.findings` under its own name.
 NO_LEVER_REGISTRY_NAMES = NO_LEVER - {"placement"}
 
-# sdk's own gate: `deadweight`/`subagent` are gated on a DATA SOURCE this
-# persona structurally never has (an on-disk Claude Code transcript, a
-# populated `sub_agent_id`), not on a missing lever — same "must never be
-# invoked" bar, different reason. Derived from the production map for the
-# same reason NO_LEVER is: a name silently dropped from the gate fails here.
+# sdk's own gate: these are gated on an INPUT this persona structurally never
+# has (an on-disk Claude Code transcript, a populated `sub_agent_id`, an agent
+# instruction file for the summarize catalog to scan), not on a missing lever —
+# same "must never be invoked" bar, different reason. Derived from the
+# production map for the same reason NO_LEVER is: a name silently dropped from
+# the gate fails here.
 SDK_NO_LEVER = set(PERSONA_DISABLED_ANALYZERS.get("sdk", frozenset()))
-assert SDK_NO_LEVER == {"deadweight", "subagent"}
+assert SDK_NO_LEVER == {"deadweight", "subagent", "summarize"}
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 
@@ -143,10 +145,11 @@ def test_sdk_window_is_unaffected_by_the_claude_code_no_lever_gate(db, cfg, monk
 
 
 def test_sdk_window_never_invokes_the_data_source_gated_analyzers(db, cfg, monkeypatch):
-    """`deadweight` (on-disk Claude Code transcripts) and `subagent`
-    (`sub_agent_id IS NOT NULL`) can never produce a candidate for an SDK
-    window — true-skip them rather than dispatch a query that structurally
-    always returns nothing to act on."""
+    """`deadweight` (on-disk Claude Code transcripts), `subagent`
+    (`sub_agent_id IS NOT NULL`) and `summarize` (a filesystem catalog of agent
+    instruction files) can never produce a candidate for an SDK window —
+    true-skip them rather than dispatch work that structurally always returns
+    nothing to act on."""
     _seed(db, "billing-service")
     invoked, report = _run_recording_invocations(db, cfg, monkeypatch)
 
@@ -154,6 +157,69 @@ def test_sdk_window_never_invokes_the_data_source_gated_analyzers(db, cfg, monke
     # Never invoked -> no query ran, and nothing to render.
     assert SDK_NO_LEVER.isdisjoint(invoked)
     assert SDK_NO_LEVER.isdisjoint(report.findings)
+
+
+def test_summarize_is_gated_for_sdk_and_untouched_for_claude_code(db, cfg, monkeypatch):
+    """Named explicitly, not just covered set-wise by SDK_NO_LEVER.
+
+    `summarize` prices what a filesystem scan of AGENT INSTRUCTION FILES found
+    (`core/summarize/agent_files.toml`: CLAUDE.md, AGENTS.md, GEMINI.md, the
+    rules/skills/commands/agents markdown beside them). It has never scanned
+    application source or a prompt template in `.py`/`.ts`, so an SDK window's
+    prompt text is outside its population by construction and the scan can only
+    return a card with no fix behind it.
+
+    Both halves matter, and the CC half is the one that keeps this test from
+    passing vacuously (Critical Rule 40): if `summarize` stopped being
+    dispatched at all, the SDK assertion alone would still be green.
+    """
+    sdk_backend = InMemoryBackend()
+    try:
+        _seed(sdk_backend, "billing-service")
+        sdk_invoked, sdk_report = _run_recording_invocations(sdk_backend, cfg, monkeypatch)
+        assert sdk_report.persona == "sdk"
+        assert "summarize" not in sdk_invoked
+        assert "summarize" not in sdk_report.findings
+    finally:
+        sdk_backend.close()
+
+    _seed(db, "claude-code-proj")
+    cc_invoked, cc_report = _run_recording_invocations(db, cfg, monkeypatch)
+    assert cc_report.persona == "claude-code"
+    assert "summarize" in cc_invoked
+
+
+def test_summarize_card_is_dropped_from_the_review_inbox_for_sdk():
+    """The second selection surface has to make the same call, or a gated
+    analyzer's finding still lands in Review as a card the user cannot act on
+    (Critical Rule 26b). A report carrying the finding is a real shape here: a
+    cached payload, or a wider selection, can still hold one."""
+    from tokenjam.core.optimize.analyzers.summarize import (
+        SummarizeCandidate,
+        SummarizeFinding,
+    )
+
+    w = WindowSummary(since=NOW - timedelta(days=30), until=NOW, days=30, sessions=10,
+                      spans=100, total_tokens=1_000_000, total_cost_usd=50.0,
+                      thin_data=False)
+    finding = SummarizeFinding(
+        candidates=[SummarizeCandidate(path="/repo/CLAUDE.md", kind="prompt",
+                                       scope="project", est_tokens_saved=900,
+                                       total_chars=12_000, reduction_pct=30)],
+        files=1, past_overspend_usd=4.0, past_overspend_tokens=90_000,
+        avg_reduction_pct=30,
+    )
+
+    def _analyzers(persona: str) -> set[str]:
+        rep = OptimizeReport(window=w, persona=persona, findings={"summarize": finding})
+        return {p.analyzer for p in cost_proposals_from_report(rep)}
+
+    # The vehicle is valid only if the card exists at all for the persona that
+    # keeps the analyzer — assert that before asserting its absence.
+    assert "summarize" in _analyzers("claude-code")
+    assert "summarize" not in _analyzers("sdk")
+    assert "summarize" not in cost_analyzers_for_persona("sdk")
+    assert "summarize" in cost_analyzers_for_persona("claude-code")
 
 
 def test_claude_code_window_still_invokes_the_sdk_gated_analyzers(db, cfg, monkeypatch):
@@ -187,8 +253,16 @@ class _CountingDb:
         self.conn = _CountingConn(backend.conn)
 
 
-def test_gate_saves_real_query_work_on_a_claude_code_window(cfg):
-    """Not merely hidden: the skipped analyzers issue no SQL of their own."""
+def test_gate_saves_real_query_work_for_both_gated_personas(cfg, monkeypatch):
+    """Not merely hidden: the skipped analyzers issue no SQL of their own.
+
+    Measured against the SAME persona with the gate emptied, never one persona
+    against the other. The cross-persona form this replaced (claude-code issues
+    fewer statements than sdk) was a proxy for the claude-code gate being the
+    only heavy one, and it inverted the moment the sdk key grew: it then failed
+    while both gates were working perfectly. A control that can invert without
+    the property under test changing was measuring the wrong thing.
+    """
     def _count_queries(agent_id: str) -> int:
         backend = InMemoryBackend()
         try:
@@ -199,7 +273,11 @@ def test_gate_saves_real_query_work_on_a_claude_code_window(cfg):
         finally:
             backend.close()
 
-    assert _count_queries("claude-code-proj") < _count_queries("billing-service")
+    gated_cc = _count_queries("claude-code-proj")
+    gated_sdk = _count_queries("billing-service")
+    monkeypatch.setattr(runner_mod, "PERSONA_DISABLED_ANALYZERS", {})
+    assert gated_cc < _count_queries("claude-code-proj")
+    assert gated_sdk < _count_queries("billing-service")
 
 
 def test_mixed_and_unknown_personas_disable_nothing():
@@ -247,7 +325,7 @@ def test_cost_analyzers_mirror_the_gate():
     # too, or a disabled analyzer's findings would still reach it as
     # apply-able cards (COST_ANALYZERS is an independent second surface).
     sdk_scoped = cost_analyzers_for_persona("sdk")
-    assert "deadweight" not in sdk_scoped and "subagent" not in sdk_scoped
+    assert SDK_NO_LEVER.isdisjoint(sdk_scoped)
     assert set(sdk_scoped) == set(COST_ANALYZERS) - SDK_NO_LEVER
     # Any unclassified persona keeps the full list.
     assert cost_analyzers_for_persona("unknown") == COST_ANALYZERS

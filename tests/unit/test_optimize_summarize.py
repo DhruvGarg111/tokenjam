@@ -76,12 +76,22 @@ def _patch_scan(monkeypatch, cands: list[Candidate]) -> None:
     )
 
 
+#: The window must classify as `claude-code`, or the persona gate true-skips
+#: `summarize` before dispatch and every test here reads an absent finding.
+#: That is not test scaffolding: `summarize` scans AGENT INSTRUCTION FILES
+#: (`core/summarize/agent_files.toml`), which an SDK window does not have, so a
+#: coding-agent window is the only shape in which this analyzer runs at all.
+#: `tests.factories`' default `agent_id="test-agent"` classifies as `sdk`.
+_CC_AGENT_ID = "claude-code-proj"
+
+
 def _seed_window(db) -> None:
     """One qualifying LLM call in the window so the analyzer runs — it
     window-guards on a dead window (no telemetry → no per-call saving to attach).
-    Content is irrelevant; the finding is filesystem-derived."""
-    db.upsert_session(make_session(session_id="s0"))
-    db.insert_span(make_llm_span(session_id="s0", start_time=utcnow() - timedelta(days=1)))
+    Content is irrelevant beyond the agent id; the finding is filesystem-derived."""
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s0"))
+    db.insert_span(make_llm_span(agent_id=_CC_AGENT_ID, session_id="s0",
+                                 start_time=utcnow() - timedelta(days=1)))
 
 
 def _run(db) -> object:
@@ -214,8 +224,8 @@ def test_global_scope_file_is_priced_across_every_session_in_the_window(
     later calls at the cache-read rate) — not a one-time figure."""
     from tokenjam.core.pricing import get_rates
 
-    db.upsert_session(make_session(session_id="s1"))
-    db.upsert_session(make_session(session_id="s2"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s1"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s2"))
     for sid in ("s1", "s2"):
         for _ in range(3):
             db.insert_span(make_llm_span(
@@ -261,7 +271,7 @@ def test_token_and_dollar_aggregates_describe_the_same_quantity(db, monkeypatch)
     from tokenjam.core.pricing import get_rates
 
     for sid in ("s1", "s2"):
-        db.upsert_session(make_session(session_id=sid))
+        db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id=sid))
         for _ in range(3):
             db.insert_span(make_llm_span(
                 session_id=sid, provider="anthropic", model="claude-haiku-4-5",
@@ -350,7 +360,7 @@ def test_render_summarize_shows_the_window_dollar_figure_when_priced(
 ):
     from tokenjam.cli.cmd_optimize import _render_summarize
 
-    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s1"))
     db.insert_span(make_llm_span(
         session_id="s1", provider="anthropic", model="claude-haiku-4-5",
         input_tokens=100, output_tokens=10, start_time=utcnow() - timedelta(days=1),
@@ -1119,8 +1129,8 @@ def test_relocation_is_priced_on_the_same_multiplier_as_compression(db, monkeypa
     """The whole point of routing it through the same per-file session/call
     multiplier: the two operations become directly comparable, and the token and
     dollar fields count the same events (Critical Rule 28)."""
-    db.upsert_session(make_session(session_id="s1"))
-    db.upsert_session(make_session(session_id="s2"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s1"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s2"))
     for sid in ("s1", "s2"):
         for _ in range(3):
             db.insert_span(make_llm_span(
@@ -1147,7 +1157,7 @@ def test_the_relocation_figure_is_never_summed_into_the_compression_one(db, monk
     """A section relocated out of a file is no longer there to be compressed, so
     adding the two would price the same text twice (Critical Rule 27). They are
     alternatives the user picks between, per file."""
-    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s1"))
     for _ in range(3):
         db.insert_span(make_llm_span(
             session_id="s1", provider="anthropic", model="claude-haiku-4-5",
@@ -1176,7 +1186,7 @@ def test_the_relocation_implied_rate_lands_inside_a_real_price_band(db, monkeypa
     mismatch always throws the implied rate orders of magnitude out of band."""
     from tokenjam.core.pricing import get_rates
 
-    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s1"))
     for _ in range(8):
         db.insert_span(make_llm_span(
             session_id="s1", provider="anthropic", model="claude-haiku-4-5",
@@ -1198,7 +1208,7 @@ def test_a_file_with_nothing_relocatable_carries_no_relocation_figure(db, monkey
     """Symmetric degrade: a measured zero is not a figure to render, and the
     aggregate is `None` rather than `0` when nothing qualified — "no reference
     section here" is not "relocation is worth nothing"."""
-    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(agent_id=_CC_AGENT_ID, session_id="s1"))
     db.insert_span(make_llm_span(
         session_id="s1", provider="anthropic", model="claude-haiku-4-5",
         input_tokens=100, output_tokens=10,
