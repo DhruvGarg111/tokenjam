@@ -8,9 +8,12 @@ import functools
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import uuid
+import weakref
+from contextlib import ExitStack
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast, runtime_checkable
@@ -586,6 +589,20 @@ AGENT_CONFIG_FILES_TABLE_SQL = (
     ")"
 )
 
+# The table's secondary indexes, single-sourced beside the DDL for the same
+# reason `SPANS_INDEX_SQL` is: a fresh install and the `EXPECTED_TABLES`
+# self-heal must create the SAME set, or a database quietly ends up missing an
+# index that nothing will ever put back (migrations are already recorded
+# applied). `repair_explicit_indexes` does not read this constant -- it
+# re-issues each index from its own catalogue DDL, so it repairs indexes this
+# module has never heard of.
+AGENT_CONFIG_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
+    "ON agent_config_files(kind);\n"
+    "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
+    "ON agent_config_files(last_seen)"
+)
+
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -905,11 +922,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     # here precisely because taking it means STARTING the server, so it must
     # survive between analysis runs and be invalidated by the spec hash rather
     # than re-taken on a schedule.
-    (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n"
-     "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
-     "ON agent_config_files(kind);\n"
-     "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
-     "ON agent_config_files(last_seen)"),
+    (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n" + AGENT_CONFIG_INDEX_SQL),
 ]
 
 
@@ -2024,9 +2037,17 @@ def check_spans_index_corruption(
     * **inconsistent** — the index answers a point lookup with fewer rows than
       the table holds. Probed the same way the stats check probes: take a value
       known to be present, ask for it once in a form an index can serve and once
-      in a form it cannot (``CAST(col AS VARCHAR)`` is an expression over the
-      column, so no index applies — and unlike the stats check's ``LIKE`` trick
-      it works for ``start_time`` too).
+      in a form it cannot.
+
+      **The unindexable form must be ``CAST(col AS VARCHAR) || ''``, not a bare
+      ``CAST``.** Four of the five columns here are already ``VARCHAR``, so
+      casting them is a no-op the planner discards — the index then serves BOTH
+      sides and the probe compares a damaged index against itself, reporting
+      sound whatever the damage. Only ``start_time`` was ever really being
+      tested. Concatenating an empty string is a real expression over the
+      column for every type, so it always forces the scan. Demonstrated on a
+      damaged index elsewhere in this schema: the equality form answered 7
+      where the table held 94, and the bare-``CAST`` form also answered 7.
 
     An empty table, an unreadable column, or a column holding only NULLs
     contributes nothing: this reports what it can demonstrate, never suspicion.
@@ -2063,7 +2084,7 @@ def check_spans_index_corruption(
                 ).fetchone()
                 scanned_row = conn.execute(
                     f"SELECT COUNT(*) FROM spans "
-                    f"WHERE CAST({column} AS VARCHAR) = CAST($1 AS VARCHAR)",
+                    f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
                     [value],
                 ).fetchone()
             except duckdb.Error:
@@ -2143,6 +2164,412 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CHECKPOINT")
 
 
+#: An index name / column name we are willing to interpolate into SQL. These
+#: come from DuckDB's own catalogue rather than from a user, but a probe that
+#: builds SQL by string-splicing validates its identifiers anyway.
+_SQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _index_columns(expressions: str) -> list[str]:
+    """Column names out of ``duckdb_indexes().expressions``.
+
+    That column is a VARCHAR rendering of the indexed expression list, e.g.
+    ``'[kind]'`` or ``'[agent_id, started_at]'`` — not a real list, so it is
+    parsed rather than unnested.
+    """
+    inner = (expressions or "").strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    return [part.strip() for part in inner.split(",") if part.strip()]
+
+
+def explicit_indexes(
+    conn: duckdb.DuckDBPyConnection,
+) -> list[tuple[str, str, list[str], str]]:
+    """Every explicit index in the database: ``(name, table, columns, ddl)``.
+
+    Read from ``duckdb_indexes()``, which lists only indexes created by an
+    explicit ``CREATE INDEX``. A ``PRIMARY KEY``'s own ART is NOT in there, so
+    a repair driven by this list structurally cannot touch a primary key —
+    which is the property that makes the sweep safe to run unattended.
+    ``is_primary``/``is_unique`` are filtered as well, belt and braces.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT index_name, table_name, expressions, sql FROM duckdb_indexes() "
+            "WHERE NOT is_primary AND NOT is_unique ORDER BY table_name, index_name"
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    out = []
+    for name, table, expressions, ddl in rows:
+        if not _SQL_IDENTIFIER.match(str(name)) or not _SQL_IDENTIFIER.match(str(table)):
+            continue
+        out.append((str(name), str(table), _index_columns(expressions), str(ddl or "")))
+    return out
+
+
+#: Values to compare per index when the table is small enough to enumerate its
+#: value space. Above `_PROBE_EXHAUSTIVE_MAX_ROWS` the probe falls back to a
+#: few samples, because the scan side of each comparison is a full table scan.
+_PROBE_VALUE_LIMIT = 200
+_PROBE_EXHAUSTIVE_MAX_ROWS = 50_000
+_PROBE_SAMPLE_VALUES = 3
+
+
+def check_index_divergence(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Sweep EVERY explicit index for disagreement with its table.
+
+    Returns ``(faults, unproven)``, each a list of ``(index, table, reason)``.
+
+    **A clean `faults` list is NOT a proof of soundness, and `unproven` is how
+    that is said out loud.** This probe compares counts for particular VALUES,
+    so it can only find damage in the entries it looked at. Learned the hard
+    way: on a genuinely damaged database a three-value sample found three of
+    four damaged indexes, the fourth reported clean, and a repair driven by
+    that verdict left the table still raising the fatal. So an index is only
+    reported sound when every distinct value was compared; anything less lands
+    in ``unproven`` with the reason, and callers that must be CORRECT rather
+    than cheap repair everything instead of trusting this (see
+    ``repair_explicit_indexes`` and ``recover_invalidated_database``).
+
+    Coverage is exhaustive for a table small enough to enumerate and sampled
+    above that, because the scan side of each comparison is a full table scan
+    and the cost is per distinct value.
+
+    **Why the scan side multiplies by an empty string.** The probe asks the
+    same question in a form an index can serve and one it cannot. Picking the
+    second form is the whole difficulty: ``CAST(col AS VARCHAR)`` is a NO-OP on
+    a column already stored as ``VARCHAR``, so the planner discards it and the
+    index ends up serving BOTH sides — the probe then compares a damaged index
+    against itself and reports it sound whatever the damage. Concatenating an
+    empty string is a real expression over the column for every type. Measured
+    on a genuinely damaged index: the equality form answered 7 where the table
+    held 94, the bare-``CAST`` form also answered 7, the concatenated form 94.
+    """
+    faults: list[tuple[str, str, str]] = []
+    unproven: list[tuple[str, str, str]] = []
+    row_counts: dict[str, int] = {}
+    for index_name, table, columns, _ddl in explicit_indexes(conn):
+        if len(columns) != 1 or not _SQL_IDENTIFIER.match(columns[0]):
+            unproven.append((
+                index_name, table,
+                "indexed on an expression this single-column comparison "
+                "cannot test",
+            ))
+            continue
+        column = columns[0]
+        try:
+            if table not in row_counts:
+                count_row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                row_counts[table] = int(count_row[0]) if count_row else 0
+            small = row_counts[table] <= _PROBE_EXHAUSTIVE_MAX_ROWS
+            limit = _PROBE_VALUE_LIMIT if small else _PROBE_SAMPLE_VALUES
+            values = conn.execute(
+                f"SELECT DISTINCT {column} FROM {table} "
+                f"WHERE {column} IS NOT NULL LIMIT {limit + 1}"
+            ).fetchall()
+        except duckdb.Error as exc:
+            unproven.append((index_name, table, f"could not be probed: {exc}"))
+            continue
+        if not values:
+            continue  # empty table or all-NULL column: nothing to demonstrate
+        complete = small and len(values) <= limit
+        diverged = False
+        for (value,) in values[:limit]:
+            try:
+                indexed_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {column} = $1", [value]
+                ).fetchone()
+                scanned_row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} "
+                    f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
+                    [value],
+                ).fetchone()
+            except duckdb.Error as exc:
+                unproven.append((index_name, table, f"could not be probed: {exc}"))
+                diverged = True  # not a fault, but not proven either
+                break
+            indexed = indexed_row[0] if indexed_row else 0
+            scanned = scanned_row[0] if scanned_row else 0
+            if indexed < scanned:
+                faults.append((
+                    index_name, table,
+                    f"returns {indexed} of {scanned} matching row(s)",
+                ))
+                diverged = True
+                break
+        if not diverged and not complete:
+            unproven.append((
+                index_name, table,
+                f"only {min(len(values), limit)} of the table's distinct values "
+                f"were compared, so a clean result here is not proof",
+            ))
+    return faults, unproven
+
+
+def repair_explicit_indexes(
+    conn: duckdb.DuckDBPyConnection,
+    index_names: "Sequence[str] | None" = None,
+) -> list[str]:
+    """Drop and recreate explicit indexes from their own catalogue DDL.
+
+    ``index_names`` limits the repair to those indexes; ``None`` repairs every
+    explicit index. Returns the names actually rebuilt. Idempotent, and safe on
+    a healthy database.
+
+    **What it cannot do, structurally.** The DDL is read back from
+    ``duckdb_indexes()``, which does not list a ``PRIMARY KEY``'s ART, so no
+    primary key or unique constraint is reachable from here. No rows are read,
+    written or moved and no table is rebuilt: the table's rows are the source
+    of truth, so a re-issued index can only agree with them. That is why this
+    is safe unattended where `repair_spans_stats`'s table rebuild would not be.
+
+    An index whose catalogue entry carries no DDL is left alone rather than
+    dropped — dropping without being able to re-create it would turn a damaged
+    index into a missing one, and migrations are already recorded applied, so
+    nothing else would put it back.
+    """
+    wanted = set(index_names) if index_names is not None else None
+    rebuilt: list[str] = []
+    for index_name, _table, _columns, ddl in explicit_indexes(conn):
+        if wanted is not None and index_name not in wanted:
+            continue
+        if not ddl.strip():
+            logger.warning(
+                "index %s has no DDL in the catalogue; leaving it in place rather "
+                "than dropping an index that could not be recreated", index_name,
+            )
+            continue
+        conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        for statement in ddl.split(";"):
+            statement = statement.strip()
+            if statement:
+                conn.execute(statement)
+        rebuilt.append(index_name)
+    if rebuilt:
+        conn.execute("CHECKPOINT")
+    return rebuilt
+
+
+# ---------------------------------------------------------------------------
+# Fatal errors and database invalidation
+# ---------------------------------------------------------------------------
+#
+# A DuckDB `FatalException` is categorically different from every other error
+# this module handles, and the difference is not visible at the call site that
+# raises it. Verified against duckdb 1.5.5, holding one root connection, one
+# sibling cursor and one connection opened afterwards:
+#
+#   * The exception invalidates the whole DATABASE INSTANCE, not the connection
+#     that raised it. Every other cursor over that database starts raising
+#     `FATAL Error: Failed: database has been invalidated because of a previous
+#     fatal error. The database must be restarted prior to being used again.`
+#   * `duckdb.connect(same_path)` AFTERWARDS hands back the SAME dead instance
+#     — DuckDB caches instances per path within a process, so "just reconnect"
+#     is not a recovery. This is why a fatal raised on a background scan's own
+#     `DuckDBBackend` takes down the web server's unrelated connections too.
+#   * Closing EVERY connection to that path evicts the instance from that
+#     cache; the next `duckdb.connect` then opens a healthy database, in the
+#     same process, with no restart. That is the only in-process recovery, and
+#     it is why recovery has to be a property of the process rather than of one
+#     backend object — hence the registry below.
+#
+# The consequence for error handling: any `except Exception` that treats a
+# failure as skip-this-row-and-continue MUST re-check for a fatal first. After
+# a fatal there are no more rows to skip, only queries that will all fail, and
+# a handler that logs a per-record warning turns a hard stop into a process
+# that keeps serving traffic on a database it can no longer read.
+
+#: Text DuckDB uses for every post-fatal query on an invalidated instance.
+DATABASE_INVALIDATED_MESSAGE = "database has been invalidated"
+
+
+def is_fatal_db_error(exc: BaseException) -> bool:
+    """True when ``exc`` means the database instance is gone, not this row.
+
+    Matches on the exception TYPE and, as a backstop, on the invalidation text:
+    the type is authoritative, but the message check keeps the classification
+    correct if a fatal reaches us wrapped by an intermediate layer.
+    """
+    fatal_type = getattr(duckdb, "FatalException", None)
+    if fatal_type is not None and isinstance(exc, fatal_type):
+        return True
+    return DATABASE_INVALIDATED_MESSAGE in str(exc)
+
+
+# Every live `DuckDBBackend`, so recovery can close all of a path's connections
+# — the necessary condition for DuckDB to evict the invalidated instance.
+# Weak, so a backend that goes out of scope is not kept alive by being here.
+_LIVE_BACKENDS: "weakref.WeakSet[DuckDBBackend]" = weakref.WeakSet()
+_FATAL_LOCK = threading.RLock()
+#: Set when a fatal is observed anywhere in this process; cleared by a
+#: successful recovery. Process-wide because the invalidation is.
+_FATAL_DB_ERROR: str | None = None
+
+
+def note_fatal_db_error(exc: BaseException) -> None:
+    """Record that a fatal happened, so surfaces stop claiming to be healthy."""
+    global _FATAL_DB_ERROR
+    with _FATAL_LOCK:
+        if _FATAL_DB_ERROR is None:
+            _FATAL_DB_ERROR = f"{type(exc).__name__}: {exc}".split("\n")[0]
+    logger.error(
+        "database instance invalidated by a fatal DuckDB error (%s: %s); every "
+        "connection in this process is now dead until it is re-established",
+        type(exc).__name__, str(exc).split("\n")[0],
+    )
+
+
+def fatal_db_error() -> str | None:
+    """The recorded fatal, or None. Cheap; safe to call from a request path."""
+    with _FATAL_LOCK:
+        return _FATAL_DB_ERROR
+
+
+def clear_fatal_db_error() -> None:
+    global _FATAL_DB_ERROR
+    with _FATAL_LOCK:
+        _FATAL_DB_ERROR = None
+
+
+def handle_if_fatal(exc: BaseException, *, what: str) -> bool:
+    """Whether ``exc`` was fatal; if so, record it and re-establish connections.
+
+    The hook for every broad `except Exception` that logs a failure and carries
+    on. Those handlers are correct for the errors they were written for and
+    catastrophic for this one, and the difference is invisible at the catch
+    site — which is how a fatal ends up swallowed by a `pass` on a background
+    thread while the request path quietly dies. Ask this first:
+
+        except Exception as exc:
+            if not handle_if_fatal(exc, what="the job"):
+                logger.warning("the job failed", exc_info=True)
+
+    Returns True when it handled a fatal (already logged, recovery attempted),
+    so the caller's ordinary logging is skipped rather than duplicated.
+    """
+    if not is_fatal_db_error(exc):
+        return False
+    note_fatal_db_error(exc)
+    if recover_invalidated_database():
+        logger.warning("%s: database connections re-established", what)
+    else:
+        logger.error(
+            "%s: the database could not be re-established; this process can no "
+            "longer read it. /health reports unhealthy until `tj serve` is "
+            "restarted and `tj doctor --repair` has run.", what,
+        )
+    return True
+
+
+def recover_if_fatal_noted(*, what: str) -> bool:
+    """Recover if a fatal was recorded anywhere in this process, however it was
+    caught. Returns whether a recovery ran.
+
+    **The swallow-proof backstop, and the reason it has to exist.**
+    `handle_if_fatal` only fires when the exception REACHES the handler that
+    calls it, and in this codebase a fatal from an analyzer's database write
+    crosses several broad `except Exception` handlers on its way out — the
+    per-analyzer one that records a failure and continues with the rest, and
+    the store one that keeps a pass alive. Any of them can absorb it, and
+    adding the classification to each is a game nobody wins: the next handler
+    someone writes reopens the hole silently.
+
+    Exception propagation is therefore the wrong channel. `note_fatal_db_error`
+    is called at the point the fatal is RECOGNISED, before it is re-raised, so
+    the process-wide record survives every handler that swallows the exception
+    itself. Call this from the `finally` of any long-running job and the
+    recovery happens whether or not the exception ever escaped.
+    """
+    if fatal_db_error() is None:
+        return False
+    logger.error(
+        "%s: a fatal DuckDB error was recorded during this pass; the exception "
+        "may have been absorbed by an intermediate handler. Recovering.", what,
+    )
+    if recover_invalidated_database():
+        logger.warning("%s: database connections re-established", what)
+    else:
+        logger.error(
+            "%s: the database could not be re-established; /health reports "
+            "unhealthy until `tj serve` is restarted.", what,
+        )
+    return True
+
+
+def recover_invalidated_database(*, repair: bool = True) -> bool:
+    """Re-establish every connection in this process; returns whether it worked.
+
+    Closes all registered backends' connections FIRST and only then reconnects
+    them, because a single surviving connection pins the invalidated instance
+    in DuckDB's per-path cache and every reconnect would hand back that same
+    dead instance (see the note above). In-memory backends are skipped: their
+    database IS their connection, so closing it discards the data, and there is
+    nothing on disk to reopen.
+
+    With ``repair``, rebuilds EVERY explicit index on the way back up.
+
+    **All of them, not just the ones the probe flags, and that is deliberate.**
+    The exception does not name the index that raised it, and
+    ``check_index_divergence`` compares particular values, so a clean verdict
+    from it is not a proof of soundness — measured on a real damaged database,
+    a sampled sweep found three of four damaged indexes and a repair driven by
+    that verdict left the table still raising the fatal on the next write.
+    Recovering into the same fatal is the one outcome this path must not have,
+    so it rebuilds the lot. That is affordable because the rebuild reads no
+    rows and moves no data: measured at ~1.1s for all fourteen indexes of a
+    3.9GB / 736k-row database, against a fault that otherwise 500s every route.
+    """
+    with _FATAL_LOCK:
+        backends = [b for b in _LIVE_BACKENDS if b.recoverable]
+        ok = True
+        rebuilt: list[str] = []
+        # Hold every backend's connection lock across teardown AND reopen, so
+        # no thread can be handed a cursor from the window in between. Without
+        # this, `conn` on another thread sees the bumped generation, calls
+        # `.cursor()` on the already-closed root connection, and either raises
+        # into a 500 or drops a write -- which would make the recovery path
+        # itself do the thing this whole change exists to prevent. `conn`
+        # blocks for the duration instead, which is the right trade: recovery
+        # is sub-second and the alternative is serving a dead handle.
+        with ExitStack() as locks:
+            for backend in backends:
+                locks.enter_context(backend._conn_lock)
+            for backend in backends:
+                backend._teardown_connections()
+            for backend in backends:
+                if not backend._reopen():
+                    ok = False
+            if ok and repair:
+                # One rebuild per database, not per backend: every registered
+                # backend on this path shares the instance we just reopened.
+                # Still under the locks: a half-repaired index set is no safer
+                # to hand out than a closed connection.
+                for backend in backends:
+                    try:
+                        faults, _unproven = check_index_divergence(backend.conn)
+                        if faults:
+                            logger.error(
+                                "index damage found while recovering: %s",
+                                "; ".join(f"{n} on {t} {r}" for n, t, r in faults),
+                            )
+                        rebuilt = repair_explicit_indexes(backend.conn)
+                    except duckdb.Error as exc:
+                        logger.error("index repair failed after recovery: %s", exc)
+                        ok = False
+                    break
+        if ok:
+            clear_fatal_db_error()
+            logger.warning(
+                "database connections re-established after a fatal DuckDB error; "
+                "rebuilt %d index(es) so the fault does not recur", len(rebuilt),
+            )
+        return ok
+
+
 # ---------------------------------------------------------------------------
 # DuckDBBackend
 # ---------------------------------------------------------------------------
@@ -2185,9 +2612,25 @@ class DuckDBBackend:
     def __init__(self, config: StorageConfig) -> None:
         db_path = Path(config.path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path: str | None = str(db_path)
         self._conn = duckdb.connect(str(db_path))
         run_migrations(self._conn)
         self._local = threading.local()
+        # Every cursor `conn` has handed out. Recovery must close ALL of them —
+        # a `threading.local` cannot be enumerated from another thread, and one
+        # surviving connection is enough to keep an invalidated database
+        # instance alive in DuckDB's per-path cache (see `is_fatal_db_error`).
+        # `_generation` is how a thread notices its cursor belongs to a
+        # torn-down connection and lazily takes a fresh one.
+        self._cursors: list[duckdb.DuckDBPyConnection] = []
+        self._generation = 0
+        # Deliberately NOT `write_lock`. Connection lifecycle must not order
+        # against the write path: a writer that hits a fatal records it under
+        # `_FATAL_LOCK` while still on the write path, and recovery holds
+        # `_FATAL_LOCK` while tearing connections down — sharing one lock
+        # between the two would make that pair deadlock-able.
+        self._conn_lock = threading.RLock()
+        _LIVE_BACKENDS.add(self)
         # Serializes *writes* across threads. Reads use per-thread cursors and
         # stay lock-free (#124), but DuckDB uses optimistic concurrency control:
         # two transactions mutating the same table from different threads can
@@ -2220,10 +2663,76 @@ class DuckDBBackend:
         behavior is unchanged for them.
         """
         cur = getattr(self._local, "cursor", None)
-        if cur is None:
-            cur = self._conn.cursor()
+        if cur is None or getattr(self._local, "generation", None) != self._generation:
+            with self._conn_lock:
+                cur = self._conn.cursor()
+                self._cursors.append(cur)
             self._local.cursor = cur
+            self._local.generation = self._generation
         return cur
+
+    # -- connection health and recovery --
+    #
+    # See the module-level "Fatal errors and database invalidation" note for
+    # why recovery cannot be done by one backend alone, and why it works at all.
+
+    @property
+    def recoverable(self) -> bool:
+        """Whether this backend can be torn down and reopened from disk.
+
+        False for `InMemoryBackend`, whose database only exists inside its
+        connection — closing it would discard the data rather than recover it.
+        """
+        return self._db_path is not None
+
+    def check_health(self) -> bool:
+        """Whether this backend can still answer a query.
+
+        `SELECT 1` is enough: an invalidated instance fails it, which is what
+        makes a health probe able to tell "the process is up" apart from "the
+        process can still read its database". Never raises.
+        """
+        try:
+            self.conn.execute("SELECT 1").fetchone()
+        except Exception as exc:  # noqa: BLE001 - a probe reports, never raises
+            if is_fatal_db_error(exc):
+                note_fatal_db_error(exc)
+            return False
+        return True
+
+    def _teardown_connections(self) -> None:
+        """Close every connection this backend holds, ignoring close errors.
+
+        Errors are ignored deliberately: closing an already-invalidated handle
+        can itself raise, and a failure to close cleanly must not stop us from
+        closing the REST — the eviction only happens once they are all gone.
+        """
+        with self._conn_lock:
+            for cur in self._cursors:
+                try:
+                    cur.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._cursors.clear()
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            # Bump BEFORE reopening so any thread racing in on the old cursor
+            # is forced to take a fresh one rather than reusing a closed handle.
+            self._generation += 1
+
+    def _reopen(self) -> bool:
+        if self._db_path is None:
+            return False
+        try:
+            with self._conn_lock:
+                self._conn = duckdb.connect(self._db_path)
+                run_migrations(self._conn)
+            return self.check_health()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("could not re-establish the database connection: %s", exc)
+            return False
 
     # -- writes --
 
@@ -3565,8 +4074,11 @@ class DuckDBBackend:
         return spans_deleted, sessions_deleted
 
     def close(self) -> None:
-        # Closing the root connection tears down the database and all cursors.
-        self._conn.close()
+        # Every cursor explicitly, then the root connection. Closing the root
+        # alone does tear the cursors down, but DuckDB only evicts an
+        # invalidated instance from its per-path cache once no handle to it
+        # survives, and relying on GC for that makes recovery non-deterministic.
+        self._teardown_connections()
 
 
 # ---------------------------------------------------------------------------
@@ -3581,9 +4093,15 @@ class InMemoryBackend(DuckDBBackend):
         # connection share the same in-memory database, so the per-thread cursor
         # property (#124) works identically here — including cross-thread
         # visibility, which the threadpool-backed integration tests rely on.
+        # `_db_path = None` marks it unrecoverable: there is no file to reopen,
+        # so tearing the connection down would destroy the data, not restore it.
+        self._db_path = None
         self._conn = duckdb.connect(":memory:")
         run_migrations(self._conn)
         self._local = threading.local()
+        self._cursors = []
+        self._generation = 0
+        self._conn_lock = threading.RLock()
         # Inherited write methods take this lock (async-hooks concurrency, #124).
         self._write_lock = threading.RLock()
 

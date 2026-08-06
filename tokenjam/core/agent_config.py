@@ -58,6 +58,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
+from tokenjam.core.db import is_fatal_db_error, note_fatal_db_error
 from tokenjam.core.summarize.catalog import Catalog, load_catalog
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 from tokenjam.utils.time_parse import utcnow
@@ -441,7 +442,22 @@ class DuckDBAgentConfigStore(AgentConfigStore):
 
         Once, because this runs on a background pass that may repeat every few
         minutes and a per-row log line would bury the signal in its own noise.
+
+        **A fatal is never degraded — it is re-raised.** Degrading means "one
+        row did not land, carry on with the in-memory view", and that is only
+        true while the database is still there to carry on against. A DuckDB
+        `FatalException` invalidates the whole database INSTANCE, so every
+        other connection in the process — the web server's included — is dead
+        the moment it is raised (`core/db.is_fatal_db_error`). Logging that as
+        a per-record warning is what turned one failed upsert into a daemon
+        that answered every request with a 500 while still reporting healthy.
+        The pass has nothing left to do, so it stops loudly and lets the
+        recovery path re-establish the connections.
         """
+        if is_fatal_db_error(exc):
+            note_fatal_db_error(exc)
+            self._degraded = True
+            raise exc
         if not self._degraded:
             log.warning(
                 "agent-config %s could not be persisted (%s: %s); this pass is "

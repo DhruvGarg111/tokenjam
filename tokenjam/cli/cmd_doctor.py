@@ -70,6 +70,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     above cannot see, and one that makes the retention DELETE unreliable.
     checks.append(_check_spans_indexes(ctx.obj["db"]))
 
+    # 9c. Every OTHER explicit index, swept. 9b covers spans specifically
+    #     (including absent ones); this one asks the same divergence question
+    #     of the whole catalogue, because the fault is not confined to spans.
+    checks.append(_check_index_divergence(ctx.obj["db"]))
+
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
 
@@ -594,6 +599,72 @@ def _check_spans_indexes(db: object) -> dict:
                        f"agree with the table."}
 
 
+def _check_index_divergence(db: object) -> dict:
+    """Sweep EVERY explicit index for disagreement with its table.
+
+    One cause, two harms, which is why this is an error and not a note:
+
+    * **Reads silently under-report.** A `WHERE col = ...` served by a damaged
+      index returns fewer rows than the table holds, with no error at all, so
+      analyzers understate whatever they read through it.
+    * **Writes are fatal.** A statement that must REMOVE an index entry raises
+      a DuckDB `FatalException`, which invalidates the whole database instance
+      and every connection in the process.
+
+    The sweep covers every explicit index because the fault has been seen on
+    more than one table. It reports what it can PROVE: an index is called sound
+    only when every distinct value was compared, and anything less is reported
+    as not proven rather than counted as passing. `--repair` therefore rebuilds
+    every index rather than only the ones named here -- see the repair handler.
+    """
+    from tokenjam.core.db import check_index_divergence, explicit_indexes
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Index integrity", "level": "info",
+                "message": "Skipped \u2014 CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults, unproven = check_index_divergence(conn)
+        total = len(explicit_indexes(conn))
+    except duckdb.Error as e:
+        return {"name": "Index integrity", "level": "info",
+                "message": f"Skipped \u2014 could not probe the indexes: {e}"}
+
+    if faults:
+        detail = "; ".join(f"{name} on {table} {reason}" for name, table, reason in faults)
+        caveat = (
+            f" A further {len(unproven)} index(es) could not be proven sound; "
+            f"the repair rebuilds every index, not only the ones listed here."
+            if unproven else ""
+        )
+        return {
+            "name": "Index integrity",
+            "level": "error",
+            "message": f"Index damage \u2014 {detail}. Queries served by these "
+                       f"indexes return incomplete results, and the next write "
+                       f"that removes an entry will invalidate the database and "
+                       f"500 every route. Run `tj doctor --repair` to rebuild "
+                       f"every index from its table (no rows are read or moved)."
+                       f"{caveat}",
+            "repair_action": "rebuild_diverged_indexes",
+        }
+    if unproven:
+        listed = "; ".join(f"{name} ({reason})" for name, _t, reason in unproven)
+        return {
+            "name": "Index integrity",
+            "level": "warn",
+            "message": f"No divergence found, but only {total - len(unproven)} of "
+                       f"{total} explicit indexes could be PROVEN sound. Not "
+                       f"proven: {listed}. `tj doctor --repair` rebuilds every "
+                       f"index regardless, which is the only way to be certain.",
+            "repair_action": "rebuild_diverged_indexes",
+        }
+    return {"name": "Index integrity", "level": "ok",
+            "message": f"All {total} explicit indexes compared against every "
+                       f"distinct value in their tables and agree."}
+
+
 def _check_retention(config: object, db: object) -> dict:
     """Report the analysis span, the retention derived from it, and the last delete.
 
@@ -1087,6 +1158,8 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
         ensure_expected_columns,
         ensure_expected_tables,
         purge_sentinel_timestamp_rows,
+        check_index_divergence,
+        repair_explicit_indexes,
         repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
@@ -1395,6 +1468,47 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
                     f"  [green]Spans table rebuilt — {before} rows preserved "
                     f"(verified: {after}).[/green]"
                 )
+            continue
+        if action == "rebuild_diverged_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped \u2014 CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # EVERY index, not only the ones the probe flagged. The probe
+                # compares particular values, so a clean verdict from it is not
+                # proof -- on a real damaged database a sampled sweep missed one
+                # of four, and repairing only its verdict left the table still
+                # raising the fatal. Measured at ~1.1s for all fourteen indexes
+                # of a 3.9GB database, so there is nothing to be clever about.
+                rebuilt = repair_explicit_indexes(conn)
+                still_diverged, _ = check_index_divergence(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Repair failed \u2014 {e}. If the database is locked, "
+                        f"stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if still_diverged:
+                    detail = "; ".join(
+                        f"{n} on {t} {r}" for n, t, r in still_diverged
+                    )
+                    console.print(
+                        f"  [red]Rebuilt {len(rebuilt)} index(es) but divergence "
+                        f"remains \u2014 {detail}.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(rebuilt)} damaged index(es) from "
+                        f"their tables \u2014 {', '.join(rebuilt)}. No rows read or "
+                        f"moved; re-probe is clean.[/green]"
+                    )
 
 
 def _is_local_url(url: str) -> bool:
