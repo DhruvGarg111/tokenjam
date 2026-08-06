@@ -1501,6 +1501,68 @@ a.health-tile.attn { border-color: var(--warn); }
 .opt-table tr.flagged td { color: var(--warn); }
 .opt-caveat { font-size: 12px; font-style: italic; color: var(--warn); margin-top: 10px; }
 
+/* Analyzer detail shell (lens redesign): breadcrumb chip nav across the 11
+   `DETAIL_ANALYZER_NAMES` findings, a title row carrying a CLI-command chip
+   + a mech badge (apply/snippet/read, see OPT_MECH), a 3-tile stat row, a
+   two-column Evidence/Fix body, and a footer "next biggest" nav. Restyles
+   the existing OptimizeFinding shell; per-analyzer branch content (tables,
+   prose) is untouched and slots into `.panel-body` as-is. */
+.opt-crumbs { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.opt-crumb-div { width: 1px; align-self: stretch; min-height: 18px; background: var(--border); }
+.opt-crumb-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.opt-crumb-chip {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text-dim);
+  padding: 5px 11px; border-radius: var(--radius-pill); cursor: pointer;
+  font-family: 'Geist Mono', monospace; font-size: 11.5px; text-decoration: none; line-height: 1.4;
+}
+.opt-crumb-chip:hover { color: var(--text); border-color: var(--text-faint); }
+.opt-crumb-chip.active { background: rgba(var(--accent-rgb),0.10); border-color: var(--accent); color: var(--accent); }
+/* Persona-disabled chips stay reachable (they land on the honest third-state
+   page below) but read as dimmer than a chip with a real finding, same
+   "distinct, never hidden" principle as the page they link to. */
+.opt-crumb-chip.gated { color: var(--text-faint); border-style: dashed; }
+
+.opt-head-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.opt-cli-chip { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 3px 9px; }
+.opt-mech-badge { font-family: 'Geist Mono', monospace; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; padding: 3px 9px; border-radius: var(--radius-pill); border: 1px solid; white-space: nowrap; }
+.opt-mech-apply   { color: var(--success); border-color: rgba(var(--success-rgb), var(--tint-border)); background: rgba(var(--success-rgb), var(--tint-bg)); }
+.opt-mech-snippet { color: var(--brand);   border-color: rgba(var(--brand-rgb),   var(--tint-border)); background: rgba(var(--brand-rgb),   var(--tint-bg)); }
+.opt-mech-read    { color: var(--text-dim); border-color: var(--border); background: var(--surface2); }
+
+.opt-blurb { font-size: 13px; color: var(--text-dim); line-height: 1.55; max-width: 640px; margin: 4px 0 0; }
+
+.opt-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 16px 0 0; }
+.opt-stat-tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: 14px 16px; }
+.opt-stat-v { font-family: 'Geist Mono', monospace; font-size: 22px; font-weight: 700; }
+.opt-stat-l { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; }
+
+.opt-body-grid { display: grid; grid-template-columns: minmax(0,1.6fr) minmax(0,1fr); gap: 16px; margin-top: 16px; align-items: start; }
+@media (max-width: 860px) { .opt-body-grid { grid-template-columns: minmax(0,1fr); } }
+.opt-side { display: flex; flex-direction: column; gap: 16px; }
+.opt-evidence-note { font-size: 11.5px; color: var(--text-faint); margin-top: 10px; }
+
+.opt-fix-empty { font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+
+/* Two box variants sharing one body style: caveat is amber-tinted (matches
+   `.band-stale`'s tint convention), basis is plain grey-bordered. */
+.opt-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: 14px 16px; }
+.opt-box.opt-box-caveat { border-color: rgba(var(--warn-rgb), var(--tint-border)); }
+.opt-box-label { font-family: 'Geist Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); margin-bottom: 6px; }
+.opt-box-caveat .opt-box-label { color: var(--warn); }
+.opt-box-body { font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+
+/* The persona-disabled third state (root anti-pattern 22): a finding this
+   persona has no lever for was never invoked server-side, so there is no `fd`
+   to render an empty-table state from — this must never be mistaken for "ran,
+   found nothing" (that case still renders the analyzer's own empty-state
+   sentence via OptimizeFinding, further down). */
+.opt-persona-gated { background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius-panel); padding: 14px 16px; font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+
+.opt-footer-nav { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.opt-footer-cap { font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-dim); }
+.opt-next-btn { background: var(--surface); border: 1px solid var(--text-faint); color: var(--text); padding: 7px 14px; border-radius: var(--radius-control); cursor: pointer; font-family: 'Geist Mono', monospace; font-size: 12px; font-weight: 600; text-decoration: none; display: inline-block; }
+.opt-next-btn:hover { border-color: var(--accent); color: var(--accent); }
+
 /* FAQ (Improve ▸ FAQ, formerly Observe ▸ Optimize ▸ Guide). It reuses
    .opt-section for the card frame so it can never drift from the Optimize
    cards it explains, and (like .opt-line on those cards) the prose fills the
@@ -6768,6 +6830,51 @@ const DETAIL_ANALYZER_NAMES = new Set([
   'downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim',
   'reuse', 'subagent', 'verbosity', 'deadweight', 'placement',
 ]);
+// Same 11 names as DETAIL_ANALYZER_NAMES, ordered (not rank-sorted — this is
+// the biggest-first CLI order OptimizeView's `order`/persona-gate filter
+// already used inline; pulled out once so the breadcrumb chip nav and the
+// filtered `order` array can't drift apart).
+const OPT_DETAIL_ORDER = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
+
+// The mech badge (design's apply/snippet/read pill) is a static
+// classification of an analyzer's fix MECHANISM, not a per-instance
+// computation — same status as ANALYZER_META's hint text, which is why it
+// lives beside it rather than being derived from a finding payload (no field
+// like this exists server-side; see the W4 survey's gap note). `apply`: a
+// deterministic write tokenjam can make (subject to a proposal being open).
+// `snippet`: the fix is a diff the user places themselves (CLAUDE.md note,
+// cache_control placement, template edit) — tokenjam never writes it.
+// `read`: no lever exists to act on the finding at all (placement is the
+// only one — batch adoption is an architectural change in the user's own
+// app, so there is structurally no diff to hand over).
+const OPT_MECH = {
+  downsize: 'apply', subagent: 'apply', deadweight: 'apply',
+  resend: 'snippet', cache: 'snippet', 'cache-recommend': 'snippet',
+  script: 'snippet', trim: 'snippet', reuse: 'snippet', verbosity: 'snippet',
+  placement: 'read',
+};
+const OPT_MECH_LABEL = { apply: 'writes the change', snippet: 'hands you the fix', read: 'read-only finding' };
+
+// Static "why there's no fix right now" copy — the founder decision that the
+// Fix panel is always present (never a bare stop after a number/table). Used
+// ONLY as the last resort: no open cost proposal for this analyzer AND the
+// branch itself produced no inline fix content (resend's fix_compaction,
+// verbosity's remedy sentence). Never a computed figure, same footing as any
+// other static UI copy (ANALYZER_META.hint, mock blurbs) — describes the
+// mechanism, states nothing time-varying.
+const OPT_NO_FIX_REASON = {
+  downsize: 'No model-swap proposal is open for this window. A candidate becomes a standing fix once it clears the analyzer’s confidence bar.',
+  resend: 'Not enough data in this window to measure a repeat share, so there’s nothing to fix yet.',
+  cache: 'This analyzer doesn’t produce a standing fix proposal yet. Use the evidence above: place a cache_control breakpoint after the largest repeated prefix for the worst-ratio (provider, model) pair.',
+  'cache-recommend': 'This analyzer doesn’t produce a standing fix proposal yet. The candidates above are the placement points — add cache_control there.',
+  script: 'No cluster in this window cleared the ≥20-identical-signature bar a scripted replacement needs, so there’s nothing to propose.',
+  trim: 'This analyzer doesn’t produce a standing fix proposal yet. Drop or rewrite the flagged regions above in your prompt template, then re-run your eval — there’s no writer for prompt-template source.',
+  reuse: 'No fix proposal is open for this window.',
+  subagent: 'No model-swap proposal is open for this window. tokenjam writes the fix only when a flagged dispatch resolves to a named .claude/agents/<name>.md file; a built-in agent type has nothing to point at.',
+  verbosity: 'No verbosity remedy was computed for this window.',
+  deadweight: 'No server-removal proposal is open for this window.',
+  placement: 'Batch adoption is an architectural change in your own application (submit + poll). tokenjam has no writer for it — use the workload sizes above to size the migration yourself.',
+};
 function optimizeDetailAnalyzers(opt) {
   if (!opt || opt.report_available === false) return [];
   return recoverableTiles(opt)
@@ -6966,25 +7073,86 @@ function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
 }
 
 // ---- Optimize detail screen ----
+// Stat-tile numbers 2 and 3 (the design's 3-tile row — tile 1 is always past
+// overspend, computed in OptimizeFinding itself). Every value here already
+// exists as inline prose in the branch below; this just picks the two most
+// legible per-analyzer numbers and labels them, no new server data and no
+// analysis performed client-side beyond a plain sum over rows the branch
+// already renders (same precedent as the existing `sfTok` reduce above).
+// Returns `[stat2, stat3]`, each `{v, l}` or null when the analyzer found
+// nothing this window — the branch's own empty-state sentence in the
+// Evidence panel already covers that case, so the tiles just don't render.
+function optDetailStats(name, fd, dg) {
+  if (name === 'downsize') {
+    if (!dg) return [null, null];
+    return [{ v: dg.percent_of_sessions + '%', l: 'of sessions match' }, { v: dg.candidate_sessions + ' / ' + dg.total_sessions, l: 'candidate sessions' }];
+  }
+  if (!fd) return [null, null];
+  if (name === 'placement') return [{ v: String(fd.candidates.length), l: 'workloads fit the batch shape' }, { v: fd.percent_of_window_cost + '%', l: 'of window cost' }];
+  if (name === 'cache') return [{ v: String((fd.rows || []).length), l: '(provider, model) pairs' }, { v: String((fd.flagged || []).length), l: 'below efficacy threshold' }];
+  if (name === 'resend') return fd.repeat_share == null ? [null, null] : [{ v: (fd.repeat_share * 100).toFixed(0) + '%', l: 'of prompt tokens are repeats' }, { v: String(fd.turns_examined), l: 'turns measured' }];
+  if (name === 'cache-recommend') {
+    if (!fd.enabled || !(fd.candidates || []).length) return [null, null];
+    const tok = fd.candidates.reduce((s, c) => s + (c.estimated_cacheable_tokens || 0), 0);
+    return [{ v: String(fd.candidates.length), l: 'prefix candidates' }, { v: fmtTokens(tok), l: 'tokens behind them' }];
+  }
+  if (name === 'script') {
+    if (!(fd.clusters || []).length) return [null, null];
+    const inst = fd.clusters.reduce((s, c) => s + (c.instances || 0), 0);
+    return [{ v: String(fd.clusters.length), l: 'deterministic clusters' }, { v: String(inst), l: 'total instances' }];
+  }
+  if (name === 'trim') {
+    if (!fd.enabled || !(fd.per_prompt || []).length) return [null, null];
+    return [{ v: String(fd.prompts_scored), l: 'prompts scored' }, { v: fd.total_bloat_chars + ' / ' + fd.total_chars, l: 'chars flagged' }];
+  }
+  if (name === 'reuse') {
+    if (!(fd.clusters || []).length) return [null, null];
+    const reps = fd.clusters.reduce((s, c) => s + (c.repetitions || 0), 0);
+    return [{ v: String(fd.clusters.length), l: 'repeated-plan clusters' }, { v: String(reps), l: 'total repetitions' }];
+  }
+  if (name === 'subagent') {
+    if (!fd.total_subagents) return [null, null];
+    return [{ v: String(fd.total_subagents), l: 'subagents dispatched' }, { v: (fd.percent_of_cost * 100).toFixed(0) + '%', l: 'of window cost' }];
+  }
+  if (name === 'verbosity') {
+    if (!(fd.candidates || []).length) return [null, null];
+    return [{ v: String(fd.total_candidates || fd.candidates.length), l: 'high-verbosity candidates' }, { v: String(fd.sessions_examined), l: 'sessions examined' }];
+  }
+  if (name === 'deadweight') {
+    if (!(fd.dead_servers || []).length) return [null, null];
+    return [{ v: String(fd.dead_servers.length), l: 'dead MCP servers' }, { v: String(fd.configured_servers), l: 'configured servers' }];
+  }
+  return [null, null];
+}
+
 function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onProposalDismiss, onProposalMark }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
+  // Fix-panel content this branch produces inline (resend's always-on
+  // fix_compaction sentence + optional cache_control snippet; verbosity's
+  // remedy-to-review sentence). Kept separate from `body` (which stays
+  // evidence-only) so both can be restyled into their own design components
+  // — the Evidence panel and the always-present Fix panel — without
+  // reshuffling every branch's actual content.
+  let inlineFix = null;
+  // Caveat text this branch carries (`fd.caveat` / `dg.caveat` / `fd.friction`
+  // / the first cluster's caveat for `reuse`) — a plain string, rendered once
+  // in the shared Caveat box rather than inline per branch.
+  let caveatText = null;
   if (name === 'downsize') {
     const dg = opt.downgrade;
-    // Always render the section — a null typed slot means the analyzer ran and
-    // found no candidates, not that it's missing (issue #126).
-    if (!dg) {
-      return html`<section class="opt-section" id="opt-downsize">
-        <div class="opt-title">Downsize</div>
-        <div class="opt-line dim">No downsize candidates in this window; sessions don't match the smaller-model shape (small input/output, few tool calls).</div>
-      </section>`;
-    }
-    body = html`
+    // A null typed slot means the analyzer ran and found no candidates, not
+    // that it's missing (issue #126) — falls through to the shared shell
+    // below (title/stats/Fix panel) exactly like every other analyzer's
+    // empty state, rather than returning its own miniature section.
+    body = !dg ? html`
+      <div class="opt-line dim">No downsize candidates in this window; sessions don't match the smaller-model shape (small input/output, few tool calls).</div>`
+      : html`
       <div class="opt-line">${dg.percent_of_sessions}% of sessions match a smaller-model candidate shape (${dg.candidate_sessions} of ${dg.total_sessions}).</div>
       ${dg.suggestions && Object.keys(dg.suggestions).length ? html`<div class="opt-line dim">Pattern: ${Object.entries(dg.suggestions).map(([k, v]) => k + ' → ' + v).join(', ')}</div>` : null}
       ${(dg.examples || []).length ? html`<div class="opt-sub">Examples</div>
-        <div class="table-wrap"><table class="opt-table"><tbody>${dg.examples.map(ex => html`<tr><td class="mono">${(ex.trace_id || '').slice(0, 8)}…</td><td>${ex.tool_calls} tools</td><td class="mono">${ex.model}</td></tr>`)}</tbody></table></div>` : null}
-      ${dg.caveat ? html`<div class="opt-caveat">! ${dg.caveat}</div>` : null}`;
+        <div class="table-wrap"><table class="opt-table"><tbody>${dg.examples.map(ex => html`<tr><td class="mono">${(ex.trace_id || '').slice(0, 8)}…</td><td>${ex.tool_calls} tools</td><td class="mono">${ex.model}</td></tr>`)}</tbody></table></div>` : null}`;
+    caveatText = dg && dg.caveat;
   } else if (name === 'placement') {
     // Batch API placement: unattended, cadence-regular workloads whose spend
     // could move to the Batch API's flat 50% rate. A sibling top-level branch
@@ -6992,41 +7160,41 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
     // `analyze_batch_placement` drops the key from `findings` entirely rather
     // than carrying an empty-candidates finding when nothing qualifies (see
     // model_downgrade.py's `run()`) — same "null slot means ran, found
-    // nothing" shape as `downsize`/`opt.downgrade` just above, so it gets the
-    // same explicit empty-state treatment (issue #126) instead of vanishing
-    // via the generic `if (!fd) return null` a couple lines down.
+    // nothing" shape as `downsize`/`opt.downgrade` just above, so it falls
+    // through to the shared shell rather than vanishing via the generic
+    // `if (!fd) return null` a couple lines down.
     const fd = (opt.findings || {})[name];
     if (!fd) {
-      return html`<section class="opt-section" id="opt-placement">
-        <div class="opt-title">Batch placement</div>
-        <div class="opt-line dim">No unattended, cadence-regular workloads in this window <span class="dim">(≥${PLACEMENT_DEFAULT_MIN_SESSIONS} sessions on a regular cadence, ≥${fmtCost(PLACEMENT_DEFAULT_MIN_GROUP_COST_USD)} window spend)</span>. Lower <span class="mono">[optimize] min_sessions_for_cadence</span> / <span class="mono">min_group_cost_usd</span> in tj.toml to consider smaller workloads.</div>
-      </section>`;
+      body = html`
+        <div class="opt-line dim">No unattended, cadence-regular workloads in this window <span class="dim">(≥${PLACEMENT_DEFAULT_MIN_SESSIONS} sessions on a regular cadence, ≥${fmtCost(PLACEMENT_DEFAULT_MIN_GROUP_COST_USD)} window spend)</span>. Lower <span class="mono">[optimize] min_sessions_for_cadence</span> / <span class="mono">min_group_cost_usd</span> in tj.toml to consider smaller workloads.</div>`;
+    } else {
+      // This number is a PRICE difference on the SAME tokens (batch bills the
+      // same work at half rate, freeing nothing), never tokens freed — so
+      // unlike every sibling card this branch renders its own footer line
+      // below instead of the generic past-overspend one (see
+      // `recUsd`/`recTok` suppression for this name further down), and gates
+      // the dollar figure on `pricing_mode === 'api'` exactly, not just "not
+      // suppressed" — the Batch API discount is an api-billed lever a
+      // subscription/local/unknown plan cannot pull at all, mirroring the
+      // CLI's `_render_placement` and `cost_proposals._placement_to_proposals`
+      // (CLAUDE.md anti-pattern #22). Advise-only by design: batch adoption is
+      // an architectural change (submit + poll) in the user's own application,
+      // so this analyzer's mech badge is `read`, not `apply`/`snippet` — see
+      // OPT_MECH — and its Fix panel never offers an apply action, only the
+      // generic proposals block (data-driven off `hasProposal`) if one is
+      // ever open, since that only ever points at the Review inbox.
+      const n = fd.candidates.length;
+      const isApi = framing && framing.pricing_mode === 'api';
+      body = html`
+        <div class="opt-line">${n} workload${n !== 1 ? 's' : ''} fit the batch shape <span class="dim">(regular cadence, no human turn after the first model call)</span>: <b>${fd.percent_of_window_cost}%</b> of window cost.</div>
+        <div class="table-wrap"><table class="opt-table"><thead><tr><th>Agent</th><th>Cadence</th><th>Tokens</th>${isApi ? html`<th>Spend → batch rate</th>` : null}</tr></thead>
+          <tbody>${fd.candidates.slice(0, 10).map(c => html`<tr><td class="mono">${c.agent_id}</td><td>${c.sessions} session${c.sessions !== 1 ? 's' : ''} every ${fmtCadence(c.median_gap_seconds)}</td><td>${fmtTokens(c.tokens)}</td>${isApi ? html`<td class="mono">${fmtCost(c.cost_usd)} → <span style="color:var(--success)">${fmtCost(c.cost_usd - c.estimated_batch_saving_usd)}</span></td>` : null}</tr>`)}</tbody></table></div>
+        ${fd.candidates.length > 10 ? html`<div class="opt-line dim">…and ${fd.candidates.length - 10} more.</div>` : null}
+        ${isApi && fd.past_overspend_usd != null ? html`
+          <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.past_overspend_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
+          : html`<div class="opt-line dim" style="margin-top:8px">The Batch API's discount is an api-billed price lever, so no dollar figure is shown for this plan. The workload sizes above still say how much work fits the shape.</div>`}`;
+      caveatText = fd.friction;
     }
-    // This number is a PRICE difference on the SAME tokens (batch bills the
-    // same work at half rate, freeing nothing), never tokens freed — so
-    // unlike every sibling card this branch renders its own footer line
-    // below instead of the generic past-overspend one (see
-    // `recUsd`/`recTok` suppression for this name further down), and gates
-    // the dollar figure on `pricing_mode === 'api'` exactly, not just "not
-    // suppressed" — the Batch API discount is an api-billed lever a
-    // subscription/local/unknown plan cannot pull at all, mirroring the
-    // CLI's `_render_placement` and `cost_proposals._placement_to_proposals`
-    // (CLAUDE.md anti-pattern #22). Advise-only by design: batch adoption is
-    // an architectural change (submit + poll) in the user's own application,
-    // so this card offers no apply action — the generic "fix is ready" link
-    // rendered below (data-driven off `hasProposal`) still applies, since it
-    // only ever points at the Review inbox, never an apply button.
-    const n = fd.candidates.length;
-    const isApi = framing && framing.pricing_mode === 'api';
-    body = html`
-      <div class="opt-line">${n} workload${n !== 1 ? 's' : ''} fit the batch shape <span class="dim">(regular cadence, no human turn after the first model call)</span>: <b>${fd.percent_of_window_cost}%</b> of window cost.</div>
-      <div class="table-wrap"><table class="opt-table"><thead><tr><th>Agent</th><th>Cadence</th><th>Tokens</th>${isApi ? html`<th>Spend → batch rate</th>` : null}</tr></thead>
-        <tbody>${fd.candidates.slice(0, 10).map(c => html`<tr><td class="mono">${c.agent_id}</td><td>${c.sessions} session${c.sessions !== 1 ? 's' : ''} every ${fmtCadence(c.median_gap_seconds)}</td><td>${fmtTokens(c.tokens)}</td>${isApi ? html`<td class="mono">${fmtCost(c.cost_usd)} → <span style="color:var(--success)">${fmtCost(c.cost_usd - c.estimated_batch_saving_usd)}</span></td>` : null}</tr>`)}</tbody></table></div>
-      ${fd.candidates.length > 10 ? html`<div class="opt-line dim">…and ${fd.candidates.length - 10} more.</div>` : null}
-      ${isApi && fd.past_overspend_usd != null ? html`
-        <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.past_overspend_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
-        : html`<div class="opt-line dim" style="margin-top:8px">The Batch API's discount is an api-billed price lever, so no dollar figure is shown for this plan. The workload sizes above still say how much work fits the shape.</div>`}
-      ${fd.friction ? html`<div class="opt-caveat">! ${fd.friction}</div>` : null}`;
   } else {
     const fd = (opt.findings || {})[name];
     if (!fd) return null;
@@ -7055,7 +7223,8 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
           <div class="table-wrap"><table class="opt-table"><thead><tr><th>What's re-included</th><th>Sessions</th><th>Occurrences</th><th>Fix</th></tr></thead>
             <tbody>${fd.recurring_examples.slice(0, 8).map((r, i) => html`<tr key=${i}><td class="mono" title=${r.label}>${shortPath(r.label)}</td><td>${r.sessions}</td><td>${r.occurrences}</td><td class="dim">${r.fix}</td></tr>`)}</tbody></table></div>`
           : (fd.notes && fd.notes[0] ? html`<div class="opt-line dim">${fd.notes[0]}</div>` : null)}
-        <div class="opt-sub">Fixes</div>
+        ${(!dollarsSuppressed(framing) && usd == null && tok != null) ? html`<div class="opt-line dim">No dollar figure: no session in this window carries a priced, cache-capable model to estimate the cache_control-adoption saving from. The token estimate above still applies to the compaction lever, which is cache-agnostic.</div>` : null}`;
+      inlineFix = fd.repeat_share == null ? null : html`
         <div class="opt-line">${fd.fix_compaction} <span class="dim">(agent-harness users, e.g. Claude Code)</span></div>
         ${fd.fix_cache_control ? html`
           <div style="margin-top:8px">
@@ -7065,9 +7234,8 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
             </div>
             <div style="margin:0 0 2px"><span class="dim" style="font-weight:400">SDK users, paste into your own call site</span></div>
             <div class="sz-copybox" style="margin-top:2px">${fd.fix_cache_control}</div>
-          </div>` : null}
-        ${(!dollarsSuppressed(framing) && usd == null && tok != null) ? html`<div class="opt-line dim">No dollar figure: no session in this window carries a priced, cache-capable model to estimate the cache_control-adoption saving from. The token estimate above still applies to the compaction lever, which is cache-agnostic.</div>` : null}
-        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
+          </div>` : null}`;
+      caveatText = fd.caveat;
     } else if (name === 'cache-recommend') {
       // This analyzer is Anthropic-only by design (structural prefix
       // detection, not a cross-provider extension — see cache_recommend.py).
@@ -7082,9 +7250,9 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
         <div class="table-wrap"><table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
-          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}</td></tr>`)}</tbody></table></div>
-        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}</td></tr>`)}</tbody></table></div>`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
+      caveatText = fd.caveat;
     } else if (name === 'trim') {
       // Per-prompt block, not a flat table (web card parity with the
       // CLI's `_render_trim`): each prompt can now carry a provenance line
@@ -7116,27 +7284,27 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
         <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${captureModeNote(fd.capture_mode)}.</div>
         ${isDegradedCapture(fd.capture_mode) && fd.hint ? html`<div class="opt-line dim">${fd.hint}</div>` : null}
         <div class="table-wrap"><table class="opt-table"><thead><tr><th>Repeats</th><th>Signature</th><th>Reuse</th><th>Script</th></tr></thead>
-          <tbody>${fd.clusters.slice(0, 5).map(c => html`<tr><td>${c.repetitions}×</td><td class="mono">${(c.tool_signature || []).join(' → ').slice(0, 60)}</td><td>${fmtFramedSavings(c.cache_reuse_recoverable_usd, c.cache_reuse_recoverable_tokens, framing)}</td><td>${fmtFramedSavings(c.script_replacement_recoverable_usd, c.script_replacement_recoverable_tokens, framing)}</td></tr>`)}</tbody></table></div>
-        ${fd.clusters[0].caveat ? html`<div class="opt-caveat">! ${fd.clusters[0].caveat}</div>` : null}`
+          <tbody>${fd.clusters.slice(0, 5).map(c => html`<tr><td>${c.repetitions}×</td><td class="mono">${(c.tool_signature || []).join(' → ').slice(0, 60)}</td><td>${fmtFramedSavings(c.cache_reuse_recoverable_usd, c.cache_reuse_recoverable_tokens, framing)}</td><td>${fmtFramedSavings(c.script_replacement_recoverable_usd, c.script_replacement_recoverable_tokens, framing)}</td></tr>`)}</tbody></table></div>`
         : html`<div class="opt-line dim">No repeated planning detected above threshold (≥3 sessions sharing a skeleton).</div>
           ${fd.hint ? html`<div class="opt-line dim">${fd.hint}</div>` : null}`;
+      caveatText = (fd.clusters || []).length ? fd.clusters[0].caveat : null;
     } else if (name === 'subagent') {
       body = fd.total_subagents ? html`
         <div class="opt-line">${fd.total_subagents} subagent${fd.total_subagents !== 1 ? 's' : ''} across ${fd.sessions_with_subagents} session${fd.sessions_with_subagents !== 1 ? 's' : ''}, ${(fd.percent_of_cost * 100).toFixed(0)}% of window cost (${fmtFramedSavings(fd.subagent_cost_usd, fd.subagent_tokens, framing)}).</div>
         ${(fd.flagged || []).length ? html`
           <div class="table-wrap"><table class="opt-table"><thead><tr><th>Session/Sub-agent</th><th>Model</th><th>Tools</th><th>Flags</th></tr></thead>
             <tbody>${fd.flagged.slice(0, 10).map(r => html`<tr><td class="mono">${(r.session_id || '').slice(0, 8)}…/${(r.sub_agent_id || '').slice(0, 10)}</td><td class="mono">${r.model}</td><td>${r.tool_calls}</td><td>${(r.flags || []).join(', ')}</td></tr>`)}</tbody></table></div>`
-          : html`<div class="opt-line dim">No right-sizing candidates above thresholds.</div>`}
-        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
+          : html`<div class="opt-line dim">No right-sizing candidates above thresholds.</div>`}`
         : html`<div class="opt-line dim">No subagent (Task-tool) activity in this window.</div>`;
+      caveatText = fd.caveat;
     } else if (name === 'verbosity') {
       body = (fd.candidates || []).length ? html`
         <div class="opt-line">${fd.total_candidates || fd.candidates.length} high-verbosity candidate${(fd.total_candidates || fd.candidates.length) !== 1 ? 's' : ''} <span class="dim">(output well above the per-task-shape median)</span>.</div>
         <div class="table-wrap"><table class="opt-table"><thead><tr><th>Session</th><th>Output</th><th>vs baseline</th><th>Recoverable</th></tr></thead>
-          <tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.session_id || '').slice(0, 8)}…</td><td>${fmtTokens(c.output_tokens)}</td><td>${fmtTokens(c.baseline_output_tokens)} median, ${c.over_baseline_multiple}×</td><td>${fmtFramedSavings(c.recoverable_usd, c.over_baseline_tokens, framing)}</td></tr>`)}</tbody></table></div>
-        ${fd.suggested_max_tokens ? html`<div class="opt-line dim">Remedy to review (not applied): a terse system-prompt line and/or a max_tokens cap near ~${fmtTokens(fd.suggested_max_tokens)}.</div>` : null}
-        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
+          <tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.session_id || '').slice(0, 8)}…</td><td>${fmtTokens(c.output_tokens)}</td><td>${fmtTokens(c.baseline_output_tokens)} median, ${c.over_baseline_multiple}×</td><td>${fmtFramedSavings(c.recoverable_usd, c.over_baseline_tokens, framing)}</td></tr>`)}</tbody></table></div>`
         : html`<div class="opt-line dim">${fd.sessions_examined === 0 ? 'No LLM spans in this window.' : `Examined ${fd.sessions_examined} session${fd.sessions_examined !== 1 ? 's' : ''} across ${fd.cohorts_examined} task-shape cohort${fd.cohorts_examined !== 1 ? 's' : ''}; no session's output ran high enough vs its cohort median to flag.`}</div>`;
+      inlineFix = fd.suggested_max_tokens ? html`<div class="opt-fix-empty">Remedy to review (not applied): a terse system-prompt line and/or a max_tokens cap near ~${fmtTokens(fd.suggested_max_tokens)}. tokenjam doesn't write this automatically — terser output is only a saving if the answer still holds.</div>` : null;
+      caveatText = fd.caveat;
     } else if (name === 'deadweight') {
       body = !fd.sessions_scanned ? html`<div class="opt-line dim">No Claude Code sessions in this window.</div>`
         : !fd.configured_servers ? html`<div class="opt-line dim">Scanned ${fd.sessions_scanned} session${fd.sessions_scanned !== 1 ? 's' : ''}; no MCP server is configured, so nothing is being injected.</div>`
@@ -7144,35 +7312,81 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
         : html`
           <div class="opt-line">${fd.dead_servers.length} dead MCP server${fd.dead_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, never called)</span>.</div>
           <div class="table-wrap"><table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax (window)</th></tr></thead>
-            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table></div>
-          ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
+            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table></div>`;
+      caveatText = fd.caveat;
     }
   }
-  // Recoverable estimate line (when present). `placement` is excluded: its
-  // figure is a price difference, not recoverable tokens, and its own branch
-  // above renders its own footer with the "price difference" label instead
-  // (root anti-pattern 22: the generic past-overspend wording
-  // below would be dishonest for a figure that frees no tokens at all).
+  // Recoverable estimate (when present). `placement` is excluded: its figure
+  // is a price difference, not recoverable tokens, and its own branch above
+  // renders its own inline line with the "price difference" label instead
+  // (root anti-pattern 22: the generic past-overspend wording here would be
+  // dishonest for a figure that frees no tokens at all) — its stat tile 1
+  // below reads directly off `fd.past_overspend_usd` with that same distinct
+  // label rather than off `rec`.
   const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
+  const dg = name === 'downsize' ? fd : null;
   const recUsd = name === 'placement' ? null : (fd ? fd.past_overspend_usd : null);
   const recTok = name === 'placement' ? null : (fd ? fd.past_overspend_tokens : null);
   const rec = (recUsd != null || recTok != null) ? fmtFramedSavings(recUsd, recTok, framing) : null;
+  const isApiPricing = framing && framing.pricing_mode === 'api';
+
+  // Stat tile 1: past overspend for every analyzer except `placement` (its
+  // own price-difference framing, gated the same way its inline line is —
+  // an api-billed lever a subscription/local/unknown plan cannot read a
+  // dollar figure for at all).
+  const tile1 = name === 'placement'
+    ? { v: (isApiPricing && fd && fd.past_overspend_usd != null) ? fmtCost(fd.past_overspend_usd) : '—', l: 'price difference, this window' }
+    : { v: rec || '—', l: 'past overspend, this window' };
+  const [stat2, stat3] = optDetailStats(name, fd, dg);
+
+  const mechKind = OPT_MECH[name] || 'read';
+  const cli = 'tj optimize ' + name;
+  const basisText = fd && fd.estimate_basis;
+  const hasProposals = !!(proposals && proposals.length);
+  const hasInlineFix = !!inlineFix;
 
   return html`<section class="opt-section" id=${'opt-' + name}>
-    <div class="opt-title">${meta.title}
-      ${rec ? html`<span class="opt-rec" title=${(fd && fd.estimate_basis) || ''}>${rec}</span>` : null}
+    <div class="opt-head-row">
+      <div class="opt-title" style="margin-bottom:0">${meta.title}</div>
+      <span class="opt-cli-chip">${cli}</span>
+      <span class="opt-mech-badge opt-mech-${mechKind}">${OPT_MECH_LABEL[mechKind]}</span>
     </div>
-    ${body}
-    ${/* The applyable fix now lives HERE, inline under the evidence, rather than
-          on a separate Review-actions page. `embedded` drops the card's own
-          title/figure (this section already shows them) and keeps the "what to
-          do": the fix snippet + the apply control + Mark applied / Dismiss. */ ''}
-    ${(proposals && proposals.length) ? html`
-      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
-        <div class="opt-sub" style="margin-bottom:6px">Recommended change${proposals.length > 1 ? 's' : ''}</div>
-        ${proposals.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} embedded=${true} busy=${false}
-          onMark=${onProposalMark} onDismiss=${onProposalDismiss} onChanged=${onProposalChanged} />`)}
-      </div>` : null}
+    ${meta.hint ? html`<div class="opt-blurb">${meta.hint}</div>` : null}
+    <div class="opt-stats">
+      <div class="opt-stat-tile"><div class="opt-stat-v">${tile1.v}</div><div class="opt-stat-l">${tile1.l}</div></div>
+      ${stat2 ? html`<div class="opt-stat-tile"><div class="opt-stat-v">${stat2.v}</div><div class="opt-stat-l">${stat2.l}</div></div>` : null}
+      ${stat3 ? html`<div class="opt-stat-tile"><div class="opt-stat-v">${stat3.v}</div><div class="opt-stat-l">${stat3.l}</div></div>` : null}
+    </div>
+    <div class="opt-body-grid">
+      <div class="panel">
+        <div class="panel-head">Evidence · the sessions this figure came from</div>
+        <div class="panel-body">${body}</div>
+      </div>
+      <div class="opt-side">
+        <div class="panel">
+          <div class="panel-head">The fix</div>
+          <div class="panel-body">
+            ${hasProposals ? html`
+              <div style=${hasInlineFix ? 'margin-bottom:12px' : ''}>
+                ${proposals.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} embedded=${true} busy=${false}
+                  onMark=${onProposalMark} onDismiss=${onProposalDismiss} onChanged=${onProposalChanged} />`)}
+              </div>` : null}
+            ${hasInlineFix ? inlineFix : null}
+            ${(!hasProposals && !hasInlineFix) ? html`<div class="opt-fix-empty">No fix available right now. ${OPT_NO_FIX_REASON[name] || 'Nothing is currently offered for this finding.'}</div>` : null}
+          </div>
+        </div>
+        ${caveatText ? html`
+          <div class="opt-box opt-box-caveat">
+            <div class="opt-box-label">Caveat</div>
+            <div class="opt-box-body">${caveatText}</div>
+          </div>` : null}
+        ${basisText ? html`
+          <div class="opt-box">
+            <div class="opt-box-label">How this figure is computed</div>
+            <div class="opt-box-body">${basisText}</div>
+          </div>` : null}
+      </div>
+    </div>
   </section>`;
 }
 
@@ -7309,8 +7523,7 @@ function OptimizeView({ params, navParam }) {
   // would be a row pointing at a lever the reader does not have. Filtering the
   // order list here covers every such branch at once, including future ones.
   const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);
-  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']
-    .filter(n => !personaGated.has(n));
+  const order = OPT_DETAIL_ORDER.filter(n => !personaGated.has(n));
   const compFraming = st.comp ? st.comp.framing : framing;
   // LOCAL only -- subscription no longer suppresses (product decision: tj
   // does not differentiate subscription-billed from API-billed users).
@@ -7344,6 +7557,11 @@ function OptimizeView({ params, navParam }) {
   // `#/optimize/<name>` deep link — an analyzer with no finding gets no page.
   const detailNames = st.opt ? optimizeDetailAnalyzers(st.opt) : [];
   const detailSet = new Set(detailNames);
+  // Same tiles, kept as full objects (not just names) so the footer "Next
+  // biggest" nav can show an amount without re-deriving one — biggest-waste-
+  // first order already matches `detailNames` above (both come from the same
+  // `recoverableTiles` call over the same predicate).
+  const detailTiles = st.opt ? recoverableTiles(st.opt).filter(t => t.state === 'actionable' && DETAIL_ANALYZER_NAMES.has(t.name)) : [];
 
   // Unified "Recommended actions" rows — one digestible section that replaces the
   // chart's per-analyzer waste-list, the standalone Rules and Summarize boxes, and
@@ -7391,20 +7609,68 @@ function OptimizeView({ params, navParam }) {
     if (st.error) {
       return html`${backLink}<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>`;
     }
+    // Breadcrumb chip nav across all 11 analyzer detail pages, not just the
+    // ones with a page-worthy figure this window — a chip is still a real,
+    // reachable page via deep link even for an analyzer that ran and found
+    // nothing. A persona-gated chip (`.gated`) stays clickable and reads
+    // dimmer: it lands on the persona-disabled state below rather than
+    // disappearing, the same "distinct, never hidden" rule that state itself
+    // follows (root anti-pattern 22).
+    const crumbs = html`
+      <div class="opt-crumbs">
+        <a class="sz-back-link" href="#/optimize">← Back to Optimize</a>
+        <div class="opt-crumb-div"></div>
+        <div class="opt-crumb-list">
+          ${OPT_DETAIL_ORDER.map(n => {
+            const m = ANALYZER_META[n] || { title: capitalize(n) };
+            const gated = personaGated.has(n);
+            return html`<a key=${n} href=${'#/optimize/' + n} class=${'opt-crumb-chip' + (n === detailName ? ' active' : '') + (gated ? ' gated' : '')}>${m.title}</a>`;
+          })}
+        </div>
+      </div>`;
+    // Persona-disabled is a THIRD state, distinct from "ran, found nothing"
+    // (root anti-pattern 22): the analyzer was never invoked for this
+    // persona's window (`PERSONA_DISABLED_ANALYZERS`, runner.py), so there is
+    // no `fd` to read a real empty state from. Checked BEFORE `hasCard` below
+    // so a gated analyzer never falls into that generic branch, which would
+    // misreport a true absence-of-lever as "may have been resolved, or this
+    // window has no candidates" — a claim the analyzer never got to test.
+    if (personaGated.has(detailName)) {
+      return html`
+        ${crumbs}
+        <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
+          <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
+        </div>
+        <div class="opt-persona-gated">This analyzer doesn't run for the selected persona — no lever exists for it here, so tokenjam skips the scan rather than showing a diagnostic there's nothing you can act on. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div>
+      `;
+    }
     const hasCard = st.opt && (detailName === 'downsize'
       ? true
       : detailName === 'placement'
         ? true
         : !!(st.opt.findings || {})[detailName]);
+    // Footer "next biggest" nav: cycles through the analyzers that actually
+    // carry a figure this window (`detailTiles`, already rank-sorted
+    // biggest-first), wrapping past the end. An analyzer with no current
+    // figure (this one, or every other detail page, when only one or zero
+    // carry a figure) gets no footer rather than a nonsensical self-link.
+    const tileIdx = detailTiles.findIndex(t => t.name === detailName);
+    const nextTile = tileIdx !== -1 && detailTiles.length > 1 ? detailTiles[(tileIdx + 1) % detailTiles.length] : null;
+    const nextMeta = nextTile ? (ANALYZER_META[nextTile.name] || { title: capitalize(nextTile.name) }) : null;
     return html`
-      ${backLink}
+      ${crumbs}
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:16px">
-        ${meta.title} <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
+        <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
       </div>
       ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px;margin-bottom:12px">Computed over the last ${scan.windowDays} days by the background scan.</div>` : null}
       ${hasCard
         ? html`<${OptimizeFinding} name=${detailName} opt=${st.opt} framing=${framing} proposals=${proposalsFor(detailName)} onProposalChanged=${load} onProposalDismiss=${dismissProposal} onProposalMark=${markProposal} />`
         : html`<div class="chart-card"><div class="opt-line dim">No <b>${meta.title}</b> finding in the latest scan. It may have been resolved, or this window has no candidates. <a class="sz-link" href="#/optimize">Back to Optimize →</a></div></div>`}
+      ${nextTile ? html`
+        <div class="opt-footer-nav">
+          <div class="opt-footer-cap">Next biggest: ${nextMeta.title} · ${fmtFramedSavings(nextTile.usd, nextTile.tokens, framing)}</div>
+          <a class="opt-next-btn" href=${'#/optimize/' + nextTile.name}>Next fix →</a>
+        </div>` : null}
     `;
   }
 
