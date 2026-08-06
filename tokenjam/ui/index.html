@@ -8871,10 +8871,56 @@ function SummarizeView({ params }) {
     <div class="cur-seg"><span class="seg-label">${label}</span>
       ${opts.map(o => html`<button class=${val === o.v ? 'on' : ''} onClick=${() => set(o.v)}>${o.t}</button>`)}
     </div>`;
+
+  // The two filter bars on this screen (curator and review) share these option
+  // lists so the same dimension cannot end up spelled two ways.
+  const KIND_OPTS = [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }];
+  const SCOPE_OPTS = [{ v: 'all', t: 'All' }, { v: 'global', t: 'Global' }, { v: 'repo', t: 'Repo' }, { v: 'project', t: 'Project' }];
+  const STATUS_OPTS = [{ v: 'all', t: 'All' }, { v: 'candidate', t: 'Candidate' }, { v: 'staged', t: 'Staged' }];
+  const RV_STATE_OPTS = [{ v: 'all', t: 'All' }, { v: 'staged', t: 'Staged' }, { v: 'applied', t: 'Applied' },
+    { v: 'rejected', t: 'Rejected' }, { v: 'reverted', t: 'Reverted' }];
+
+  // Decide whether one filter dimension is worth a control at all, and what it
+  // should actually filter by.
+  //
+  // A dimension whose population holds ONE distinct value cannot change the
+  // result: every button either does nothing or empties the list. That was the
+  // steady state here — `Kind` is binary and is almost always all-`prompt`,
+  // `Scope` is usually all-`project`, and the review bar's `applied` /
+  // `rejected` / `reverted` states live only in the client-side `fileStates`
+  // overlay, so after a reload every row is `staged` and three of the five
+  // buttons matched nothing while still being offered.
+  //
+  // BASIS IS THE WHOLE POPULATION THE BAR FILTERS, never the currently-visible
+  // subset. Faceting on the visible subset makes a control vanish the instant
+  // it is used (one value left once you pick it) and strands the reader with no
+  // way back to All.
+  //
+  // Returns `shown: null` for "render no control", plus the value that should
+  // apply. A retained selection the control can no longer offer — the data
+  // moved under a stale filter, or the dimension collapsed entirely — reverts
+  // to 'all' rather than silently emptying a list with nothing on screen to
+  // explain why (root anti-pattern 22: a hidden control must never be
+  // mistakable for "no results").
+  const facet = (opts, val, rows, valueOf) => {
+    const present = new Set();
+    rows.forEach(r => { const v = valueOf(r); if (v != null && v !== '') present.add(v); });
+    const shown = present.size < 2 ? null : opts.filter(o => o.v === 'all' || present.has(o.v));
+    return { shown, effective: (shown && present.has(val)) ? val : 'all' };
+  };
+
+  const kindFacet = facet(KIND_OPTS, kind, cands, c => c.kind);
+  const scopeFacet = facet(SCOPE_OPTS, scope, cands, c => c.scope);
+  const statusFacet = facet(STATUS_OPTS, status, cands, statusOf);
+  // Whether any dimension is still filtering, so the empty state can say which
+  // of the two empties it is looking at.
+  const curFiltered = kindFacet.effective !== 'all' || scopeFacet.effective !== 'all'
+    || statusFacet.effective !== 'all' || query !== '';
+
   const baseMatch = c =>
-    (kind === 'all' || c.kind === kind) &&
-    (scope === 'all' || c.scope === scope) &&
-    (status === 'all' || statusOf(c) === status) &&
+    (kindFacet.effective === 'all' || c.kind === kindFacet.effective) &&
+    (scopeFacet.effective === 'all' || c.scope === scopeFacet.effective) &&
+    (statusFacet.effective === 'all' || statusOf(c) === statusFacet.effective) &&
     (query === '' || c.path.toLowerCase().includes(query.toLowerCase()));
   const visible = cands.filter(baseMatch);
   const selectable = visible.filter(c => !added.has(c.path));
@@ -8959,11 +9005,23 @@ function SummarizeView({ params }) {
   // ---- review ----
   const revRows = staged.map(s => { const c = candByPath[s.path]; return { ...s, kind: c ? c.kind : 'other', scope: c ? c.scope : '—' }; });
   const stOf = p => fileStates[p] || 'staged';
+  // Same facet rule as the curator bar, on the review population. `State` is
+  // the one that matters most here: `applied` / `rejected` / `reverted` are set
+  // only by this session's Apply / Reject / Undo, and nothing persists them, so
+  // on a fresh load `stOf` returns 'staged' for every row and the whole
+  // dimension correctly disappears instead of offering three buttons that
+  // cannot match. Nothing here invents server persistence for those states.
+  const rvStateFacet = facet(RV_STATE_OPTS, rvState, revRows, r => stOf(r.path));
+  const rvKindFacet = facet(KIND_OPTS, rvKind, revRows, r => r.kind);
+  const rvScopeFacet = facet(SCOPE_OPTS, rvScope, revRows, r => r.scope);
+  const rvFiltered = rvStateFacet.effective !== 'all' || rvKindFacet.effective !== 'all'
+    || rvScopeFacet.effective !== 'all' || rvQuery !== '';
+
   const rvMatch = r => {
     const st = stOf(r.path);
-    return (rvState === 'all' || st === rvState) &&
-      (rvKind === 'all' || r.kind === rvKind) &&
-      (rvScope === 'all' || r.scope === rvScope) &&
+    return (rvStateFacet.effective === 'all' || st === rvStateFacet.effective) &&
+      (rvKindFacet.effective === 'all' || r.kind === rvKindFacet.effective) &&
+      (rvScopeFacet.effective === 'all' || r.scope === rvScopeFacet.effective) &&
       (rvQuery === '' || r.path.toLowerCase().includes(rvQuery.toLowerCase()));
   };
   const rvVisible = revRows.filter(rvMatch);
@@ -9112,9 +9170,9 @@ function SummarizeView({ params }) {
       ${applyMsg ? html`<div class="opt-caveat" style=${'font-style:normal;color:' + (applyMsg.tone === 'warn' ? 'var(--warn)' : 'var(--success)')}>${applyMsg.text}</div>` : null}
       <div class="section-band">Staged <span class="hint">· click a row for its diff</span></div>
       <div class="cur-filters">
-        ${seg(rvState, setRvState, [{ v: 'all', t: 'All' }, { v: 'staged', t: 'Staged' }, { v: 'applied', t: 'Applied' }, { v: 'rejected', t: 'Rejected' }, { v: 'reverted', t: 'Reverted' }], 'State')}
-        ${seg(rvKind, setRvKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
-        ${seg(rvScope, setRvScope, [{ v: 'all', t: 'All' }, { v: 'global', t: 'Global' }, { v: 'repo', t: 'Repo' }, { v: 'project', t: 'Project' }], 'Scope')}
+        ${rvStateFacet.shown ? seg(rvStateFacet.effective, setRvState, rvStateFacet.shown, 'State') : null}
+        ${rvKindFacet.shown ? seg(rvKindFacet.effective, setRvKind, rvKindFacet.shown, 'Kind') : null}
+        ${rvScopeFacet.shown ? seg(rvScopeFacet.effective, setRvScope, rvScopeFacet.shown, 'Scope') : null}
         <input class="cur-search" placeholder="search files…" value=${rvQuery} onInput=${e => setRvQuery(e.target.value)} />
       </div>
       <div class="cur-listhead">
@@ -9139,7 +9197,11 @@ function SummarizeView({ params }) {
                 <td><span class=${'rev-state ' + st}>${st}</span>${st === 'applied' ? html` <span class="sz-link" style="font-size:11px" title="restore this file from its backup" onClick=${() => undoPath(r.path)}>undo</span>` : null}</td>
               </tr>`;
             })}
-            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${revRows.length === 0 ? 'Nothing staged. Run the summarizer from the curator.' : 'No files match these filters.'}</td></tr>` : null}
+            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${revRows.length === 0
+              ? 'Nothing staged. Run the summarizer from the curator.'
+              : rvFiltered
+                ? 'No files match these filters. Clear the search or widen a filter above.'
+                : `All ${revRows.length} staged file(s) are hidden and no filter is set. That shouldn't happen; go back to the curator and re-run.`}</td></tr>` : null}
           </tbody>
         </table>
       </div>
@@ -9231,9 +9293,9 @@ function SummarizeView({ params }) {
 
     <div class="section-band">Candidates <span class="hint">· pick what to compress</span></div>
     <div class="cur-filters">
-      ${seg(kind, setKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
-      ${seg(scope, setScope, [{ v: 'all', t: 'All' }, { v: 'global', t: 'Global' }, { v: 'repo', t: 'Repo' }, { v: 'project', t: 'Project' }], 'Scope')}
-      ${seg(status, setStatus, [{ v: 'all', t: 'All' }, { v: 'candidate', t: 'Candidate' }, { v: 'staged', t: 'Staged' }], 'Status')}
+      ${kindFacet.shown ? seg(kindFacet.effective, setKind, kindFacet.shown, 'Kind') : null}
+      ${scopeFacet.shown ? seg(scopeFacet.effective, setScope, scopeFacet.shown, 'Scope') : null}
+      ${statusFacet.shown ? seg(statusFacet.effective, setStatus, statusFacet.shown, 'Status') : null}
       <input class="cur-search" list="sz-files" placeholder="search files…" value=${query} onInput=${e => setQuery(e.target.value)} />
       <datalist id="sz-files">${cands.map((c, i) => html`<option value=${c.path} key=${i}></option>`)}</datalist>
     </div>
@@ -9273,7 +9335,16 @@ function SummarizeView({ params }) {
               <td class="dim" style="font-size:12px">${st}</td>
             </tr>`;
           })}
-          ${visible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${cands.length === 0 ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.' : 'No files match these filters.'}</td></tr>` : null}
+          ${/* Three distinct empties, never collapsed into one sentence: the
+                scan found nothing, a filter is hiding everything, or the scan
+                found things and nothing is filtering — the last of which would
+                be a bug, so it says so rather than blaming a filter the reader
+                cannot see. */ ''}
+          ${visible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${cands.length === 0
+            ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.'
+            : curFiltered
+              ? 'No files match these filters. Clear the search or widen a filter above.'
+              : `All ${cands.length} candidate(s) are hidden and no filter is set. That shouldn't happen; try Rescan.`}</td></tr>` : null}
         </tbody>
       </table>
     </div>
