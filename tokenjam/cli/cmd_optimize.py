@@ -800,6 +800,32 @@ def _format_plan_multiplier(multiplier: float) -> str:
     return f"{multiplier:.1f}×"
 
 
+#: The analyzers whose evidence is the filesystem rather than the span table
+#: (docs/configuration.md, "Which filesystem the analyzers read") — the ones a
+#: skipped scan actually costs the reader.
+_FILESYSTEM_SCAN_ANALYZERS = ("deadweight", "relearn", "summarize")
+
+
+def _filesystem_scan_note(report: OptimizeReport) -> str | None:
+    """The "these did not look" line for a skipped filesystem scan, or None.
+
+    Hardcoding the three names made the note assert something false for a
+    persona whose gate had already dropped some of them: `deadweight` and
+    `summarize` are gated off for `sdk`, so naming them under a SCOPE reason
+    blames the scope for an absence the persona gate caused. Names are filtered
+    against the gate, and a skip that cost this reader nothing says nothing.
+    """
+    reason = report.filesystem_scan_skipped_reason
+    if not reason:
+        return None
+    disabled = _disabled_analyzers(report.persona or "unknown")
+    names = [n for n in _FILESYSTEM_SCAN_ANALYZERS if n not in disabled]
+    if not names:
+        return None
+    joined = f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else names[0]
+    return f"  [dim]{joined} did not run: {_rich_escape(str(reason))}.[/dim]"
+
+
 def _render_report(
     report: OptimizeReport,
     agent: str | None,
@@ -899,14 +925,12 @@ def _render_report(
     if report.notes:
         console.print()
 
-    # Said out loud, because the alternative is three analyzers rendering as
+    # Said out loud, because the alternative is analyzers rendering as
     # "nothing found" when the truth is that they never looked (root
     # anti-pattern 22). See `core/optimize/scope.py`.
-    if report.filesystem_scan_skipped_reason:
-        console.print(
-            "  [dim]deadweight, relearn and summarize did not run: "
-            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
-        )
+    scan_note = _filesystem_scan_note(report)
+    if scan_note:
+        console.print(scan_note)
         console.print()
 
     # An analyzer the user typed by name that this persona's skip gate dropped
@@ -919,9 +943,20 @@ def _render_report(
             set(requested) & _disabled_analyzers(report.persona or "unknown")
         )
         if gated:
+            # The REASON is persona-specific, and one sentence cannot carry
+            # both: a `claude-code` window loses analyzers whose lever lives on
+            # the harness's side of the line, while an `sdk` window loses ones
+            # whose INPUT it structurally does not have (a Claude Code
+            # transcript, a populated `sub_agent_id`, an agent instruction
+            # file). Stating the wrong one is worse than terse. Per-analyzer
+            # reasons live in `PERSONA_DISABLED_ANALYZERS`.
+            reason = (
+                "No fix for these exists inside an interactive coding-agent session"
+                if (report.persona or "") == "claude-code"
+                else "These read an input an SDK/API window does not have"
+            )
             console.print(
-                f"  [dim]Not run: {', '.join(gated)}. No fix for these exists "
-                f"inside an interactive coding-agent session, so they are "
+                f"  [dim]Not run: {', '.join(gated)}. {reason}, so they are "
                 f"skipped rather than reported as findings you cannot act "
                 f"on.[/dim]\n"
             )
@@ -1398,16 +1433,14 @@ def _render_scoreboard(
         f"{_plural(len(rows), 'finding')}[/dim]\n"
     )
 
-    # Said out loud rather than left as three quiet absences: an analyzer that
+    # Said out loud rather than left as quiet absences: an analyzer that
     # never looked is not an analyzer that found nothing (root anti-pattern 22).
     for note in report.notes:
         console.print(f"  [warn]![/warn] {_rich_escape(note)}")
-    if report.filesystem_scan_skipped_reason:
-        console.print(
-            "  [dim]deadweight, relearn and summarize did not run: "
-            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
-        )
-    if report.notes or report.filesystem_scan_skipped_reason:
+    scan_note = _filesystem_scan_note(report)
+    if scan_note:
+        console.print(scan_note)
+    if report.notes or scan_note:
         console.print()
 
     if rows:

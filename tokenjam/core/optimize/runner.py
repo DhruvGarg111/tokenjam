@@ -145,12 +145,13 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # finding: it stays enabled for `sdk` / `mixed` / `unknown`.
         "stream-usage",
     }),
-    # An SDK/API window has no on-disk Claude Code transcript and never
-    # populates `sub_agent_id` (no Task-tool subagent-dispatch concept in
-    # generic SDK telemetry) — both analyzers below are gated on a DATA
-    # SOURCE that structurally does not exist for this persona, not on a
-    # missing lever, so every dispatch would run a real query and still
-    # return nothing to act on.
+    # Every analyzer below is gated on an INPUT that structurally does not
+    # exist for this persona, not on a missing lever: an SDK/API window has no
+    # on-disk Claude Code transcript, never populates `sub_agent_id` (no
+    # Task-tool subagent-dispatch concept in generic SDK telemetry), and has no
+    # agent instruction files for the summarize catalog to scan. Each would do
+    # real work — a query, or a filesystem walk — and still return nothing to
+    # act on.
     "sdk": frozenset({
         # Reads project `.mcp.json` / `.claude/settings*.json` / on-disk
         # Claude Code `.jsonl` transcripts (see deadweight.py's module
@@ -162,6 +163,23 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # window can never have a row here, so this always renders a
         # permanently-empty card.
         "subagent",
+        # Summarize prices what a filesystem scan of AGENT INSTRUCTION FILES
+        # found. Its population is the catalog in
+        # `core/summarize/agent_files.toml` — `CLAUDE.md`, `AGENTS.md`,
+        # `GEMINI.md`, `.claude/rules/*.md` and the skill / command / agent
+        # markdown beside them, plus the `~/.claude`, `~/.codex` and
+        # `~/.gemini` equivalents. That is harness configuration; the scan has
+        # never read application source, and the only widening it offers (the
+        # user-invoked `tj summarize list --recursive`) adds `.md`/`.markdown`
+        # files, not the `.py`/`.ts` a prompt template lives in. So an SDK/API
+        # workload's prompt text is outside the population by construction and
+        # the scan returns nothing this persona can act on. NOTE this gate is
+        # `sdk`-only and does not touch Codex or Gemini CLI users: an
+        # interactive coding agent classifies as `claude-code`
+        # (`framing.dominant_persona` via `alerts.is_interactive_coding_agent`),
+        # never `sdk`. `tj summarize` itself stays available to everyone — the
+        # gate drops the analyzer from optimize reports, not the command.
+        "summarize",
     }),
 }
 
