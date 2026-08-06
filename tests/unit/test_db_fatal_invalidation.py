@@ -37,15 +37,15 @@ from fastapi.testclient import TestClient
 
 from tokenjam.core.agent_config import ConfigRecord, DuckDBAgentConfigStore
 from tokenjam.core.db import (
-    AGENT_CONFIG_INDEXES,
     DuckDBBackend,
-    check_agent_config_index_corruption,
+    check_index_divergence,
+    explicit_indexes,
     clear_fatal_db_error,
     fatal_db_error,
     is_fatal_db_error,
     note_fatal_db_error,
     recover_invalidated_database,
-    repair_agent_config_index,
+    repair_explicit_indexes,
     run_migrations,
 )
 from tokenjam.core.config import StorageConfig
@@ -243,6 +243,31 @@ def test_recovery_closes_cursors_belonging_to_other_threads(backend):
     assert backend._cursors, "recovery must hand out fresh cursors, not reuse closed ones"
 
 
+def test_recovery_rebuilds_every_index_not_only_the_flagged_ones(backend, monkeypatch):
+    """The correctness property that a cheaper recovery would break.
+
+    The fatal does not name the index that raised it and the probe only
+    compares sampled values, so recovering by repairing the probe's verdict can
+    reconnect straight back into the same fatal. Measured on a real damaged
+    database: a sampled sweep found three of four, and the next write still
+    died. Recovery therefore rebuilds the lot.
+    """
+    import tokenjam.core.db as db_mod
+
+    repaired: list = []
+    monkeypatch.setattr(
+        db_mod, "repair_explicit_indexes",
+        lambda conn, names=None: repaired.append(names) or ["x"],
+    )
+    monkeypatch.setattr(
+        db_mod, "check_index_divergence",
+        lambda conn: ([("idx_agent_config_kind", "agent_config_files", "bad")], []),
+    )
+    backend._teardown_connections()
+    assert recover_invalidated_database() is True
+    assert repaired == [None], "recovery must not scope the repair to the faults"
+
+
 def test_in_memory_backend_is_not_torn_down_by_recovery():
     """Its database IS its connection — 'recovering' it would delete the data."""
     from tokenjam.core.db import InMemoryBackend
@@ -412,46 +437,60 @@ def _seed(conn, n: int) -> None:
         )
 
 
-def test_repair_agent_config_index_preserves_every_row(conn):
+def _index_names(conn) -> set:
+    return {
+        r[0] for r in conn.execute(
+            "SELECT index_name FROM duckdb_indexes()"
+        ).fetchall()
+    }
+
+
+def test_repair_rebuilds_every_explicit_index_by_default(conn):
     _seed(conn, 25)
-    assert repair_agent_config_index(conn) == 25
+    before = _index_names(conn)
+    rebuilt = repair_explicit_indexes(conn)
+    assert set(rebuilt) == before
+    assert _index_names(conn) == before
+
+
+def test_repair_can_be_limited_to_named_indexes(conn):
+    """Recovery and doctor both repair only what diverged — rebuilding a sound
+    index is correct but pointlessly expensive on a large table."""
+    _seed(conn, 5)
+    rebuilt = repair_explicit_indexes(conn, ["idx_agent_config_kind"])
+    assert rebuilt == ["idx_agent_config_kind"]
+    assert "idx_agent_config_last_seen" in _index_names(conn)
+
+
+def test_repair_preserves_every_row(conn):
+    _seed(conn, 25)
+    repair_explicit_indexes(conn)
     rows = conn.execute(
         "SELECT config_id, tokens FROM agent_config_files ORDER BY tokens"
     ).fetchall()
     assert rows == [(f"id-{i}", i) for i in range(25)]
 
 
-def test_repair_agent_config_index_is_idempotent(conn):
+def test_repair_is_idempotent(conn):
     _seed(conn, 5)
-    assert repair_agent_config_index(conn) == 5
-    assert repair_agent_config_index(conn) == 5
-    assert repair_agent_config_index(conn) == 5
+    first = repair_explicit_indexes(conn)
+    assert repair_explicit_indexes(conn) == first
+    assert repair_explicit_indexes(conn) == first
 
 
-def test_repair_agent_config_index_is_safe_on_an_empty_table(conn):
-    assert repair_agent_config_index(conn) == 0
+def test_repair_is_safe_on_empty_tables(conn):
+    assert set(repair_explicit_indexes(conn)) == _index_names(conn)
 
 
-def test_repair_agent_config_index_recreates_both_indexes(conn):
-    """Dropping without re-issuing would leave the table permanently unindexed:
-    the migrations are already recorded applied, so nothing else puts them back."""
+def test_repair_never_touches_a_primary_key(conn):
+    """The safety property that makes the sweep runnable unattended.
+
+    `duckdb_indexes()` does not list a PRIMARY KEY's own ART, so a repair
+    driven by that catalogue structurally cannot drop one. Asserted by
+    behaviour, not by inspection: the constraint still rejects a duplicate.
+    """
     _seed(conn, 3)
-    conn.execute("DROP INDEX idx_agent_config_kind")
-    repair_agent_config_index(conn)
-    names = {
-        r[0] for r in conn.execute(
-            "SELECT index_name FROM duckdb_indexes() "
-            "WHERE table_name = 'agent_config_files'"
-        ).fetchall()
-    }
-    assert {name for name, _ in AGENT_CONFIG_INDEXES} <= names
-
-
-def test_repair_agent_config_index_leaves_the_primary_key_enforced(conn):
-    """The repair touches only the two secondary indexes. The PRIMARY KEY is
-    not the damaged one and must come through untouched."""
-    _seed(conn, 3)
-    repair_agent_config_index(conn)
+    repair_explicit_indexes(conn)
     with pytest.raises(duckdb.ConstraintException):
         conn.execute(
             "INSERT INTO agent_config_files "
@@ -460,14 +499,11 @@ def test_repair_agent_config_index_leaves_the_primary_key_enforced(conn):
         )
 
 
-def test_repair_agent_config_index_leaves_the_table_writable(conn):
-    """The point of the repair: DELETE and INSERT OR REPLACE work afterwards.
-
-    These are the two statements a damaged index makes fatal, so a repair that
-    did not restore them would clear nothing.
-    """
+def test_repair_leaves_the_table_writable(conn):
+    """DELETE and INSERT OR REPLACE are the two statements a damaged index
+    makes fatal, so a repair that did not restore them would clear nothing."""
     _seed(conn, 4)
-    repair_agent_config_index(conn)
+    repair_explicit_indexes(conn)
     conn.execute("DELETE FROM agent_config_files WHERE config_id = 'id-1'")
     conn.execute(
         "INSERT OR REPLACE INTO agent_config_files "
@@ -480,35 +516,111 @@ def test_repair_agent_config_index_leaves_the_table_writable(conn):
     assert rows == [("id-0", 0), ("id-2", 99), ("id-3", 3)]
 
 
-# --- the integrity probe ---------------------------------------------------
+def test_repair_leaves_an_index_it_cannot_recreate_alone(conn, monkeypatch):
+    """Dropping an index whose DDL is unknown would turn damage into absence,
+    and nothing would put it back — migrations are already recorded applied."""
+    _seed(conn, 3)
+    import tokenjam.core.db as db_mod
 
-def test_check_reports_no_faults_on_a_healthy_table(conn):
+    real = db_mod.explicit_indexes
+    monkeypatch.setattr(db_mod, "explicit_indexes", lambda c: [
+        (n, t, cols, "" if n == "idx_agent_config_kind" else ddl)
+        for n, t, cols, ddl in real(c)
+    ])
+    rebuilt = repair_explicit_indexes(conn)
+    assert "idx_agent_config_kind" not in rebuilt
+    assert "idx_agent_config_kind" in _index_names(conn)
+
+
+# --- the sweep -------------------------------------------------------------
+
+def test_sweep_covers_every_explicit_index(conn):
+    """Whatever we do not probe, we may not call sound — so the sweep must
+    reach every index in the catalogue, not one table's worth."""
     _seed(conn, 10)
-    assert check_agent_config_index_corruption(conn) == []
+    tables = {t for _n, t, _c, _d in explicit_indexes(conn)}
+    assert "agent_config_files" in tables and "spans" in tables and "sessions" in tables
 
 
-def test_check_reports_an_absent_index(conn):
-    _seed(conn, 4)
-    conn.execute("DROP INDEX idx_agent_config_kind")
-    faults = check_agent_config_index_corruption(conn)
-    assert ("idx_agent_config_kind", "absent from the catalogue") in faults
+def test_sweep_reports_no_faults_on_a_healthy_database(conn):
+    _seed(conn, 10)
+    faults, _unprobed = check_index_divergence(conn)
+    assert faults == []
 
 
-def test_check_is_quiet_on_an_empty_table(conn):
+def test_sweep_is_quiet_on_empty_tables(conn):
     """Nothing to compare is not evidence of damage."""
-    assert check_agent_config_index_corruption(conn) == []
+    faults, unprobed = check_index_divergence(conn)
+    assert faults == [] and unprobed == []
+
+
+def test_sweep_excludes_primary_keys_from_what_it_reports(conn):
+    _seed(conn, 4)
+    assert all(
+        not name.upper().startswith("PRIMARY")
+        for name, _t, _c, _d in explicit_indexes(conn)
+    )
+
+
+def test_sweep_reports_an_unprobeable_index_rather_than_passing_it(conn):
+    """A multi-column index cannot be tested by the single-column comparison.
+    It must surface as not-proven, never be counted as sound."""
+    _seed(conn, 4)
+    conn.execute(
+        "CREATE INDEX idx_acf_multi ON agent_config_files(kind, scope)"
+    )
+    faults, unproven = check_index_divergence(conn)
+    assert faults == []
+    assert any(name == "idx_acf_multi" for name, _t, _r in unproven)
+
+
+def test_sweep_says_so_when_coverage_was_only_a_sample(conn, monkeypatch):
+    """The property that stops a clean verdict being read as a guarantee.
+
+    Learned by getting it wrong on a real damaged database: a three-value
+    sample called an index clean, a repair trusted that verdict, and the very
+    next write still raised the fatal. Partial coverage must be reported, not
+    rounded up to "sound".
+    """
+    import tokenjam.core.db as db_mod
+
+    monkeypatch.setattr(db_mod, "_PROBE_VALUE_LIMIT", 1)
+    monkeypatch.setattr(db_mod, "_PROBE_SAMPLE_VALUES", 1)
+    _seed(conn, 6)  # 6 distinct paths, 1 compared
+    faults, unproven = check_index_divergence(conn)
+    assert faults == []
+    reasons = {name: reason for name, _t, reason in unproven}
+    assert "idx_agent_config_last_seen" in reasons
+    assert "not proof" in reasons["idx_agent_config_last_seen"]
+
+
+def test_sweep_proves_soundness_when_every_value_was_compared(conn):
+    """The inverse: full coverage on a small table earns an empty `unproven`,
+    otherwise doctor could never report a clean bill of health at all."""
+    _seed(conn, 6)
+    faults, unproven = check_index_divergence(conn)
+    assert faults == []
+    acf = [name for name, table, _r in unproven if table == "agent_config_files"]
+    assert acf == []
+
+
+def test_index_columns_parses_the_catalogue_rendering():
+    """`expressions` is a VARCHAR rendering of a list, not a list."""
+    from tokenjam.core.db import _index_columns
+
+    assert _index_columns("[kind]") == ["kind"]
+    assert _index_columns("[agent_id, started_at]") == ["agent_id", "started_at"]
+    assert _index_columns("") == []
 
 
 def test_probe_uses_a_form_the_index_cannot_serve(conn):
     """The subtle half, and the reason this probe nearly did not work.
 
-    `CAST(col AS VARCHAR)` is a NO-OP on a column that is already VARCHAR, so
-    the planner discards it and the index serves both sides of the comparison —
-    a probe built on it compares a damaged index against itself and reports
-    sound whatever the damage. Concatenating an empty string is a real
-    expression for every type. This pins that the scan form still agrees with
-    a GROUP BY (which no index can serve) on a healthy table, so the two forms
-    are genuinely answering the same question.
+    `CAST(col AS VARCHAR)` is a NO-OP on a column already VARCHAR, so the
+    planner discards it and the index serves both sides of the comparison — a
+    probe built on it compares a damaged index against itself and reports sound
+    whatever the damage. This pins that the scan form still agrees with a
+    GROUP BY, which no index can serve, so the two sides genuinely differ.
     """
     _seed(conn, 12)
     truth = dict(conn.execute(

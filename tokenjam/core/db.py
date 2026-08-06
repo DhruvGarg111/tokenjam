@@ -8,6 +8,7 @@ import functools
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -588,20 +589,17 @@ AGENT_CONFIG_FILES_TABLE_SQL = (
 )
 
 # The table's secondary indexes, single-sourced beside the DDL for the same
-# reason `SPANS_INDEX_SQL` is: migration 22 and `repair_agent_config_index`
-# must create the SAME set, or a repaired table quietly loses an index that
-# nothing will ever put back (migrations are already recorded applied).
+# reason `SPANS_INDEX_SQL` is: a fresh install and the `EXPECTED_TABLES`
+# self-heal must create the SAME set, or a database quietly ends up missing an
+# index that nothing will ever put back (migrations are already recorded
+# applied). `repair_explicit_indexes` does not read this constant -- it
+# re-issues each index from its own catalogue DDL, so it repairs indexes this
+# module has never heard of.
 AGENT_CONFIG_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_agent_config_kind "
     "ON agent_config_files(kind);\n"
     "CREATE INDEX IF NOT EXISTS idx_agent_config_last_seen "
     "ON agent_config_files(last_seen)"
-)
-
-#: (index name, indexed column), for the integrity check and the repair.
-AGENT_CONFIG_INDEXES: tuple[tuple[str, str], ...] = (
-    ("idx_agent_config_kind",      "kind"),
-    ("idx_agent_config_last_seen", "last_seen"),
 )
 
 
@@ -2165,114 +2163,194 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     conn.execute("CHECKPOINT")
 
 
-def check_agent_config_index_corruption(
+#: An index name / column name we are willing to interpolate into SQL. These
+#: come from DuckDB's own catalogue rather than from a user, but a probe that
+#: builds SQL by string-splicing validates its identifiers anyway.
+_SQL_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _index_columns(expressions: str) -> list[str]:
+    """Column names out of ``duckdb_indexes().expressions``.
+
+    That column is a VARCHAR rendering of the indexed expression list, e.g.
+    ``'[kind]'`` or ``'[agent_id, started_at]'`` — not a real list, so it is
+    parsed rather than unnested.
+    """
+    inner = (expressions or "").strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    return [part.strip() for part in inner.split(",") if part.strip()]
+
+
+def explicit_indexes(
     conn: duckdb.DuckDBPyConnection,
-) -> list[tuple[str, str]]:
-    """The ``agent_config_files`` secondary indexes that disagree with the table.
+) -> list[tuple[str, str, list[str], str]]:
+    """Every explicit index in the database: ``(name, table, columns, ddl)``.
 
-    Returns ``(index name, what is wrong)`` pairs; empty means both are sound.
-
-    **The fault, and what it costs.** DuckDB's explicit non-unique ART indexes
-    can reach a persisted state where they no longer agree with the table's
-    rows. The PRIMARY KEY is NOT affected — dropping just these two indexes
-    makes the table fully writable again, which is what identifies which index
-    is at fault. Upstream, still open at the time of writing:
-    https://github.com/duckdb/duckdb/issues/23645
-
-    It breaks reads and writes differently, and the read half is the quieter
-    danger. A write that must REMOVE an index entry (`DELETE`, and the delete
-    half of `INSERT OR REPLACE`) fails loudly with `Invalid Input Error: Failed
-    to delete all rows from index. Only deleted 0 out of 1 rows.` — raised as a
-    `FatalException`, which invalidates the whole database instance (see
-    `is_fatal_db_error`). But an ordinary `WHERE kind = 'instruction'` served by
-    a damaged index simply returns FEWER ROWS than the table holds, with no
-    error at all, so every analyzer reading this table silently under-reports
-    the config surface.
-
-    **Why the probe multiplies by an empty string.** Ask the same question in a
-    form an index can serve and one it cannot, and compare. Picking the second
-    form is the whole difficulty: `CAST(col AS VARCHAR)` is NOT sufficient for a
-    column that is ALREADY `VARCHAR`, because the cast is a no-op the planner
-    discards, leaving the index serving both sides — the probe then compares a
-    damaged index against itself and reports it sound. Concatenating an empty
-    string is a real expression over the column for every type, so it always
-    forces the scan. Verified against a genuinely damaged index: on `kind`, the
-    equality form answered 7 where the table held 94, and the bare-CAST form
-    also answered 7, while the concatenated form answered 94.
+    Read from ``duckdb_indexes()``, which lists only indexes created by an
+    explicit ``CREATE INDEX``. A ``PRIMARY KEY``'s own ART is NOT in there, so
+    a repair driven by this list structurally cannot touch a primary key —
+    which is the property that makes the sweep safe to run unattended.
+    ``is_primary``/``is_unique`` are filtered as well, belt and braces.
     """
     try:
-        conn.execute("SELECT 1 FROM agent_config_files LIMIT 0").fetchall()
-        present = {
-            str(row[0])
-            for row in conn.execute(
-                "SELECT index_name FROM duckdb_indexes() "
-                "WHERE table_name = 'agent_config_files'"
-            ).fetchall()
-        }
+        rows = conn.execute(
+            "SELECT index_name, table_name, expressions, sql FROM duckdb_indexes() "
+            "WHERE NOT is_primary AND NOT is_unique ORDER BY table_name, index_name"
+        ).fetchall()
     except duckdb.Error:
         return []
+    out = []
+    for name, table, expressions, ddl in rows:
+        if not _SQL_IDENTIFIER.match(str(name)) or not _SQL_IDENTIFIER.match(str(table)):
+            continue
+        out.append((str(name), str(table), _index_columns(expressions), str(ddl or "")))
+    return out
 
-    faults: list[tuple[str, str]] = []
-    for index_name, column in AGENT_CONFIG_INDEXES:
-        if index_name not in present:
-            faults.append((index_name, "absent from the catalogue"))
+
+#: Values to compare per index when the table is small enough to enumerate its
+#: value space. Above `_PROBE_EXHAUSTIVE_MAX_ROWS` the probe falls back to a
+#: few samples, because the scan side of each comparison is a full table scan.
+_PROBE_VALUE_LIMIT = 200
+_PROBE_EXHAUSTIVE_MAX_ROWS = 50_000
+_PROBE_SAMPLE_VALUES = 3
+
+
+def check_index_divergence(
+    conn: duckdb.DuckDBPyConnection,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Sweep EVERY explicit index for disagreement with its table.
+
+    Returns ``(faults, unproven)``, each a list of ``(index, table, reason)``.
+
+    **A clean `faults` list is NOT a proof of soundness, and `unproven` is how
+    that is said out loud.** This probe compares counts for particular VALUES,
+    so it can only find damage in the entries it looked at. Learned the hard
+    way: on a genuinely damaged database a three-value sample found three of
+    four damaged indexes, the fourth reported clean, and a repair driven by
+    that verdict left the table still raising the fatal. So an index is only
+    reported sound when every distinct value was compared; anything less lands
+    in ``unproven`` with the reason, and callers that must be CORRECT rather
+    than cheap repair everything instead of trusting this (see
+    ``repair_explicit_indexes`` and ``recover_invalidated_database``).
+
+    Coverage is exhaustive for a table small enough to enumerate and sampled
+    above that, because the scan side of each comparison is a full table scan
+    and the cost is per distinct value.
+
+    **Why the scan side multiplies by an empty string.** The probe asks the
+    same question in a form an index can serve and one it cannot. Picking the
+    second form is the whole difficulty: ``CAST(col AS VARCHAR)`` is a NO-OP on
+    a column already stored as ``VARCHAR``, so the planner discards it and the
+    index ends up serving BOTH sides — the probe then compares a damaged index
+    against itself and reports it sound whatever the damage. Concatenating an
+    empty string is a real expression over the column for every type. Measured
+    on a genuinely damaged index: the equality form answered 7 where the table
+    held 94, the bare-``CAST`` form also answered 7, the concatenated form 94.
+    """
+    faults: list[tuple[str, str, str]] = []
+    unproven: list[tuple[str, str, str]] = []
+    row_counts: dict[str, int] = {}
+    for index_name, table, columns, _ddl in explicit_indexes(conn):
+        if len(columns) != 1 or not _SQL_IDENTIFIER.match(columns[0]):
+            unproven.append((
+                index_name, table,
+                "indexed on an expression this single-column comparison "
+                "cannot test",
+            ))
             continue
+        column = columns[0]
         try:
-            sample = conn.execute(
-                f"SELECT {column} FROM agent_config_files "
-                f"WHERE {column} IS NOT NULL LIMIT 3"
+            if table not in row_counts:
+                count_row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                row_counts[table] = int(count_row[0]) if count_row else 0
+            small = row_counts[table] <= _PROBE_EXHAUSTIVE_MAX_ROWS
+            limit = _PROBE_VALUE_LIMIT if small else _PROBE_SAMPLE_VALUES
+            values = conn.execute(
+                f"SELECT DISTINCT {column} FROM {table} "
+                f"WHERE {column} IS NOT NULL LIMIT {limit + 1}"
             ).fetchall()
-        except duckdb.Error:
+        except duckdb.Error as exc:
+            unproven.append((index_name, table, f"could not be probed: {exc}"))
             continue
-        for (value,) in sample:
+        if not values:
+            continue  # empty table or all-NULL column: nothing to demonstrate
+        complete = small and len(values) <= limit
+        diverged = False
+        for (value,) in values[:limit]:
             try:
                 indexed_row = conn.execute(
-                    f"SELECT COUNT(*) FROM agent_config_files WHERE {column} = $1",
-                    [value],
+                    f"SELECT COUNT(*) FROM {table} WHERE {column} = $1", [value]
                 ).fetchone()
                 scanned_row = conn.execute(
-                    f"SELECT COUNT(*) FROM agent_config_files "
+                    f"SELECT COUNT(*) FROM {table} "
                     f"WHERE CAST({column} AS VARCHAR) || '' = CAST($1 AS VARCHAR)",
                     [value],
                 ).fetchone()
-            except duckdb.Error:
+            except duckdb.Error as exc:
+                unproven.append((index_name, table, f"could not be probed: {exc}"))
+                diverged = True  # not a fault, but not proven either
                 break
             indexed = indexed_row[0] if indexed_row else 0
             scanned = scanned_row[0] if scanned_row else 0
             if indexed < scanned:
                 faults.append((
-                    index_name,
+                    index_name, table,
                     f"returns {indexed} of {scanned} matching row(s)",
                 ))
+                diverged = True
                 break
-    return faults
+        if not diverged and not complete:
+            unproven.append((
+                index_name, table,
+                f"only {min(len(values), limit)} of the table's distinct values "
+                f"were compared, so a clean result here is not proof",
+            ))
+    return faults, unproven
 
 
-def repair_agent_config_index(conn: duckdb.DuckDBPyConnection) -> int:
-    """Drop and recreate both ``agent_config_files`` secondary indexes.
+def repair_explicit_indexes(
+    conn: duckdb.DuckDBPyConnection,
+    index_names: "Sequence[str] | None" = None,
+) -> list[str]:
+    """Drop and recreate explicit indexes from their own catalogue DDL.
 
-    Returns the row count, which the repair never changes — the table's rows
-    are the source of truth and are not touched, so a rebuilt index can only
-    agree with them. Idempotent, and safe on a healthy database.
+    ``index_names`` limits the repair to those indexes; ``None`` repairs every
+    explicit index. Returns the names actually rebuilt. Idempotent, and safe on
+    a healthy database.
 
-    Same shape as `repair_spans_indexes`, and deliberately NOT the table
-    rebuild `repair_spans_stats` does: the damage is confined to these two
-    explicit non-unique indexes (see `check_agent_config_index_corruption`), so
-    dropping and re-issuing them from the canonical DDL is sufficient and
-    leaves the PRIMARY KEY, the rows and the schema entirely alone. Verified on
-    a damaged database: after this, every previously-fatal upsert succeeds, the
-    heal survives a `CHECKPOINT` and reopen, and the PRIMARY KEY still rejects a
-    duplicate.
+    **What it cannot do, structurally.** The DDL is read back from
+    ``duckdb_indexes()``, which does not list a ``PRIMARY KEY``'s ART, so no
+    primary key or unique constraint is reachable from here. No rows are read,
+    written or moved and no table is rebuilt: the table's rows are the source
+    of truth, so a re-issued index can only agree with them. That is why this
+    is safe unattended where `repair_spans_stats`'s table rebuild would not be.
+
+    An index whose catalogue entry carries no DDL is left alone rather than
+    dropped — dropping without being able to re-create it would turn a damaged
+    index into a missing one, and migrations are already recorded applied, so
+    nothing else would put it back.
     """
-    for index_name, _ in AGENT_CONFIG_INDEXES:
+    wanted = set(index_names) if index_names is not None else None
+    rebuilt: list[str] = []
+    for index_name, _table, _columns, ddl in explicit_indexes(conn):
+        if wanted is not None and index_name not in wanted:
+            continue
+        if not ddl.strip():
+            logger.warning(
+                "index %s has no DDL in the catalogue; leaving it in place rather "
+                "than dropping an index that could not be recreated", index_name,
+            )
+            continue
         conn.execute(f"DROP INDEX IF EXISTS {index_name}")
-    for statement in AGENT_CONFIG_INDEX_SQL.split(";"):
-        statement = statement.strip()
-        if statement:
-            conn.execute(statement)
-    conn.execute("CHECKPOINT")
-    row = conn.execute("SELECT COUNT(*) FROM agent_config_files").fetchone()
-    return int(row[0]) if row else 0
+        for statement in ddl.split(";"):
+            statement = statement.strip()
+            if statement:
+                conn.execute(statement)
+        rebuilt.append(index_name)
+    if rebuilt:
+        conn.execute("CHECKPOINT")
+    return rebuilt
 
 
 # ---------------------------------------------------------------------------
@@ -2396,9 +2474,18 @@ def recover_invalidated_database(*, repair: bool = True) -> bool:
     database IS their connection, so closing it discards the data, and there is
     nothing on disk to reopen.
 
-    With ``repair``, rebuilds ``agent_config_files`` on the way back up. The
-    fault that causes this fatal is persistent — without the rebuild the very
-    next agent-config pass re-raises it and the recovery loops forever.
+    With ``repair``, rebuilds EVERY explicit index on the way back up.
+
+    **All of them, not just the ones the probe flags, and that is deliberate.**
+    The exception does not name the index that raised it, and
+    ``check_index_divergence`` compares particular values, so a clean verdict
+    from it is not a proof of soundness — measured on a real damaged database,
+    a sampled sweep found three of four damaged indexes and a repair driven by
+    that verdict left the table still raising the fatal on the next write.
+    Recovering into the same fatal is the one outcome this path must not have,
+    so it rebuilds the lot. That is affordable because the rebuild reads no
+    rows and moves no data: measured at ~1.1s for all fourteen indexes of a
+    3.9GB / 736k-row database, against a fault that otherwise 500s every route.
     """
     with _FATAL_LOCK:
         backends = [b for b in _LIVE_BACKENDS if b.recoverable]
@@ -2408,19 +2495,28 @@ def recover_invalidated_database(*, repair: bool = True) -> bool:
         for backend in backends:
             if not backend._reopen():
                 ok = False
+        rebuilt: list[str] = []
         if ok and repair:
+            # One rebuild per database, not per backend: every registered
+            # backend on this path shares the instance we just reopened.
             for backend in backends:
                 try:
-                    repair_agent_config_index(backend.conn)
+                    faults, _unproven = check_index_divergence(backend.conn)
+                    if faults:
+                        logger.error(
+                            "index damage found while recovering: %s",
+                            "; ".join(f"{n} on {t} {r}" for n, t, r in faults),
+                        )
+                    rebuilt = repair_explicit_indexes(backend.conn)
                 except duckdb.Error as exc:
-                    logger.error("agent-config index repair failed after recovery: %s", exc)
+                    logger.error("index repair failed after recovery: %s", exc)
                     ok = False
-                break  # one repair per path; all registered backends share it
+                break
         if ok:
             clear_fatal_db_error()
             logger.warning(
                 "database connections re-established after a fatal DuckDB error; "
-                "the agent-config indexes were rebuilt so the fault does not recur",
+                "rebuilt %d index(es) so the fault does not recur", len(rebuilt),
             )
         return ok
 
