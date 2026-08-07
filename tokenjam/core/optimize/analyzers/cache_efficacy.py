@@ -259,10 +259,10 @@ MIN_LOOKBACK_MISS_RECURRENCE = 3
 # The A2 "instability" card checklist — a diagnostic the user runs on their
 # own prompt-assembly code, not a tokenjam-side detection.
 SILENT_INVALIDATOR_CHECKLIST = (
-    "Likely silent cache-invalidators to check in your prompt-assembly code: "
-    "a timestamp or UUID placed early in the prompt; non-deterministic JSON "
-    "key ordering; a tool set that varies per request; switching models "
-    "mid-conversation."
+    "Check your prompt-assembly code for these likely silent cache-invalidators: "
+    "a timestamp or UUID placed early in the prompt, non-deterministic JSON "
+    "key ordering, or a tool set that varies per request. Switching models "
+    "mid-conversation also breaks the cache."
 )
 
 
@@ -546,10 +546,10 @@ def _classify_a1(
         cache_control_snippet=_uncached_snippet(model, prefix),
         past_overspend_usd=usd, past_overspend_tokens=tokens,
         estimate_basis=(
-            "assumed stable prefix = this agent's own p25 per-call input "
-            "tokens; recoverable = calls x prefix x (input rate - cache-read "
-            "rate), minus one 5-minute-TTL cache write per session "
-            "(conservative single-write-per-burst assumption)"
+            "assumed stable prefix = this agent's own p25 per-call input tokens. "
+            "recoverable = calls x prefix x (input rate - cache-read rate), "
+            "minus one 5-minute-TTL cache write per session. this is a "
+            "conservative single-write-per-burst assumption"
         ),
     )
 
@@ -632,11 +632,11 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
         cache_control_snippet=snippet,
         past_overspend_usd=recoverable_usd,
         estimate_basis=(
-            "wasted = cache-write tokens x (write rate - cache-read rate); "
-            "what was paid to write the prefix versus what the same tokens "
-            "would have cost read from a stable cache. Excluded (None) when "
-            "the TTL variant's break-even is negative, since the card's own "
-            "recommended fix (switching TTL) would not recover it."
+            "wasted = cache-write tokens x (write rate - cache-read rate). "
+            "this is what was paid to write the prefix versus what the same "
+            "tokens would have cost read from a stable cache. excluded (None) "
+            "when the TTL variant's break-even is negative. in that case, the "
+            "card's own recommended fix (switching TTL) would not recover it."
         ),
     )
 
@@ -703,13 +703,13 @@ def _classify_a3(
         past_overspend_usd=usd, past_overspend_tokens=tokens,
         estimate_basis=(
             f"cache breakpoints look back at most {LOOKBACK_BLOCK_LIMIT} "
-            "content blocks; a proxy block count (tool-call spans between two "
+            "content blocks. a proxy block count (tool-call spans between two "
             f"LLM calls x {BLOCKS_PER_TOOL_CALL}, for the tool_use + "
             "tool_result blocks each contributes) flags turns that likely "
-            "pushed the prior breakpoint out of range. Recoverable = "
+            "pushed the prior breakpoint out of range. recoverable = "
             "rewritten prefix tokens x (write rate - cache-read rate) per "
             "miss, priced only over misses that actually paid a cache-write "
-            "cost (cache_write_tokens > 0) — a miss with zero cache-write "
+            "cost (cache_write_tokens > 0). a miss with zero cache-write "
             "tokens contributes to miss_count but not to the dollar estimate"
         ),
     )
