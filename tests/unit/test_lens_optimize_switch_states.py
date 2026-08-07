@@ -88,7 +88,6 @@ _HELD = {
     "cmp": {"cost_delta_usd": -18.0},
     "comp": {"total_cost_usd": 900.0, "total_recoverable_usd": 412.5},
     "bk": [{"path": "CLAUDE.md", "est_tokens_saved": 1200}],
-    "rec": {"rows": [{"analyzer": "downsize"}]},
     "proposals": [{"analyzer": "downsize", "signature": "sig"}],
     "proposalsScoped": True,
 }
@@ -104,7 +103,10 @@ def test_empty_state_states_no_figure_and_no_absence():
     st = _run_js("optEmptyState()")
     assert st["loading"] is True
     assert st["error"] is None
-    for field in ("opt", "cmp", "comp", "rec"):
+    # `rec` was a held figure here too, until the recommendation-outcome panel
+    # was removed for mixing measured with never-measurable kinds. The field
+    # went with its only consumer, so there is no longer a `rec` to drop.
+    for field in ("opt", "cmp", "comp"):
         assert st[field] is None, f"{field} must be null while unknown, got {st[field]!r}"
     # `bk` is a list only because the block that reads it is behind the same
     # gate; it must at least be empty rather than a previous persona's rows.
@@ -115,7 +117,7 @@ def test_empty_state_states_no_figure_and_no_absence():
 def test_persona_switch_drops_every_held_figure():
     st = _run_js("optPendingState(%s, true)" % json.dumps(_HELD))
     assert st["loading"] is True, "a switch must render as not-yet-known"
-    for field in ("opt", "cmp", "comp", "rec"):
+    for field in ("opt", "cmp", "comp"):
         assert st[field] is None, (
             f"{field} survived a persona switch: the previous persona's figures "
             f"would render under the new persona's label"
