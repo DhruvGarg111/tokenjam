@@ -533,8 +533,8 @@ def run(ctx: AnalyzerContext) -> None:
             enabled=False,
             significance_threshold=significance_threshold,
             hint=(
-                "Enable `[capture] prompts = true` in tj.toml and let the "
-                "daemon collect a window of data before re-running this "
+                "Enable `[capture] prompts = true` in tj.toml. Let the "
+                "daemon collect a window of data, then re-run this "
                 "analyzer. Trim needs captured prompt text to score."
             ),
         )
@@ -703,6 +703,6 @@ def run(ctx: AnalyzerContext) -> None:
         significance_threshold=significance_threshold,
         estimate_basis=(
             "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "
-            "× window input rate — review before editing prompts"
+            "× window input rate. Review before editing prompts."
         ),
     )
