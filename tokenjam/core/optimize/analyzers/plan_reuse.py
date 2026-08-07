@@ -69,9 +69,9 @@ _MODE1_HINT = (
 # without OTEL_LOG_USER_PROMPTS=1 (see api/routes/logs.py).
 _CAPTURE_ON_NO_CONTENT_HINT = (
     "[capture] prompts is on, but no planning call in this window carried "
-    "prompt text, so clustering ran on tool-sequence signatures only. Sessions "
-    "ingested live carry prompt text only when Claude Code ran with "
-    "OTEL_LOG_USER_PROMPTS=1; `tj backfill claude-code` recovers it from the "
+    "prompt text. So clustering ran on tool-sequence signatures only. "
+    "Sessions ingested live carry prompt text only when Claude Code ran with "
+    "OTEL_LOG_USER_PROMPTS=1. `tj backfill claude-code` recovers it from the "
     "transcripts on disk."
 )
 
@@ -81,9 +81,9 @@ _CAPTURE_ON_NO_CONTENT_HINT = (
 # fully content-matched result from one that was half tool-signature guesswork.
 _MIXED_CAPTURE_HINT = (
     "Only some planning calls in this window carried prompt text; the rest "
-    "were clustered on tool-sequence signatures alone, so these clusters do "
+    "were clustered on tool-sequence signatures alone. So these clusters do "
     "not all rest on the same evidence. Sessions ingested live carry prompt "
-    "text only when Claude Code ran with OTEL_LOG_USER_PROMPTS=1; "
+    "text only when Claude Code ran with OTEL_LOG_USER_PROMPTS=1. "
     "`tj backfill claude-code` recovers it from the transcripts on disk."
 )
 
