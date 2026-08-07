@@ -228,6 +228,46 @@ def test_optimize_passes_its_unresolved_state_to_the_scanbar(optimize_view: str)
     assert "loading=${st.loading && !st.opt}" in optimize_view
 
 
+def test_gated_analyzers_get_no_chip_but_keep_their_page(optimize_view: str, html: str):
+    """Withdrawing the offer is not the same as denying the page exists.
+
+    Operator decision: the breadcrumb strip on an analyzer detail page renders
+    only analyzers that RUN for the selected persona. It used to render all of
+    them with the gated ones dimmed and clickable.
+
+    The half that must NOT change with it: ``#/optimize/<gated>`` still routes
+    and still lands on the persona-disabled explanation, so a deep link, a
+    bookmark, or a link from a screen viewed under the other persona keeps
+    working and says why.
+    """
+    crumbs = optimize_view[optimize_view.index("const crumbs = html`"):]
+    crumbs = crumbs[: crumbs.index("</div>`;")]
+    assert "${order.map(n => {" in crumbs, (
+        "the strip must iterate the persona-filtered list, not every analyzer"
+    )
+    assert "OPT_DETAIL_ORDER.map" not in crumbs
+    assert "gated" not in crumbs, "no gated chip, so no gated branch in the chip"
+    # `order` is the SAME filtered list the summary's row list uses, so the two
+    # surfaces cannot offer different analyzer sets.
+    assert "const order = OPT_DETAIL_ORDER.filter(n => !personaGated.has(n));" in optimize_view
+
+    # The page survives the chip.
+    assert "if (personaGated.has(detailName)) {" in optimize_view, (
+        "the deep-linked persona-disabled page must still render"
+    )
+    gated_page = optimize_view[optimize_view.index("if (personaGated.has(detailName)) {"):]
+    assert "opt-persona-gated" in gated_page[:1200]
+    assert "${crumbs}" in gated_page[:1200], "and it still carries the strip"
+
+    # The dimmed-chip style goes with the behaviour it styled (root anti-pattern
+    # 23: the prose arguing for the old rule must not outlive it either).
+    assert ".opt-crumb-chip.gated {" not in html
+    assert "distinct, never hidden" not in html, (
+        "the comment arguing gated chips must never be hidden describes "
+        "behaviour the code no longer has"
+    )
+
+
 def test_the_optimize_submenu_has_a_not_yet_known_state(html: str):
     """The sidebar's analyzer children are a persona-specific set too.
 

@@ -254,6 +254,23 @@ code, .mono {
    traces reach every persona through the session detail's Traces tab, which is
    ungated. So this hides a second door, never the only one. */
 .sidebar[data-persona="claude-code"] a.nav-link[data-view="traces"] { display: none !important; }
+/* Spend: hidden for BOTH personas (PERSONA_HIDDEN_DELIBERATE.cost carries the
+   reason). Two rules rather than one persona-less selector, because the mirror
+   is one rule per LIST ENTRY: a persona-less rule would keep hiding the link
+   after an entry was removed from one of the lists, which is the same class of
+   drift as the entry outliving its rule.
+
+   These two are a REGRESSION REPAIR. Spend used to be hidden by a pair of
+   rules keyed on the nav attribute the removed Improve/Observe lens carried
+   (deliberately not spelled here: a regression test pins every fragment of that
+   machinery absent, and a comment naming it trips the same guard). Removing the
+   lens took the enforcement with it while leaving both list entries in place.
+   The list is the DECLARATION and CSS is the ENFORCEMENT; neither implies the
+   other, so the link rendered, the route stayed gated, and clicking it landed
+   on nothing. `test_lens_persona_hidden_mirror.py` now pins the two against
+   each other in both directions. */
+.sidebar[data-persona="claude-code"] a.nav-link[data-view="cost"] { display: none !important; }
+.sidebar[data-persona="sdk"] a.nav-link[data-view="cost"] { display: none !important; }
 /* The Dashboard's health band summarises unread alerts, agents drifting and
    budgets at risk: pages a coding-agent user cannot open. Hidden for that
    persona rather than left pointing at nothing. */
@@ -1585,10 +1602,10 @@ a.health-tile.attn { border-color: var(--warn); }
 }
 .opt-crumb-chip:hover { color: var(--text); border-color: var(--text-faint); }
 .opt-crumb-chip.active { background: rgba(var(--accent-rgb),0.10); border-color: var(--accent); color: var(--accent); }
-/* Persona-disabled chips stay reachable (they land on the honest third-state
-   page below) but read as dimmer than a chip with a real finding, same
-   "distinct, never hidden" principle as the page they link to. */
-.opt-crumb-chip.gated { color: var(--text-faint); border-style: dashed; }
+/* No `.gated` chip style: a persona-gated analyzer no longer appears in the
+   strip at all (see the crumbs block in OptimizeView). Its PAGE still exists
+   and still renders `.opt-persona-gated`, which is where that state is now
+   explained. */
 
 .opt-head-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 .opt-cli-chip { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 3px 9px; }
@@ -3418,6 +3435,13 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // are content-defined, not a user-selected view (#306).
   const codingAgents = agents.filter(a => a.kind === 'coding');
   const codingArchived = (data.archived || []).filter(s => s.kind === 'coding' && (!agentId || s.agent_id === agentId));
+  // WHETHER THE CODING ZONE PUTS ANYTHING ON THE PAGE, hoisted because three
+  // places need the same answer and they must agree: the header's active/
+  // archived count, the zone itself, and the separator below it. `showCodingZone`
+  // alone is not that answer — the persona can permit the zone while it has
+  // nothing to render — and treating the two as interchangeable is what left a
+  // separator standing on its own.
+  const codingZoneShown = showCodingZone && !!(codingAgents.length || codingArchived.length);
   // Short names, disambiguated WITHIN each list: the cards and the archive are
   // two lists, so each resolves its own collisions rather than sharing a map
   // that could shorten a name in one on the strength of the other's contents.
@@ -3556,12 +3580,12 @@ function StatusView({ params, persona, personaKnown, routeView }) {
             zone does. Viewing as SDK it read "5 active · 50 of 5,741 archived"
             above a page with no coding sessions on it — a figure published
             beside a population it does not cover (root anti-pattern 22b). */ ''}
-      ${showCodingZone && (codingAgents.length || codingArchived.length) ? html`
+      ${codingZoneShown ? html`
         <span class="zone-count" style="align-self:center">${codingAgents.length} active · ${archivedCountLabel(codingArchived.length, data.archived_total)} archived</span>` : null}
     </div>
     ${agentId ? html`<div style="font-size:12px;color:var(--text-dim);margin:2px 0 16px;font-family:'Geist Mono',monospace">Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a></div>` : null}
 
-    ${showCodingZone && (codingAgents.length || codingArchived.length) ? html`
+    ${codingZoneShown ? html`
       ${showSdkZone ? html`
         <div class="zone-head">
           <span class="zone-title">Coding sessions</span>
@@ -3622,7 +3646,16 @@ function StatusView({ params, persona, personaKnown, routeView }) {
           on this screen rather than a teaser and a page disagreeing about how
           many there are. */ ''}
     ${showSdkZone ? html`
-      <div class="section-gap"></div>
+      ${/* A SEPARATOR, so it only exists when there are two things to separate.
+            It used to sit above an "SDK services" zone-head that has since been
+            removed as a duplicate, and it kept its place: viewing as SDK, where
+            the coding zone renders nothing at all, it opened a 28px band of
+            dead space between the page header and the tab row below. It is not
+            unconditionally wrong either — with both zones on screen it is the
+            only thing between the archived table and this strip — so it is
+            conditional on the zone above having actually rendered, not deleted.
+            `.tab-bar` carries its own margin-bottom; this is the top side. */ ''}
+      ${codingZoneShown ? html`<div class="section-gap"></div>` : null}
       <div class="tab-bar" role="tablist">
         ${SESSIONS_SDK_TABS.map(([key, label]) => html`
           <a key=${key} class=${'tab' + (sdkTab === key ? ' active' : '')} role="tab"
@@ -8048,10 +8081,6 @@ function OptimizeView({ params, navParam, persona }) {
     const g = ++runRef.current;
     setSt(s => optPendingState(s, changed));
     try {
-      // `persona` is the SELECTED one, not the corpus's dominant one. The route
-      // gates the analyzer set for what was asked, so the cards, the ranked
-      // list and the gated-analyzer state below all describe the persona the
-      // reader is actually looking at.
       // ONE round trip's worth of wall clock, not six. These six reads have no
       // data dependency on each other, and awaiting them in sequence made the
       // not-yet-known window the SUM of their latencies — the window a persona
@@ -8139,8 +8168,9 @@ function OptimizeView({ params, navParam, persona }) {
 
   // Same stored artifact the Dashboard band reads, so the two screens state one
   // computed-at and cannot disagree about whether anything has been scanned.
-  // `st.opt` is deliberately kept across a reload (`loading: !s.opt` above), so
-  // a rescan in flight keeps the last completed findings on screen.
+  // `st.opt` is deliberately kept across a SAME-QUESTION reload (see
+  // `optPendingState`), so a rescan in flight keeps the last completed findings
+  // on screen. A question change drops it instead.
   const scan = scanState(st.opt);
   const {
     busy: rescanning, error: rescanError, declined: rescanDeclined,
@@ -8251,22 +8281,28 @@ function OptimizeView({ params, navParam, persona }) {
     if (st.error) {
       return html`${backLink}<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>`;
     }
-    // Breadcrumb chip nav across all 11 analyzer detail pages, not just the
-    // ones with a page-worthy figure this window — a chip is still a real,
-    // reachable page via deep link even for an analyzer that ran and found
-    // nothing. A persona-gated chip (`.gated`) stays clickable and reads
-    // dimmer: it lands on the persona-disabled state below rather than
-    // disappearing, the same "distinct, never hidden" rule that state itself
-    // follows (root anti-pattern 22).
+    // Breadcrumb chip nav over the analyzers that RUN for the selected persona
+    // (`order`, the same filtered list the summary's row list uses, so the two
+    // surfaces cannot offer different sets). An analyzer with no page-worthy
+    // figure this window keeps its chip: it ran, and "ran and found nothing" is
+    // a real, reachable page.
+    //
+    // A persona-gated analyzer gets NO chip. This strip is an offer to go
+    // somewhere useful, and a chip for an analyzer that has no lever under this
+    // persona is an offer the product cannot honour, so it stops being made.
+    // THE PAGE IS NOT REMOVED WITH THE CHIP: `#/optimize/<gated>` still routes
+    // and still lands on the persona-disabled explanation below, so a deep
+    // link, a bookmark and a link from another persona's screen all keep
+    // working and say why. Withdrawing the offer is not the same as denying the
+    // page exists.
     const crumbs = html`
       <div class="opt-crumbs">
         <a class="sz-back-link" href="#/optimize">← Back to Optimize</a>
         <div class="opt-crumb-div"></div>
         <div class="opt-crumb-list">
-          ${OPT_DETAIL_ORDER.map(n => {
+          ${order.map(n => {
             const m = ANALYZER_META[n] || { title: capitalize(n) };
-            const gated = personaGated.has(n);
-            return html`<a key=${n} href=${'#/optimize/' + n} class=${'opt-crumb-chip' + (n === detailName ? ' active' : '') + (gated ? ' gated' : '')}>${m.title}</a>`;
+            return html`<a key=${n} href=${'#/optimize/' + n} class=${'opt-crumb-chip' + (n === detailName ? ' active' : '')}>${m.title}</a>`;
           })}
         </div>
       </div>`;
