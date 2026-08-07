@@ -174,7 +174,14 @@ def test_home_when_db_populated_but_no_config_is_set_up(monkeypatch, capsys, tmp
     db = tmp_path / ".tj" / "telemetry.duckdb"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"\x00" * 4096)
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    # `_db_has_data()` resolves the default "~/.tj/telemetry.duckdb" via
+    # `Path.expanduser()`, which reads the `HOME` env var directly rather
+    # than going through `pathlib.Path.home()` — so patching `Path.home`
+    # (as this test used to) is a no-op here and the assertion only passed
+    # by accident, off a DB left behind under the session-wide fake HOME by
+    # an earlier test. Set `HOME` itself so this test's own db is what gets
+    # found, independent of suite order.
+    monkeypatch.setenv("HOME", str(tmp_path))
     print_home()
     out = capsys.readouterr().out
     assert "You're set up" in out, out
