@@ -73,7 +73,7 @@ MAX_EXAMPLES = 5
 # recoverable finding's caveat so no surface can drop it. States the ONE thing
 # that makes this the least-grounded analyzer: output length is not waste.
 VERBOSITY_HONESTY_CAVEAT = (
-    "Predicted high-verbosity output — review before constraining a response. "
+    "Predicted high-verbosity output. Review before constraining a response. "
     "Output length is not waste: a terse answer can drop information the task "
     "needed. This is a candidate to look at, never a claim you are wasting "
     "tokens. Measure a brevity constraint before applying it."
@@ -82,9 +82,9 @@ VERBOSITY_HONESTY_CAVEAT = (
 # The `estimate_basis` surfaced behind the "estimated recoverable" tag. Names
 # the softer basis explicitly and points at measurement (#477).
 VERBOSITY_ESTIMATE_BASIS = (
-    "output tokens above the per-task-shape median, priced at output rates — a "
-    "SOFT upper bound, not a measured saving: a brevity constraint can be "
-    "net-negative once its own overhead is counted, so measure before claiming"
+    "output tokens above the per-task-shape median, priced at output rates. a "
+    "SOFT upper bound, not a measured saving. a brevity constraint can be "
+    "net-negative once its own overhead is counted. measure before claiming"
 )
 
 # Surfaced remedy (not applied, and never written into a workspace file — see

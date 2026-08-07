@@ -98,13 +98,13 @@ SUBAGENT_HONESTY_CAVEAT = (
 # pricing data, or no cohort baseline (fewer than min_cohort_sessions
 # like-shaped peers) contributes nothing to that component.
 SUBAGENT_ESTIMATE_BASIS = (
-    "over_powered subagents (any premium-tier subagent above the noise floor) "
-    "priced at claude-sonnet-5 (one tier down, not model_downgrade's "
-    "two-tier opus-to-haiku jump) over the same tokens, a model-swap delta, "
-    "structural fit only, plus over_provisioned subagents priced on their "
-    "context excess over their dispatch cohort's own median (same calling "
-    "agent + model), at the cache-read rate; no quality validation, review "
-    "before re-dispatching. No guaranteed saving."
+    "over_powered subagents (any premium-tier subagent above the noise floor) are priced at "
+    "claude-sonnet-5, one tier down. That is not model_downgrade's two-tier opus-to-haiku "
+    "jump. The price uses the same tokens: a model-swap delta, structural fit only.\n\n"
+    "over_provisioned subagents are priced on their context excess over their dispatch "
+    "cohort's own median (same calling agent + model). That excess is priced at the "
+    "cache-read rate. There is no quality validation: review before re-dispatching. "
+    "No guaranteed saving."
 )
 
 

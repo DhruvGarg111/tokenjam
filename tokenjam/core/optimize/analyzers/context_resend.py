@@ -184,47 +184,54 @@ _resend_tail_tokens_per_turn = resend_tail_tokens_per_turn
 _introduced_tokens = introduced_tokens
 
 RESEND_HONESTY_CAVEAT = (
-    "Structural token-share, not a savings claim: a conservative lower bound "
-    "(benchmarks/RESULTS.md, HAL corpus: 93.8% of prompt tokens re-sent). "
-    "Measured independent of whether caching is enabled: this can read high "
-    "even when every re-sent byte was already a cheap cache read. Review "
-    "sessions before restructuring."
+    "This is a structural token-share, not a savings claim: a conservative "
+    "lower bound (benchmarks/RESULTS.md, HAL corpus: 93.8% of prompt tokens "
+    "re-sent).\n\n"
+    "It is measured independent of whether caching is enabled. This means it "
+    "can read high even when every re-sent byte was already a cheap cache "
+    "read. Review sessions before restructuring."
 )
 
 RESEND_ESTIMATE_BASIS = (
-    "repeat_tokens = sum(prompt_size) - max(prompt_size) per session "
-    "(prompt_size = input_tokens + cache_tokens per turn), aggregated "
-    "token-weighted across sessions. The headline TOKEN and USD figures count "
-    "the SAME events over the SAME sessions: both are the subagent-offload + "
-    "right-sizing lever below, so dividing one by the other yields a real "
-    "per-token price rather than a number no provider charges. A separate, "
-    "wider compaction-lever estimate (repeat_tokens x 68.3% avoidable-fraction, "
-    "cross-corpus calibrated rather than measured here) is reported on its own "
-    "`compaction_avoidable_tokens` field and is deliberately NOT summed into "
-    "the headline token figure, because no dollar figure is computed over that "
-    "population. USD claim (subagent-offload + right-sizing lever, measured "
-    "on YOUR data): for each main-thread turn of a context-heavy session, the "
-    "material it introduces (uncached input + output) is re-read by every later "
-    "main-thread turn until the next compaction, billed at the cache-read rate "
-    "— that tail is what offloading the work to a subagent removes, because a "
-    "subagent's tool output never enters the parent context. Only the share of "
-    "that volume you demonstrably CAN offload is claimed, and that share is "
-    "measured from your own sub_agent_id telemetry (how much of the "
+    "repeat_tokens = sum(prompt_size) - max(prompt_size) per session, where "
+    "prompt_size = input_tokens + cache_tokens per turn. This is aggregated "
+    "token-weighted across sessions.\n\n"
+    "The headline TOKEN and USD figures count the SAME events over the SAME "
+    "sessions. Both are the subagent-offload + right-sizing lever below. "
+    "Dividing one by the other yields a real per-token price, not a number no "
+    "provider charges.\n\n"
+    "A separate, wider compaction-lever estimate is repeat_tokens x 68.3% "
+    "avoidable-fraction, cross-corpus calibrated rather than measured here. "
+    "It is reported on its own `compaction_avoidable_tokens` field. It is "
+    "deliberately NOT summed into the headline token figure, because no "
+    "dollar figure is computed over that population.\n\n"
+    "USD claim (subagent-offload + right-sizing lever, measured on YOUR "
+    "data): take each main-thread turn of a context-heavy session. The "
+    "material it introduces is uncached input plus output. That material is "
+    "re-read by every later main-thread turn until the next compaction, "
+    "billed at the cache-read rate. That tail is what offloading the work to "
+    "a subagent removes: a subagent's tool output never enters the parent "
+    "context.\n\n"
+    "Only the share of that volume you demonstrably CAN offload is claimed. "
+    "That share is measured from your own sub_agent_id telemetry, not "
+    "inherited from a benchmark. It reflects how much of the "
     "context-introducing volume already runs in subagents, in the sessions "
-    "where you delegate at all) rather than inherited from a benchmark. "
+    "where you delegate at all.\n\n"
     "Right-sizing stacks on top: the same offloaded volume priced at the "
-    "cheaper same-family model's input rate instead of the premium one. "
+    "cheaper same-family model's input rate instead of the premium one.\n\n"
     "TOKENS claim: exactly the token counts those two dollar terms were "
-    "applied to — the offloadable share of the re-read tail (billed at the "
-    "cache-read rate) plus the offloadable share of the material a right-sized "
-    "model would have read instead (billed at the premium-vs-cheaper input-rate "
-    "gap). A turn contributes to both the token and the dollar sum or to "
-    "neither: where a rate is missing — an unpriced model, or no cheaper "
-    "same-family model to compare against — that turn is dropped from BOTH, "
-    "never counted as tokens with zero dollars against it. "
-    "Computed over main-thread spans only, so it never overlaps the subagent "
-    "analyzer's own claim. Boundary against the relearn analyzer, which prices "
-    "failed-call recovery over some of the same turns: "
+    "applied to. That is the offloadable share of the re-read tail, billed at "
+    "the cache-read rate. It is also the offloadable share of the material a "
+    "right-sized model would have read instead, billed at the "
+    "premium-vs-cheaper input-rate gap.\n\n"
+    "A turn contributes to both the token and the dollar sum, or to neither. "
+    "Where a rate is missing (an unpriced model, or no cheaper same-family "
+    "model to compare against), that turn is dropped from BOTH. It is never "
+    "counted as tokens with zero dollars against it. This is computed over "
+    "main-thread spans only, so it never overlaps the subagent analyzer's own "
+    "claim.\n\n"
+    "Boundary against the relearn analyzer, which prices failed-call recovery "
+    "over some of the same turns: "
     + RELEARN_RESEND_BOUNDARY + "."
 )
 
@@ -266,15 +273,16 @@ def _offloadable_share_disclosure(measured: OffloadableShare) -> str:
         if measured.median is not None else ""
     )
     return (
-        f" BEHAVIOURAL BASIS AND SAMPLE SIZE of the {measured.share:.1%} "
-        f"offloadable share: it is measured across the "
-        f"{measured.sessions:,} of {measured.sessions_total:,} session(s) "
-        f"({measured.sampled_fraction:.1%}) that dispatch a subagent at all, "
-        f"then applied unchanged to the sessions that never delegate — which "
-        f"are exactly the ones being advised. It therefore describes how much "
-        f"work you ALREADY offload when you offload, not how much of this "
-        f"window's in-thread work was structurally offloadable; no per-tool-call "
-        f"delegability measure is computed anywhere today.{spread}"
+        f"\n\nBEHAVIOURAL BASIS AND SAMPLE SIZE of the {measured.share:.1%} "
+        f"offloadable share. It is measured across {measured.sessions:,} of "
+        f"{measured.sessions_total:,} session(s) "
+        f"({measured.sampled_fraction:.1%}) that dispatch a subagent at all. "
+        f"That share is then applied unchanged to the sessions that never "
+        f"delegate, which are exactly the ones being advised. It therefore "
+        f"describes how much work you ALREADY offload when you offload. It is "
+        f"not a measure of how much of this window's in-thread work was "
+        f"structurally offloadable. No per-tool-call delegability measure is "
+        f"computed anywhere today.{spread}"
     )
 
 # THE text lives in `core/fixes/registry.py`, so the lint sees it.
@@ -618,38 +626,39 @@ def _coverage_note(finding: ResendFinding) -> str:
     if not sessions_total:
         return ""
     parts = [
-        f"COVERAGE. {sessions_total:,} session(s) in this window carried repeat "
-        f"volume; the avoidable figure was computed over "
+        f"COVERAGE. {sessions_total:,} session(s) in this window carried "
+        f"repeat volume. The avoidable figure was computed over "
         f"{finding.sessions_in_scope:,} of them."
     ]
     if finding.driver_role_sessions and finding.cost_driver_role_usd:
         parts.append(
             f"{finding.driver_role_sessions:,} session(s) carrying "
-            f"${finding.cost_driver_role_usd:,.2f} of that cost are analysed on "
-            f"the model-role card instead (a premium model drove them inline), "
-            f"so their avoidable portion is reported there, not counted here."
+            f"${finding.cost_driver_role_usd:,.2f} of that cost are analysed "
+            f"on the model-role card instead. A premium model drove them "
+            f"inline, so their avoidable portion is reported there, not "
+            f"counted here."
         )
     if finding.sessions_no_lever and finding.cost_no_lever_usd:
         parts.append(
             f"{finding.sessions_no_lever:,} session(s) carrying "
             f"${finding.cost_no_lever_usd:,.2f} never accumulate the "
             f"{MIN_SESSION_CONTEXT_TOKENS:,} tokens of main-thread context an "
-            f"offload lever needs, so they are dropped from the avoidability "
+            f"offload lever needs. They are dropped from the avoidability "
             f"calculation while still counting as cost."
         )
     if finding.cost_in_scope_usd and finding.offload_ceiling_usd is not None:
         parts.append(
             f"Inside the sessions that were analysed, only the "
             f"compaction-bounded main-thread re-read tail is offloadable at "
-            f"all — ${finding.offload_ceiling_usd:,.2f} of the "
-            f"${finding.cost_in_scope_usd:,.2f} cost there — and only the "
-            f"measured share of that tail is priced as avoidable."
+            f"all. That tail is ${finding.offload_ceiling_usd:,.2f} of the "
+            f"${finding.cost_in_scope_usd:,.2f} cost there. Only the measured "
+            f"share of that tail is priced as avoidable."
         )
     parts.append(
         "The difference between the two figures is therefore NOT a measurement "
         "of what was unavoidable. It is what this analyzer did not analyse."
     )
-    return " ".join(parts)
+    return "\n\n".join(parts)
 
 
 def _capture_flags(config) -> tuple[bool, bool, bool]:
@@ -691,16 +700,16 @@ def run(ctx: AnalyzerContext) -> None:
 
     if len(by_session) < MIN_SESSIONS_FOR_SIGNAL:
         finding.notes.append(
-            f"Only {len(by_session)} session(s) in the window (need >= "
-            f"{MIN_SESSIONS_FOR_SIGNAL}): too few sessions to measure a "
-            "stable repeat-share."
+            f"Only {len(by_session)} session(s) are in the window. At least "
+            f"{MIN_SESSIONS_FOR_SIGNAL} are needed to measure a stable "
+            "repeat-share."
         )
         ctx.report.findings["resend"] = finding
         return
     if len(turns) < MIN_TURNS_FOR_SIGNAL:
         finding.notes.append(
-            f"Only {len(turns)} LLM turn(s) in the window (need >= "
-            f"{MIN_TURNS_FOR_SIGNAL}): too few turns to measure repeat-share."
+            f"Only {len(turns)} LLM turn(s) are in the window. At least "
+            f"{MIN_TURNS_FOR_SIGNAL} are needed to measure repeat-share."
         )
         ctx.report.findings["resend"] = finding
         return
@@ -955,12 +964,15 @@ def run(ctx: AnalyzerContext) -> None:
         # answering separate questions, and neither is the aggregate the
         # cross-analyzer rollup reads.
         finding.notes.append(
-            "No dollar figure for the offload lever: this window has no "
-            "session that both delegates to a subagent (nothing to measure "
-            "your offloadable share from) and carries enough main-thread "
-            "context for offloading to pay. No token figure is claimed for it "
-            "either — the two always degrade together. The measured repeat "
-            "volume and the compaction-lever token estimate above still stand."
+            "No dollar figure is claimed for the offload lever. This window "
+            "has no session that meets both conditions the lever needs. It "
+            "would need a session that delegates to a subagent, which is what "
+            "lets us measure your offloadable share. It would also need that "
+            "same session to carry enough main-thread context for offloading "
+            "to pay.\n\n"
+            "No token figure is claimed for it either. The two always degrade "
+            "together. The measured repeat volume and the compaction-lever "
+            "token estimate above still stand."
         )
     finding.driver_role_sessions = driver_role_sessions
     if driver_role_sessions:
@@ -994,9 +1006,10 @@ def run(ctx: AnalyzerContext) -> None:
     else:
         finding.notes.append(
             "Enable `[capture] tool_inputs = true` / `prompts = true` / "
-            "`tool_outputs = true` in tj.toml, then `tj backfill claude-code "
-            "--reingest`, to see WHICH re-read files, re-run searches, "
-            "re-pasted prompts, or re-pasted outputs are driving this number."
+            "`tool_outputs = true` in tj.toml. Then run `tj backfill "
+            "claude-code --reingest`. This shows WHICH re-read files, re-run "
+            "searches, re-pasted prompts, or re-pasted outputs are driving "
+            "this number."
         )
 
     ctx.report.findings["resend"] = finding

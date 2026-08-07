@@ -217,8 +217,8 @@ def run(ctx: AnalyzerContext) -> None:
             enabled=False,
             min_prefix_occurrences=min_prefix_occurrences,
             hint=(
-                "Enable `[capture] prompts = true` in tj.toml and let the "
-                "daemon collect a window of data before re-running this "
+                "Enable `[capture] prompts = true` in tj.toml. Let the "
+                "daemon collect a window of data, then re-run this "
                 "analyzer. Without captured prompt content there's no way "
                 "to identify stable prefixes."
             ),
@@ -341,8 +341,8 @@ def run(ctx: AnalyzerContext) -> None:
     finding_tokens = sum(priced_tokens) if priced_tokens else None
     basis = (
         "reads after the first occurrence at (input - cache-read) rate, minus "
-        "one cache write per prefix at the write rate, priced off each "
-        "prefix's most-called model; candidates with no priced rate observed "
+        "one cache write per prefix at the write rate. priced off each "
+        "prefix's most-called model. candidates with no priced rate observed "
         "for their model contribute no dollar figure"
     ) if priced_usd else ""
 

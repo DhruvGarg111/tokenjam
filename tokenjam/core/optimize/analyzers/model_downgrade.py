@@ -280,25 +280,31 @@ def _turns_by_session(
 
 
 DRIVER_ROLE_BASIS_TEMPLATE = (
-    "Sessions where a premium-tier model drove the whole session inline: it "
-    "never dispatched a subagent, ran {floor}+ main-thread tool calls, and "
-    "accumulated more than {ctx:,} tokens of context. Two exact arithmetic "
-    "halves over the turns inside a tool-driven stretch (a contiguous run of "
-    "turns that each ran at least one tool — the reads/searches/edits a worker "
-    "would have carried). (1) OFFLOAD: the uncached material those turns pulled "
-    "in — tool results, file contents — is re-read by every later main-thread "
-    "turn until the next compaction, billed at the premium cache-read rate; a "
-    "worker's tool output never enters the caller's context, so that tail is "
-    "removed. Only the pulled-in material is counted, never the assistant's own "
-    "output, because a worker's short conclusion does come back to the caller. "
+    "Sessions where a premium-tier model drove the whole session inline. It "
+    "never dispatched a subagent. It ran {floor}+ main-thread tool calls and "
+    "accumulated more than {ctx:,} tokens of context.\n\n"
+    "Two exact arithmetic halves apply to the turns inside a tool-driven "
+    "stretch. A tool-driven stretch is a contiguous run of turns that each "
+    "ran at least one tool: the reads/searches/edits a worker would have "
+    "carried.\n\n"
+    "(1) OFFLOAD: the uncached material those turns pulled in (tool results, "
+    "file contents) is re-read by every later main-thread turn until the "
+    "next compaction. It is billed at the premium cache-read rate. A "
+    "worker's tool output never enters the caller's context, so that tail "
+    "is removed.\n\n"
+    "Only the pulled-in material is counted, never the assistant's own "
+    "output. That is because a worker's short conclusion does come back to "
+    "the caller.\n\n"
     "(2) TIER: those same turns' own input and output repriced at the "
     "substitute worker tier ({substitutes}) instead of the premium driver's. "
-    "The two compound — where the work runs and what it runs on are "
-    "independent. The premium driver itself is left in place and is NOT "
-    "repriced: an interactive session must stay smart, so nothing here assumes "
-    "you downgrade your own thread. Disjoint by construction from the resend "
-    "card (which skips exactly these sessions) and from the subagent card "
-    "(these sessions dispatch no subagent, so they carry no subagent spans)."
+    "The two compound: where the work runs and what it runs on are "
+    "independent.\n\n"
+    "The premium driver itself is left in place and is NOT repriced. An "
+    "interactive session must stay smart, so nothing here assumes you "
+    "downgrade your own thread.\n\n"
+    "Disjoint by construction from the resend card, which skips exactly "
+    "these sessions. Also disjoint from the subagent card: these sessions "
+    "dispatch no subagent, so they carry no subagent spans."
 )
 
 
@@ -812,7 +818,7 @@ def analyze_model_downgrade(
         ) + (
             (
                 "SECONDARY (structurally tiny sessions): candidate sessions "
-                "routed to a cheaper model over the window — structural fit "
+                "routed to a cheaper model over the window. Structural fit "
                 "only, no quality validation."
             ) if candidate_sessions else ""
         ),

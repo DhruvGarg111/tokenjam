@@ -84,15 +84,16 @@ CLUSTER_GAP_RATIO = 3.0
 #: Construction footnote for the card's dollar figure.
 BATCH_ESTIMATE_BASIS = (
     "Window spend of the workloads whose session starts fit a regular cadence "
-    "and that ran with no human turn after their first model call, halved at "
-    "the Batch API's flat 50% rate. An estimate of the price difference on the "
-    "same tokens; it assumes the same work runs unchanged on the batch lane."
+    "and that ran with no human turn after their first model call. That spend "
+    "is halved at the Batch API's flat 50% rate. An estimate of the price "
+    "difference on the same tokens. It assumes the same work runs unchanged "
+    "on the batch lane."
 )
 
 #: The friction the card must state next to the number.
 BATCH_FRICTION_NOTE = (
-    "Batch adoption is an architectural change, not a configuration flip: work "
-    "is submitted and polled for later, so only workloads nobody is waiting on "
+    "Batch adoption is an architectural change, not a configuration flip. Work "
+    "is submitted and polled for later. So only workloads nobody is waiting on "
     "can move. Most batches finish within an hour, but none are interactive."
 )
 

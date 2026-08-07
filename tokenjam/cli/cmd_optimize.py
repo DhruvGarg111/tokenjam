@@ -7,6 +7,7 @@ from typing import Any, NoReturn
 import click
 from rich.markup import escape as _rich_escape
 from rich.padding import Padding
+from rich.table import Table
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.cli.tj_status import TjCommand, tj_status
@@ -1949,6 +1950,51 @@ def _usd_with_tokens(usd: float, tokens: int | None) -> str:
     return format_cost(usd)
 
 
+def _render_prose(
+    text: str, *, marker: str = "", style: str | None = None, escape: bool = True,
+    indent: int = 5,
+) -> None:
+    """Render an analyzer prose field (`caveat`, `estimate_basis`, `notes`,
+    `coverage_note`, and their siblings — `friction`, `measurement_note`,
+    `accounting_note`) so every line hangs indented under the first
+    paragraph's text, not just the first line.
+
+    These fields were rewritten from single 40-90 word run-on paragraphs into
+    short sentences grouped into paragraphs separated by a literal blank line
+    (`"\\n\\n"`), which the web dashboard already renders correctly. A
+    hand-written prefix like `f"     [yellow]![/yellow] [italic]{caveat}[/italic]"`
+    only indents line 1 — rich reflows everything after it, both the
+    soft-wrapped continuation of a long sentence and every paragraph after a
+    blank line, starting back at column 0 and visually detaching it from the
+    marker it belongs to.
+
+    Built on a borderless two-column `Table.grid` (elsewhere in this file,
+    `_render_scoreboard`'s `priced_rows` note reaches for `Padding` to solve
+    the same class of problem for an unmarked block): the marker column is
+    `no_wrap` so it never reflows and fixes a left column, and rich aligns
+    every line of the prose column — wrapped or blank-line-broken alike —
+    under that same column start (root anti-pattern 30: pin the indent to
+    every line the renderer produces, not just the first one it happened to
+    be written for).
+
+    `marker` is one-time leading markup (e.g. `"[yellow]![/yellow]"` for a
+    caveat, `""` for a plain dim line) rendered once at `indent` spaces;
+    continuation paragraphs align under the TEXT, not under the marker.
+    `style` wraps the prose itself (`"italic"`, `"dim"`). `escape` must match
+    each call site's PRE-EXISTING `_rich_escape` usage — several of these
+    fields (caveat, estimate_basis) print unescaped today, and this helper
+    only fixes indentation, not that.
+    """
+    body = _rich_escape(text) if escape else text
+    content = f"[{style}]{body}[/{style}]" if style else body
+    lead = " " * indent + (f"{marker} " if marker else "")
+    grid = Table.grid(padding=0)
+    grid.add_column(no_wrap=True)
+    grid.add_column()
+    grid.add_row(lead, content)
+    console.print(grid)
+
+
 def _render_cache_control_or_no_lever(snippet: str, persona: str) -> None:
     """Persona-gated `cache_control` snippet render, shared by every
     cache-family CLI renderer that prints one (`cache`'s A1/A2/A3
@@ -2377,7 +2423,7 @@ def _render_workflow_restructure(
                 f"replacing with a deterministic script would eliminate it.[/dim]"
             )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_prompt_bloat(
@@ -2562,10 +2608,11 @@ def _render_reuse(
             )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     if finding.clusters:
-        console.print(
-            f"     [yellow]![/yellow] [italic]{finding.clusters[0].caveat}[/italic]"
+        _render_prose(
+            finding.clusters[0].caveat, marker="[yellow]![/yellow]", style="italic",
+            escape=False,
         )
 
 
@@ -2651,7 +2698,7 @@ def _render_subagent(
             f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
         )
 
-    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
@@ -2756,7 +2803,7 @@ def _render_relearn(
         "full detail with [bold]tj optimize relearn --json[/bold].[/dim]"
     )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_verbosity(
@@ -2821,7 +2868,7 @@ def _render_verbosity(
             f"[bold]tj optimize --validate[/bold].[/dim]"
         )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_summarize(
@@ -2895,7 +2942,7 @@ def _render_summarize(
         "then [bold]tj summarize prep <path>[/bold] to generate a rewrite."
     )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
@@ -2999,9 +3046,7 @@ def _render_deadweight(
         # nobody has a path to does not exist).
         _render_deadweight_plugins(finding, pricing_mode=pricing_mode)
         if finding.coverage_note:
-            console.print(
-                f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
-            )
+            _render_prose(finding.coverage_note, marker="[yellow]![/yellow]", style="dim")
         return
 
     if not finding.unused_servers:
@@ -3009,7 +3054,7 @@ def _render_deadweight(
         # bracket form, which Rich would otherwise parse as an unknown style
         # tag and silently drop from the printed line.
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
         if not finding.notes:
             console.print(
                 f"     [dim]All {finding.configured_servers} configured MCP "
@@ -3083,21 +3128,17 @@ def _render_deadweight(
             )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     # The MEASUREMENT coverage note, beside the figure it qualifies. Without it
     # the terminal showed a priced dollar total for the servers that could be
     # measured and said nothing about the ones excluded — an undisclosed FLOOR
     # rendered as a total. The number was honest; the presentation was not.
     if getattr(finding, "measurement_note", ""):
-        console.print(
-            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.measurement_note)}[/dim]"
-        )
+        _render_prose(finding.measurement_note, marker="[yellow]![/yellow]", style="dim")
     if finding.coverage_note:
-        console.print(
-            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
-        )
+        _render_prose(finding.coverage_note, marker="[yellow]![/yellow]", style="dim")
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _cadence_phrase(seconds: float) -> str:
@@ -3183,9 +3224,9 @@ def _render_placement(
         )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     if finding.friction:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.friction}[/italic]")
+        _render_prose(finding.friction, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_resend(
@@ -3211,7 +3252,7 @@ def _render_resend(
         # Below the data threshold (too few sessions/turns) — empty-state
         # discipline: never a bare "nothing found", always the reason.
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
         if not finding.notes:
             console.print("     [dim]No LLM turns in this window.[/dim]")
         return
@@ -3267,7 +3308,7 @@ def _render_resend(
             console.print(f"          [green]→[/green] {_rich_escape(r.fix)}")
     else:
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
 
     # Recoverable figure: fed through framing.render_savings rather than a
     # hand-rolled pricing_mode branch, so it can't quietly disagree with the
@@ -3299,9 +3340,9 @@ def _render_resend(
             f"avoidable across every session with repeat volume.[/dim]"
         )
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
 
-    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
     _render_resend_fix(finding, persona)
 
 
@@ -3441,8 +3482,8 @@ def _render_stream_usage(
         )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{_rich_escape(finding.estimate_basis)}[/dim]")
-    console.print(f"     [dim]{_rich_escape(finding.accounting_note)}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim")
+    _render_prose(finding.accounting_note, style="dim")
 
 
 # Dispatch table — analyzer registration name → renderer.

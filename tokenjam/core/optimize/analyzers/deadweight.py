@@ -135,7 +135,7 @@ CHARS_PER_TOKEN = 4
 DEADWEIGHT_HONESTY_CAVEAT = (
     "Structural detection off configured MCP servers and their measured "
     "tool-call counts, not a judgment about whether the server is useful. "
-    "Review the window before removing a server; a low-traffic server can "
+    "Review the window before removing a server. A low-traffic server can "
     "still be load-bearing for an occasional task."
 )
 
@@ -437,7 +437,7 @@ def render_mcp_remove(pre_image: str | None, server_name: str) -> tuple[str | No
     try:
         doc = json.loads(pre_image)
     except ValueError as exc:
-        return None, f"that file is not valid JSON ({exc}) — refusing to edit it."
+        return None, f"that file is not valid JSON ({exc}). Refusing to edit it."
     servers = doc.get("mcpServers") if isinstance(doc, dict) else None
     if not isinstance(servers, dict) or server_name not in servers:
         return None, f"`{server_name}` is not in that file's mcpServers block any more."
@@ -445,7 +445,7 @@ def render_mcp_remove(pre_image: str | None, server_name: str) -> tuple[str | No
     if span is None:
         return None, (
             f"could not locate `{server_name}`'s entry precisely in the file "
-            f"text — refusing a risky edit."
+            f"text. Refusing a risky edit."
         )
     start, end = span
     return pre_image[:start] + pre_image[end:], ""
@@ -467,14 +467,14 @@ def mcp_remove_precheck(source_path: str, server_name: str) -> dict:
         )}
     path = Path(source_path).expanduser()
     if not path.is_file():
-        return {"ok": False, "reason": f"{path} no longer exists on disk — nothing to edit."}
+        return {"ok": False, "reason": f"{path} no longer exists on disk. Nothing to edit."}
     try:
         json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return {"ok": False, "reason": f"{path} is not valid JSON ({exc}) — refusing to edit it."}
+        return {"ok": False, "reason": f"{path} is not valid JSON ({exc}). Refusing to edit it."}
     if not server_still_configured(server_name, str(path)):
         return {"ok": False, "reason": (
-            f"`{server_name}` is no longer in {path}'s mcpServers block — it may "
+            f"`{server_name}` is no longer in {path}'s mcpServers block. It may "
             f"already have been removed by hand."
         )}
     return {"ok": True, "reason": "", "target_path": str(path)}
@@ -807,15 +807,17 @@ def _measurement_note(measurement: Any) -> str:
         return (
             "This server's schema size could NOT be measured"
             + (f" ({detail})" if detail else "")
-            + " — it is excluded from every priced figure here rather than "
+            + ". It is excluded from every priced figure here rather than "
             "billed a default."
         )
     tools = int(getattr(measurement, "tool_count", 0) or 0)
-    cached = " (re-used from the last measurement; the server's launch spec is " \
-             "unchanged since)" if getattr(measurement, "from_cache", False) else ""
+    cached = (
+        " Re-used from the last measurement. The server's launch spec is "
+        "unchanged since."
+    ) if getattr(measurement, "from_cache", False) else ""
     return (
         f"Measured from this server's OWN tools/list response: {tools} tool "
-        f"schema(s), serialized as they are injected{cached}."
+        f"schema(s), serialized as they are injected.{cached}"
     )
 
 
@@ -841,7 +843,7 @@ def _tax_construction_note(
         )
     elif non_deferred == 0:
         note = (
-            f"{deferred_shown:,} tok on the first call; ToolSearch deferred "
+            f"{deferred_shown:,} tok on the first call. ToolSearch deferred "
             f"this server's schemas in every observed session (name and "
             f"description line only, never the full schema tax). "
             f"{_measurement_note(measurement)}"
@@ -849,24 +851,25 @@ def _tax_construction_note(
     else:
         note = (
             f"{full_tokens:,} tok on the first call when fully loaded "
-            f"({non_deferred} of {sessions_present} sessions) blended with "
-            f"{deferred_shown:,} tok when ToolSearch defers this server's "
-            f"schemas ({deferred_sessions} of {sessions_present} sessions); "
-            f"never claims the full tax for a deferred call. "
+            f"({non_deferred} of {sessions_present} sessions). This blends "
+            f"with {deferred_shown:,} tok when ToolSearch defers this "
+            f"server's schemas ({deferred_sessions} of {sessions_present} "
+            f"sessions). Never claims the full tax for a deferred call. "
             f"{_measurement_note(measurement)}"
         )
     if cache_read_ratio > 0:
         note += (
             f" The schema rides in the `tools` array of every call in the "
-            f"session, not just the first: priced at the input rate once, "
-            f"then at the cache-read rate (~{cache_read_ratio * 100:.0f}% of "
-            f"input) on every later call (avg {avg_calls_per_session:.1f} "
-            f"call(s)/session across these sessions, from each session's own "
-            f"actual call count, never a global mean/median). Simplification: "
-            f"assumes every call in a session lands inside Anthropic's "
-            f"5-minute cache TTL; a call after a longer gap would instead "
-            f"re-write the schema at the higher cache-write rate for that "
-            f"call, so this understates sessions with long gaps between calls."
+            f"session, not just the first. It is priced at the input rate "
+            f"once, then at the cache-read rate (~{cache_read_ratio * 100:.0f}% "
+            f"of input) on every later call. The call count used is avg "
+            f"{avg_calls_per_session:.1f} call(s)/session across these "
+            f"sessions, from each session's own actual call count, never a "
+            f"global mean/median. Simplification: this assumes every call in "
+            f"a session lands inside Anthropic's 5-minute cache TTL. A call "
+            f"after a longer gap would instead re-write the schema at the "
+            f"higher cache-write rate for that call. This understates "
+            f"sessions with long gaps between calls."
         )
     else:
         note += (
@@ -883,8 +886,8 @@ def _pricing_note(model: str, input_per_mtok: float | None, usd_per_session: flo
     """
     if not model or input_per_mtok is None or usd_per_session is None:
         return (
-            "No dollar estimate: no priced model observed across these "
-            "sessions (core/pricing.py has no rate for it); tokens only."
+            "No dollar estimate: no priced model was observed across these "
+            "sessions (core/pricing.py has no rate for it). Tokens only."
         )
     return (
         f"Priced at {model}'s input rate (${input_per_mtok:.2f}/MTok via "
@@ -1259,7 +1262,7 @@ def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
     elif finding.unresolvable_tokens:
         parts.append(
             f"~{finding.unresolvable_tokens:,} tok of usage sits behind "
-            f"those sessions; no priced model was observed across them, so "
+            f"those sessions. No priced model was observed across them, so "
             f"no dollar figure is stated."
         )
     parts.append(
@@ -1419,7 +1422,7 @@ def _plugin_rows(
                     f"tok resident per call: the `name: description` line of "
                     f"each of this plugin's {skills} skill(s) and {agents} "
                     f"agent(s), measured off the installed files. BODIES are "
-                    f"NOT counted — a body arrives when the skill/agent is "
+                    f"NOT counted. A body arrives when the skill/agent is "
                     f"invoked, not at session start."
                 )
             if mcp_count:
@@ -1438,7 +1441,7 @@ def _plugin_rows(
             if not parts:
                 parts.append(
                     "No skill, agent or MCP server was found for this "
-                    "plugin — nothing to price."
+                    "plugin. Nothing to price."
                 )
         else:
             parts.append(
@@ -1507,7 +1510,7 @@ def _measurement_coverage_note(finding: DeadweightFinding) -> str:
         f"configured MCP server(s) had their schema size measured from the "
         f"server's own tools/list response. The other "
         f"{finding.servers_unmeasured:,} could not be measured and contribute "
-        f"NOTHING to any figure here — they are excluded rather than billed a "
+        f"NOTHING to any figure here. They are excluded rather than billed a "
         f"default, so every total on this finding is a floor. Each server's "
         f"own row says which of them it is and why."
     )
@@ -1910,8 +1913,8 @@ def compute_deadweight_finding(
         # So a durable instruction lived here, unlinted, hidden behind a
         # grounded sentence. What is left below is only this row's evidence.
         fix = (
-            f"{action} the `{server.name}` MCP server ({server.source}); "
-            f"zero tool calls across {sessions_present} session(s) in this "
+            f"{action} the `{server.name}` MCP server ({server.source}). "
+            f"Zero tool calls across {sessions_present} session(s) in this "
             f"window. " + fix_text("deadweight.remove_unused_server")
         )
         if other_sources:
@@ -2049,17 +2052,17 @@ def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> Deadweigh
         )
         basis = (
             f"sum of each unused server's schema-injection tax observed over "
-            f"this window, where each server's per-call size is MEASURED from "
+            f"this window. Each server's per-call size is MEASURED from "
             f"its own tools/list response rather than assumed ({span} across "
             f"the {len(measured_unused)} of {len(finding.unused_servers)} unused "
-            f"server(s) that could be measured); the tax table's own "
+            f"server(s) that could be measured). The tax table's own "
             f"MCP-schema rows are informational only and never double-count "
             f"into this total."
         )
         if unmeasured_unused:
             basis += (
                 f" {unmeasured_unused} unused server(s) could not be measured "
-                f"and contribute nothing to this figure — it is a floor, not a "
+                f"and contribute nothing to this figure. It is a floor, not a "
                 f"total."
             )
         if priced:
@@ -2085,7 +2088,7 @@ def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> Deadweigh
         finding.notes.append(
             f"{len(finding.unused_servers)} configured MCP server(s) had "
             f"nothing attributable fire in the last "
-            f"{UNUSED_RECENCY_WINDOW_DAYS} days, but none of them could be "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days. None of them could be "
             f"measured, so no token or dollar figure is stated for them. See "
             f"each row's own construction note for why."
         )
@@ -2093,7 +2096,7 @@ def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> Deadweigh
         finding.notes.append(
             f"No configured MCP server went {UNUSED_RECENCY_WINDOW_DAYS} days "
             f"with nothing attributable firing (or the corpus doesn't hold "
-            f"that much history yet for some of them — see each server's own "
+            f"that much history yet for some of them; see each server's own "
             f"row)."
         )
 
@@ -2112,10 +2115,10 @@ def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> Deadweigh
         finding.estimate_basis = (finding.estimate_basis or "") + (
             f" Plus {len(finding.unused_plugins)} enabled plugin(s) with "
             f"nothing attributable firing in the last "
-            f"{UNUSED_RECENCY_WINDOW_DAYS} days: their skill/agent `name: "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days. Their skill/agent `name: "
             f"description` listing (plus any plugin-contributed MCP server's "
             f"measured schema) is resident in every session, priced per call "
-            f"at the window's dominant model. BODIES are never counted — a "
+            f"at the window's dominant model. BODIES are never counted. A "
             f"body arrives on invocation, not at session start."
         ).lstrip()
     if plugin_usd:
@@ -2130,7 +2133,7 @@ def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> Deadweigh
             f"{len(insufficient_plugins)} of {finding.plugins_resident} "
             f"resident plugin(s) don't have {UNUSED_RECENCY_WINDOW_DAYS} "
             f"days of session history yet, so no unused claim can be made "
-            f"for them — not a finding, just not enough evidence."
+            f"for them. Not a finding, just not enough evidence."
         )
     if partial_plugins:
         finding.notes.append(
@@ -2138,7 +2141,7 @@ def _finish_totals(finding: DeadweightFinding, *, configured: dict) -> Deadweigh
             f"components that fired in the last "
             f"{UNUSED_RECENCY_WINDOW_DAYS} days and some that did not. "
             f"Enable/disable is whole-plugin only, so no fix is offered "
-            f"for a partially-used plugin — see each one's own row."
+            f"for a partially-used plugin. See each one's own row."
         )
     if resident_plugins and not finding.unused_plugins and not insufficient_plugins and not partial_plugins:
         finding.notes.append(

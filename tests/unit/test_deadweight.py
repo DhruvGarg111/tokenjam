@@ -1362,7 +1362,10 @@ def test_an_unmeasured_server_is_excluded_not_defaulted(tmp_path, monkeypatch):
     assert finding.servers_measured == 0
     assert finding.servers_unmeasured == 1
     assert "could not be measured" in finding.measurement_note
-    assert any("none of them could be measured" in n for n in finding.notes)
+    # The sentence now opens a new sentence ("None of them could be
+    # measured..."), so it's capitalized where it used to continue a clause;
+    # compare case-insensitively rather than pinning the old casing.
+    assert any("none of them could be measured" in n.lower() for n in finding.notes)
     # An unmeasured server must not appear in the tax table either — a row
     # claiming 0 tokens would read as "this server is free".
     assert not [r for r in finding.tax_table if r.source.startswith("MCP schema:")]
