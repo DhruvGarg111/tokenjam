@@ -25,12 +25,22 @@ TWO DEFECTS, MEASURED ON THE FOUNDER'S REAL CORPUS, BOTH FIXED HERE.
 window across every agent, i.e. the ceiling's own denominator. `total_cost_usd`
 still answers the caller's window and is no longer a valid divisor for it.
 
-WHY THE PERSONA DOES NOT SCOPE THE DENOMINATOR. The picker selects which
-ANALYZERS contribute (`_collect_recoverable` filters findings by lever), not
-which traffic is measured: every finding is computed over the whole corpus. On
-the real corpus that distinction is stark. Scoping the denominator to the SDK
-persona's own traffic gave $1.37 of spend against a $1,023.58 ceiling at 30d,
-and $0.00 at 7d. `recoverable_basis_note` states the scope on the bar instead.
+WHY THE PERSONA NOW SCOPES BOTH HALVES, AND THE OTHER TWO AXES STILL SCOPE
+NEITHER. This file was written when the picker selected only which ANALYZERS
+contributed and every finding was computed over the whole corpus — so scoping
+the denominator alone put a whole-corpus ceiling over a fraction of the spend
+it came from, and the fix was to leave the denominator corpus-wide.
+
+That premise no longer holds. The analyzer pass now runs once per persona over
+that persona's own rows (`runner.build_persona_reports`), so the NUMERATOR is
+that persona's money. The same reasoning that once forbade scoping the
+denominator now REQUIRES it: a scoped ceiling over an unscoped basis is the
+identical two-populations defect facing the other way, and it rendered on a
+mixed corpus as an overspend ceiling larger than measured spend.
+
+The window and `agent_id` axes are unchanged and still must not touch the
+denominator: neither of them re-runs the analyzers, so the stored numerator
+cannot follow them. Persona can, because the pass really was run again.
 
 THE CORPUS BELOW IS DELIBERATELY ASYMMETRIC. Both defects were invisible on the
 small purpose-built corpus a previous worker verified against, because there
@@ -52,6 +62,11 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session
+
+# Captured at import, BEFORE any test monkeypatches the module attribute, so
+# the back-compat test can exercise the real resolution rule.
+from tokenjam.core.optimize import report_store as _report_store
+_REAL_FOR_PERSONA = _report_store.stored_report_for_persona
 
 # The stored report's window. Everything below is positioned relative to it.
 REPORT_WINDOW_DAYS = 30
@@ -153,6 +168,17 @@ def _install_report(monkeypatch):
         "provenance": None,
         "degraded": False, "last_error": None, "last_error_at": None,
     }
+    # `stored_report_for_persona` is the seam the route reads: it resolves
+    # WHICH stored artifact answers for a persona (the corpus-wide one for a
+    # persona that narrows nothing, that persona's own scoped sub-report
+    # otherwise). Patched rather than `stored_report`, or every persona-scoped
+    # request below resolves to "no artifact answers for this persona" and the
+    # overlay correctly disappears — which is a real behaviour, pinned in
+    # `test_a_report_without_per_persona_passes_cannot_answer_for_one` below,
+    # and not the one these tests are about.
+    monkeypatch.setattr(
+        report_store, "stored_report_for_persona", lambda *a, **k: report,
+    )
     monkeypatch.setattr(report_store, "stored_report", lambda *a, **k: report)
     monkeypatch.setattr(report_store, "stored_report_block", lambda *a, **k: block)
     return since, now
@@ -225,8 +251,13 @@ async def test_the_ceiling_and_its_denominator_share_one_window(persona, monkeyp
 
     wide, narrow = by_window["30d"], by_window["7d"]
 
-    # The requested window still moves the figure that ANSWERS the request.
-    assert narrow["total_cost_usd"] < wide["total_cost_usd"]
+    # The requested window still moves (or at worst does not grow) the figure
+    # that ANSWERS the request. `<=` rather than `<` because the corpus places
+    # each persona's traffic on one side of the 7d boundary: scoped to
+    # claude-code every span is inside it, so the two windows legitimately
+    # measure the same spend. The cross-persona contrast below is what proves
+    # the request window is still being applied at all.
+    assert narrow["total_cost_usd"] <= wide["total_cost_usd"]
     # The pair does not move: same numerator, same denominator, same ratio.
     assert narrow["total_recoverable_usd"] == wide["total_recoverable_usd"]
     assert narrow["recoverable_basis_cost_usd"] == wide["recoverable_basis_cost_usd"]
@@ -237,10 +268,14 @@ async def test_the_ceiling_and_its_denominator_share_one_window(persona, monkeyp
     }
     assert ratios["7d"] == pytest.approx(ratios["30d"])
     # THE BAD STATE, pinned absent: the ceiling over the REQUEST window's total
-    # is the ratio that used to be drawn, and on this corpus it differs.
-    assert ratios["7d"] != pytest.approx(
-        narrow["total_recoverable_usd"] / narrow["total_cost_usd"]
-    )
+    # is the ratio that used to be drawn. It is only a DIFFERENT ratio when the
+    # request window actually narrows this persona's spend — and when it
+    # narrows it to zero there is no ratio to compare, which is itself the
+    # sharpest form of the bug (a division by zero, not a plausible number).
+    if narrow["total_cost_usd"] > 0 and narrow["total_cost_usd"] != wide["total_cost_usd"]:
+        assert ratios["7d"] != pytest.approx(
+            narrow["total_recoverable_usd"] / narrow["total_cost_usd"]
+        )
 
     # And the window is published, so a reader can check it rather than trust it.
     for d in by_window.values():
@@ -254,13 +289,14 @@ async def test_the_ceiling_and_its_denominator_share_one_window(persona, monkeyp
 async def test_the_ceiling_and_its_denominator_share_one_agent_population(
     window, monkeypatch,
 ):
-    """DEFECT 1. The persona changes the LEVER SET, never the traffic measured.
+    """The persona scopes BOTH halves, together, or neither is meaningful.
 
-    So the denominator is identical across personas (both cover the whole
-    corpus, which is what the stored report covers) while the numerator is not.
-    A denominator that tracked the persona's own traffic would differ here, and
-    on the real corpus would divide a whole-corpus ceiling by 0.01% of the
-    spend it came from.
+    This test used to assert the opposite — one denominator, both personas —
+    and that was right while every finding was computed over the whole corpus.
+    Now the analyzer pass runs per persona over that persona's rows, so a
+    corpus-wide denominator under a persona's own ceiling is the same
+    two-populations defect facing the other way. What is pinned is that the two
+    move TOGETHER: each persona's ceiling sits over each persona's own spend.
     """
     db = InMemoryBackend()
     cfg = TjConfig(version="1")
@@ -282,16 +318,24 @@ async def test_the_ceiling_and_its_denominator_share_one_agent_population(
     assert sdk["total_recoverable_usd"] == pytest.approx(SDK_ONLY_USD + SHARED_USD)
     assert cc["total_recoverable_usd"] != sdk["total_recoverable_usd"]
 
-    # The denominator is NOT: one population, one number, both personas.
-    assert cc["recoverable_basis_cost_usd"] == sdk["recoverable_basis_cost_usd"]
-    assert cc["recoverable_basis_tokens"] == sdk["recoverable_basis_tokens"]
+    # And so is the denominator: each persona's ceiling is drawn over that
+    # persona's own measured spend. On this corpus the two differ by an order
+    # of magnitude, so a denominator that had stayed corpus-wide could not
+    # coincidentally match.
+    assert cc["recoverable_basis_cost_usd"] != sdk["recoverable_basis_cost_usd"]
+    assert cc["recoverable_basis_cost_usd"] == pytest.approx(
+        cc_only["total_cost_usd"]
+    )
+    assert sdk["recoverable_basis_cost_usd"] == pytest.approx(
+        sdk_only["total_cost_usd"]
+    )
 
-    # THE BAD STATE, pinned absent: neither persona's own traffic is the
-    # denominator. Both are real, both are wrong, and both are far enough from
-    # the right answer that a coincidence cannot hide it.
-    basis = cc["recoverable_basis_cost_usd"]
-    assert basis > cc_only["total_cost_usd"]
-    assert basis > sdk_only["total_cost_usd"] * 5
+    # THE BAD STATE, pinned absent: a ceiling drawn over a population it was
+    # not computed from. Each persona's shaded fraction must be computable
+    # without borrowing the other's spend.
+    combined = cc_only["total_cost_usd"] + sdk_only["total_cost_usd"]
+    for d in (cc, sdk):
+        assert d["recoverable_basis_cost_usd"] != pytest.approx(combined)
 
 
 @pytest.mark.asyncio
@@ -314,9 +358,13 @@ async def test_an_agent_filter_does_not_narrow_the_ceiling_s_denominator(
             c, persona=persona, since="30d", agent_id="billing-service",
         )
 
-    # The requested figure narrows, as it should.
-    assert filtered["total_cost_usd"] < whole["total_cost_usd"]
-    # The ceiling's own denominator does not.
+    # The requested figure narrows, as it should — unless the persona scope has
+    # ALREADY narrowed to exactly this agent, in which case naming it again is
+    # a no-op and there is nothing left for the filter to remove.
+    assert filtered["total_cost_usd"] <= whole["total_cost_usd"]
+    # The ceiling's own denominator does not. This is the axis that has NOT
+    # changed: `agent_id` never re-runs the analyzers, so the stored numerator
+    # cannot follow it and neither may its denominator.
     assert filtered["recoverable_basis_cost_usd"] == whole["recoverable_basis_cost_usd"]
     assert filtered["total_recoverable_usd"] == whole["total_recoverable_usd"]
 
@@ -383,4 +431,49 @@ async def test_a_cold_store_publishes_no_denominator_and_no_zero(persona):
     assert d["recoverable_basis_since"] is None
     assert d["recoverable_basis_note"] == ""
     # The live measured total is unaffected: it never depended on the scan.
+    assert d["total_cost_usd"] > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persona", PERSONAS)
+async def test_a_report_without_per_persona_passes_cannot_answer_for_one(
+    persona, monkeypatch,
+):
+    """Back-compat, and it WITHHOLDS rather than substitutes.
+
+    An artifact written before the analyzer pass ran per persona holds one
+    corpus-wide report. Its ceiling is not this persona's money, so the overlay
+    is withheld and every figure that depends on it comes back `None`. Serving
+    the corpus figures under this persona's label is the defect; serving them
+    as this persona's zero is the same defect facing the reassuring way, which
+    is why `None` and not `0.0` is the assertion.
+
+    Exercises the REAL `stored_report_for_persona` against a store whose report
+    carries no `persona_reports` — the shape every install has until its first
+    scan after upgrading.
+    """
+    from tokenjam.core.optimize import report_store
+
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed(db)
+    _install_report(monkeypatch)
+    # Undo just the persona seam `_install_report` stubbed, so the real
+    # resolution rule runs, and give it a legacy-shaped body to resolve.
+    monkeypatch.setattr(
+        report_store, "stored_report_for_persona", _REAL_FOR_PERSONA,
+    )
+    monkeypatch.setattr(
+        report_store, "stored_report_dict",
+        lambda *a, **k: {"persona": "claude-code", "findings": {}},
+    )
+
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = await _get(c, persona=persona, since="30d")
+
+    assert d["total_recoverable_usd"] is None
+    assert d["recoverable_basis_cost_usd"] is None
+    assert d["largest_recoverable_analyzer"] is None
+    # The MEASURED half is unaffected: it needs no stored report at all.
     assert d["total_cost_usd"] > 0

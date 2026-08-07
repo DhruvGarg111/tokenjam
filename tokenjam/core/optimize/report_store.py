@@ -297,6 +297,36 @@ def stored_report(
     return report_from_stored_dict(stored_report_dict(config, path=path))
 
 
+def stored_report_for_persona(
+    config: TjConfig | None = None, persona: str | None = None, *,
+    path: Path | None = None,
+) -> Any | None:
+    """The stored report ANSWERING FOR ``persona``, or ``None`` if none can.
+
+    THE one seam every persona-scoped consumer of the report store goes
+    through, so the "which artifact answers for this persona" rule lives in one
+    place rather than being re-implemented per route.
+
+    * a persona that narrows nothing (``mixed`` / ``unknown`` / ``None``) gets
+      the top-level report, which is the corpus and therefore its own answer;
+    * ``claude-code`` / ``sdk`` get their own fully-scoped sub-report out of
+      :attr:`OptimizeReport.persona_reports`;
+    * an artifact written before per-persona passes existed has no sub-report,
+      and the answer is ``None`` — NOT the corpus-wide report. Its figures are
+      not that persona's money, and a caller must render the absence as
+      not-yet-known rather than publish them under that persona's label.
+    """
+    from tokenjam.core.persona_scope import persona_scopes_population
+
+    if not persona_scopes_population(persona):
+        return stored_report(config, path=path)
+    body = stored_report_dict(config, path=path)
+    if not isinstance(body, dict):
+        return None
+    scoped = (body.get("persona_reports") or {}).get(persona)
+    return report_from_stored_dict(scoped) if isinstance(scoped, dict) else None
+
+
 def report_from_stored_dict(body: dict | None) -> Any | None:
     """Rehydrate a report dict this store produced, or ``None`` if it cannot be.
 

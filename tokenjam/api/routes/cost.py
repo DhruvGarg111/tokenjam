@@ -550,17 +550,11 @@ async def get_cost_components(
     # THE PERSONA'S OWN SCOPED REPORT, not the corpus-wide one with its analyzer
     # set sliced. Slicing the set drops findings this persona has no lever for;
     # it does nothing about the fact that the surviving findings were computed
-    # over everybody's sessions. The daemon stores one fully-scoped report per
-    # persona for exactly this reason (`runner.build_persona_reports`).
-    body = report_store.stored_report_dict(config)
-    if persona_scopes_population(persona) and isinstance(body, dict):
-        scoped_body = (body.get("persona_reports") or {}).get(persona)
-        # No scoped report means an artifact from before per-persona passes.
-        # `None` here reports the overlay as NOT YET KNOWN — which is what
-        # `recoverable_status` already exists to say — rather than publishing
-        # the corpus's recoverable figures under this persona's label.
-        body = scoped_body if isinstance(scoped_body, dict) else None
-    stored = report_store.report_from_stored_dict(body)
+    # over everybody's sessions. `stored_report_for_persona` owns that rule,
+    # including the `None` an artifact from before per-persona passes yields —
+    # which reports the overlay as NOT YET KNOWN (what `recoverable_status`
+    # already exists to say) rather than publishing the corpus's figures here.
+    stored = report_store.stored_report_for_persona(config, persona)
     recoverable: list[dict] = (
         _collect_recoverable(stored, persona=persona) if stored is not None else []
     )

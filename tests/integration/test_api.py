@@ -1038,9 +1038,20 @@ async def test_cost_components_overlay_is_scoped_to_the_requested_persona(
     if sdk.get("largest_recoverable_analyzer"):
         assert sdk["largest_recoverable_analyzer"] in _analyzers(sdk)
 
-    # Measured spend is NOT persona-scoped — the picker changes which fixes
-    # apply, never what was billed.
-    assert cc["components"] == sdk["components"]
+    # Measured spend IS persona-scoped, and this assertion used to say the
+    # opposite. It was right while the picker only chose which FIXES applied
+    # and every finding was measured over the whole corpus; once the analyzer
+    # pass runs per persona, the recoverable ceiling above is that persona's
+    # money and the spend it is drawn against has to be the same persona's, or
+    # the bar shades one population's overspend as a fraction of everybody's.
+    # Pinned as a partition so neither side can quietly go back to corpus-wide.
+    both = (await client.get("/api/v1/cost/components?since=30d")).json()
+
+    def _total(payload):
+        return sum(c["cost_usd"] for c in payload["components"])
+
+    assert cc["components"] != sdk["components"]
+    assert _total(cc) + _total(sdk) == pytest.approx(_total(both))
 
     assert (
         await client.get("/api/v1/cost/components?since=30d&persona=nope")
