@@ -683,6 +683,15 @@ def analyze_model_downgrade(
     total_savings = savings_window + driver_savings
     monthly_savings = (total_savings / window_days * 30.0) if window_days > 0 else 0.0
     percent = (candidate_sessions / total_sessions * 100.0) if total_sessions else 0.0
+    # Both cases combined — the population `past_overspend_usd` actually sums
+    # over. `percent`/`percent_of_sessions` above stays tiny-session-only (see
+    # its own comment); this is the pair a surface must use beside the dollar
+    # tile, or a driver-role-only window renders a real $ figure next to "0%,
+    # 0 of N" — see `DowngradeFinding.percent_of_all_sessions`.
+    percent_of_all = (
+        ((candidate_sessions + len(driver_aggs)) / total_sessions * 100.0)
+        if total_sessions else 0.0
+    )
     # The confidence interval brackets what the card actually shows, so it has
     # to resample BOTH cases' per-session values, not just the tiny-session one.
     per_session_savings.extend(a.recoverable_usd for a in driver_aggs)
@@ -763,6 +772,7 @@ def analyze_model_downgrade(
         alternative_cost_usd=round(alt_cost, 6),
         monthly_savings_usd=round(monthly_savings, 2),
         percent_of_sessions=round(percent, 1),
+        percent_of_all_sessions=round(percent_of_all, 1),
         examples=examples,
         suggestions=suggestions,
         bench_command=bench_command,

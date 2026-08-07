@@ -146,15 +146,27 @@ class DowngradeFinding:
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
     # Sampling confidence (#308). `n_sessions` is the candidate-session sample
-    # the projection rests on; `ci_low`/`ci_high` are the 95% bootstrap interval
-    # on `monthly_savings_usd`, so a 5-session estimate shows a visibly wider
-    # band than a 500-session one. This is SAMPLING confidence on the projection,
-    # NOT a claim the model swap preserves quality — the MODEL_DOWNGRADE_CAVEAT
-    # still governs that. ci_low/ci_high are None when n < 2 (no spread to
-    # estimate from a single point).
+    # the projection rests on — BOTH cases combined (`candidate_sessions +
+    # driver_sessions`), since `past_overspend_usd` is their sum too; `ci_low`/
+    # `ci_high` are the 95% bootstrap interval on `monthly_savings_usd`, so a
+    # 5-session estimate shows a visibly wider band than a 500-session one.
+    # This is SAMPLING confidence on the projection, NOT a claim the model
+    # swap preserves quality — the MODEL_DOWNGRADE_CAVEAT still governs that.
+    # ci_low/ci_high are None when n < 2 (no spread to estimate from a single
+    # point).
     n_sessions:                   int          = 0
     ci_low:                       float | None = None
     ci_high:                      float | None = None
+    # `n_sessions / total_sessions`, as a percent — the population this finding's
+    # ONE `past_overspend_usd` actually covers (both cases). `percent_of_sessions`
+    # above covers the tiny-session case ALONE, so a surface that renders the
+    # dollar tile beside a "N of M sessions" stat must use THIS pair
+    # (`n_sessions`/`percent_of_all_sessions`), never `candidate_sessions`/
+    # `percent_of_sessions` — a window where the driver-role case carries the
+    # whole figure has `candidate_sessions == 0`, which would render a real
+    # dollar amount beside "0%, 0 of N" (two figures over two different
+    # populations shown together).
+    percent_of_all_sessions:      float        = 0.0
     # Per-agent price arithmetic for the proposed swap (one
     # `analyzers.downsize_agents.AgentPriceRow` per agent/model group over the
     # candidate sessions): exact per-type tokens at the current model's rates

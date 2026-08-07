@@ -1696,19 +1696,35 @@ def _downsize_finding():
     )
 
 
-def test_downsize_window_wide_card_gives_claude_code_the_cc_lever_not_a_raw_swap():
-    """A claude-code window can't switch its own interactive model mid-
-    session, so the window-wide fallback card must not hand it the raw
-    "route to a cheaper model" instruction an SDK caller gets."""
+def test_downsize_window_wide_card_is_retired_for_claude_code():
+    """DECISION (persona/actionability matrix, downsize row): for
+    ``claude-code``, `downsize` fires ONLY the driver-role card. This used to
+    assert the window-wide card fired with a CC-lever fallback (INVERTED per
+    Critical Rule 23) — that fallback card always ended in "switch your own
+    interactive model", a pointer to other commands rather than a fix, so a
+    claude-code window hit a number with no fix as the common case. The
+    fixture below carries no driver-role fields, so the retired card leaves
+    nothing behind: no cards at all, not a degraded one."""
     from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
 
     props = _downsize_to_proposal(_downsize_finding(), persona="claude-code")
-    assert len(props) == 1
-    p = props[0]
-    assert "switch your own interactive model" in p.advise_text
-    assert "route to a cheaper" not in p.advise_text.lower()
-    assert "tj route export" in p.advise_text
-    assert p.suggestion == ""  # the unusable model-swap snippet is dropped
+    assert props == []
+
+
+def test_downsize_claude_code_gets_only_the_driver_role_card():
+    """When the SAME finding also carries driver-role data (the common CC
+    shape — a premium model doing undelegated work), claude-code gets exactly
+    that one card and never the tiny-session/per-agent fallback, even though
+    `candidate_sessions` is nonzero."""
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    finding = _downsize_finding()
+    finding.driver_sessions = 2
+    finding.driver_recoverable_usd = 5.0
+    finding.driver_substitutes = {"claude-opus-4-8": "claude-sonnet-5"}
+
+    props = _downsize_to_proposal(finding, persona="claude-code")
+    assert [p.signature for p in props] == ["cost:downsize:driver-role"]
 
 
 def test_downsize_window_wide_card_unchanged_for_sdk_and_unknown():

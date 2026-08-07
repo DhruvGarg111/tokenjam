@@ -399,10 +399,15 @@ def _downsize_to_proposal(
     delta-verify pass measures the model-mix cost delta across ALL flagged
     models, so one proposal listing them keeps that aggregate estimate coherent.
 
-    ``persona`` gates the CTA exactly like ``cmd_optimize._render_downgrade_
-    cta`` gates the CLI's: a ``"claude-code"`` window can't switch its own
-    interactive model, so it never gets the raw "route to a cheaper model"
-    instruction — see ``_DOWNSIZE_CC_LEVER``.
+    ``persona`` gates which of the two cards fire, not just their wording.
+    DECISION (persona/actionability matrix, downsize row): for
+    ``"claude-code"``, this analyzer emits ONLY the driver-role card. Both
+    the window-wide and per-agent tiny-session cards end in "switch your own
+    interactive model" for this persona — above the CC actionable ceiling —
+    so a Claude Code reader used to hit a card that stated a number with no
+    fix. Retired for that persona only: ``_downsize_agent_proposals`` and the
+    window-wide card below are unchanged and still fire for ``sdk``, where
+    routing a request to a cheaper model is a real lever.
     """
     if finding is None:
         return []
@@ -413,6 +418,13 @@ def _downsize_to_proposal(
     # Exactly one window-wide card, never one per agent, so this adds at most a
     # single row to the inbox.
     proposals = _driver_role_proposals(finding, persona)
+    if persona == "claude-code":
+        # See the docstring above: the tiny-session/per-agent cards never had
+        # a fix on this persona's action surface, only a pointer to other
+        # commands — retiring them here means a claude-code window either
+        # gets the driver-role card (a real one-paste fix) or nothing, never
+        # a number with no fix attached.
+        return proposals
     if getattr(finding, "candidate_sessions", 0) <= 0:
         return proposals
     per_agent = _downsize_agent_proposals(finding, config, persona)
@@ -1775,10 +1787,20 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
     subagents = len({(r.session_id, r.sub_agent_id) for r in over_powered})
     pct = float(getattr(finding, "percent_of_cost", 0.0) or 0.0) * 100
     model_list = ", ".join(models)
+    # State what the `over_powered` gate actually tests — `is_premium_tier(model)`
+    # plus the cost floor, and NOTHING about output size or tool-call count (see
+    # `subagent_rightsizing._flags_for`). The old wording ("did little work,
+    # small output, few tool calls") described `over_provisioned`'s gate, not
+    # this one, so a dispatch that ran hundreds of tool calls and returned a
+    # large result was told it did little work — contradicting the numbers
+    # rendered on the same card. `over_provisioned` legitimately keeps that
+    # language on its own evidence (see `_derived_effort`); this sentence must
+    # not borrow it.
+    floor = float(getattr(finding, "min_flag_cost_usd", 0.0) or 0.0)
     evidence = (
         f"{subagents} subagent dispatch(es) ran on a premium-tier model "
-        f"({model_list}) but did little work (small output, few tool calls). "
-        f"Subagents are {pct:.0f}% of the window's cost."
+        f"({model_list}), above the {_money(floor)} per-dispatch cost floor "
+        f"this flag applies. Subagents are {pct:.0f}% of the window's cost."
     )
     # The trailing sentence here used to RESTATE the rubric — "route that shape
     # to the cheaper same-family model next time" is the rubric's own core
