@@ -43,6 +43,7 @@ from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recu
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext, ReuseCluster, ReuseFinding
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Cluster thresholds (issue #115 AC6 / savings contract). Module-level for
 # explicit visibility and easy tuning. A cluster is surfaced only when it
@@ -267,6 +268,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT session_id, start_time, model, tool_name, "

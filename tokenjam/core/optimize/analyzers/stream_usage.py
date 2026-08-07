@@ -42,6 +42,7 @@ from tokenjam.core.cost import calculate_cost
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.otel.semconv import TjAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +200,10 @@ def _select_streaming_spans(ctx: AnalyzerContext) -> list[tuple]:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     # The token columns are read RAW, never COALESCEd to 0. NULL here means the
     # observer could not see token counts at all — the proxy's SSE tap watches

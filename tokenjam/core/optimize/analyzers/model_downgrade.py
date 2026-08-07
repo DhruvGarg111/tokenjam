@@ -64,6 +64,7 @@ from tokenjam.core.optimize.types import (
     OpusAuditExample,
     OpusQuotaAudit,
 )
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Structural heuristic thresholds for the SECONDARY tiny-session case. Sessions
 # are flagged only when ALL three hold; the analyzer never claims the cheaper
@@ -261,6 +262,7 @@ def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
 
 def _turns_by_session(
     conn, since: datetime, until: datetime, agent_id: str | None,
+    persona_scope: str | None = None,
 ) -> dict[str, list[TurnComposition]]:
     """Window turns grouped by session, ordered, with tool activity attached.
 
@@ -270,7 +272,8 @@ def _turns_by_session(
     """
     by_session: dict[str, list[TurnComposition]] = {}
     for turn in load_turn_compositions(
-        conn, since, until, agent_id, ordered=True, with_tool_activity=True,
+        conn, since, until, agent_id, persona_scope=persona_scope,
+        ordered=True, with_tool_activity=True,
     ):
         by_session.setdefault(turn.session_id, []).append(turn)
     return by_session
@@ -467,6 +470,7 @@ def analyze_model_downgrade(
     until: datetime,
     agent_id: str | None,
     window_days: float,
+    persona_scope: str | None = None,
 ) -> DowngradeFinding | None:
     """
     Two cases, one finding (see the module docstring for why the split exists).
@@ -508,6 +512,10 @@ def analyze_model_downgrade(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
 
     # First pass: main-thread LLM spans grouped by session.
@@ -538,7 +546,8 @@ def analyze_model_downgrade(
         str(r[0]): (str(r[2]) if r[2] else "unknown") for r in llm_rows if r[0]
     }
     driver_aggs = analyze_driver_role(
-        _turns_by_session(conn, since, until, agent_id), agent_by_session,
+        _turns_by_session(conn, since, until, agent_id, persona_scope),
+        agent_by_session,
         window_start=since,
     )
     driver_sessions = {a.session_id for a in driver_aggs}
@@ -696,7 +705,8 @@ def analyze_model_downgrade(
     per_agent = build_agent_price_rows(
         price_candidates, window_days,
         thinking_tokens_by_session(
-            conn, since, until, agent_id, main_thread_only=True,
+            conn, since, until, agent_id,
+            persona_scope=persona_scope, main_thread_only=True,
         ),
         window_start=since,
     )
@@ -859,13 +869,19 @@ def run(ctx: AnalyzerContext) -> None:
 
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
+        ctx.persona_scope,
     )
     if "placement" in disabled_analyzers_for_persona(ctx.persona):
         return
     optimize_cfg = getattr(ctx.config, "optimize", None)
     ctx.report.findings["placement"] = analyze_batch_placement(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        # The window cost this is compared against comes from `ctx.summary`,
+        # which `build_report` already scoped to the same persona — so the
+        # group costs below and the window total they are a share of cover one
+        # population.
         ctx.summary.total_cost_usd or 0.0,
+        persona_scope=ctx.persona_scope,
         min_sessions_for_cadence=getattr(
             optimize_cfg, "min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE,
         ),

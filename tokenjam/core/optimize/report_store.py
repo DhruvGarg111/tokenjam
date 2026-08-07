@@ -399,7 +399,11 @@ def recompute_now(
     with _LAST_RUN_LOCK:
         _LAST_RUN_MONOTONIC = time.monotonic()
     try:
-        from tokenjam.core.optimize import GATED_PERSONAS, build_report, report_to_dict
+        from tokenjam.core.optimize import (
+            GATED_PERSONAS,
+            build_persona_reports,
+            report_to_dict,
+        )
         from tokenjam.utils.time_parse import utcnow
 
         record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle(
@@ -424,16 +428,25 @@ def recompute_now(
         # replaced.
         record = record.with_window(since_dt, until_dt, days)
         try:
-            # ONE artifact, EITHER persona. The dashboard's "Viewing as" picker
-            # asks for a persona the corpus may not be dominated by, and no
-            # request path may run an analyzer to answer that (the whole reason
-            # this store exists). So the background pass selects the UNION of
-            # what each gated persona has a lever for, and the route narrows to
-            # the requested one on read (`runner.findings_for_persona`). The
-            # report's own `persona` is untouched — it still records what the
-            # corpus IS, and every persona-scoped derivation keys off the
-            # requested persona rather than off what happened to be dispatched.
-            report = build_report(
+            # ONE artifact, EITHER persona — but a pass EACH, not one widened
+            # pass. The dashboard's "Viewing as" picker asks for a persona the
+            # corpus may not be dominated by, and no request path may run an
+            # analyzer to answer that (the whole reason this store exists).
+            #
+            # Widening the ANALYZER SET and slicing on read is sound: a set of
+            # names is separable. Widening the POPULATION is not — an analyzer
+            # summing Claude Code and SDK rows together yields one figure
+            # containing both, and no read-time filter can take one back out.
+            # Selecting the union alone is exactly how every "gated" Optimize
+            # figure came to be computed over the whole mixed corpus. So the
+            # background pass runs once per scoping persona under that
+            # persona's own row scope, and the route picks the matching one
+            # (`runner.findings_for_persona` still narrows the analyzer set
+            # within it). The top-level report stays the unscoped, union-gated
+            # one: its `persona` records what the corpus IS, and a
+            # persona-blind reader gets the corpus rather than whichever side
+            # happens to dominate it.
+            report = build_persona_reports(
                 db=db, config=config, since=since_dt, until=until_dt,
                 personas=GATED_PERSONAS,
             )

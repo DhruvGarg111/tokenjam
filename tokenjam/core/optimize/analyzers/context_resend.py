@@ -673,6 +673,7 @@ def run(ctx: AnalyzerContext) -> None:
     # the partition identical to `downsize`'s rather than accidentally wider.
     turns = load_turn_compositions(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope,
         ordered=True, with_tool_activity=True,
     )
     if not turns:
@@ -984,6 +985,7 @@ def run(ctx: AnalyzerContext) -> None:
     if tool_inputs_captured or prompts_captured or tool_outputs_captured:
         diag = compute_context_diagnostic(
             ctx.conn, ctx.since, ctx.until, agent_id=ctx.agent_id,
+            persona_scope=ctx.persona_scope,
             tool_inputs_captured=tool_inputs_captured,
             prompts_captured=prompts_captured,
             tool_outputs_captured=tool_outputs_captured,

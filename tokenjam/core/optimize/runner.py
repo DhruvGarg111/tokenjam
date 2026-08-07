@@ -17,6 +17,11 @@ from typing import Any
 from tokenjam.core.config import TjConfig
 from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
+from tokenjam.core.persona_scope import (
+    SCOPING_PERSONAS,
+    add_persona_clause,
+    persona_scopes_population,
+)
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
 from tokenjam.core.optimize.scope import resolve_analyzer_scope
 from tokenjam.core.optimize.types import (
@@ -248,12 +253,21 @@ def summarize_window(
     since: datetime,
     until: datetime,
     agent_id: str | None = None,
+    persona_scope: str | None = None,
 ) -> WindowSummary:
+    """Totals for the analyzed window.
+
+    ``persona_scope`` narrows the rows exactly as it narrows every analyzer's,
+    and it MUST: this summary is the denominator a finding's share-of-window is
+    quoted against, so a scoped numerator over an unscoped denominator publishes
+    two figures covering different populations as one ratio.
+    """
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     row = conn.execute(
         f"SELECT COUNT(*) AS spans, "
@@ -293,6 +307,7 @@ def build_report(
     budget_provider_filter: str | None = None,
     budget_usd_override: float | None = None,
     personas: Sequence[str] | None = None,
+    persona_scope: str | None = None,
 ) -> OptimizeReport:
     """
     Build a complete OptimizeReport.
@@ -310,6 +325,17 @@ def build_report(
         The report still records its own dominant `persona`; what widens is only
         which analyzers were dispatched, recorded on `computed_analyzers`.
 
+    `persona_scope` is the OTHER half of the gate and a different question.
+    `personas` decides WHICH ANALYZERS run; this decides WHICH ROWS they read.
+    `None` means the whole corpus. Set it and every analyzer's query, and the
+    window summary they quote shares against, narrow to that persona's sessions
+    through the one predicate `alerts.is_interactive_coding_agent` owns. A pass
+    may be widened over `personas` because a union of analyzer NAMES can be
+    sliced afterwards; it can never be widened over `persona_scope`, because a
+    dollar figure computed over two populations cannot be un-mixed on read.
+    That asymmetry is why the daemon runs one pass PER persona
+    (:func:`build_persona_reports`) rather than one pass for all of them.
+
     Analyzers are executed in ANALYZER_ORDER, never in caller-supplied order,
     so dependent analyzers (e.g. budget-projection reading the downgrade
     finding) work correctly regardless of how the caller lists them.
@@ -322,7 +348,9 @@ def build_report(
     if conn is None:
         raise RuntimeError("optimize requires a direct DuckDB connection")
 
-    summary = summarize_window(conn, since, until, agent_id=agent_id)
+    summary = summarize_window(
+        conn, since, until, agent_id=agent_id, persona_scope=persona_scope,
+    )
     window_days = max(summary.days, 1.0 / 86400.0)
 
     # Dominant persona for this window, computed exactly once — see
@@ -333,7 +361,9 @@ def build_report(
     agent_mix = agent_persona_mix(conn, since, until, agent_id=agent_id)
     persona = dominant_persona(agent_mix, declared_plan=config_declared_plan(config))
 
-    report = OptimizeReport(window=summary, persona=persona)
+    report = OptimizeReport(
+        window=summary, persona=persona, persona_scope=persona_scope,
+    )
     if summary.thin_data:
         report.notes.append(
             "Window contains less than ~1 week of activity — projections shown "
@@ -358,6 +388,7 @@ def build_report(
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
         persona=persona,
+        persona_scope=persona_scope,
         # Resolved exactly once, here, for the same reason the persona is: an
         # analyzer that re-derives its own root from `Path.home()` or the env
         # var escapes whatever scope the caller drew, and `--db` stops meaning
@@ -478,6 +509,61 @@ def build_report(
         pass
 
     return report
+
+
+def build_persona_reports(
+    db,
+    config: TjConfig,
+    since: datetime,
+    until: datetime | None = None,
+    *,
+    personas: Sequence[str] = SCOPING_PERSONAS,
+    **kwargs: Any,
+) -> OptimizeReport:
+    """One analyzer pass PER persona, returned as one artifact.
+
+    The daemon's entry point. It returns the report for the corpus's own
+    dominant persona — what every persona-blind consumer (the CLI, a stored
+    report read without a persona) should see — with a fully-scoped report for
+    each of ``personas`` hanging off it under
+    :attr:`OptimizeReport.persona_reports`.
+
+    **Why not one widened pass.** The dispatch gate can be widened and sliced on
+    read because it selects analyzer NAMES, and a set of names is separable. A
+    population is not: an analyzer aggregating over Claude Code sessions and SDK
+    sessions together produces one number that contains both, and no read-time
+    filter can take one back out. So a persona-labelled figure has to be
+    computed under that persona's scope, which means a pass each. Each pass is
+    also gated to just that persona's analyzer set, so neither pass pays for
+    analyzers its persona cannot act on.
+
+    Cost is one corpus pass per scoping persona instead of one in total. That
+    is affordable precisely because no request path runs an analyzer — see
+    ``core/optimize/report_store.py``; it is background work, and the
+    alternative is a wrong number on every persona-scoped surface.
+
+    A persona whose scope is the whole corpus (``mixed`` / ``unknown``) is not
+    given its own pass: its scope IS the base report, and giving it a duplicate
+    entry would spend a second corpus scan to recompute an identical answer.
+    """
+    scoping = [p for p in personas if persona_scopes_population(p)]
+    per_persona: dict[str, OptimizeReport] = {
+        p: build_report(db, config, since, until, persona_scope=p, personas=[p], **kwargs)
+        for p in scoping
+    }
+    # The BASE report — unscoped, so it answers for the corpus rather than for
+    # either side of the picker. It is what the CLI and every persona-blind
+    # reader gets, and its `persona` is the corpus's dominant one exactly as
+    # before. Reusing a scoped pass here instead would silently make the
+    # persona-blind view mean "whichever persona happens to dominate", which is
+    # the confusion this whole split exists to end.
+    base = build_report(
+        db, config, since, until, personas=list(personas), **kwargs,
+    )
+    base.persona_reports = {
+        p: report_to_dict(r) for p, r in per_persona.items()
+    }
+    return base
 
 
 def report_to_dict(report: OptimizeReport) -> dict:
@@ -740,6 +826,19 @@ def report_from_dict(d: dict) -> OptimizeReport:
         notes=list(d.get("notes") or []),
         findings=findings,
         persona=str(d.get("persona", "unknown")),
+        # WHAT RAN, and FOR WHOM, and OVER WHAT ROWS — the three facts that let
+        # a rehydrated report be served for a persona other than its own
+        # without lying. Dropping them (as this constructor used to) collapses
+        # "never invoked" into "found nothing" and lets a whole-corpus figure be
+        # published under a persona label, which are the two failure modes the
+        # fields exist to prevent. `persona_scope` absent means the artifact
+        # predates population scoping: `None`, i.e. unscoped, which is the
+        # truth about it and not a defect to paper over.
+        computed_analyzers=list(d.get("computed_analyzers") or []),
+        computed_for_personas=list(d.get("computed_for_personas") or []),
+        analyzer_errors=dict(d.get("analyzer_errors") or {}),
+        persona_scope=d.get("persona_scope") or None,
+        persona_reports=dict(d.get("persona_reports") or {}),
         # Round-tripped like every other report-level field: a report rebuilt
         # from the daemon's cache must still be able to say its filesystem
         # analyzers never scanned, or a served surface silently reads an

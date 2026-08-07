@@ -84,6 +84,29 @@ def is_interactive_coding_agent(agent_id: str | None) -> bool:
     return any(agent_id.startswith(p) for p in _INTERACTIVE_AGENT_PREFIXES)
 
 
+def interactive_coding_agent_sql(column: str = "agent_id") -> str:
+    """SQL predicate equivalent to :func:`is_interactive_coding_agent`.
+
+    GENERATED from ``_INTERACTIVE_AGENT_PREFIXES``, never a second literal
+    list: the analyzers scope their POPULATION to one side of the dashboard's
+    persona picker inside SQL, where a hand-written ``LIKE 'claude-code%'``
+    would be a copy of the classifier above and free to drift from it. The
+    session list can afford to filter in Python (it fetches whole rows); an
+    analyzer aggregating over the whole ``spans`` table cannot.
+
+    ``starts_with`` rather than ``LIKE`` so a prefix is never re-read as a
+    pattern, and ``COALESCE(..., FALSE)`` so the predicate is NULL-safe and
+    total: a row with no ``agent_id`` is not an interactive coding agent, which
+    makes ``NOT (<this>)`` the correct SDK-side filter with no second guard.
+    Pinned against the Python twin by
+    ``tests/unit/test_alerts.py::test_sql_predicate_matches_the_python_classifier``.
+    """
+    ors = " OR ".join(
+        f"starts_with({column}, '{p}')" for p in _INTERACTIVE_AGENT_PREFIXES
+    )
+    return f"COALESCE({ors}, FALSE)"
+
+
 def agent_display_name(agent_id: str | None) -> str | None:
     """The name to SHOW for an agent: the project, without the tool prefix.
 

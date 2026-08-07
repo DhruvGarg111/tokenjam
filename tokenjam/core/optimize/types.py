@@ -429,6 +429,25 @@ class OptimizeReport:
     #: own. This is what tells a route whether it may answer a request for a
     #: persona other than :attr:`persona` at all.
     computed_for_personas: list = field(default_factory=list)
+    #: The persona this report's ROWS were restricted to, or ``None`` for the
+    #: whole corpus. :attr:`persona` says what the window is; this says what was
+    #: looked at. A consumer publishing a figure under a persona label must
+    #: check that this MATCHES that persona — a report computed over everything
+    #: cannot answer "how much is my SDK traffic costing me", and rendering it
+    #: as though it could is the whole-corpus-number-under-a-persona-label bug.
+    #: ``None`` on a report deserialized from an artifact written before this
+    #: field existed, which is indistinguishable from "unscoped" and is treated
+    #: as exactly that.
+    persona_scope: str | None = None
+    #: One fully-scoped report per persona the pass was asked to answer for,
+    #: keyed by persona and shaped like this one (``report_to_dict`` of a nested
+    #: :class:`OptimizeReport`). The dispatch gate could be widened to a union
+    #: and sliced on read because it only decides which analyzers run; a
+    #: POPULATION cannot be unioned — one number cannot cover two populations —
+    #: so the pass runs once per persona and stores each result whole. Empty
+    #: means the artifact predates per-persona scoping: a reader asking for a
+    #: specific persona then has NOT-YET-KNOWN, never this report's figures.
+    persona_reports: dict = field(default_factory=dict)
     # Why the filesystem-reading analyzers (deadweight, relearn, summarize)
     # scanned nothing, when they scanned nothing — see
     # `core/optimize/scope.py`. `None` means they DID scan, which is a
@@ -481,6 +500,17 @@ class AnalyzerContext:
     # looking at an SDK caller (e.g. deciding fix modality) read it here
     # instead of re-deriving it from `conn`.
     persona:                str            = "unknown"
+    # The persona whose POPULATION this pass is scoped to, or `None` for the
+    # whole corpus. NOT the same field as `persona` above, which records what
+    # the window IS. This one records what the pass was asked to LOOK AT, and
+    # it is what makes a dollar figure published under a persona label actually
+    # be that persona's money: the dispatch gate only decides which analyzers
+    # run, so without this every survivor still aggregates the whole mixed
+    # corpus. Analyzers apply it through
+    # `core/optimize/persona_scope.add_persona_clause` — never a hand-written
+    # prefix test, which would be a second bucketing rule free to drift from
+    # `alerts.is_interactive_coding_agent`.
+    persona_scope:          str | None     = None
     # Which filesystem the filesystem-reading analyzers (deadweight, relearn,
     # summarize) may read, and why. Resolved once in `runner.build_report` via
     # `core.optimize.scope.resolve_analyzer_scope` — an analyzer must never
