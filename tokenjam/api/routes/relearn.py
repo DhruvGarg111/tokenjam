@@ -353,8 +353,23 @@ def get_relearn_proposals(
                     "and the dollar figures to occurrences inside the window. "
                     "Omit for the full unbounded observation.",
     ),
+    persona: str | None = None,
 ) -> dict[str, Any]:
     """Cached relearn-detector proposals for the Review inbox.
+
+    ``persona`` scopes the clusters to one side of the "Viewing as" picker.
+    relearn's three lanes are ALREADY partitioned by persona — the OTel lane
+    reads only non-coding-agent spans, the transcript and archive lanes read
+    only Claude Code sessions — so the scan cycle stores each persona's own
+    lane-partitioned finding and this route selects among them. Without that,
+    an SDK reader saw recurring-failure clusters mined out of Claude Code
+    transcripts, and the Dashboard's "recurring mistakes" count sat beside
+    persona-scoped dollar tiles describing a different population.
+
+    A cache with no per-persona findings (one written before they existed)
+    reports ``persona_scoped: false`` and ``finding: null`` rather than the
+    whole-corpus finding under a persona's label. That is NOT-YET-KNOWN and a
+    surface must render it as such.
 
     Returns ``{"status": "ready"|"computing"|"never_run", "computed_at":
     iso|null, "finding": <RelearnFinding dict>|null, "framing": dict}``. A
@@ -414,13 +429,48 @@ def get_relearn_proposals(
     if since_error is not None:
         raise HTTPException(status_code=400, detail=f"Invalid since: {since_error}")
 
-    cached = relearn_store.read_cache(config=_config(request))
+    from tokenjam.core.framing import PERSONAS
+    from tokenjam.core.persona_scope import persona_scopes_population
+
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
+    config = _config(request)
+    cached = relearn_store.read_cache(config=config)
     computing = relearn_store.is_computing()
+    # THE PERSONA-PARTITIONED FINDING, when one is being asked for. It lives in
+    # the cost store beside that persona's proposals because both come out of
+    # the same scan cycle's scoped pass, and keeping them in one artifact is
+    # what stops the inbox's two feeds describing two populations.
+    persona_scoped = True
+    if persona_scopes_population(persona):
+        cost_block = relearn_store.read_cost_proposals(config=config) or {}
+        by_persona = cost_block.get("cost_relearn_by_persona") or {}
+        if persona in by_persona:
+            cached = {**(cached or {}), "finding": by_persona[persona]}
+        else:
+            # No scoped finding. Refusing is the only honest answer: the
+            # whole-corpus finding is not this persona's, and an empty one
+            # would read as "no recurring mistakes", which is a measurement
+            # nobody took.
+            persona_scoped = False
+            cached = None
     conn = _conn(request)
     data_span = available_data_span(conn).to_dict()
     if cached is None:
         return {
-            "status": "computing" if computing else "never_run",
+            # A ledger that cannot answer for this persona is its own state,
+            # not "never run": the detector HAS run, just not in a form this
+            # persona can be served from. A rescan resolves it; a client must
+            # render both as unknown and neither as "no recurring mistakes".
+            "status": (
+                "persona_unscoped" if not persona_scoped
+                else "computing" if computing else "never_run"
+            ),
+            "persona_requested": persona,
+            "persona_scoped": persona_scoped,
             "computed_at": None,
             **_scan_provenance(None),
             "finding": None,
@@ -459,6 +509,8 @@ def get_relearn_proposals(
     finding, window, windowed_total = _apply_window(finding, since)
     return {
         "status": "computing" if computing else "ready",
+        "persona_requested": persona,
+        "persona_scoped": persona_scoped,
         "computed_at": cached.get("computed_at"),
         **_scan_provenance(cached),
         "finding": _with_example_resolvability(finding, conn),

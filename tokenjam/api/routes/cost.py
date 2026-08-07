@@ -780,9 +780,21 @@ async def get_cost(
     feature: str | None = None,
     environment: str | None = None,
     prompt_version: str | None = None,
+    persona: str | None = None,
 ) -> dict:
+    """Grouped spend for the window.
+
+    ``persona`` scopes to one side of the "Viewing as" picker, through
+    ``CostFilters`` so every figure derived from these filters covers the same
+    population. Omitted (and `mixed`/`unknown`) means all spend.
+    """
     db = request.app.state.db
     config = request.app.state.config
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     try:
         since_dt = parse_since(since) if since else None
         until_dt = parse_since(until) if until else None
@@ -797,6 +809,7 @@ async def get_cost(
         feature=feature,
         environment=environment,
         prompt_version=prompt_version,
+        persona=persona,
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)

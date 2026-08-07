@@ -4720,7 +4720,7 @@ function RunDetailView({ runId }) {
 // dedicated entry point onto the most expensive traces in the window.
 const TRACE_SORTS = ['recent', 'cost'];
 
-function TracesListView({ params }) {
+function TracesListView({ params, persona }) {
   // Filters come from the URL (issue #112). `result` maps to the API's `status`.
   const DEFAULTS = { since: DEFAULT_SINCE, result: '', agent_id: '', sort: 'recent', min_cost: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
@@ -4756,9 +4756,12 @@ function TracesListView({ params }) {
     const [td, sd] = await Promise.all([
       api('/traces', {
         since, status: result || undefined, agent_id: agentId || undefined,
-        sort, min_cost_usd: minCostUsd, limit: TRACE_PAGE_SIZE, offset,
+        sort, min_cost_usd: minCostUsd, limit: TRACE_PAGE_SIZE, offset, persona,
       }),
-      api('/status'),
+      // SAME persona: this read supplies the live/idle dot beside each row, and
+      // an unscoped agent list would light up rows for agents this page is not
+      // showing.
+      api('/status', { persona }),
     ]);
     const nextTraces = td.traces || [];
     setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
@@ -4769,7 +4772,10 @@ function TracesListView({ params }) {
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
     setLoaded(true);
-  }, [since, result, agentId, sort, minCost, traces.length]);
+    // `persona` is a real dependency. Without it the picker changes the label
+    // and the list keeps showing the previous persona's traces — which is
+    // exactly the state this page was in before it took a persona at all.
+  }, [since, result, agentId, sort, minCost, traces.length, persona]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
@@ -4794,7 +4800,14 @@ function TracesListView({ params }) {
   };
 
   return html`
-    <div class="page-title" style="margin-bottom:4px">Traces</div>
+    ${/* The picker sits beside the title, exactly as it does on Sessions,
+          Dashboard and Optimize. Traces is persona-scoped now — the row list,
+          the total count and the outlier quartiles are all computed over the
+          selected persona's traces — so the control belongs here. */ ''}
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px">
+      <div class="page-title" style="margin:0">Traces</div>
+      <${PersonaPicker} bare=${true} />
+    </div>
     <div class="meta" style="margin-bottom:14px">Click a trace row for its waterfall</div>
     <div class="view-toggle" style="margin:0 0 12px">
       <button class=${sort === 'recent' ? 'active' : ''} onClick=${() => setFilter('sort', 'recent')}>Most recent</button>
@@ -7121,6 +7134,15 @@ function rollupFigure(read) {
   if (!data || !data.computed_at) {
     return { state: 'unknown', totalUsd: 0, totalTokens: 0, byAnalyzer: [], dedupedCount: 0 };
   }
+  // A ledger that cannot answer for the selected persona is UNKNOWN, never
+  // empty. The endpoint returns an empty proposal list in that case — summing
+  // it would produce a real-looking `$0` under a persona label, and "no
+  // recoverable waste" is the single most reassuring thing this page can say
+  // wrongly. `persona_scoped` is only ever false when a persona was requested
+  // and the stored ledger predates per-persona proposals; a rescan fixes it.
+  if (data.persona_scoped === false || data.status === 'persona_unscoped') {
+    return { state: 'unknown', totalUsd: 0, totalTokens: 0, byAnalyzer: [], dedupedCount: 0 };
+  }
   const po = data.past_overspend || {};
   const populated = (po.proposal_count || 0) > 0 || (po.token_proposal_count || 0) > 0;
   return {
@@ -7425,7 +7447,15 @@ function useTriageRead(run, deps) {
 // latest refresh failed: the figure was true when it was read.
 function readStatus(read) {
   if (!read) return 'loading';
-  if (read.data != null) return 'ready';
+  // A read that answered "I cannot scope this to the persona you asked for" is
+  // NOT ready. Its payload is well-formed and its counts are zero, so without
+  // this it renders as a confident "0 pending fixes" for a persona nothing was
+  // ever measured for — the reassuring direction of root anti-pattern 22, and
+  // the one a reader is least likely to question. 'loading' is the right state:
+  // the scan cycle that resolves it is genuinely pending.
+  const d = read.data;
+  if (d && (d.persona_scoped === false || d.status === 'persona_unscoped')) return 'loading';
+  if (d != null) return 'ready';
   return read.phase === 'error' ? 'error' : 'loading';
 }
 
@@ -7895,7 +7925,11 @@ function OptimizeView({ params, navParam, persona }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set(), proposals: [] });
+  // `proposalsScoped` starts TRUE only because nothing has been fetched yet and
+  // nothing renders off it until `loading` clears; once a fetch answers it is
+  // the server's own `persona_scoped`, and a false there withholds every inline
+  // fix card rather than showing corpus-wide dollars under a persona label.
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set(), proposals: [], proposalsScoped: true });
   // Locally-dismissed proposal signatures (same lock-free browser store the old
   // Review-actions page used). A dismissed fix withdraws its OFFER only; the
   // analyzer's figure is untouched (Critical Rule 32).
@@ -7910,7 +7944,10 @@ function OptimizeView({ params, navParam, persona }) {
       // reader is actually looking at.
       const opt = await api('/optimize', { since, agent_id: agentId || undefined, persona });
       let cmp = null;
-      if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined }).catch(() => null);
+      // SAME persona again. This comparison sits beside the analyzer rows as
+      // part of one answer, so an unscoped delta here would put the whole
+      // corpus's spend movement next to one persona's findings.
+      if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined, persona }).catch(() => null);
       // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
       // failure must not blank the Optimize screen.
       // SAME persona as the /optimize read above. These two render as one
@@ -7927,10 +7964,16 @@ function OptimizeView({ params, navParam, persona }) {
       // rendered inline on the analyzer's own detail page (the retired
       // Review-actions page's job moved here). Best-effort: a failed or empty
       // fetch just means a detail page shows no fix, never an error state.
-      const cp = await api('/relearn/cost-proposals').catch(() => null);
-      const proposals = (cp && cp.proposals) || [];
+      // SAME persona. These are the inline "apply this fix" cards on every
+      // analyzer detail page, and their dollar figures are the ones the reader
+      // acts on. `persona_scoped: false` means the stored ledger predates
+      // per-persona proposals and cannot answer — the cards are then withheld
+      // rather than shown with corpus-wide money under this persona's label.
+      const cp = await api('/relearn/cost-proposals', { persona }).catch(() => null);
+      const proposalsScoped = !cp || cp.persona_scoped !== false;
+      const proposals = (proposalsScoped && cp && cp.proposals) || [];
       const proposalAnalyzers = new Set(proposals.map(p => p.analyzer));
-      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers, proposals });
+      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers, proposals, proposalsScoped });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
     // `persona` is a real dependency, not decoration: switching the picker has
     // to re-read, or the page keeps rendering the previous persona's analyzer
@@ -12801,18 +12844,26 @@ function DashboardView({ params, persona }) {
   // now settles on its own and the panel it feeds paints the moment ITS answer
   // lands. /optimize keeps a richer state machine of its own below, because it is
   // the only one slow enough to need a bounded wait.
-  const costRead = useTriageRead(() => api('/cost', { since, group_by: 'day' }), [since]);
-  const statusRead = useTriageRead(() => api('/status'), []);
-  const alertsRead = useTriageRead(() => api('/alerts', { since, unread: 'true' }), [since]);
+  //
+  // EVERY read below carries `persona`, and every dependency list names it.
+  // These panels are stacked on one screen under one "Viewing as" label, so a
+  // read that drops it publishes the whole corpus's figures beside its
+  // neighbours' scoped ones — and the reader has no way to tell which tile
+  // answered the picker. `persona` is therefore a dependency of each read, not
+  // just a parameter on it: without that, switching the picker re-labels the
+  // page and leaves every figure on it unchanged.
+  const costRead = useTriageRead(() => api('/cost', { since, group_by: 'day', persona }), [since, persona]);
+  const statusRead = useTriageRead(() => api('/status', { persona }), [persona]);
+  const alertsRead = useTriageRead(() => api('/alerts', { since, unread: 'true', persona }), [since, persona]);
   // These two used to send no window and depend on nothing, so the selector
   // above visibly governed three tiles and silently did nothing to the other
   // two: the same clusters and the same drift count came back for 24h and 90d.
   // A control that governs part of a page is worse than none, because a reader
   // cannot tell which figures moved. Both endpoints report the window they
   // actually applied.
-  const driftRead = useTriageRead(() => api('/drift', { since }), [since]);
-  const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6 }), [since]);
-  const relearnRead = useTriageRead(() => api('/relearn/proposals', { since }), [since]);
+  const driftRead = useTriageRead(() => api('/drift', { since, persona }), [since, persona]);
+  const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6, persona }), [since, persona]);
+  const relearnRead = useTriageRead(() => api('/relearn/proposals', { since, persona }), [since, persona]);
   // The hero band's own read, on its own state machine, same as every other
   // panel here. `past_overspend` (`cost_proposals.past_overspend_rollup`,
   // gathered across cost proposals AND relearn clusters by
@@ -12823,7 +12874,7 @@ function DashboardView({ params, persona }) {
   // own figures client-side, which is what used to double-count once `reuse`
   // and `script` (both cluster on the identical repeated-tool-sequence shape)
   // were left enabled together for one persona (`sdk`).
-  const costProposalsRead = useTriageRead(() => api('/relearn/cost-proposals', { since }), [since]);
+  const costProposalsRead = useTriageRead(() => api('/relearn/cost-proposals', { since, persona }), [since, persona]);
   const rollupFig = rollupFigure(costProposalsRead);
 
   // ---- The recoverable-waste read, on its own state machine ---------------- //
@@ -13050,8 +13101,13 @@ function DashboardView({ params, persona }) {
   // paints as soon as its own endpoint answers: /alerts and /drift no longer wait
   // behind the 27-second /cost read they have nothing to do with.
   const alertList = (alertsRead.data && alertsRead.data.alerts) || [];
-  const relearnClusters = (relearnRead.data && relearnRead.data.finding
-    && relearnRead.data.finding.clusters) || [];
+  // Guarded on the read's OWN scope answer, not just on the finding being
+  // present: an unscoped ledger returns `finding: null`, and `[]` from that is
+  // "we have not measured", not "no recurring mistakes". `readStatus` keeps the
+  // tile in its skeleton for exactly that case, so this length is never
+  // published as a count.
+  const relearnClusters = (relearnRead.data && relearnRead.data.persona_scoped !== false
+    && relearnRead.data.finding && relearnRead.data.finding.clusters) || [];
   const errTraces = traceList.filter(t => t.status_code === 'error').length;
 
   // Run-rate projection folded into a one-line caption under the explorer's KPI
@@ -13520,17 +13576,23 @@ function PersonaPicker({ bare } = {}) {
 // that has to be positioned twice will drift twice.
 //
 // Membership is decided by whether the persona changes what the page SHOWS, not
-// by whether the page has somewhere convenient to put a dropdown. Traces, FAQ,
-// Relearn and Summarize read no persona and render identically for either one,
-// so a picker there is a control that changes nothing — worse than an
-// inconsistent one, because it invites the reader to believe the page responded.
-// Spend is absent for the same reason plus a stronger one: it is hidden from
-// both personas (see PERSONA_HIDDEN_DELIBERATE).
+// by whether the page has somewhere convenient to put a dropdown. FAQ, Relearn
+// and Summarize read no persona and render identically for either one, so a
+// picker there is a control that changes nothing — worse than an inconsistent
+// one, because it invites the reader to believe the page responded. Spend is
+// absent for the same reason plus a stronger one: it is hidden from both
+// personas (see PERSONA_HIDDEN_DELIBERATE).
+//
+// `traces` earns its place by the same test: `GET /traces` takes a persona and
+// scopes the rows, the total count and the outlier quartiles to it, so the page
+// genuinely shows something different for each. It was excluded while it read
+// no persona — correctly, on this rule — and the rule is what moved it, not an
+// exception to it.
 //
 // `review` was in the predecessor of this list and is gone: that route has
 // aliased to the Dashboard since the Review page was retired, so the entry
 // matched no view at all.
-const PERSONA_PICKER_VIEWS = new Set(['dashboard', 'optimize', 'sessions']);
+const PERSONA_PICKER_VIEWS = new Set(['dashboard', 'optimize', 'sessions', 'traces']);
 
 // Reconcile the sidebar to the current route + persona: active-highlight, reveal
 // the active section's nav-children, and keep the lens pill in sync. Module-level

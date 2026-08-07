@@ -1237,7 +1237,10 @@ def test_the_persona_picker_has_exactly_one_placement_mechanism(html: str) -> No
     The fallback is DELETED rather than restyled. A control positioned in two
     places will drift in two places.
     """
-    assert "const PERSONA_PICKER_VIEWS = new Set(['dashboard', 'optimize', 'sessions']);" in html
+    assert (
+        "const PERSONA_PICKER_VIEWS = "
+        "new Set(['dashboard', 'optimize', 'sessions', 'traces']);"
+    ) in html
     # The float, its component, and the app-level render site are all gone.
     assert "function PersonaBar(" not in html
     assert "VIEWS_WITH_PERSONA_SLOT" not in html
@@ -1249,16 +1252,35 @@ def test_the_picker_is_absent_from_views_the_persona_does_not_change(
     html: str,
 ) -> None:
     """A control that changes nothing is worse than a misplaced one: it invites
-    the reader to believe the page responded to it.
+    the reader to believe the page responded to it. The converse is worse
+    still, and is what this test used to enforce: a page whose CONTENT the
+    persona changes, with no control on it to say so.
 
-    Traces, FAQ, Relearn and Summarize read no persona and render identically
-    for either, so they show no picker. Asserted structurally — none of those
-    components takes a `persona` prop — so the day one of them becomes
-    persona-aware, this test is what says the picker has to come back with it.
+    The rule is one rule in both directions — does the persona change what the
+    page SHOWS? — so this pins both halves. FAQ, Relearn and Summarize read no
+    persona and render identically for either, so they take no `persona` prop
+    and show no picker; that is asserted structurally, so the day one of them
+    becomes persona-aware this test says the picker has to come with it.
+
+    Traces was in that list and is not any more. `GET /traces` now takes a
+    persona and scopes the rows, the total count and the outlier quartiles to
+    it, so the page genuinely shows something different for each — and while it
+    took no persona, this test was ENFORCING that it could not. Pinning it
+    positively is what keeps that from silently coming back.
     """
-    for view in ("dashboard", "optimize", "sessions"):
-        assert f"'{view}'" in html[html.index("const PERSONA_PICKER_VIEWS"):][:200]
-    for fn in ("function TracesListView(", "function AnalyzerGuideView(",
+    picker_decl = html[html.index("const PERSONA_PICKER_VIEWS"):][:200]
+    for view in ("dashboard", "optimize", "sessions", "traces"):
+        assert f"'{view}'" in picker_decl
+    traces_at = html.index("function TracesListView(")
+    assert "persona" in html[traces_at:][:80], (
+        "TracesListView must take a persona: its list, its total count and its "
+        "outlier rule are all scoped to one, and a page that filters by persona "
+        "without a picker gives the reader no way to see or change what it did"
+    )
+    assert "<${PersonaPicker} bare=${true} />" in html[traces_at:traces_at + 8000], (
+        "Traces is persona-scoped, so it renders the picker in its own header"
+    )
+    for fn in ("function AnalyzerGuideView(",
                "function RulesView(", "function SummarizeView("):
         sig = html[html.index(fn):][: len(fn) + 60]
         assert "persona" not in sig, f"{fn} now takes a persona; give it a picker"

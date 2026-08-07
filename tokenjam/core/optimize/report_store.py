@@ -294,9 +294,21 @@ def stored_report(
     persona gate, `gather_planning_texts`. A route that only needs to SERVE the
     report wants :func:`stored_report_dict` instead.
     """
+    return report_from_stored_dict(stored_report_dict(config, path=path))
+
+
+def report_from_stored_dict(body: dict | None) -> Any | None:
+    """Rehydrate a report dict this store produced, or ``None`` if it cannot be.
+
+    Split out from :func:`stored_report` so a caller that has ALREADY selected
+    which stored dict it is serving — notably ``GET /optimize`` picking a
+    persona-scoped sub-report out of ``persona_reports`` — can rehydrate THAT
+    one. Re-reading the top-level report instead would derive the ranking, the
+    window and the framing from the whole corpus while the findings beside them
+    came from one persona, which is two populations in one response.
+    """
     from tokenjam.core.optimize import report_from_dict
 
-    body = stored_report_dict(config, path=path)
     if body is None:
         return None
     try:

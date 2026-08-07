@@ -41,6 +41,7 @@ from tokenjam.core.models import (
     TraceFilters,
     TraceRecord,
 )
+from tokenjam.core.persona_scope import add_persona_clause, persona_agent_clause
 from tokenjam.utils.time_parse import utcnow
 
 logger = logging.getLogger("tokenjam.db")
@@ -130,10 +131,12 @@ class StorageBackend(Protocol):
     def count_unknown_plan_tier_sessions(self) -> int: ...
     def get_window_cost_totals(
         self, since: datetime, until: datetime, agent_id: str | None = None,
+        persona: str | None = None,
     ) -> tuple[int, int, int, int, int, float]: ...
     def get_cost_delta_by_group(
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
+        persona: str | None = None,
     ) -> list[dict]: ...
     def delete_spans_before(
         self,
@@ -3380,6 +3383,10 @@ class DuckDBBackend:
             clauses.append(f"status_code = ${idx}")
             params.append(filters.status)
             idx += 1
+        # The persona scope, applied HERE so every consumer of this WHERE — the
+        # row list, `count_traces`, and `get_trace_cost_stats`' outlier
+        # quartiles — covers the same population by construction.
+        add_persona_clause(clauses, filters.persona)
         where = " AND ".join(clauses) if clauses else "1=1"
         return where, params, idx
 
@@ -3615,6 +3622,7 @@ class DuckDBBackend:
             clauses.append(f"prompt_template_version = ${idx}")
             params.append(filters.prompt_version)
             idx += 1
+        add_persona_clause(clauses, filters.persona)
         where = " AND ".join(clauses)
 
         # Cache-read + cache-write are summed alongside in/out so callers can
@@ -3701,6 +3709,7 @@ class DuckDBBackend:
             idx += 1
         if filters.unread:
             clauses.append("acknowledged = false")
+        add_persona_clause(clauses, filters.persona)
         where = " AND ".join(clauses) if clauses else "1=1"
         sql = (
             f"SELECT * FROM alerts WHERE {where} "
@@ -3920,12 +3929,14 @@ class DuckDBBackend:
 
     def get_window_cost_totals(
         self, since: datetime, until: datetime, agent_id: str | None = None,
+        persona: str | None = None,
     ) -> tuple[int, int, int, int, int, float]:
         clauses = ["start_time >= $1", "start_time < $2"]
         params: list = [since, until]
         if agent_id:
             clauses.append(f"agent_id = ${len(params) + 1}")
             params.append(agent_id)
+        add_persona_clause(clauses, persona)
         where = " AND ".join(clauses)
         row = self.conn.execute(
             f"SELECT COUNT(DISTINCT session_id) AS sessions, "
@@ -3946,11 +3957,16 @@ class DuckDBBackend:
     def get_cost_delta_by_group(
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
+        persona: str | None = None,
     ) -> list[dict]:
         # group_col is an internal, fixed identifier (never user input); the
         # allow-list keeps it that way so the interpolation below stays safe.
         if group_col not in ("agent_id", "model"):
             raise ValueError(f"Unsupported group_col {group_col!r}")
+        # Parameter-free, so it interpolates into the SQL below without
+        # disturbing the positional `$n` numbering that block depends on.
+        persona_clause = persona_agent_clause(persona)
+        persona_sql = f" AND {persona_clause}" if persona_clause else ""
         sql = f"""
             SELECT {group_col} AS grp,
                    COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
@@ -3965,7 +3981,7 @@ class DuckDBBackend:
                                           + cache_write_tokens ELSE 0 END), 0) AS prev_tokens
             FROM spans
             WHERE (start_time >= $3 AND start_time < $2)
-              AND {group_col} IS NOT NULL
+              AND {group_col} IS NOT NULL{persona_sql}
             GROUP BY {group_col}
             HAVING ABS(cur_cost - prev_cost) > 0.0001
             ORDER BY ABS(cur_cost - prev_cost) DESC

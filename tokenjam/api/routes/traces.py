@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.data_span import available_data_span
 from tokenjam.core.framing import (
+    PERSONAS,
     WindowSummary,
     compute_framing,
     plan_determination_mix,
@@ -55,8 +56,23 @@ async def list_traces(
     span_name: str | None = None,
     sort: str | None = None,
     min_cost_usd: float | None = None,
+    persona: str | None = None,
 ) -> dict:
+    """Trace list, scoped to one side of the "Viewing as" picker.
+
+    ``persona`` narrows to interactive coding agents (`claude-code`) or to
+    everything else (`sdk`); `mixed` / `unknown` / omitted narrow nothing,
+    matching `GET /sessions`. It reaches the SQL through ``TraceFilters`` so the
+    rows, the total count and the outlier rule below all describe the same
+    population — a filtered list beside an unfiltered total is the recurring
+    defect in this product, not a rounding error.
+    """
     db = request.app.state.db
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     try:
         since_dt = parse_since(since) if since else None
         until_dt = parse_since(until) if until else None
@@ -72,6 +88,7 @@ async def list_traces(
         span_name=span_name,
         sort=sort if sort in _VALID_TRACE_SORTS else "recent",
         min_cost_usd=min_cost_usd,
+        persona=persona,
     )
     traces = db.get_traces(filters)
     total_count = db.count_traces(filters) if hasattr(db, "count_traces") else len(traces)
@@ -151,6 +168,17 @@ TRACE_SPAN_CAP = 2000
 @router.get("/traces/{trace_id}")
 async def get_trace(request: Request, trace_id: str, attributes: bool = True) -> dict:
     """Trace detail.
+
+    **DELIBERATELY PERSONA-BLIND, and this is the reason.** A trace id addresses
+    ONE trace, which belongs to exactly one agent and therefore to exactly one
+    side of the picker already. A `persona` parameter here could only do one of
+    two things, and both are wrong: silently return nothing for a trace the
+    reader is looking straight at (a deep link, a row they just clicked), or
+    filter within a single trace's spans, which would produce a partial
+    waterfall whose totals no longer add up to the trace. Scoping belongs on
+    the LIST (`GET /traces`), which is what decides whether this trace is
+    offered at all. Reachability by direct URL is intentional — the picker is a
+    view over a list, not an access control.
 
     Defaults to FULL spans (each with its `attributes` dict) so
     `ApiBackend.get_trace_spans` and every existing complete-span consumer

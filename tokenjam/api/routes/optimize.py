@@ -46,6 +46,7 @@ from tokenjam.core.optimize import (
     findings_for_persona,
     report_store,
 )
+from tokenjam.core.persona_scope import persona_scopes_population
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
@@ -150,6 +151,29 @@ def get_optimize(
         envelope["report_available"] = False
         return envelope
 
+    # THE SCOPED BODY, when one was asked for. Slicing the analyzer SET for a
+    # persona (further down) was only ever half the gate: the stored top-level
+    # report is computed over the whole corpus, so every figure surviving that
+    # slice was still the mixed corpus's money wearing the reader's persona
+    # label. The scan cycle stores one fully-scoped report per persona
+    # (`runner.build_persona_reports`) precisely because a population, unlike a
+    # set of names, cannot be narrowed after the fact.
+    view_persona = persona or str(body.get("persona") or "unknown")
+    if persona_scopes_population(view_persona):
+        scoped = (body.get("persona_reports") or {}).get(view_persona)
+        if not isinstance(scoped, dict):
+            # An artifact written before per-persona passes existed. It holds
+            # corpus-wide figures and cannot answer for this persona. Serving
+            # them anyway is the bug; serving them as this persona's ZERO would
+            # be the same bug in the reassuring direction. So this reads as
+            # COLD — not computed yet — which is the state a rescan resolves.
+            envelope["report_available"] = False
+            envelope["unavailable_reason"] = "persona_unscoped"
+            envelope["view_persona"] = view_persona
+            envelope["report_persona"] = body.get("persona")
+            return envelope
+        body = scoped
+
     # The STORED DICT verbatim. Deliberately NOT `report_to_dict(rehydrated)`:
     # the store already holds exactly what the serializer produced, so passing
     # it through a rehydration step could only ever lose something. The typed
@@ -162,7 +186,13 @@ def get_optimize(
         payload.get("findings"), envelope.get("window_days"), config=config,
     )
 
-    report = report_store.stored_report(config)
+    # Rehydrated from THE SAME dict the payload was built from — the scoped one
+    # when a persona narrowed it. Reading the top-level report here instead
+    # would derive the ranking, the window and the framing from the whole
+    # corpus while the findings beside them came from one persona: two
+    # populations in one response, which is the class of defect this whole
+    # change closes.
+    report = report_store.report_from_stored_dict(body)
     if report is None:
         # The stored dict is present but un-rehydratable (a corrupt or
         # far-future payload). Serve the body — it is what the analyzers
@@ -173,13 +203,18 @@ def get_optimize(
         payload["skipped_analyzers"] = []
         return payload
 
-    # The persona this response is ANSWERING FOR. `report.persona` stays on the
-    # payload untouched (it is what the corpus IS, and the CLI round-trips it);
+    # The persona this response is ANSWERING FOR, resolved above so the scoped
+    # body could be selected with it. `report.persona` stays on the payload
+    # untouched (it is what the corpus IS, and the CLI round-trips it);
     # everything gated below keys off `view_persona`, which is what the reader
     # asked to see.
-    view_persona = persona or report.persona
     payload["report_persona"] = report.persona
     payload["view_persona"] = view_persona
+    # WHAT POPULATION THESE FIGURES COVER. `None` means the whole corpus, which
+    # is the right answer for a persona that narrows nothing (`mixed` /
+    # `unknown`) and for an unnarrowed request. A client publishing a figure
+    # under a persona label must check this matches.
+    payload["persona_scope"] = getattr(report, "persona_scope", None)
 
     # `fast` no longer skips anything (nothing runs here), so nothing is
     # "skipped for speed". The key stays for wire compatibility.
