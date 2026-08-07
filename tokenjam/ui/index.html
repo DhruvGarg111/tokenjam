@@ -7635,7 +7635,15 @@ function HealthTile({ label, value, attention, href, sub, status = 'ready' }) {
 function optDetailStats(name, fd, dg) {
   if (name === 'downsize') {
     if (!dg) return [null, null];
-    return [{ v: dg.percent_of_sessions + '%', l: 'of sessions match' }, { v: dg.candidate_sessions + ' / ' + dg.total_sessions, l: 'candidate sessions' }];
+    // `n_sessions`/`percent_of_all_sessions`, not `candidate_sessions`/
+    // `percent_of_sessions`: the latter pair covers the tiny-session case
+    // ALONE, while stat tile 1 (past overspend, rendered by the caller) sums
+    // BOTH the tiny-session and driver-role cases. A driver-role-only window
+    // has `candidate_sessions === 0`, which rendered a real dollar figure
+    // beside "0%, 0 of N" — two figures over two different populations shown
+    // together. `n_sessions`/`percent_of_all_sessions` cover the SAME
+    // population the dollar figure does.
+    return [{ v: dg.percent_of_all_sessions + '%', l: 'of sessions flagged' }, { v: dg.n_sessions + ' / ' + dg.total_sessions, l: 'flagged sessions' }];
   }
   if (!fd) return [null, null];
   if (name === 'placement') return [{ v: String(fd.candidates.length), l: 'workloads fit the batch shape' }, { v: fd.percent_of_window_cost + '%', l: 'of window cost' }];
@@ -7704,7 +7712,19 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
     body = !dg ? html`
       <div class="opt-line dim">No downsize candidates in this window; sessions don't match the smaller-model shape (small input/output, few tool calls).</div>`
       : html`
-      <div class="opt-line">${dg.percent_of_sessions}% of sessions match a smaller-model candidate shape (${dg.candidate_sessions} of ${dg.total_sessions}).</div>
+      ${/* Two DISJOINT populations feed this one finding (see
+           model_downgrade.py): a premium model driving undelegated work
+           (below) and structurally tiny sessions that match a candidate
+           shape (further below). Each sentence is gated on its OWN
+           population rather than always rendering both — a driver-role-only
+           window has `candidate_sessions === 0`, and printing "0% ... 0 of
+           N" next to the real dollar figure above claimed a different
+           population than the one the tile actually sums (root anti-pattern
+           22). Labelling each figure with the population it covers, per the
+           same rule, beats merging them into one number that would overstate
+           the tiny-session shape's own share. */ ''}
+      ${dg.driver_sessions ? html`<div class="opt-line">${dg.driver_sessions} session(s) ran a premium model in the driver role, undelegated: ${fmtCost(dg.driver_recoverable_usd)} of the figure above.</div>` : null}
+      ${dg.candidate_sessions ? html`<div class="opt-line">${dg.percent_of_sessions}% of sessions match a smaller-model candidate shape (${dg.candidate_sessions} of ${dg.total_sessions}).</div>` : null}
       ${dg.suggestions && Object.keys(dg.suggestions).length ? html`<div class="opt-line dim">Pattern: ${Object.entries(dg.suggestions).map(([k, v]) => k + ' → ' + v).join(', ')}</div>` : null}
       ${(dg.examples || []).length ? html`<div class="opt-sub">Examples</div>
         <div class="table-wrap"><table class="opt-table"><tbody>${dg.examples.map(ex => html`<tr><td class="mono">${(ex.trace_id || '').slice(0, 8)}…</td><td>${ex.tool_calls} tools</td><td class="mono">${ex.model}</td></tr>`)}</tbody></table></div>` : null}`;
