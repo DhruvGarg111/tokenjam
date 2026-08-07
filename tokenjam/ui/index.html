@@ -238,27 +238,10 @@ code, .mono {
 .sidebar a:hover { background: rgba(var(--accent-rgb),0.04); color: var(--text); }
 .sidebar a.active { color: var(--accent); background: rgba(var(--accent-rgb),0.08); }
 .sidebar a .icon { width: 16px; text-align: center; font-size: 14px; }
-/* Two-lens nav (self-improve-loop SPEC.md §12): Improve (CC power-user home,
-   default) vs Observe (SDK/observability suite). The pill switches which
-   nav-link group is visible; App()'s route effect keeps it in sync with the
-   current route so a direct link/back-nav into an Observe view flips the
-   pill without a click. */
-.lens-switch { display: flex; gap: 2px; margin: 4px 12px 10px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
-.lens-btn { flex: 1; background: none; border: none; border-radius: 6px; padding: 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; font-weight: 500; color: var(--text-dim); cursor: pointer; transition: background .15s, color .15s; }
-.lens-btn:hover { color: var(--text); }
-.lens-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
-.sidebar[data-lens="improve"] a.nav-link[data-lens="observe"] { display: none; }
-.sidebar[data-lens="observe"] a.nav-link[data-lens="improve"] { display: none; }
-/* Persistent top-level items (data-lens="all", e.g. Dashboard, issue #654)
-   serve both lenses equally, so they sit ABOVE the Improve/Observe toggle and
-   are never hidden by it. The two rules above only target improve/observe, so
-   an "all" link is already immune — this margin just seats it as a header item
-   above the switch. */
-.sidebar a.nav-link[data-lens="all"] { margin-bottom: 8px; }
-/* Persona gating. Neither persona has an Observe lens, so the lens switcher is
-   hidden for both rather than left as a control with one option: showing a
-   toggle that cannot toggle reads as a broken affordance. Everything a persona
-   still sees therefore lives in one flat Improve nav.
+/* Dashboard is the persistent front door, so it is seated as a header item
+   above the rest of the nav. */
+.sidebar a.nav-link[data-view="dashboard"] { margin-bottom: 8px; }
+/* Persona gating. Every persona sees one flat nav.
    `!important` because the route effect writes an inline `display` on
    nav-children, which would otherwise win over these rules.
 
@@ -267,23 +250,13 @@ code, .mono {
    `[data-persona="..."]`, which syncNavState leaves EMPTY until the persona is
    settled: an unresolved read hides nothing, the same rule personaHides
    follows. */
-.sidebar[data-persona="claude-code"] .lens-switch { display: none; }
-.sidebar[data-persona="sdk"] .lens-switch { display: none; }
-/* The whole Observe group is unreachable for both personas (no switcher), so
-   an observe-lens link is dead markup for either of them. Spend is the only
-   row left in that group and it is hidden deliberately — see
-   PERSONA_HIDDEN_DELIBERATE, and PERSONA_HIDDEN_VIEWS' `cost` entry for both
-   personas. */
-.sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
-.sidebar[data-persona="sdk"] a.nav-link[data-lens="observe"] { display: none !important; }
 /* Traces: SDK only. It is the standalone CROSS-SESSION browser; per-session
    traces reach every persona through the session detail's Traces tab, which is
    ungated. So this hides a second door, never the only one. */
 .sidebar[data-persona="claude-code"] a.nav-link[data-view="traces"] { display: none !important; }
-/* The Dashboard's health band is Observe-shaped: unread alerts, agents
-   drifting, budgets at risk. A coding-agent user has no Observe lens, so the
-   band summarises pages they cannot open. Hidden for that persona rather than
-   left pointing at nothing. */
+/* The Dashboard's health band summarises unread alerts, agents drifting and
+   budgets at risk: pages a coding-agent user cannot open. Hidden for that
+   persona rather than left pointing at nothing. */
 body[data-persona="claude-code"] .health-glance { display: none; }
 /* The persona picker has ONE position: inside the header of each page that
    shows it (see PERSONA_PICKER_VIEWS). There is no app-level floated bar any
@@ -2231,17 +2204,12 @@ code.md-code {
 </head>
 <body>
 
-<nav class="sidebar" data-lens="improve">
+<nav class="sidebar">
   <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam Lens</span></div>
-  <!-- Dashboard is a persistent top-level entry ABOVE the Improve/Observe
-       toggle (issue #654): its waste tiles + spend pivot serve both lenses
-       equally, so it stays visible in either mode. data-lens="all" keeps it
-       out of the improve/observe hide rules. -->
-  <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="all"><span class="icon">&#9678;</span> Dashboard</a>
-  <div class="lens-switch" role="tablist" aria-label="Lens">
-    <button type="button" class="lens-btn active" data-lens="improve">Improve</button>
-    <button type="button" class="lens-btn" data-lens="observe">Observe</button>
-  </div>
+  <!-- Dashboard is the persistent top-level entry: its waste tiles and spend
+       pivot are the shared triage front door, so it is seated above the rest
+       of the nav. -->
+  <a href="#/dashboard" class="nav-link" data-view="dashboard"><span class="icon">&#9678;</span> Dashboard</a>
   <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
        one rendered the SAME StatusView for their bare route, so the sidebar
        advertised two items that were one page. This #/sessions link is the one
@@ -2249,32 +2217,28 @@ code.md-code {
        keys on data-view === route.view, so only data-view="sessions" lights up
        while a session detail is open. #/status survives as a silent route alias
        for old bookmarks. -->
-  <!-- Optimize sits in Improve, not Observe: its most-populated analyzers end
-       in a concrete edit the user makes, which is what this lens is for. Its
-       two children carry the SAME lens for the reason the old comment gave in
-       reverse: `data-lens` decides which sidebar GROUP a link sits in, so a
-       child in a different group than its parent is orphaned. All three stay
-       above Sessions and well above the FAQ, which is pinned last here. -->
-  <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="improve"><span class="icon">&#9889;</span> Optimize</a>
+  <!-- Optimize and its two analyzer children stay above Sessions and well
+       above the FAQ, which is pinned last here. -->
+  <a href="#/optimize" class="nav-link" data-view="optimize"><span class="icon">&#9889;</span> Optimize</a>
   <!-- Analyzer nav-children (#/optimize/<name>) are injected right here by App()
        — one per analyzer that has a real finding, in rank order — before the
        static Summarize and Relearn children below. See the nav-child injection
        effect in App(). The two static children carry data-optimize-static so the
        injector can find them and always insert BEFORE Summarize. -->
-  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Summarize</a>
-  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1" data-lens="improve"><span class="icon">&#8627;</span> Relearn</a>
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-optimize-static="1"><span class="icon">&#8627;</span> Summarize</a>
+  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-optimize-static="1"><span class="icon">&#8627;</span> Relearn</a>
   <!-- Sessions covers alerts / budget too: neither is per-session, so they are
        tabs of this screen's SDK-services zone rather than nav entries of their
        own (see SESSIONS_SDK_TABS). `data-view-alt` is a comma list so this row
        stays lit on either of them. -->
-  <a href="#/sessions" class="nav-link" data-view="sessions" data-view-alt="alerts,budget" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
+  <a href="#/sessions" class="nav-link" data-view="sessions" data-view-alt="alerts,budget"><span class="icon">&#9707;</span> Sessions</a>
   <!-- Traces sits in the flat Improve nav, not the Observe group: neither
        persona has a lens switcher, so an observe-group link is unreachable for
        both. It is hidden for claude-code by the per-view rule in the stylesheet
        — a coding-agent user reaches per-session traces from the session
        detail's Traces tab, which is ungated, and has no use for the
        cross-session browser. -->
-  <a href="#/traces" class="nav-link" data-view="traces" data-lens="improve"><span class="icon">&diamond;</span> Traces</a>
+  <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
        child of Optimize this entry was invisible from Traces / Cost / Alerts /
@@ -2286,14 +2250,14 @@ code.md-code {
        Last in the Improve group and separated, because it is a reference page
        rather than a live data view: it reads no window, has no filters, and
        does not belong interleaved with the screens that do. -->
-  <a href="#/faq" class="nav-link nav-reference" data-view="faq" data-lens="improve"><span class="icon">?</span> FAQ</a>
+  <a href="#/faq" class="nav-link nav-reference" data-view="faq"><span class="icon">?</span> FAQ</a>
   <!-- Spend is HIDDEN FOR BOTH PERSONAS, on purpose — see
        PERSONA_HIDDEN_DELIBERATE for the reason, which is where a view hidden
        everywhere has to record why. The row stays in the markup (rather than
        being deleted) because the screen is built, routed and populated; only
        its place in the nav is the product decision. Budget is no longer its
        companion tab: it moved to the Sessions screen with alerts and drift. -->
-  <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Spend</a>
+  <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Spend</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
@@ -2567,8 +2531,8 @@ function friendlyAlertType(type) {
 function getRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
   const qIdx = raw.indexOf('?');
-  // Empty hash → Dashboard, the top-level triage front door shared by both the
-  // Improve and Observe lenses (issue #654). getRoute is the single source of
+  // Empty hash → Dashboard, the top-level triage front door. getRoute is the
+  // single source of
   // the default so the first render and the URL agree — no render-time
   // location.hash redirect (which raced the first render, #132).
   const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'dashboard';
@@ -3654,10 +3618,6 @@ function StatusView({ params, persona, personaKnown, routeView }) {
           many there are. */ ''}
     ${showSdkZone ? html`
       <div class="section-gap"></div>
-      <div class="zone-head">
-        <span class="zone-title">SDK services</span>
-        <span class="zone-sub">unbounded telemetry · alerts and caps across agents</span>
-      </div>
       <div class="tab-bar" role="tablist">
         ${SESSIONS_SDK_TABS.map(([key, label]) => html`
           <a key=${key} class=${'tab' + (sdkTab === key ? ' active' : '')} role="tab"
@@ -13383,32 +13343,6 @@ function DashboardView({ params, persona }) {
   `;
 }
 
-// Two lenses, one router (self-improve-loop SPEC.md §12): Improve is the
-// Claude-Code wedge (review inbox, dashboard, session monitoring), Observe is
-// the SDK/observability suite. Views not listed default to 'improve' — every
-// existing view still renders, this only decides which nav group frames it.
-// Lens membership lives in TWO places that must agree: each nav anchor's own
-// `data-lens` attribute (pure CSS decides which group renders) and this map
-// (which lens a ROUTE belongs to, used to flip the active lens on a deep-link
-// or a back-nav). Changing one without the other desyncs the sidebar from the
-// URL: the link sits in one group while landing on it activates the other.
-// Dashboard is deliberately ABSENT here: it is the lens-neutral front door
-// (data-lens="all", visible in both lenses, issue #654). Mapping it to a lens
-// would flip an Observe user to Improve the moment they open it, hiding their
-// Observe nav (Greptile P1). A view with no entry resolves to `null` in the
-// route-sync effect, which then PRESERVES whatever lens is active rather than
-// forcing a switch.
-// alerts / drift / budget are 'improve' because they are no longer pages of
-// their own: they render inside the Sessions screen's SDK-services zone, and
-// Sessions is an Improve page. Leaving them mapped to 'observe' would flip the
-// sidebar to a lens neither persona has the moment one of those tabs opened.
-const VIEW_LENS = {
-  status: 'improve', sessions: 'improve', runs: 'improve',
-  faq: 'improve', optimize: 'improve',
-  alerts: 'improve', drift: 'improve', budget: 'improve',
-  traces: 'improve', cost: 'observe',
-};
-
 // ============================
 // App Router — keep-alive
 // ============================
@@ -13549,7 +13483,7 @@ function personaHides(persona, view, known) {
 // page, where it renders inside the SDK-services zone rather than as a
 // top-level nav entry of its own.
 const SESSIONS_SDK_TABS = [
-  ['services', 'Services'],
+  ['services', 'Sessions'],
   ['alerts', 'Alerts'],
   ['budget', 'Budget'],
 ];
@@ -13651,9 +13585,6 @@ const PERSONA_PICKER_VIEWS = new Set(['dashboard', 'optimize', 'sessions', 'trac
 // stands right now. Pure DOM work — reads no React state beyond its args.
 function syncNavState(view, param, persona, personaKnown) {
   const sidebar = document.querySelector('.sidebar');
-  const lens = (persona === 'claude-code' || persona === 'sdk')
-    ? 'improve'
-    : (VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve');
   // EMPTY until the persona is settled, so every `[data-persona="..."]` CSS
   // hide rule fails to match and the nav shows everything. The same
   // not-yet-known rule personaHides follows, applied to the half of the gating
@@ -13661,8 +13592,6 @@ function syncNavState(view, param, persona, personaKnown) {
   const personaAttr = personaKnown ? persona : '';
   if (sidebar) sidebar.dataset.persona = personaAttr;
   document.body.dataset.persona = personaAttr;
-  if (sidebar) sidebar.dataset.lens = lens;
-  document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
   document.querySelectorAll('.nav-link').forEach(el => {
     const v = el.dataset.view || '';
     if (el.classList.contains('nav-child')) {
@@ -13803,7 +13732,6 @@ function App() {
       a.className = 'nav-link nav-child';
       a.dataset.view = 'optimize';
       a.dataset.param = name;
-      a.dataset.lens = 'improve';
       a.dataset.optimizeDyn = '1';
       const icon = document.createElement('span');
       icon.className = 'icon';
@@ -13876,11 +13804,7 @@ function App() {
     }
   }, [persona, personaKnown, route.view]);
 
-  // Update active nav link + reveal nested children of the active section +
-  // keep the Improve/Observe lens pill in sync with the current route (self-
-  // improve-loop SPEC.md §12 — two lenses, one router; a direct link or
-  // back-nav into the other lens's view must flip the pill, not just the page).
-  // Active-highlight + reveal the active section's children + lens pill sync.
+  // Update active nav link + reveal nested children of the active section.
   // The rules live in module-level syncNavState so the nav-child injection effect
   // can re-apply them to newly-added Optimize children. `persona` is a dependency
   // because syncNavState writes `data-persona` (which drives CSS nav gating);
@@ -14022,23 +13946,6 @@ fetch('/api/v1/version')
       apply(pref);
     });
     mql.addEventListener('change', function () { if (pref === 'system') apply(pref); });
-  })();
-</script>
-<script>
-  // Lens pill: clicking switches the sidebar to that lens's default route.
-  // App()'s route effect (module script above) is the source of truth for
-  // which lens is actually shown — it re-syncs the pill + nav-link visibility
-  // on every hashchange, so this handler only needs to navigate.
-  (function () {
-    var LENS_HOME = { improve: '#/dashboard', observe: '#/traces' };
-    document.querySelectorAll('.lens-btn').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var lens = btn.dataset.lens;
-        var sidebar = document.querySelector('.sidebar');
-        if (sidebar && sidebar.dataset.lens === lens) return;
-        location.hash = LENS_HOME[lens] || '#/dashboard';
-      });
-    });
   })();
 </script>
 </body>

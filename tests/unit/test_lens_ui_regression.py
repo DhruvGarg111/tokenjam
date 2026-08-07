@@ -33,27 +33,36 @@ def html() -> str:
 # --------------------------------------------------------------------------- #
 # #654 — Dashboard is a persistent top-level item + the default landing route.
 # --------------------------------------------------------------------------- #
-def test_dashboard_nav_link_is_persistent_across_lenses(html: str) -> None:
-    # The Dashboard link must carry data-lens="all" so the improve/observe hide
-    # rules never remove it, and must NOT be scoped to the improve lens anymore.
+def test_dashboard_nav_link_is_the_persistent_front_door(html: str) -> None:
+    """Dashboard is the persistent top-level entry.
+
+    THIS TEST USED TO ENFORCE THE REMOVED LENS. It pinned the Dashboard link as
+    carrying data-lens="all" so the improve/observe hide rules could not remove
+    it. The Improve/Observe lens was dead for every persona and has been
+    removed, so the assertion is INVERTED rather than deleted: the link stays
+    pinned as present, and the lens attribute is pinned ABSENT so the removed
+    concept cannot creep back in through this markup.
+    """
     assert (
-        '<a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="all">'
-        in html
-    ), "Dashboard nav link must be data-lens=\"all\" (persistent in both lenses)"
-    assert (
-        '<a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="improve">'
-        not in html
-    ), "Dashboard must no longer be improve-only"
+        '<a href="#/dashboard" class="nav-link" data-view="dashboard">' in html
+    ), "Dashboard nav link must be present as the persistent front door"
+    assert "data-lens" not in html, "the removed lens concept must not return"
 
 
-def test_dashboard_link_sits_above_the_lens_switch(html: str) -> None:
-    dash = html.index('data-view="dashboard" data-lens="all"')
-    switch = html.index('<div class="lens-switch"')
-    assert dash < switch, "Dashboard nav link must be ABOVE the Improve/Observe toggle"
+def test_dashboard_link_sits_at_the_top_of_the_nav(html: str) -> None:
+    # It used to be pinned above the Improve/Observe toggle. With the lens gone,
+    # the durable property is that Dashboard still leads the nav.
+    dash = html.index('<a href="#/dashboard" class="nav-link" data-view="dashboard">')
+    optimize = html.index('<a href="#/optimize" class="nav-link" data-view="optimize">')
+    assert dash < optimize, "Dashboard nav link must lead the sidebar"
+    assert '<div class="lens-switch"' not in html, "the lens switch must stay removed"
 
 
-def test_persistent_lens_items_have_a_style_rule(html: str) -> None:
-    assert '.sidebar a.nav-link[data-lens="all"]' in html
+def test_persistent_front_door_has_a_style_rule(html: str) -> None:
+    # The spacing rule that seated Dashboard above the toggle is re-anchored to
+    # the view, not to the removed lens attribute.
+    assert '.sidebar a.nav-link[data-view="dashboard"]' in html
+    assert '.sidebar a.nav-link[data-lens="all"]' not in html
 
 
 def test_empty_hash_default_route_is_dashboard(html: str) -> None:
@@ -75,31 +84,34 @@ def test_default_route_normalization_agrees_with_getroute(html: str) -> None:
     ), "empty-hash normalization must write #/dashboard, not #/review"
 
 
-def test_dashboard_is_lens_neutral_and_preserves_active_lens(html: str) -> None:
-    # Greptile P1-3: Dashboard is data-lens="all", so opening it from Observe
-    # must keep the user in Observe. It must therefore be ABSENT from VIEW_LENS
-    # (a mapped lens would force a switch), and the route-sync effect must fall
-    # back to the sidebar's CURRENT lens for an unmapped view, not to 'improve'.
-    assert (
-        "dashboard: 'improve'" not in html
-    ), "Dashboard must not be classified as improve in VIEW_LENS (it is lens-neutral)"
-    # The lens-neutral fallback expression is still present for any future
-    # persona that keeps both lenses; both currently-known personas (claude-code
-    # and sdk) force 'improve' instead (guarded by
-    # test_persona_forces_improve_lens below).
-    assert (
-        "(VIEW_LENS[view] || (sidebar && sidebar.dataset.lens) || 'improve')" in html
-    ), "the lens-neutral fallback expression must remain"
+def test_the_lens_concept_is_gone(html: str) -> None:
+    """The Improve/Observe lens was dead UI and is removed.
+
+    It was hidden by CSS for BOTH personas, so no user could ever reach it, but
+    the hide was keyed on `.sidebar[data-persona="..."]` — an attribute
+    syncNavState leaves EMPTY until the persona resolves. That made the switch
+    render during the loading state and only then. The whole mechanism is gone;
+    this pins every part of it absent so it cannot return piecemeal.
+    """
+    for dead in (
+        '<div class="lens-switch"',
+        "lens-btn",
+        "data-lens",
+        "VIEW_LENS",
+        "dataset.lens",
+        "LENS_HOME",
+        ">Improve<",
+        ">Observe<",
+    ):
+        assert dead not in html, f"removed lens machinery is back: {dead}"
 
 
-def test_persona_forces_improve_lens(html: str) -> None:
-    # Neither the claude-code nor the sdk persona has Observe pages or a
-    # lens-switch, so both must be FORCED to 'improve'. Deriving the lens from a
-    # lens-neutral view (Dashboard) would preserve a stale 'observe' left by a
-    # prior session, collapsing the sidebar to Dashboard-only until a reload —
-    # the persona-toggle collapse bug.
-    assert "const lens = (persona === 'claude-code' || persona === 'sdk')" in html
-    assert "? 'improve'" in html
+def test_no_persona_computes_a_lens(html: str) -> None:
+    # Both personas used to be FORCED to the improve lens so the flat nav
+    # rendered regardless of stale lens state. With the lens removed the nav is
+    # unconditionally flat, so the forcing expression must be gone too.
+    assert "const lens = (persona === 'claude-code' || persona === 'sdk')" not in html
+    assert "? 'improve'" not in html
 
 
 def test_trace_detail_is_exempt_from_persona_redirect(html: str) -> None:
@@ -298,9 +310,9 @@ def test_sdk_sidebar_differs_from_claude_code_only_where_sdk_has_a_lever(
     parts stay pinned as present, and the identical-lists state is now pinned as
     ABSENT so it cannot come back.
     """
-    # Still shared: neither persona has a lens toggle, so both hide it.
-    assert '.sidebar[data-persona="claude-code"] .lens-switch { display: none; }' in html
-    assert '.sidebar[data-persona="sdk"] .lens-switch { display: none; }' in html
+    # Still shared: neither persona has a lens toggle, because the lens is gone
+    # entirely (see test_the_lens_concept_is_gone).
+    assert '<div class="lens-switch"' not in html
     # THE BAD STATE, pinned absent: the two persona keys must not carry the same
     # list, and the observe suite must not be hidden wholesale for SDK.
     assert "'sdk': ['traces', 'cost', 'alerts', 'drift', 'budget']," not in html, (
@@ -324,12 +336,8 @@ def test_sdk_sidebar_differs_from_claude_code_only_where_sdk_has_a_lever(
     assert '<a href="#/drift" class="nav-link" data-view="drift"' not in html
     # The predecessor's SDK-specific forcing of observe links visible, and its
     # hiding of Review inbox + Sessions, must still be gone.
-    assert 'a.nav-link[data-lens="observe"] { display: flex !important; }' not in html
     assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="review"]' not in html
     assert '.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"]' not in html
-    # The lens is forced to 'improve' for both personas so the flat nav renders
-    # regardless of stale lens state.
-    assert "(persona === 'claude-code' || persona === 'sdk')" in html
 
 
 # --------------------------------------------------------------------------- #
@@ -999,9 +1007,12 @@ def test_drift_is_unreachable_from_every_surface(html: str) -> None:
     # a caption ("within baseline") straight onto the Dashboard.
     assert 'label="Agents drifting"' not in html
     assert 'href="#/drift"' not in html
-    # The zone heading's copy loses it too: the strip no longer offers drift.
+    # The zone heading is gone entirely -- it duplicated the page's own
+    # "Sessions" H1 -- so neither wording can render. Pinned absent rather
+    # than deleted so a restored heading cannot quietly bring drift back.
     assert "alerts, drift and caps across agents" not in html
-    assert "alerts and caps across agents" in html
+    assert "alerts and caps across agents" not in html
+    assert '<span class="zone-title">SDK services</span>' not in html
 
 
 def test_the_drift_mechanism_is_kept_intact_behind_the_removed_surface(
