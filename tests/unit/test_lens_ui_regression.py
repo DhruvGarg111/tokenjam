@@ -986,6 +986,36 @@ def test_alerts_drift_budget_are_sessions_tabs_not_top_level_views(
     assert "(el.dataset.viewAlt || '').split(',')" in html
 
 
+def test_the_sessions_sub_tabs_receive_the_selected_persona(html: str) -> None:
+    """A sub-tab is a view too, and its RENDER SITE is where the scope is lost.
+
+    The Alerts tab shipped rendering as `<${AlertsView} params=${EMPTY_PARAMS} />`
+    with no persona at all, so under the SDK persona it listed claude-code and
+    codex alerts: the endpoint filters correctly, the client simply never asked
+    it to. A signature-only assertion would not have caught this, because the
+    parent dropped the prop rather than the child ignoring it. So pin BOTH ends.
+    """
+    # The render site hands it down.
+    assert (
+        "<${AlertsView} params=${EMPTY_PARAMS} persona=${persona} />" in html
+    ), "the Alerts tab must receive the selected persona from its parent"
+    # The component reads it and forwards it to its own fetch.
+    alerts_at = html.index("function AlertsView(")
+    sig_end = html.index(")", alerts_at)
+    assert "persona" in html[alerts_at:sig_end], "AlertsView must take a persona"
+    body = html[alerts_at:alerts_at + 4000]
+    assert "persona: persona || undefined" in body, (
+        "AlertsView must send the persona to /alerts"
+    )
+    # ...and reload when it changes, or a switch leaves the old list rendered.
+    assert "[severity, unread, agentId, since, persona]" in body, (
+        "persona must be a load dependency of the alerts read"
+    )
+    # Budget's own alert reads cover the same agents its caps do.
+    assert "type: 'cost_budget_daily', since: '24h', persona: 'sdk'" in html
+    assert "type: 'cost_budget_session', since: '24h', persona: 'sdk'" in html
+
+
 def test_drift_is_unreachable_from_every_surface(html: str) -> None:
     """The founder's decision, as a guard: Drift has no way in.
 

@@ -3687,7 +3687,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
       ${sdkTab === 'services' ? html`
         <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} history=${sdkHistory} />
         <${SdkSessionHistory} history=${sdkHistory} framing=${data.framing} />` : null}
-      ${sdkTab === 'alerts' ? html`<${AlertsView} params=${EMPTY_PARAMS} />` : null}
+      ${sdkTab === 'alerts' ? html`<${AlertsView} params=${EMPTY_PARAMS} persona=${persona} />` : null}
       ${sdkTab === 'budget' ? html`<${BudgetView} params=${EMPTY_PARAMS} />` : null}
     ` : null}
   `;
@@ -5986,7 +5986,7 @@ function TopTenantsPanel({ tenants, framing }) {
 // ============================
 // Alerts View
 // ============================
-function AlertsView({ params }) {
+function AlertsView({ params, persona }) {
   const DEFAULTS = { severity: '', unread: '', agent_id: '', since: '' };
   const severity = readParam(params, 'severity', DEFAULTS.severity,
     v => ['critical', 'warning', 'info'].includes(v));
@@ -6007,9 +6007,15 @@ function AlertsView({ params }) {
       unread: unread === 'true' ? 'true' : undefined,
       agent_id: agentId || undefined,
       since: since || undefined,
+      // The selected persona, or the endpoint answers for every agent. This
+      // view renders as a tab of another screen, so it is easy to forget it
+      // takes a scope at all: the parent has to hand it down (see the render
+      // site in StatusView) and it has to be a load dependency, or a persona
+      // switch leaves the previous persona's alerts on screen.
+      persona: persona || undefined,
     });
     setAlerts(d.alerts || []);
-  }, [severity, unread, agentId, since]);
+  }, [severity, unread, agentId, since, persona]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
@@ -6328,10 +6334,12 @@ function BudgetView({ params }) {
     // forgot the filter would otherwise publish caps for agents this surface
     // does not cover.
     api('/budget', { persona: 'sdk' }).catch(e => { throw new Error('/budget failed: ' + e.message); }),
-    api('/alerts', { type: 'cost_budget_daily', since: '24h' })
+    // SDK-scoped for the same reason the /budget read above is: these are the
+    // alerts those caps fire, so they must cover the same agents the caps do.
+    api('/alerts', { type: 'cost_budget_daily', since: '24h', persona: 'sdk' })
       .then(d => d.alerts || [])
       .catch(() => []),
-    api('/alerts', { type: 'cost_budget_session', since: '24h' })
+    api('/alerts', { type: 'cost_budget_session', since: '24h', persona: 'sdk' })
       .then(d => d.alerts || [])
       .catch(() => []),
   ]).then(([budget, daily, session]) => {
