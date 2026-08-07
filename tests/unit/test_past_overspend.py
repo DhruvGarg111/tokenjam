@@ -829,7 +829,9 @@ def test_the_card_states_what_its_figure_does_not_cover(ui):
     # happens and is invisible without it.
     card = ui[ui.index("function CostProposalCard"):]
     card = card[:card.index("\n// The headline band")]
-    assert "${prop.coverage_note}" in card
+    # `coverage_note` now renders through `proseParagraphs()` (it carries
+    # blank-line-separated paragraphs), not as a bare interpolation.
+    assert "${proseParagraphs(prop.coverage_note)}" in card
     assert "<summary>What this figure does and does not cover</summary>" in card
     assert "observedCostSentence" not in card
 
@@ -852,7 +854,13 @@ def test_the_basis_is_reachable_from_the_card_not_only_on_hover(ui):
     card = card[:card.index("\n// The headline band")] if "\n// The headline band" in card else card
     assert 'title=${prop.past_overspend_basis' in card
     assert "How this number was derived" in card
-    assert "${prop.past_overspend_basis}" in card
+    # The body-rendered copy now goes through `proseParagraphs()`, not a bare
+    # interpolation. Asserted as its own pattern (distinct from the bare
+    # `title=${prop.past_overspend_basis` hover attribute checked above) so
+    # this cannot pass on the tooltip alone -- a body-only regression would
+    # still leave the hover-attribute assertion above green, and a
+    # tooltip-only regression would fail this one.
+    assert "${proseParagraphs(prop.past_overspend_basis)}" in card
 
 
 def test_the_observed_figure_is_visually_separated_from_recoverable_tiles(ui):
