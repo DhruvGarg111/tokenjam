@@ -698,10 +698,32 @@ def post_relearn_revert(request: Request, fix_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 @router.get("/relearn/cost-proposals", dependencies=[Depends(require_api_key)])
-def get_cost_proposals(request: Request) -> dict[str, Any]:
+def get_cost_proposals(
+    request: Request, persona: str | None = None,
+) -> dict[str, Any]:
     """Cost proposals for the Review inbox, listed beside relearn proposals.
 
-    Returns ``{"status": "ready"|"computing"|"never_run"|"error",
+    ``persona`` scopes the figures to one side of the dashboard's "Viewing as"
+    picker. This endpoint feeds the Dashboard hero band, the Total-opportunity
+    tile AND every Optimize sub-page's inline fix cards, so before it took this
+    parameter those three surfaces published whole-corpus dollars under
+    whichever persona the reader had selected — the picker changed the label and
+    nothing else.
+
+    The narrowing happens at COMPUTE time, not here. ``/optimize`` can accept a
+    persona and slice on read because it is slicing a set of analyzer NAMES; a
+    dollar total summed over a mixed corpus has no such seam. So the scan cycle
+    stores one proposal list per persona and this route selects among them. A
+    ledger that predates that — or one written by a lone ``tj optimize``
+    refresh, which has no per-persona reports to adapt — cannot answer, and
+    returns ``status: "persona_unscoped"`` with ``persona_scoped: false``, an
+    empty ``proposals`` and a rollup summed over nothing. **A client must render
+    that as not-yet-known and offer a rescan.** It is the third state (root
+    anti-pattern 22): rendering it as ``$0`` or "no waste found" asserts a
+    measurement that was never taken, and does it in the reassuring direction.
+
+    Returns ``{"status": "ready"|"computing"|"never_run"|"error"|
+    "persona_unscoped",
     "computed_at": iso|null, "proposals": [dict, ...], "rollup": dict,
     "degraded": bool, "last_error": str|null, "last_error_at": iso|null}``.
 
@@ -777,14 +799,30 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     it. For a cost proposal the contribution IS ``past_overspend_usd`` unchanged;
     relearn's differs from its row's unbounded figure, which is why the field
     exists rather than each surface picking a number per row kind."""
+    from tokenjam.core.framing import PERSONAS
+    from tokenjam.core.persona_scope import persona_scopes_population
+
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
     # Listed WITH their proposal_ids: a model-routing card's Approve names an
     # ID and nothing else, so the ID has to travel with the card it belongs to.
-    proposals: list[dict[str, Any]] = (
-        relearn_proposals.list_cost_proposals(config)
-        if block is not None and block.get("cost_computed_at") else []
+    #
+    # `persona_resolved` is load-bearing and is published below. A ledger that
+    # predates per-persona proposals holds ONE whole-corpus list, and this
+    # endpoint is what the Dashboard hero band, the Total-opportunity tile and
+    # every Optimize sub-page's inline fix cards read — so serving that list
+    # under a persona label is the single biggest way a mixed-corpus figure
+    # reaches a persona-scoped surface. There is no read-time narrowing that
+    # can rescue it, so the answer is "not yet known" and a rescan.
+    proposals, persona_resolved = (
+        relearn_proposals.cost_proposals_scoped_to_persona(config, persona=persona)
+        if block is not None and block.get("cost_computed_at") else ([], True)
     )
     # Stamped BEFORE anything reads them, so the applied state a row carries and
     # the population the rollup sums are one resolution of the ledger rather than
@@ -813,8 +851,24 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # full, and discloses any cluster it could not place through `excluded`.
     # `core/optimize/inbox_contribution.py` owns that design and why it is
     # neither of the two mechanisms this repo retired.
-    relearn_cache = relearn_store.read_cache(config=config)
-    relearn_finding = (relearn_cache or {}).get("finding")
+    #
+    # UNDER A PERSONA NARROWING, relearn's own finding has to be that persona's
+    # too. The relearn cache is a whole-corpus artifact, so folding it into a
+    # scoped rollup would put the corpus's failure-recovery money on top of one
+    # persona's cost proposals — two populations, one total, which is exactly
+    # what the rest of this change removes. The scan cycle stores each persona's
+    # lane-partitioned relearn finding beside its proposals for this reason.
+    # `persona_scopes_population` and not a bare `persona is not None`: `mixed`
+    # and `unknown` narrow nothing, so the whole-corpus relearn cache IS their
+    # answer — reading a per-persona key for them would find nothing and
+    # silently drop relearn's money out of a total that should contain it.
+    if persona_scopes_population(persona) and persona_resolved and (block or {}).get(
+        "cost_relearn_by_persona"
+    ):
+        relearn_finding = (block or {}).get("cost_relearn_by_persona", {}).get(persona)
+    else:
+        relearn_cache = relearn_store.read_cache(config=config)
+        relearn_finding = (relearn_cache or {}).get("finding")
     relearn_applied_sigs = relearn_apply.applied_signatures(config)
     past_overspend = inbox_contribution.gather_rollup_population(
         open_proposals, relearn_finding, window_days=window_days,
@@ -842,6 +896,13 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         status = "error"
     else:
         status = "never_run"
+    if not persona_resolved:
+        # The THIRD state, published rather than collapsed into either of the
+        # other two. `proposals` is empty and `past_overspend` was summed over
+        # nothing, so returning `status: ready` here would assert "this persona
+        # has no recoverable waste" — a claim nothing measured. A surface must
+        # render this as unknown and offer a rescan, never as $0.
+        status = "persona_unscoped"
     return {
         "status": status,
         "computed_at": block.get("cost_computed_at") if block else None,
@@ -849,6 +910,12 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         "proposals": proposals,
         "past_overspend": past_overspend,
         "framing": framing,
+        # WHAT POPULATION THESE FIGURES COVER. `persona` echoes what was asked
+        # for; `persona_scoped` says whether the ledger could actually answer
+        # it. A client must not publish a number from this payload when
+        # `persona_scoped` is false and a persona was requested.
+        "persona": persona,
+        "persona_scoped": bool(persona_resolved),
         "degraded": bool(last_error),
         "last_error": last_error,
         "last_error_at": last_error_at,
