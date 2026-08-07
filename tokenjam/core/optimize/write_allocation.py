@@ -154,7 +154,22 @@ def allocate_report_writes(
     # ONE budget, sized ONCE off the `summarize` scan both producers used to
     # read separately. Sizing it here rather than in either producer is what
     # stops the same headroom being spent twice.
-    summarize_finding = findings.get("summarize")
+    # THIS REPORT'S OWN PERSONA decides whether `summarize` may size the budget,
+    # even when the pass that built the report dispatched a wider analyzer set
+    # (the daemon computes the union so one artifact answers for either side of
+    # the persona picker — see `runner.build_report`'s `personas`). `summarize`
+    # is gated for `sdk` because that persona has no agent instruction files to
+    # scan; letting a union pass's summarize finding through here would size an
+    # SDK window's write budget off a footprint the matrix records as
+    # deliberately unmeasured for it (ANALYZER-PERSONA-MATRIX.md §10, the
+    # documented `None` path that leaves the lane cap intact).
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+
+    _report_persona = str(getattr(report, "persona", "") or "unknown")
+    summarize_finding = (
+        None if "summarize" in disabled_analyzers_for_persona(_report_persona)
+        else findings.get("summarize")
+    )
     budget = wb.build_write_budget(
         existing_agent_file_tokens=wb.measured_agent_file_tokens(summarize_finding),
         existing_by_path=wb.measured_agent_file_tokens_by_path(summarize_finding),

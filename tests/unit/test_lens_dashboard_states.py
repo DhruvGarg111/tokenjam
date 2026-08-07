@@ -23,6 +23,7 @@ is unknown.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -190,9 +191,17 @@ def test_recoverable_tiles_are_derived_only_from_an_answer_we_hold(html):
 
 
 def _dashboard(html: str) -> str:
+    """``DashboardView``'s body, bounded by the next TOP-LEVEL declaration.
+
+    This used to end at a ``// Two lenses, one router`` comment, which vanished
+    with the dead Improve/Observe lens and took all four assertions below down
+    with it -- an extractor anchored on prose is only as durable as the prose.
+    A column-0 declaration is a structural boundary instead.
+    """
     start = html.index("function DashboardView")
-    end = html.index("// Two lenses, one router", start)
-    return html[start:end]
+    nxt = re.search(r"\n(?:function|const|class) ", html[start + 10:])
+    assert nxt, "no top-level declaration follows DashboardView; update this extractor"
+    return html[start:start + 10 + nxt.start()]
 
 
 def test_no_panel_waits_on_another_panel_s_endpoint(html):
@@ -319,12 +328,22 @@ def test_an_unknown_health_tile_says_which_kind_of_unknown_it_is(html):
 
 def test_every_health_tile_declares_the_status_of_its_source(html):
     # A tile without a status= defaults to 'ready' and would silently resume
-    # publishing derived zeros, so all five must pass one.
-    start = html.index('<div class="band-label">Health at a glance</div>')
+    # publishing derived zeros, so every one of them must pass one. The count is
+    # four since the "Agents drifting" tile was removed with the rest of the
+    # Drift surface (founder decision, un-surfaced not deleted): pinned as a
+    # number so a tile that arrives without a status is still caught.
+    start = html.index('<div class="section-band">Health at a glance</div>')
     end = html.index("<!-- The HERO", start)
     band = html[start:end]
-    assert band.count("<${HealthTile}") == 5
-    assert band.count("status=$") == 5
+    assert band.count("<${HealthTile}") == 4
+    assert band.count("status=$") == 4
+    # The removed tile, pinned absent: it published a figure and a reassuring
+    # caption ("within baseline") for a surface nothing else links to.
+    assert 'label="Agents drifting"' not in band
+    # Comment prose names the removed route to explain the removal, so the link
+    # check runs against code only.
+    band_code = re.sub(r"/\*.*?\*/", "", band, flags=re.S)
+    assert "#/drift" not in band_code
 
 
 def test_the_front_door_empty_card_requires_its_inputs_to_have_answered(html):
@@ -377,10 +396,12 @@ def test_the_past_overspend_heading_has_no_estimated_badge(html):
     # than banning the class outright.
     # The heading text is followed by the band's own window statement
     # ("· over the last N days"), so anchor on the text rather than on a
-    # closing bracket that no longer sits immediately after it.
+    # closing bracket that no longer sits immediately after it. The heading
+    # uses the shared `.section-band` zone-heading primitive (lens redesign),
+    # not a page-local `.band-label`.
     idx = html.index(">Opportunities to optimize token efficiency")
     heading = html[idx - 400:idx + 400]
-    assert "band-label" in heading
+    assert "section-band" in heading
     assert "estimated-tag" not in heading
     assert 'Opportunities to optimize token efficiency <span class="estimated-tag"' not in html
     assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)

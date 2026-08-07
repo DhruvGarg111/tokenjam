@@ -208,6 +208,12 @@ def read_cost_proposals(
     block["cost_proposals"] = block.get("cost_proposals") or []
     block["cost_window_days"] = block.get("cost_window_days") or 0
     block["cost_excluded"] = block.get("cost_excluded") or {}
+    block["cost_proposals_by_persona"] = block.get("cost_proposals_by_persona") or {}
+    block["cost_relearn_by_persona"] = block.get("cost_relearn_by_persona") or {}
+    # Absent on any cache written before per-persona proposals existed, and
+    # `False` is the truthful reading of such a block: it holds one whole-corpus
+    # list and cannot answer for a persona.
+    block["cost_persona_scoped"] = bool(block.get("cost_persona_scoped"))
     # Stable shape: these read as `None` (never guessed/derived) on a cache
     # written before the field existed, same as before prefix-projection.
     for key in (
@@ -259,6 +265,8 @@ def write_cost_proposals(
     window_days: int | None = None, excluded: dict[str, Any] | None = None,
     since: str | None = None, until: str | None = None,
     provenance: CycleProvenance | None = None,
+    by_persona: dict[str, list[Any]] | None = None,
+    relearn_by_persona: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
@@ -298,7 +306,22 @@ def write_cost_proposals(
     no current occupant (see ``read_cost_proposals``) — always written when
     this call succeeds (unlike ``window_days`` above, this one has no "leave
     untouched" case: a fresh recompute always knows the current excluded
-    state, even if it's "nothing")."""
+    state, even if it's "nothing").
+
+    ``by_persona`` is the SAME proposals recomputed once per persona over that
+    persona's own sessions, keyed by persona name. It exists because a dollar
+    figure cannot be narrowed after the fact: ``cost_proposals`` above is one
+    list built over the whole corpus, and no read-time filter can extract one
+    persona's money from it. A caller with per-persona reports passes them
+    here; one without passes ``None``.
+
+    ``None`` writes ``cost_persona_scoped: false`` and an EMPTY per-persona
+    map, deliberately clearing any previous one. Keeping a stale per-persona
+    block beside a fresher whole-corpus list is the torn artifact
+    ``cycle_provenance`` exists to prevent — two measurements taken at two
+    different moments presented as one. A reader that asks for a persona this
+    block cannot answer for must render NOT-YET-KNOWN, never these figures
+    under that persona's label."""
     from dataclasses import is_dataclass
 
     p = path or default_cache_path(config)
@@ -330,6 +353,23 @@ def write_cost_proposals(
     if effective_until is not None:
         payload["cost_until"] = effective_until
     payload["cost_excluded"] = excluded or {}
+    payload["cost_proposals_by_persona"] = {
+        persona: [
+            asdict(pr) if is_dataclass(pr) and not isinstance(pr, type) else dict(pr)
+            for pr in rows
+        ]
+        for persona, rows in (by_persona or {}).items()
+    }
+    # The FLAG is what a reader checks, not the map's emptiness: a persona
+    # whose pass legitimately produced no proposals is an empty list under a
+    # scoped ledger, which is a different statement from a ledger that was
+    # never scoped at all.
+    # Relearn's clusters reach the inbox headline through
+    # `inbox_contribution`, not through `cost_proposals`, so a persona-scoped
+    # rollup needs that persona's own lane-partitioned relearn finding here or
+    # it would fold the whole corpus's back in.
+    payload["cost_relearn_by_persona"] = dict(relearn_by_persona or {})
+    payload["cost_persona_scoped"] = bool(by_persona)
     _atomic_write(p, payload)
     return payload
 

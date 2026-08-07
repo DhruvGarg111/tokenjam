@@ -406,6 +406,7 @@ def override_since_for_compare(
 
 def compute_window_totals(
     db, since: datetime, until: datetime, agent_id: str | None = None,
+    persona: str | None = None,
 ) -> WindowTotals:
     """Aggregate sessions/tokens/cost across the spans table for a window.
 
@@ -413,7 +414,7 @@ def compute_window_totals(
     than touching `db.conn` directly (issue #309).
     """
     sessions, in_tok, out_tok, cache_tok, cache_write_tok, cost = db.get_window_cost_totals(
-        since, until, agent_id,
+        since, until, agent_id, persona,
     )
     return WindowTotals(
         since=since, until=until,
@@ -433,6 +434,7 @@ def compute_cost_diff(
     compare: str,
     agent_id: str | None = None,
     top_n: int = 5,
+    persona: str | None = None,
 ) -> CostDiff:
     """
     Build a CostDiff between the current window and the resolved compare window.
@@ -447,16 +449,21 @@ def compute_cost_diff(
         compare, current_since, current_until,
     )
 
-    current = compute_window_totals(db, current_since, current_until, agent_id)
-    previous = compute_window_totals(db, prev_since, prev_until, agent_id)
+    # ONE persona across all four reads. The two window totals and the two
+    # delta breakdowns are rendered as one comparison, so a scope applied to
+    # some of them would put different populations on either side of a delta.
+    current = compute_window_totals(db, current_since, current_until, agent_id, persona)
+    previous = compute_window_totals(db, prev_since, prev_until, agent_id, persona)
 
     return CostDiff(
         current=current,
         previous=previous,
         by_agent=db.get_cost_delta_by_group(
             "agent_id", current_since, current_until, prev_since, prev_until, top_n,
+            persona,
         ),
         by_model=db.get_cost_delta_by_group(
             "model", current_since, current_until, prev_since, prev_until, top_n,
+            persona,
         ),
     )

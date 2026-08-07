@@ -39,6 +39,7 @@ from tokenjam.core.optimize.clustering import group_by_key, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Conservative threshold: a cluster needs at least this many sessions
 # before we'll recommend replacing it with a script. Lower thresholds
@@ -174,6 +175,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope — see `core/persona_scope.py`. The
+    # per-cluster `sessions` aggregate further down needs no clause of its own:
+    # its `session_id IN (...)` list is drawn from these already-scoped rows.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT session_id, tool_name, attributes "

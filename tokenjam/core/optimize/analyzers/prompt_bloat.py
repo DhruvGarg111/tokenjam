@@ -83,6 +83,7 @@ from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.summarize.candidates import find_repo_root
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Tokens with a predicted significance score below this threshold are
 # considered "bloat" — they contribute little to the model's output.
@@ -341,7 +342,9 @@ def estimate_trim_recoverable(
     return round((low_sig_tokens / 1_000_000) * avg_input_rate_per_mtok, 6)
 
 
-def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
+def _window_avg_input_rate(
+    conn, since, until, agent_id: str | None, persona_scope: str | None = None,
+) -> float:
     """Input-token-weighted average input rate ($/MTok) across the window's
     model mix, used to price trimmable tokens.
 
@@ -359,6 +362,7 @@ def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
@@ -558,6 +562,8 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope — see `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT agent_id, attributes FROM spans WHERE {where} "
@@ -644,7 +650,7 @@ def run(ctx: AnalyzerContext) -> None:
 
         if est_tokens > 0 and avg_rate is None:
             avg_rate = _window_avg_input_rate(
-                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.persona_scope,
             )
         cost_reduction = (
             estimate_trim_recoverable(est_tokens, avg_rate)
@@ -679,7 +685,7 @@ def run(ctx: AnalyzerContext) -> None:
     if low_sig_tokens > 0:
         if avg_rate is None:
             avg_rate = _window_avg_input_rate(
-                ctx.conn, ctx.since, ctx.until, ctx.agent_id
+                ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.persona_scope,
             )
         rec_usd = estimate_trim_recoverable(low_sig_tokens, avg_rate)
         rec_tokens = low_sig_tokens
