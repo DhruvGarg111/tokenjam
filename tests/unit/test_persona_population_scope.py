@@ -13,7 +13,7 @@ about *what it runs over*.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import pytest
 

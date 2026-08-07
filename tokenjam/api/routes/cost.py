@@ -16,7 +16,7 @@ from tokenjam.core.framing import (
     plan_determination_mix,
 )
 from tokenjam.core.models import CostFilters
-from tokenjam.core.persona_scope import add_persona_clause, persona_scopes_population
+from tokenjam.core.persona_scope import add_persona_clause
 from tokenjam.core.pricing_coverage import coverage_note, summarize_pricing_coverage
 from tokenjam.utils.time_parse import parse_since, utcnow
 
