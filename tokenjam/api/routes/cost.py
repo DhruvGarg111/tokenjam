@@ -491,15 +491,33 @@ def _recoverable_basis_note(
     middle sentence (this bar does not follow the range picker; the estimate
     comes from the stored scan) was and is true, and is kept verbatim.
 
-    WHAT THIS MAY NOT CLAIM, and deliberately does not: that the ceiling's
-    POPULATION is persona-scoped. The analyzer SET is (`findings_for_persona`),
-    and the spend below it is (`add_persona_clause`), but a contributing analyzer
-    is free to measure on a wider basis than this window; `relearn` scans
-    unbounded on-disk history by design and lands the same figure in a scoped
-    total as in an unscoped one. So the sentence says the ceiling counts the
-    analyzers that persona can act on, "each measured on its own basis", which is
-    true of every contributor. Naming which contributors are wider than the
-    window needs a per-analyzer disclosure this note cannot carry.
+    NO SENTENCE HERE MAY DESCRIBE BOTH FIGURES AT ONCE, because the two do not
+    share a population and no short phrase covering both can be true. Measured on
+    a real corpus, per-analyzer, over one 30-day window:
+
+    * the SPEND is exactly persona-scoped (`add_persona_clause`). The two
+      personas partition the corpus to the cent, so "covers <persona> traffic"
+      is precise for this half;
+    * the CEILING is a MIX. `resend`, `subagent` and `summarize` move with the
+      persona; `downsize` is exactly additive across the two; but `relearn` and
+      `deadweight` come back byte-identical scoped and unscoped, because their
+      basis is an unbounded corpus scan rather than this window (matrix §7b,
+      `relearn.py`'s own note). On that corpus they were roughly a tenth of the
+      claude-code total, sitting under a persona label while not being
+      persona-scoped at all.
+
+    So both of the obvious wordings are false. "Both figures cover every agent"
+    is false for the spend under a selected persona; "both figures cover this
+    persona's traffic" is false for the corpus-wide share of the ceiling. The
+    note therefore states each figure's coverage separately and says of the
+    ceiling only what holds for every contributor: each is measured on its own
+    basis, and not every basis is scoped to the persona. Naming WHICH
+    contributors are wider needs a per-analyzer disclosure this note cannot
+    carry, and `relearn` currently ships an empty `estimate_basis`, so its card
+    does not say either.
+
+    Do not "simplify" this back into one sentence about both figures. That is
+    the exact edit that produced the wording this replaced.
     """
     if since_dt is None or until_dt is None:
         return (
@@ -516,10 +534,9 @@ def _recoverable_basis_note(
     label = _PERSONA_TRAFFIC_LABEL.get(persona or "")
     if label:
         return (
-            f"Both figures cover {label} traffic {stable} The persona picker "
-            "scopes both halves: the spend is measured over that persona's own "
-            "traffic, and the ceiling counts only the analyzers it can act on, "
-            "each measured on its own basis."
+            f"The spend covers {label} traffic {stable} The ceiling counts only "
+            "the analyzers that persona can act on, each measured on its own "
+            "basis; not every basis is scoped to this persona."
         )
     # NO PERSONA SELECTED, and this case is NOT a clean corpus total, so the note
     # may not imply one. The spend covers every agent, but the ceiling is still
@@ -533,10 +550,10 @@ def _recoverable_basis_note(
             f"The spend covers every agent {stable} The ceiling does not: with no "
             f"persona selected it counts only the analyzers a {lever_label} user "
             "can act on, each measured on its own basis. Select a persona above "
-            "to put both figures on one population."
+            "to scope the spend to that persona too."
         )
     return (
-        f"Both figures cover every agent {stable} Every analyzer contributes to "
+        f"The spend covers every agent {stable} Every analyzer contributes to "
         "the ceiling, each measured on its own basis."
     )
 

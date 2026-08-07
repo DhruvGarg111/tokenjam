@@ -409,12 +409,22 @@ async def test_the_disclosure_travels_with_the_pair(persona, window, monkeypatch
     # kept passing because they matched the string rather than the behaviour,
     # which is exactly how the wording outlived the change that falsified it.
     assert "not which traffic is measured" not in note
+    # NOR may any sentence describe both figures at once. The spend is exactly
+    # persona-scoped, but the ceiling is a mix: measured per-analyzer on a real
+    # corpus, `relearn` and `deadweight` return byte-identical figures scoped
+    # and unscoped because their basis is an unbounded corpus scan, while
+    # `resend`/`subagent`/`summarize` move with the persona. So "both cover
+    # every agent" and "both cover this persona's traffic" are each false in
+    # one direction, and the note gives each figure its own claim.
+    assert "Both figures" not in note
+    assert note.startswith("The spend covers ")
     if persona in ("claude-code", "sdk"):
-        # A scoped read names its persona and drops the corpus-wide claim.
+        # A scoped read names its persona for the SPEND and drops the
+        # corpus-wide claim, while hedging the ceiling's mixed basis.
         assert "every agent" not in note, (
             f"persona={persona}: the note still claims to cover every agent"
         )
-        assert "scopes both halves" in note
+        assert "not every basis is scoped to this persona" in note
     else:
         # Unscoped is a hybrid, not a clean corpus total: every agent's spend
         # under a ceiling still filtered by the dominant persona's lever set.

@@ -195,14 +195,42 @@ def test_the_note_no_longer_claims_the_picker_leaves_the_traffic_alone():
         assert "changes which analyzers contribute to the ceiling, not" not in note
 
 
-def test_a_selected_persona_is_named_and_both_halves_are_declared_scoped():
+def test_a_selected_persona_is_named_and_each_figure_gets_its_own_claim():
     for persona, label in (("claude-code", "Claude Code"), ("sdk", "SDK workflow")):
         note = _recoverable_basis_note(_NOW - timedelta(days=30), _NOW, 30, persona)
-        assert f"cover {label} traffic" in note
-        # It must NOT claim to cover every agent while a persona narrows it.
+        assert f"The spend covers {label} traffic" in note
+        # It must NOT claim to cover every agent while a persona narrows the spend.
         assert "every agent" not in note, f"{persona} note still claims corpus scope"
-        assert "scopes both halves" in note
+        # Nor may it claim the ceiling is scoped to that persona; see
+        # test_no_sentence_describes_both_figures_at_once for why.
+        assert "not every basis is scoped to this persona" in note
         assert "—" not in note
+
+
+def test_no_sentence_describes_both_figures_at_once():
+    """THE INVARIANT. The two figures do not share a population.
+
+    The spend is exactly persona-scoped; the ceiling is a mix, because
+    `relearn` and `deadweight` measure on an unbounded corpus scan and return
+    the same figure scoped or not. So "Both figures cover every agent" is false
+    under a selected persona, and "both cover this persona's traffic" is false
+    for that corpus-wide share. Any single coverage claim about the pair is
+    wrong in one direction or the other, which is why each figure states its
+    own. Pinned as a shape, not as a phrase, so the next rewrite cannot
+    reintroduce it under different words.
+    """
+    for persona in (None, "claude-code", "sdk"):
+        for lever in (None, "claude-code", "sdk", "mixed"):
+            note = _recoverable_basis_note(
+                _NOW - timedelta(days=30), _NOW, 30, persona, lever,
+            )
+            assert "Both figures" not in note, (
+                f"persona={persona!r} lever={lever!r}: one claim about both "
+                "figures cannot be true, they do not share a population"
+            )
+            # The spend always gets its own sentence, and it is the only half
+            # that may carry a flat coverage claim.
+            assert note.startswith("The spend covers "), note[:60]
 
 
 def test_the_unscoped_note_does_not_imply_a_clean_corpus_total():
@@ -226,6 +254,52 @@ def test_an_unclassified_corpus_gets_the_plain_note_not_a_false_lever_claim():
         note = _recoverable_basis_note(_NOW - timedelta(days=30), _NOW, 30, None, lever)
         assert "Every analyzer contributes" in note
         assert "The ceiling does not" not in note
+
+
+def test_the_ceiling_really_does_mix_scoped_and_corpus_wide_components():
+    """The measurement the note's wording is built on, encoded as a fixture.
+
+    Measured per-analyzer on the operator's corpus over one 30-day window:
+    `relearn` and `deadweight` come back byte-identical from the claude-code
+    pass and the unscoped pass, because their basis is an unbounded corpus scan;
+    `resend`, `subagent` and `summarize` move with the persona; `downsize` is
+    exactly additive across the two. So the ceiling is neither wholly scoped
+    nor wholly corpus-wide, and no single coverage sentence can cover it.
+
+    This drives `_collect_recoverable` over two reports shaped like those two
+    passes and asserts the mix survives, so if the corpus-wide analyzers ever
+    become window-scoped the note's hedge can be tightened deliberately rather
+    than by accident.
+    """
+    corpus_wide = {
+        "relearn": _FakeFinding(past_overspend_usd=250.735256, past_overspend_tokens=107529906),
+        "deadweight": _FakeFinding(past_overspend_usd=2.76376, past_overspend_tokens=552752),
+    }
+    scoped = _FakeReport(downgrade=None, findings={
+        **{k: _FakeFinding(v.past_overspend_usd, v.past_overspend_tokens) for k, v in corpus_wide.items()},
+        "resend": _FakeFinding(past_overspend_usd=429.120533, past_overspend_tokens=828619941),
+    })
+    unscoped = _FakeReport(downgrade=None, findings={
+        **{k: _FakeFinding(v.past_overspend_usd, v.past_overspend_tokens) for k, v in corpus_wide.items()},
+        "resend": _FakeFinding(past_overspend_usd=430.123459, past_overspend_tokens=830539733),
+    })
+
+    by_name = lambda rep, p: {  # noqa: E731
+        r["analyzer"]: r["past_overspend_usd"] for r in _collect_recoverable(rep, persona=p)
+    }
+    a, b = by_name(scoped, "claude-code"), by_name(unscoped, None)
+
+    # The corpus-wide half does not move with the persona. This is the fact that
+    # makes "both figures cover this persona's traffic" false.
+    assert a["relearn"] == b["relearn"]
+    assert a["deadweight"] == b["deadweight"]
+    # The scoped half does. This is the fact that makes "both figures cover
+    # every agent" false.
+    assert a["resend"] != b["resend"]
+
+    # And the note hedges exactly that, rather than claiming either extreme.
+    note = _recoverable_basis_note(_NOW - timedelta(days=30), _NOW, 30, "claude-code")
+    assert "not every basis is scoped to this persona" in note
 
 
 def test_the_note_never_claims_the_ceilings_population_is_persona_scoped():
