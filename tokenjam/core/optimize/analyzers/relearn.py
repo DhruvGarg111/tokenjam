@@ -155,7 +155,7 @@ PAST_OVERSPEND_BASIS = (
     "the same tool succeeding again. On a real corpus the median is 2, not "
     "the 1 a flat charge assumes. Turns shared by overlapping failures are "
     "split between them.\n\n"
-    "(" + RELEARN_RESEND_BOUNDARY + ") This figure also includes the error "
+    "(" + RELEARN_RESEND_BOUNDARY + "). This figure also includes the error "
     "text's own measured re-read tail, priced at the rate the contributing "
     "sessions actually billed at.\n\n"
     "Accumulated over the scanned corpus and NEVER paced, projected or "

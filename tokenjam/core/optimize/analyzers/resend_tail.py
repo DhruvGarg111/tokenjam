@@ -74,7 +74,7 @@ RELEARN_RESEND_BOUNDARY = (
     "re-read. That context is not billed at all once the call is gone. The "
     "error text's own re-read tail on LATER calls is excluded from relearn's "
     "claim and reported as an observation. This is because those calls happen "
-    "regardless, and their size is resend's to claim."
+    "regardless, and their size is resend's to claim"
 )
 
 #: A prompt whose size falls to at most this share of the previous turn's has
