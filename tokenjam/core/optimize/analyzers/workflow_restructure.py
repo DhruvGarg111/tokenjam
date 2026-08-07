@@ -128,7 +128,7 @@ class WorkflowRestructureFinding:
     confidence:  str = "structural"
     caveat:      str = (
         "Conservative cluster detection. Review each cluster before replacing "
-        "with a script — value variation that the heuristic can't see may matter."
+        "with a script. Value variation that the heuristic can't see may matter."
     )
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when no cluster cleared the threshold.
@@ -276,7 +276,7 @@ def run(ctx: AnalyzerContext) -> None:
             total_cluster_tokens if has_clusters else None
         ),
         estimate_basis=(
-            "total cost of sessions matching a deterministic call-pattern — "
-            "replacing the cluster with a script eliminates the LLM call entirely"
+            "total cost of sessions matching a deterministic call-pattern. "
+            "Replacing the cluster with a script eliminates the LLM call entirely"
         ),
     )

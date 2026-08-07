@@ -43,9 +43,9 @@ PROJECTION_DAYS = 30.0
 #: construction footnote so no channel can print the dollar delta bare.
 AGENT_PRICE_BASIS = (
     "Each agent's own input, output, cache read and cache write tokens over the "
-    "candidate sessions, priced at its current model's published rates and "
+    "candidate sessions. Priced at its current model's published rates and "
     "repriced at the proposed model's rates. The difference is arithmetic on "
-    "measured tokens, given the switch; it is not a claim that the cheaper "
+    "measured tokens, given the switch. It is not a claim that the cheaper "
     "model answers as well."
 )
 
