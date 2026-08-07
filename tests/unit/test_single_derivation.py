@@ -459,14 +459,19 @@ def _trim_fixture() -> tuple[Any, list[Any]]:
 def _deadweight_fixture() -> tuple[Any, list[Any]]:
     from tokenjam.core.optimize.analyzers.deadweight import (
         DeadweightFinding,
+        PluginComponent,
+        PluginDeadweight,
         ServerDeadweight,
     )
-    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    from tokenjam.core.optimize.cost_proposals import (
+        _deadweight_plugin_to_proposals,
+        _deadweight_to_proposals,
+    )
 
     servers = [
         ServerDeadweight(
             name="apollo", scope="project", source="/repo/.mcp.json",
-            sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+            sessions_present=10, invocations=0, deferred_sessions=0, unused=True,
             estimated_tax_tokens_per_session=25_000,
             estimated_tax_tokens_window=250_000,
             estimated_tax_usd_window=1.25,
@@ -475,7 +480,7 @@ def _deadweight_fixture() -> tuple[Any, list[Any]]:
         ),
         ServerDeadweight(
             name="gdrive", scope="user", source="/home/u/.claude.json",
-            sessions_present=6, invocations=0, deferred_sessions=2, dead=True,
+            sessions_present=6, invocations=0, deferred_sessions=2, unused=True,
             estimated_tax_tokens_per_session=25_000,
             estimated_tax_tokens_window=150_000,
             estimated_tax_usd_window=0.75,
@@ -483,16 +488,39 @@ def _deadweight_fixture() -> tuple[Any, list[Any]]:
             fix="Remove or project-scope gdrive.", example_sessions=["s1"],
         ),
     ]
+    # A single unused plugin, so the family's two adapters both contribute at
+    # least one card — the shape that would fan out if `_deadweight_plugin_
+    # to_proposals` ever stopped being fanned out alongside the server one.
+    plugins = [
+        PluginDeadweight(
+            name="stale-plugin@mkt", enabled=True, install_scope="user",
+            resident=True, not_resident_because="",
+            components=[
+                PluginComponent(kind="skill", name="s0", resident_tokens=90, used=False),
+            ],
+            skills=1, agents=0, resident_tokens=90, sessions_present=10,
+            unused=True, estimated_tax_tokens_window=900,
+            estimated_tax_usd_window=0.01, priced_model="claude-sonnet-4-5",
+            tax_construction="90 tok resident per call.",
+            fix="Disable it.",
+        ),
+    ]
     finding = DeadweightFinding(
         sessions_scanned=10, configured_servers=2,
-        servers=list(servers), dead_servers=list(servers),
-        past_overspend_tokens=sum(s.estimated_tax_tokens_window for s in servers),
+        servers=list(servers), unused_servers=list(servers),
+        plugins=list(plugins), unused_plugins=list(plugins), plugins_resident=1,
+        past_overspend_tokens=(
+            sum(s.estimated_tax_tokens_window for s in servers)
+            + sum(p.estimated_tax_tokens_window for p in plugins)
+        ),
         past_overspend_usd=round(
-            sum(s.estimated_tax_usd_window or 0.0 for s in servers), 6,
+            sum(s.estimated_tax_usd_window or 0.0 for s in servers)
+            + sum(p.estimated_tax_usd_window or 0.0 for p in plugins), 6,
         ),
         estimate_basis="deadweight basis",
     )
-    return finding, _deadweight_to_proposals(finding)
+    proposals = _deadweight_to_proposals(finding) + _deadweight_plugin_to_proposals(finding)
+    return finding, proposals
 
 
 def _script_fixture() -> tuple[Any, list[Any]]:
