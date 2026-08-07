@@ -62,17 +62,12 @@ def test_real_corpus_wording_lands_in_the_intended_family(tool, text, expected):
     assert classify_known_family(tool, text, "") == expected
 
 
-def test_every_family_ships_an_actionable_fix_not_a_placeholder():
-    """A family exists to convert an observation into a claim. One whose fix is
-    a placeholder claims nothing, so it would be a family in name only."""
-    from tokenjam.core.optimize.write_budget import is_placeholder_fix
-
+def test_every_family_declares_a_renderable_delivery():
+    """Every family declares a mechanism this build can actually render.
+    Inverted from a numeric range check that admitted 4 and 5, levels no
+    build ever produced — the range passed while asserting nothing about
+    whether the artifact could be written at all."""
     for family in _KNOWN_FAMILIES:
-        assert not is_placeholder_fix(family["fix"]), family["key"]
-        # Every family declares a mechanism this build can actually render.
-        # Inverted from a numeric range check that admitted 4 and 5, levels no
-        # build ever produced — the range passed while asserting nothing about
-        # whether the artifact could be written at all.
         assert family["delivery"] in DELIVERY_KINDS, family["key"]
 
 

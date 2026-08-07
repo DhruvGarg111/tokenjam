@@ -77,9 +77,7 @@ class Candidate:
     always_resident_tokens_saved: int = 0
     on_demand_tokens_saved: int = 0
     #: Source size of the always-resident portion (the whole file for an
-    #: ALWAYS-class one, the frontmatter for an on-demand one). The write-side
-    #: budget in ``core/optimize/write_budget`` measures the existing agent-file
-    #: footprint off this, so read and write price the same quantity.
+    #: ALWAYS-class one, the frontmatter for an on-demand one).
     always_resident_chars: int = 0
     #: The scan root this file was found under. ``path`` relative to it is the
     #: file's SLOT (``CLAUDE.md``, ``.claude/commands/ship.md``) — the same slot

@@ -98,49 +98,32 @@ def advise_only_reason(proposal: dict[str, Any]) -> str | None:
 
     One source of truth for the wording, so the CLI, the API payload and the
     inbox row cannot drift into three different explanations of one flag.
-
-    Two distinct reasons land on the same flag. The workspace-less (OTel) lane
-    has no file to write into at all; the write budget
-    (``core/optimize/write_budget.py``) declines a write that is a placeholder,
-    that costs more to keep than it recovers, or that the window's rule budget
-    cannot afford. The budget's own sentence wins when it set one, because
-    "there is no workspace" would be plainly false for a cluster that has one.
+    ``advise_only`` is the only reason left: the workspace-less (OTel) lane has
+    no file to write into, an advisory family says no action is needed, or the
+    window's persona has no workspace surface. There is no budget/ceiling gate
+    on top of that any more.
     """
-    blocked = str(proposal.get("write_blocked_reason") or "").strip()
-    if blocked and not proposal.get("write_offered", True):
-        return blocked
     return ADVISE_ONLY_REASON if proposal.get("advise_only") else None
 
 
 def advise_snippet_offered(proposal: dict[str, Any]) -> bool:
     """Is this cluster's ``proposed_fix`` a real recommendation the user can act
-    on themselves, rather than the "no fix template matched" placeholder?
+    on themselves, rather than something tokenjam is about to write for them?
 
-    The Review inbox routes every row onto a three-valued mechanism axis: tj can
-    apply it, tj hands over the exact change, or there is genuinely nothing to
-    hand over. ``write_offered`` answers the first. This answers the second, and
-    it has to be answered HERE rather than in the browser: the distinction is
-    ``build_proposals``' own ``has_real_fix``, and the only trace of it on the
-    payload is that a placeholder write is blocked with ``REASON_PLACEHOLDER``.
-    Re-deriving that in JS would mean the UI keying on a sentence this package
-    owns the wording of, which is the drift the ``short_reason`` map exists to
-    prevent.
-
-    False when the write WAS offered, and that is the load-bearing half. Unlike a
+    The Review inbox routes every row onto a three-valued mechanism axis: tj
+    can apply it, or tj hands over the exact change. False when the write WAS
+    offered (``not advise_only``), and that is the load-bearing half. Unlike a
     cost proposal, where ``suggestion`` and the apply path are separate fields
-    describing separate things (``deadweight``'s mcp_remove legitimately carries
-    both), a relearn cluster's ``proposed_fix`` is the SAME content the write
-    would write. Handing it over is only a distinct offer when tokenjam will not
-    write it, so a cluster tokenjam is about to write must not also advertise
-    "copy this" and duplicate its own fix on the row. Hence "advise" in the name.
+    describing separate things (``deadweight``'s mcp_remove legitimately
+    carries both), a relearn cluster's ``proposed_fix`` is the SAME content the
+    write would write. Handing it over is only a distinct offer when tokenjam
+    will not write it, so a cluster tokenjam is about to write must not also
+    advertise "copy this" and duplicate its own fix on the row. Hence
+    "advise" in the name.
     """
-    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER
-
     if not str(proposal.get("proposed_fix") or "").strip():
         return False
-    if proposal.get("write_offered"):
-        return False
-    return str(proposal.get("write_blocked_reason") or "").strip() != REASON_PLACEHOLDER
+    return bool(proposal.get("advise_only"))
 
 
 def proposal_id_for(signature: str) -> str:
@@ -162,8 +145,6 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
     again on read) means a cache written before either existed still resolves
     without a recompute.
     """
-    from tokenjam.core.optimize.write_budget import short_reason
-
     clusters = finding.get("clusters")
     if not isinstance(clusters, list):
         return dict(finding)
@@ -172,20 +153,9 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
             **c,
             "proposal_id": proposal_id_for(str(c.get("signature") or "")),
             "advise_only_reason": advise_only_reason(c),
-            # Derived on read for the same reason the two above are: a cache
-            # written before this field existed still has to resolve without a
-            # recompute. The Review inbox row renders ONLY the short label (the
-            # long sentence is a paragraph, and a real corpus gates ~50 of 55
-            # clusters), so without this stamp an older cache would silently
-            # drop the gate note from every row — the exact invisibility the
-            # short label was added to fix.
-            "write_blocked_short": (
-                c.get("write_blocked_short")
-                or short_reason(c.get("write_blocked_reason") or "")
-            ),
-            # Derived on read for the same reason as the three above, and
-            # deliberately NOT stored on the dataclass: it is a pure function of
-            # fields already on the cluster, so a stored copy could only ever
+            # Derived on read for the same reason as above, and deliberately
+            # NOT stored on the dataclass: it is a pure function of fields
+            # already on the cluster, so a stored copy could only ever
             # disagree with them. A cache written before this existed resolves
             # correctly on the first read, with no recompute.
             "advise_snippet_offered": advise_snippet_offered(c),

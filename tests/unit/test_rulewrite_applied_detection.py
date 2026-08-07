@@ -55,7 +55,6 @@ def _proposal(**kw) -> dict:
         "title": "Right-size Task-dispatched subagents",
         "delivery": DELIVERY_CLAUDE_MD_RULE,
         "proposed_fix": "Default every subagent to the cheapest model that fits.",
-        "write_offered": True,
         "past_overspend_usd": 412.5,
         "past_overspend_tokens": 9_100_000,
         "placement_scope": "project",

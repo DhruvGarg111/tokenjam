@@ -2,9 +2,8 @@
 
 A dependency-free vocabulary module. ``delivery`` owns each mechanism's
 BEHAVIOUR (its renderer and its pricer) and imports these names; ``types``,
-``write_budget``, ``relearn_apply`` and ``legacy`` need only the names, and
-importing them from here keeps every one of those out of a cycle with the
-behaviour module.
+``relearn_apply`` and ``legacy`` need only the names, and importing them from
+here keeps every one of those out of a cycle with the behaviour module.
 
 There is exactly one vocabulary for "what kind of artifact is this". It used to
 be two — a numeric ladder rung alongside these names — and the two disagreed
@@ -73,8 +72,8 @@ ENFORCEMENT_DELIVERIES = frozenset({DELIVERY_EXECUTING_HOOK, DELIVERY_INJECTING_
 #: Mirrors the cap the generated injecting hook enforces on itself, keyed on the
 #: stdin ``session_id``. The PRICE has to assume the same ceiling the script
 #: honours; if they drift, the product charges for one behaviour and ships
-#: another. Lives here rather than in ``delivery`` so ``write_budget`` can price
-#: an injecting hook without importing the behaviour module.
+#: another. Lives here so a pricer can price an injecting hook without
+#: importing the behaviour module.
 MAX_NUDGES_PER_SESSION = 2
 
 

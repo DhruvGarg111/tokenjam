@@ -98,9 +98,9 @@ def _resend_finding():
 
 
 def _relearn_finding():
-    """A relearn finding shaped like a real gated run: some clusters have no
-    fix template, some are net-negative to codify — both still cost real
-    money, which lands on this finding's ``past_overspend_*``.
+    """A relearn finding shaped like a real run: some clusters have no fix
+    template, some are advise-only — both still cost real money, which lands
+    on this finding's ``past_overspend_*``.
 
     It produces NO ``CostProposal`` any more: relearn's one aggregate card
     carried only the retired total-observed-cost field, so the card went with
@@ -111,20 +111,17 @@ def _relearn_finding():
     only resend would not exercise.
     """
     from tokenjam.core.optimize.analyzers.relearn import RelearnCluster
-    from tokenjam.core.optimize.write_budget import REASON_NET_NEGATIVE, REASON_PLACEHOLDER
 
     clusters = [
         RelearnCluster(
             signature="no-fix", family_key=None, title="No fix template",
             sessions=3, occurrences=5, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
-            proposed_fix="", write_offered=False,
-            write_blocked_reason=REASON_PLACEHOLDER,
+            proposed_fix="",
         ),
         RelearnCluster(
-            signature="net-neg", family_key=None, title="Net-negative rule",
+            signature="advise-only", family_key=None, title="Advise-only rule",
             sessions=4, occurrences=6, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
-            proposed_fix="Add a rule.", write_offered=False,
-            write_blocked_reason=REASON_NET_NEGATIVE,
+            proposed_fix="Add a rule.", advise_only=True,
         ),
     ]
     return RelearnFinding(
@@ -383,18 +380,6 @@ def test_no_pacing_ratio_is_applied_to_a_past_overspend_figure():
         past_overspend_rollup(props, active_days=10, n_sessions=200)  # type: ignore[call-arg]
 
 
-def test_past_overspend_reads_the_netted_figure_not_the_gross_one():
-    # A write-bearing card is netted against what its rule costs to KEEP. The
-    # observed figure must follow the netting, not the pre-net gross, or the
-    # card would state an overspend larger than the product's own arithmetic
-    # says it is.
-    prop = _with_past_overspend(_proposal(
-        signature="cost:reuse", analyzer="reuse",
-        past_overspend_usd=4.0, gross_recoverable_usd=9.0,
-    ))
-    assert prop.past_overspend_usd == 4.0
-
-
 # --- the single-number vs paired-number rule ------------------------------- #
 
 def test_every_card_renders_exactly_one_number():
@@ -414,8 +399,7 @@ def test_every_card_renders_exactly_one_number():
     assert resend.past_overspend_usd == 703.78
     assert "resend basis" in resend.past_overspend_basis
     row = asdict(resend)
-    # `gross_recoverable_usd` (the netting disclosure's pre-net figure) is not set
-    # here, so the canonical field is the only one carrying a number at all.
+    # The canonical field is the only `_usd` field carrying a number at all.
     assert {f for f in row if f.endswith("_usd") and row[f] is not None} == {
         "past_overspend_usd"
     }

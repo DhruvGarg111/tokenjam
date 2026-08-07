@@ -320,10 +320,8 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     existing relearn apply path, then records the cost marker for delta-verify."""
     from tokenjam.core.optimize import relearn_apply as pa
 
-    # over_powered subagent fan-out on a premium model, in-window. Sized past
-    # the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): this test asserts
-    # the card is APPLY-CAPABLE, and the budget declines a permanent write for
-    # a couple of dollars, so a cent-scale seed no longer reaches that path.
+    # over_powered subagent fan-out on a premium model, in-window: this test
+    # asserts the card is APPLY-CAPABLE and that the write actually lands.
     now = utcnow()
     for i in range(4):
         db.insert_span(make_llm_span(

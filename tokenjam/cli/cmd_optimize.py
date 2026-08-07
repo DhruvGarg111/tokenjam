@@ -2684,64 +2684,22 @@ def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
     return ""
 
 
-def _relearn_write_gate_line(cluster) -> str:
-    """Why no permanent fix is on offer for this cluster, or "" when one is.
-
-    The reason string is the write budget's OWN sentence
-    (``core/optimize/write_budget.py`` owns the wording so the CLI, the API
-    payload and the Review inbox row cannot drift into three explanations of
-    one flag). The payback arithmetic is appended only where the budget
-    actually computed one: an executing hook is never sent as prompt text, so
-    it has no standing cost and no ratio at all.
-    """
-    if getattr(cluster, "write_offered", True):
-        return ""
-    # The SHORT label here, not the full sentence: a real corpus gates ~50 of
-    # 55 clusters, so the long form would print a paragraph under every row.
-    # The full sentence still renders where there is room for it (the expanded
-    # Review card, `--json`).
-    short = str(getattr(cluster, "write_blocked_short", "") or "").strip()
-    if not short:
-        short = _short_reason_fallback(cluster)
-    if not short:
-        return ""
-    per_session = getattr(cluster, "standing_cost_tokens_per_session", 0) or 0
-    ratio = getattr(cluster, "payback_ratio", None)
-    if not per_session or ratio is None:
-        return f"no permanent fix offered: {short}"
-    return (
-        f"no permanent fix offered: {short} "
-        f"(~{format_tokens(per_session)} tok/session forever, "
-        f"modelled payback {ratio:.2f}x)"
-    )
-
-
-def _short_reason_fallback(cluster) -> str:
-    """Derive the short label from the long reason for a cluster read out of a
-    cache written before ``write_blocked_short`` existed. Keeps an older cache
-    rendering the verdict instead of silently dropping it."""
-    from tokenjam.core.optimize.write_budget import short_reason
-
-    return short_reason(getattr(cluster, "write_blocked_reason", "") or "")
-
-
 def _render_relearn_gate_summary(clusters) -> None:
-    """One line naming how many clusters carry no permanent fix, and why.
-
-    Without it the list reads as though every cluster is actionable. It is
-    stated as a gap in what WE can act on — never as a finding that the
-    remaining failures were harmless, which is the reading a bare count
-    invites.
+    """One line naming how many clusters have no apply path at all (advisory
+    families, or a workspace/persona that has no write surface). Without it
+    the list reads as though every cluster is actionable, when a few carry no
+    apply path of their own — never a finding that those failures were
+    harmless, which is the reading a bare count invites.
     """
-    gated = [c for c in clusters if not getattr(c, "write_offered", True)]
+    gated = [c for c in clusters if getattr(c, "advise_only", False)]
     if not gated:
         return
     console.print(
-        f"     [dim]{len(gated)} of {len(clusters)} carry no permanent fix of "
-        f"their own (no derived template, a rule modelled as costing more to "
-        f"keep than it returns, or this window's rule budget). Each still cost "
-        f"what is shown above: the gate is a gap in what we can act on, not a "
-        f"finding that the failure was harmless.[/dim]"
+        f"     [dim]{len(gated)} of {len(clusters)} have no permanent-rule "
+        f"apply path of their own (no workspace to write into, or the "
+        f"harness already self-corrects). Each still cost what is shown "
+        f"above: the gap is in what we can act on, not a finding that the "
+        f"failure was harmless.[/dim]"
     )
 
 
@@ -2773,13 +2731,9 @@ def _render_relearn(
         f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
         f"recurring blockers this agent silently re-hits"
     )
-    # Lead each row with what the recurrence ALREADY COST, not with the
-    # fix-gated forward claim. The write budget zeroes that claim whenever no
-    # permanent rule is worth offering, which on a real corpus is the large
-    # majority of clusters — so a forward-only line printed "$0.00" for most
-    # of the list while those same clusters had spent real money. A gate on
-    # our side is a gap in OUR fix library, never a finding that the failure
-    # was free (CLAUDE.md anti-pattern 32b).
+    # Lead each row with what the recurrence ALREADY COST, never a fix-gated
+    # forward claim — a cluster's cost stands whether or not it has a
+    # permanent-rule apply path (CLAUDE.md anti-pattern 32b).
     for c in finding.clusters[:10]:
         cost = _relearn_past_overspend(c, pricing_mode=pricing_mode)
         console.print(
@@ -2789,9 +2743,11 @@ def _render_relearn(
             f"[dim]({delivery_label(getattr(c, 'delivery', ''))})[/dim]"
             + (f"  [bold]{cost}[/bold] [dim]already spent[/dim]" if cost else "")
         )
-        gate = _relearn_write_gate_line(c)
-        if gate:
-            console.print(f"         [dim]{gate}[/dim]")
+        if getattr(c, "advise_only", False):
+            console.print(
+                "         [dim]no permanent-rule apply path — see the "
+                "example sessions for what to change by hand[/dim]"
+            )
     if len(finding.clusters) > 10:
         console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
     _render_relearn_gate_summary(finding.clusters)

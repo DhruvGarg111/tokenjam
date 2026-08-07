@@ -76,14 +76,11 @@ class WindowSummary:
     thin_data:   bool
     #: Distinct calendar days within the window with >=1 session — the
     #: user's own "active day" pace, the `D_active` term of the 30-day
-    #: projection basis in `core/optimize/projection.py`. Read by exactly ONE
-    #: consumer: `write_budget`, which needs "how many sessions will re-send
-    #: this artifact in a month" to price a permanent CLAUDE.md rule. It does
-    #: NOT pace any per-analyzer dollar figure — no such figure exists any
-    #: more (see the field contract in the repo `CLAUDE.md`). Defaults to 0
-    #: for a hand-built `WindowSummary` (tests, older callers, a cached report
-    #: predating the field) — a 0 fails that basis's guardrail, so the standing
-    #: cost is simply not charged rather than invented from a missing count.
+    #: projection basis in `core/optimize/projection.py`. It does NOT pace any
+    #: per-analyzer dollar figure — no such figure exists any more (see the
+    #: field contract in the repo `CLAUDE.md`). Defaults to 0 for a hand-built
+    #: `WindowSummary` (tests, older callers, a cached report predating the
+    #: field).
     active_days: int = 0
 
 
@@ -457,17 +454,6 @@ class OptimizeReport:
     # no config was ever looked at. One field on the report rather than one
     # per finding, so every surface reads the same answer.
     filesystem_scan_skipped_reason: str | None = None
-    # THE write allocation for this report, keyed by "<lane>:<signature>" and
-    # serialized (see `core/optimize/write_allocation.py`). Every permanent
-    # write either producer proposes — relearn's clusters and the write-bearing
-    # cost cards — is ranked against ONE budget, once, and the verdict is
-    # recorded here rather than decided independently inside each producer.
-    # It rides on the report because the report is what crosses the process
-    # boundary between the pass that allocates and the pass that applies the
-    # cost half; an empty dict means nobody has allocated yet, which
-    # `write_allocation.decisions_for` resolves rather than treating as "no
-    # write was offered".
-    write_decisions: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -95,24 +95,27 @@ def _rule_from_cost_proposal(raw: dict[str, Any]) -> RuleWrite | None:
     # whichever slot survived. Losing it would make a deferred rule
     # indistinguishable from one that was never derived.
     artifact = str(raw.get("proposed_fix", "") or raw.get("suggestion", "") or "")
-    offered = bool(raw.get("write_offered", False))
     if not artifact:
         return None
     # An empty `delivery` means this proposal offers no write at all — the
-    # persona gate cleared it. That is a statement about the OFFER, so a
-    # proposal that also carries no blocked-reason has nothing to list.
+    # persona gate cleared it (`advise_only`/`apply_capable=False`). That is a
+    # statement about the OFFER, so a proposal with no delivery has nothing to
+    # list.
     delivery = _delivery_of(raw)
-    if not delivery and not raw.get("write_blocked_reason"):
+    if not delivery:
         return None
+    # Every `apply_capable` proposal that resolved a delivery is offered — no
+    # budget/ceiling gate sits on top any more.
+    offered = True
     return RuleWrite(
         signature=str(raw.get("signature", "") or ""),
         analyzer=analyzer,
         title=str(raw.get("title", "") or ""),
         artifact_text=artifact,
-        delivery=delivery or DEFAULT_DELIVERY,
+        delivery=delivery,
         destinations=_destinations_from_proposal(raw),
         offered=offered,
-        blocked_reason=str(raw.get("write_blocked_reason", "") or ""),
+        blocked_reason="",
         placement_basis=str(raw.get("placement_basis", "") or ""),
         placement_coverage_note=str(raw.get("placement_coverage_note", "") or ""),
         past_overspend_tokens=raw.get("past_overspend_tokens"),
@@ -123,13 +126,11 @@ def _rule_from_cost_proposal(raw: dict[str, Any]) -> RuleWrite | None:
 def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
     """One stored relearn cluster as a rule write.
 
-    relearn's clusters already carry a resolved ``suggested_target`` and their
-    own per-repo exposure accounting (``relearn._write_exposure_sessions``), so
-    the destination is read off the cluster rather than re-derived. The two
-    lanes keep separate POPULATIONS upstream (Critical Rule 27) but share ONE
-    write budget, spent once over both — see
-    ``core/optimize/write_allocation.py``; this surface simply reads the
-    verdict each of them already carries.
+    relearn's clusters already carry a resolved ``suggested_target``, so the
+    destination is read off the cluster rather than re-derived. A cluster with
+    no target (``advise_only``, or no workspace resolved) has nothing to stage,
+    so ``offered`` follows the target's presence alone — no budget gate sits
+    on top any more.
     """
     target = str(raw.get("suggested_target", "") or "")
     artifact = str(raw.get("proposed_fix", "") or "")
@@ -149,8 +150,8 @@ def _rule_from_relearn_cluster(raw: dict[str, Any]) -> RuleWrite | None:
         artifact_text=artifact,
         delivery=_delivery_of(raw) or DEFAULT_DELIVERY,
         destinations=destinations,
-        offered=bool(raw.get("write_offered", False)) and bool(target),
-        blocked_reason=str(raw.get("write_blocked_reason", "") or ""),
+        offered=bool(target) and not bool(raw.get("advise_only", False)),
+        blocked_reason="",
         placement_basis=(
             f"scoped to {len(repos)} repo(s) by the recurrence's own sessions"
             if scope == "project" and repos else ""

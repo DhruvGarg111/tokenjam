@@ -63,8 +63,8 @@ The first term bills as before — first send at the input rate, each later call
 in that session at the cache-read rate (0.100x the input rate for every
 Anthropic model in `pricing/models.toml`). The second bills at the input rate,
 once per invocation. The split itself lives in `core/summarize/load_semantics`
-(shared with `core/optimize/write_budget`, which already applied the same rule
-when pricing a WRITE); the invocation counts are observed from Claude Code
+(shared with `core/rulewrite/delivery`, which applies the same rule when
+pricing a WRITE); the invocation counts are observed from Claude Code
 transcripts by `core/summarize/invocations`. See `_price_reduction`.
 
 That second term is a FLOOR: an invoked body stays in that session's context
@@ -72,11 +72,10 @@ for the calls that follow, and those re-reads are not counted here because the
 transcript does not say how many followed. Understating is the safe direction
 (Critical Rule 22).
 
-This is also the ONE analyzer whose fix has a NEGATIVE standing cost: it
-shrinks the always-loaded footprint that the rule-writing analyzers (`relearn`,
-`script`, `reuse`, `resend`) grow. `write_budget.measured_agent_file_tokens`
-reads this finding as the denominator of their write budget, which is why
-`summarize` is deliberately not a `COST_ANALYZERS` member — see the note there.
+This is also the ONE analyzer whose fix shrinks the always-loaded footprint
+that the rule-writing analyzers (`relearn`, `script`, `reuse`, `resend`) grow,
+which is why `summarize` is deliberately not a `COST_ANALYZERS` member — see
+the note there.
 
 Honesty discipline (Critical Rule 14 + `core/summarize/estimate.py`): a window
 figure — tokens or dollars — is only attached where the load count is
@@ -425,10 +424,7 @@ class SummarizeCandidate:
     always_resident_tokens_saved: int = 0
     on_demand_tokens_saved: int = 0
     #: Source size of the always-resident portion — the whole file for an
-    #: ALWAYS-class one, the measured frontmatter for an on-demand one. This is
-    #: what ``core/optimize/write_budget.measured_agent_file_tokens`` sizes the
-    #: write budget against, so the read side and the write side charge the
-    #: same standing footprint.
+    #: ALWAYS-class one, the measured frontmatter for an on-demand one.
     always_resident_chars: int = 0
     #: How many times this file was OBSERVED being invoked in the window.
     #: ``None`` means "not measured" (no transcript corpus) — never 0, which
