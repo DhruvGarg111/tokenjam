@@ -8503,13 +8503,34 @@ function OptimizeFinding({ name, opt, framing, proposals, onProposalChanged, onP
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">${fd.sessions_examined === 0 ? 'No LLM spans in this window.' : `Examined ${fd.sessions_examined} session${fd.sessions_examined !== 1 ? 's' : ''} across ${fd.cohorts_examined} task-shape cohort${fd.cohorts_examined !== 1 ? 's' : ''}; no session's output ran high enough vs its cohort median to flag.`}</div>`;
     } else if (name === 'deadweight') {
+      // Plugin lane (Part D web parity): same three-state gating as the CLI
+      // (`cmd_optimize._render_deadweight_plugins`) — `unused_plugins` gets
+      // the priced row + disable text, `partial_use_no_fix` names which
+      // components are unused and says plainly no fix is on offer (the
+      // toggle is whole-plugin only), `insufficient_history` renders as "not
+      // enough history yet", never a number, never a fix arrow. A plugin
+      // with nothing priced never reaches any of these three (see
+      // `PluginDeadweight.unused`'s vacuous-truth guard on the Python side),
+      // so a $0 row with a disable arrow cannot render here either.
+      const plugins = fd.plugins || [];
+      const unusedPlugins = (fd.unused_plugins || []).filter(p => p.estimated_tax_tokens_window);
+      const partialPlugins = plugins.filter(p => p.partial_use_no_fix);
+      const insufficientPlugins = plugins.filter(p => p.resident && p.insufficient_history);
+      const pluginBody = plugins.length ? html`
+        <div class="opt-line dim">Plugins: ${fd.plugins_resident || 0} of ${plugins.length} installed are resident (the rest are disabled or scoped to one project and cost nothing).</div>
+        ${unusedPlugins.length ? html`<div class="table-wrap"><table class="opt-table"><thead><tr><th>Plugin</th><th>Components</th><th>Tax (window)</th></tr></thead>
+          <tbody>${unusedPlugins.map(p => html`<tr><td class="mono">${p.name}</td><td>${p.skills} skill${p.skills !== 1 ? 's' : ''}, ${p.agents} agent${p.agents !== 1 ? 's' : ''}</td><td>${p.estimated_tax_usd_window != null ? fmtCost(p.estimated_tax_usd_window) : ('~' + fmtTokens(p.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table></div>` : null}
+        ${partialPlugins.length ? html`<div class="opt-line dim">${partialPlugins.length} plugin${partialPlugins.length !== 1 ? 's' : ''} have some components used and some not. Enable/disable is whole-plugin only, so no fix is offered — see each one's own components.</div>` : null}
+        ${insufficientPlugins.length ? html`<div class="opt-line dim">Not enough session history yet to say whether ${insufficientPlugins.map(p => p.name).join(', ')} ${insufficientPlugins.length === 1 ? 'is' : 'are'} used.</div>` : null}
+      ` : null;
       body = !fd.sessions_scanned ? html`<div class="opt-line dim">No Claude Code sessions in this window.</div>`
-        : !fd.configured_servers ? html`<div class="opt-line dim">Scanned ${fd.sessions_scanned} session${fd.sessions_scanned !== 1 ? 's' : ''}; no MCP server is configured, so nothing is being injected.</div>`
-        : !(fd.dead_servers || []).length ? html`<div class="opt-line dim">${(fd.notes && fd.notes.length) ? fd.notes.join(' ') : `All ${fd.configured_servers} configured MCP server${fd.configured_servers !== 1 ? 's' : ''} were invoked at least once in this window.`}</div>`
+        : !fd.configured_servers ? html`<div class="opt-line dim">Scanned ${fd.sessions_scanned} session${fd.sessions_scanned !== 1 ? 's' : ''}; no MCP server is configured, so nothing is being injected.</div>${pluginBody}`
+        : !(fd.unused_servers || []).length ? html`<div class="opt-line dim">${(fd.notes && fd.notes.length) ? fd.notes.join(' ') : `All ${fd.configured_servers} configured MCP server${fd.configured_servers !== 1 ? 's' : ''} were invoked at least once in this window.`}</div>${pluginBody}`
         : html`
-          <div class="opt-line">${fd.dead_servers.length} dead MCP server${fd.dead_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, never called)</span>.</div>
+          <div class="opt-line">${fd.unused_servers.length} unused MCP server${fd.unused_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, nothing fired recently)</span>.</div>
           <div class="table-wrap"><table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax (window)</th></tr></thead>
-            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table></div>
+            <tbody>${fd.unused_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table></div>
+          ${pluginBody}
           ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     }
   }

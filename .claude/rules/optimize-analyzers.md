@@ -172,6 +172,12 @@ prose: a record whose FORMAT does not match is invisible to that filter rather t
 and is indistinguishable from one correctly excluded. Both failures are silent, and both are found by
 asking what the predicate reads rather than what it returns.
 
+### Critical Rule 47 — A lane that renders only in the CLI is unfinished
+
+**A fix must also reach the web Review inbox through `cost_proposals`, not just a CLI renderer, or
+it does not exist for most users.** Wire both surfaces in the same change that adds a lane, and
+verify through both before calling it done.
+
 ## `tokenjam/core/summarize/`
 
 Structure-aware prompt summarization (advisory). Pure domain logic — no `tokenjam.cli` /

@@ -152,7 +152,7 @@ def test_every_command_the_optimize_scoreboard_advertises_runs(capsys):
                 past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
             ),
             "deadweight": SimpleNamespace(
-                dead_servers=["some-mcp"],
+                unused_servers=["some-mcp"],
                 past_overspend_usd=296.74, past_overspend_tokens=1_000,
             ),
         },

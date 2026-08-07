@@ -1969,9 +1969,9 @@ def _mcp_remove_plumbing(server: Any) -> dict[str, Any]:
 
 
 def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
-    """One proposal per dead-weight MCP server (Component C1).
+    """One proposal per unused MCP server (Component C1).
 
-    Reads ONLY ``DeadweightFinding.dead_servers`` — the C2 tax table (which
+    Reads ONLY ``DeadweightFinding.unused_servers`` — the C2 tax table (which
     lists every configured server, dead or alive, purely for ranked
     visibility) never feeds a proposal here, so a server's schema-injection
     tax is never counted both in the tax table AND a proposal (the same
@@ -2013,7 +2013,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     measurement_note = str(getattr(finding, "measurement_note", "") or "")
     if measurement_note:
         coverage_note = " ".join(x for x in (coverage_note, measurement_note) if x)
-    for server in getattr(finding, "dead_servers", []) or []:
+    for server in getattr(finding, "unused_servers", []) or []:
         # A server measured to cost NOTHING has nothing to recover, so it gets
         # no card at all. This is also what keeps the two figures on one basis:
         # `tokens or None` coerces a measured zero to None while the dollar
@@ -2109,6 +2109,74 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             target_path=str(plumbing.get("target_path", "")),
             scope=server.scope,
             apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
+        ))
+    return proposals
+
+
+def _deadweight_plugin_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per unused plugin — reaches the Review inbox with the
+    same lifecycle as an unused MCP server's card (Part D).
+
+    Reads ONLY ``DeadweightFinding.unused_plugins``: a plugin with SOME
+    components used and some not (``PluginDeadweight.partial_use_no_fix``)
+    never gets a card here — the toggle is whole-plugin only, so there is
+    genuinely no fix to offer, and a card dangling a number with no action
+    behind it is worse than no card (root anti-pattern 22 in the meta-repo
+    `CLAUDE.md`). A plugin with nothing priced (`estimated_tax_tokens_window
+    == 0`) is skipped the same way `_deadweight_to_proposals` skips a
+    zero-tax server — never a card that reads "$0, disable it".
+
+    Never apply-capable. Unlike the MCP server's deterministic config-file
+    splice, there is no file this adapter can edit on the user's behalf: the
+    real fix is the CLI command `claude plugin disable <name>`, which the
+    user runs themselves (see
+    ``core/fixes/registry.DEADWEIGHT_DISABLE_PLUGIN``). Every card is
+    advise-only with that command as its copy-pasteable ``suggestion`` —
+    the same shape the MCP card falls back to when a direct splice isn't
+    offered, just without the apply-capable branch, since no splice exists
+    to attempt.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
+
+    if finding is None:
+        return []
+    proposals: list[CostProposal] = []
+    for plugin in getattr(finding, "unused_plugins", []) or []:
+        if not plugin.estimated_tax_tokens_window:
+            continue
+        component_names = ", ".join(
+            f"{c.kind} `{c.name}`" for c in getattr(plugin, "components", []) or []
+        )
+        evidence = (
+            f"`{plugin.name}` (enabled, resident): {component_names} — "
+            f"nothing fired in {UNUSED_RECENCY_WINDOW_DAYS} days."
+        )
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="deadweight",
+            signature=f"cost:deadweight:plugin:{plugin.name}",
+            title=f"Unused plugin: {plugin.name}",
+            target_key={"plugin": plugin.name, "install_scope": plugin.install_scope},
+            evidence=evidence,
+            baseline={
+                "skills": plugin.skills,
+                "agents": plugin.agents,
+                "components": [
+                    {"kind": c.kind, "name": c.name}
+                    for c in getattr(plugin, "components", []) or []
+                ],
+                "sessions_present": plugin.sessions_present,
+                "priced_model": plugin.priced_model,
+            },
+            advise_text=plugin.fix,
+            suggestion=f"claude plugin disable {plugin.name}",
+            past_overspend_tokens=plugin.estimated_tax_tokens_window or None,
+            past_overspend_usd=plugin.estimated_tax_usd_window,
+            estimate_basis=plugin.tax_construction,
+            advise_only=True,
+            apply_capable=False,
+            agent_name=plugin.name,
+            scope=plugin.install_scope,
         ))
     return proposals
 
@@ -3328,6 +3396,7 @@ def _adapt_report(
             _pick("placement"),
         ),
         ("deadweight", _deadweight_to_proposals, _pick("deadweight")),
+        ("deadweight", _deadweight_plugin_to_proposals, _pick("deadweight")),
         ("script", lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
         ("reuse", lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
         ("verbosity", lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),

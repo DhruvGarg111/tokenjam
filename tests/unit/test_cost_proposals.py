@@ -267,7 +267,7 @@ def _dead_server(**overrides):
     from tokenjam.core.optimize.analyzers.deadweight import ServerDeadweight
     fields = dict(
         name="apollo", scope="project", source="/repo/.mcp.json",
-        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        sessions_present=10, invocations=0, deferred_sessions=0, unused=True,
         estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
         tax_construction="25,000 tok/session (full schema injection), cited estimate.",
         fix="Remove or project-scope the `apollo` MCP server (/repo/.mcp.json); "
@@ -287,7 +287,7 @@ def _deadweight_finding(dead_servers=None, tax_table=None):
     ]
     return DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
-        servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
+        servers=dead_servers, unused_servers=dead_servers, tax_table=tax_table,
         past_overspend_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
         estimate_basis="sum of each dead server's schema-injection tax "
                        "observed over this window",
@@ -397,9 +397,9 @@ def test_deadweight_finding_survives_report_dict_round_trip():
 
     finding = rebuilt.findings["deadweight"]
     assert finding.configured_servers == 1
-    assert len(finding.dead_servers) == 1
-    assert finding.dead_servers[0].name == "apollo"
-    assert finding.dead_servers[0].example_sessions == ["s0", "s1", "s2"]
+    assert len(finding.unused_servers) == 1
+    assert finding.unused_servers[0].name == "apollo"
+    assert finding.unused_servers[0].example_sessions == ["s0", "s1", "s2"]
     assert finding.past_overspend_tokens == 225_000
     assert len(finding.tax_table) == 1
     assert finding.tax_table[0].source == "MCP schema: apollo"

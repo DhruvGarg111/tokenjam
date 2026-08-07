@@ -535,14 +535,20 @@ AGGREGATE_FAMILIES: tuple[AggregateFamily, ...] = (
     AggregateFamily(
         name="deadweight",
         description=(
-            "the unused-MCP-server finding, one card per dead server."
+            "the unused-MCP-server-and-plugin finding, one card per unused "
+            "server plus one card per unused (every-component-unused) "
+            "plugin."
         ),
-        adapters=frozenset({"_deadweight_to_proposals"}),
+        adapters=frozenset({"_deadweight_to_proposals", "_deadweight_plugin_to_proposals"}),
         verdict="conserves",
         reason=(
-            "the finding's total is the sum of exactly the same list the "
-            "cards iterate (dead_servers), skipping the same unpriced "
-            "entries, and the count of skipped ones is stated in the basis."
+            "the finding's total is the sum of exactly the same two lists "
+            "the cards iterate (unused_servers, unused_plugins), skipping "
+            "the same unpriced entries each adapter skips, and the count of "
+            "skipped ones is stated in the basis. A plugin with SOME "
+            "components used never appears in unused_plugins at all "
+            "(PluginDeadweight.partial_use_no_fix), so it contributes to "
+            "neither side."
         ),
     ),
     AggregateFamily(

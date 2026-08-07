@@ -620,14 +620,14 @@ def test_past_overspend_headline_accounts_for_every_cost_analyzer():
     )
     dead_server = ServerDeadweight(
         name="apollo", scope="project", source="/repo/.mcp.json",
-        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        sessions_present=10, invocations=0, deferred_sessions=0, unused=True,
         estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
         tax_construction="25,000 tok/session, cited estimate.",
         fix="Remove or project-scope apollo.", example_sessions=["s0"],
     )
     deadweight = DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
-        servers=[dead_server], dead_servers=[dead_server],
+        servers=[dead_server], unused_servers=[dead_server],
         tax_table=[ContextTaxRow(source="MCP schema: apollo", sessions=10,
                                  avg_tokens_per_session=25_000, total_tokens_window=250_000)],
         past_overspend_tokens=225_000,
