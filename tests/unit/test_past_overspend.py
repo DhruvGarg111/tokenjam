@@ -27,6 +27,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import re
 import pytest
 
 from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
@@ -734,7 +735,14 @@ def test_the_observed_figure_renders_from_the_server_block_only(ui):
     assert ui.count("<${PastOverspendTile}") == 1, "the Review inbox's own tile"
     assert "PastOverspendBand" not in ui, "the OLD hero's retired name must not linger"
     assert "setCostPastOverspend(r.past_overspend || null)" in ui
-    dash = ui[ui.index("function DashboardView"):ui.index("// Two lenses, one router")]
+    # Bounded by the next TOP-LEVEL declaration. This used to end at a
+    # "// Two lenses, one router" comment, which vanished with the dead
+    # Improve/Observe lens and took the assertions below down with it: an
+    # extractor anchored on prose is only as durable as the prose.
+    _start = ui.index("function DashboardView")
+    _nxt = re.search(r"\n(?:function|const|class) ", ui[_start + 10:])
+    assert _nxt, "no top-level declaration follows DashboardView; update this extractor"
+    dash = ui[_start:_start + 10 + _nxt.start()]
     # The Dashboard hero (`HeroBand`) and the Total opportunity tile now both
     # read this endpoint through `rollupFig` (`rollupFigure()`), computed
     # ONCE per render and passed to both as the SAME object -- one fetch,
