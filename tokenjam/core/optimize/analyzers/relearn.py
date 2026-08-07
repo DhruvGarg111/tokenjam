@@ -2220,6 +2220,7 @@ def compute_relearn_finding(
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
     persona: str = "unknown",
+    persona_scope: str | None = None,
     retention_days: int | None = None,
     window_labels: Sequence[str] | None = RELEARN_WINDOW_LABELS,
 ) -> RelearnFinding:
@@ -2283,7 +2284,20 @@ def compute_relearn_finding(
     profile, per-turn cost and prompt timelines the unbounded figure already
     built. Pass ``None`` to opt out. Nothing here SCOPES the scan to a window:
     the horizon stays tokenjam's retention, per the note above.
+
+    ``persona_scope`` selects WHICH LANES may contribute, which is how the
+    population narrows here: this detector's lanes are ALREADY partitioned by
+    persona, so scoping is a lane choice rather than a SQL clause. The OTel
+    lane reads only non-coding-agent spans by construction
+    (``relearn_otel.extract_span_failures``); the transcript and archive lanes
+    read Claude Code sessions and nothing else. So ``claude-code`` keeps the
+    latter two, ``sdk`` keeps the former, and ``None`` keeps all three. Without
+    this, an SDK reader is shown recurring-failure clusters mined out of Claude
+    Code transcripts. It does NOT narrow the horizon — that stays retention,
+    per the note above; population and window are different questions.
     """
+    scope_coding_lanes = persona_scope != "sdk"
+    scope_otel_lane = persona_scope != "claude-code"
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
     archive_since = _retention_cutoff(retention_days)
@@ -2292,7 +2306,7 @@ def compute_relearn_finding(
     # working) transcript scan.
     span_failures: list[FailureEpisode] = []
     advise_only_repos: set[str] = set()
-    if conn is not None:
+    if conn is not None and scope_otel_lane:
         try:
             from tokenjam.core.optimize.relearn_otel import (
                 extract_span_failures,
@@ -2305,7 +2319,10 @@ def compute_relearn_finding(
             span_failures = []
             advise_only_repos = set()
 
-    paths = sorted(root.rglob("*.jsonl")) if root.exists() else []
+    paths = (
+        sorted(root.rglob("*.jsonl"))
+        if root.exists() and scope_coding_lanes else []
+    )
     sessions: list[tuple[str, str]] = []
     for path in paths:
         if since is not None:
@@ -2326,7 +2343,7 @@ def compute_relearn_finding(
     # Best-effort, exactly like the OTel lane above.
     on_disk = {session_id for session_id, _repo in sessions}
     archived_failures: list[FailureEpisode] = []
-    if conn is not None:
+    if conn is not None and scope_coding_lanes:
         try:
             from tokenjam.core.optimize.relearn_otel import (
                 extract_archived_coding_failures,
@@ -2418,6 +2435,9 @@ def run(ctx: AnalyzerContext) -> None:
     )
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
+        # WHICH LANES may contribute — see `compute_relearn_finding`. Distinct
+        # from `persona` just below it, which only gates the WRITE.
+        persona_scope=ctx.persona_scope,
         retention_days=retention_days,
         # So the inbox's one window label always has a bucket on this side
         # too. Resolved through `core/optimize/report_window`, the seam the
@@ -2439,5 +2459,9 @@ def run(ctx: AnalyzerContext) -> None:
         claude_home=resolve_write_scope(scope=scope).suggest_root,
         distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
-        persona=ctx.persona,
+        # The WRITE gate, and it follows the scope for the same reason the
+        # population does: a pass scoped to `sdk` must not be handed the
+        # corpus's `mixed` verdict and offer a CLAUDE.md write off the back of
+        # it. Distinct from `persona_scope` above, which chooses the lanes.
+        persona=ctx.effective_persona,
     )

@@ -121,6 +121,7 @@ from tokenjam.core.summarize.estimate import (
 from tokenjam.core.summarize.invocations import InvocationCounts
 from tokenjam.core.summarize.route import BEST_PRACTICES_SOURCE, PRUNE_TEST_QUOTE
 from tokenjam.core.summarize.repo_roots import ResolvedRoots, resolve_roots
+from tokenjam.core.persona_scope import add_persona_clause
 
 logger = logging.getLogger(__name__)
 
@@ -632,6 +633,7 @@ def _load_profile(ctx: AnalyzerContext) -> _LoadProfile | None:
     """
     rates = blended_rate_profile(
         ctx.conn, since=ctx.since, until=ctx.until, agent_id=ctx.agent_id,
+        persona_scope=ctx.persona_scope,
     )
     if rates is None:
         return None
@@ -640,6 +642,10 @@ def _load_profile(ctx: AnalyzerContext) -> _LoadProfile | None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope: this load profile is the multiplier the
+    # finding's dollars are built on, so it has to count the same sessions the
+    # rest of the pass does. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     try:
         rows = ctx.conn.execute(

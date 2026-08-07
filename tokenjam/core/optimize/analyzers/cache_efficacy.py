@@ -30,6 +30,7 @@ from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import blended_rates
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.pricing import STANDARD_VARIANT, ModelRates, get_rates
+from tokenjam.core.persona_scope import add_persona_clause
 
 # Minimum input volume to surface a recommendation. Below this, the
 # absolute savings are negligible regardless of efficacy.
@@ -162,7 +163,8 @@ def estimate_cache_recoverable(
 
 def _compute_rows(
     conn, since, until, agent_id: str | None,
-    *, min_input_tokens: int = MIN_INPUT_TOKENS,
+    *, persona_scope: str | None = None,
+    min_input_tokens: int = MIN_INPUT_TOKENS,
     efficacy_threshold: float = EFFICACY_THRESHOLD,
 ) -> list[CacheEfficacyRow]:
     """Aggregate input_tokens and cache_tokens per (provider, model) in window."""
@@ -174,6 +176,10 @@ def _compute_rows(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT provider, model, "
@@ -329,7 +335,7 @@ class _AgentCallRow:
 
 
 def _fetch_agent_calls(
-    conn, since, until, agent_id: str | None,
+    conn, since, until, agent_id: str | None, persona_scope: str | None = None,
 ) -> dict[str, list[_AgentCallRow]]:
     """The shared data pass: LLM spans in the window, grouped by agent_id,
     ordered by session then start_time. A1/A2/A3 all classify off this."""
@@ -341,6 +347,10 @@ def _fetch_agent_calls(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT agent_id, session_id, start_time, provider, model, "
@@ -369,7 +379,7 @@ def _fetch_agent_calls(
 
 
 def _fetch_agent_tool_starts(
-    conn, since, until, agent_id: str | None,
+    conn, since, until, agent_id: str | None, persona_scope: str | None = None,
 ) -> dict[tuple[str, str], list[Any]]:
     """Tool-call span start times per (agent_id, session_id) — the A3 block-
     count proxy input."""
@@ -381,6 +391,10 @@ def _fetch_agent_tool_starts(
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, persona_scope)
     where = " AND ".join(clauses)
     rows = conn.execute(
         f"SELECT agent_id, session_id, start_time FROM spans WHERE {where}",
@@ -703,15 +717,16 @@ def _classify_a3(
 
 def _compute_root_cause_candidates(
     conn, since, until, agent_id: str | None,
-    *, min_calls: int = MIN_CALLS_FOR_ROOT_CAUSE,
+    *, persona_scope: str | None = None,
+    min_calls: int = MIN_CALLS_FOR_ROOT_CAUSE,
 ) -> tuple[
     list[UncachedAgentCandidate], list[ThrashAgentCandidate], list[LookbackMissCandidate],
 ]:
     """One shared pass, classified in priority order per agent: A1 (uncached)
     beats A2 (thrash) beats A3 (lookback miss) — one underlying waste source
     never produces two cards."""
-    by_agent = _fetch_agent_calls(conn, since, until, agent_id)
-    tool_starts = _fetch_agent_tool_starts(conn, since, until, agent_id)
+    by_agent = _fetch_agent_calls(conn, since, until, agent_id, persona_scope)
+    tool_starts = _fetch_agent_tool_starts(conn, since, until, agent_id, persona_scope)
 
     uncached: list[UncachedAgentCandidate] = []
     thrash: list[ThrashAgentCandidate] = []
@@ -747,10 +762,12 @@ def run(ctx: AnalyzerContext) -> None:
 
     rows = _compute_rows(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope,
         min_input_tokens=min_input_tokens, efficacy_threshold=efficacy_threshold,
     )
     uncached, thrash, lookback = _compute_root_cause_candidates(
-        ctx.conn, ctx.since, ctx.until, ctx.agent_id, min_calls=min_calls,
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        persona_scope=ctx.persona_scope, min_calls=min_calls,
     )
     if not rows and not uncached and not thrash and not lookback:
         return

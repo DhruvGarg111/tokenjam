@@ -42,6 +42,7 @@ from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.optimize.span_pricing import blended_rates
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # The first N characters of the prompt are hashed to identify a "prefix
 # signature." Long enough to discriminate, short enough to avoid hashing
@@ -232,6 +233,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
         f"SELECT provider, model, attributes, input_tokens, start_time "

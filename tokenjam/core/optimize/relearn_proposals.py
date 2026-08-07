@@ -168,6 +168,7 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
 
 def list_cost_proposals(
     config: TjConfig | None = None, *, path: Path | None = None,
+    persona: str | None = None,
 ) -> list[dict[str, Any]]:
     """Every stored COST proposal from the last completed optimize pass, each
     with its ``proposal_id``.
@@ -176,21 +177,67 @@ def list_cost_proposals(
     addressable by ID on the same terms as a relearn cluster: the model-routing
     apply kinds are cost cards, so an apply that names one has to be able to
     resolve it from the store.
+
+    ``persona`` returns that persona's own scoped list instead of the
+    whole-corpus one. Use :func:`cost_proposals_scoped_to_persona` when the
+    caller has to be able to tell "this persona's list, which is empty" from
+    "this ledger cannot answer for that persona" — this function collapses the
+    second case to ``[]``, which is only safe for callers that resolve a
+    proposal BY ID (an apply path), never for one that publishes a total.
+    """
+    rows, _resolved = cost_proposals_scoped_to_persona(
+        config, path=path, persona=persona,
+    )
+    return rows
+
+
+def cost_proposals_scoped_to_persona(
+    config: TjConfig | None = None, *, path: Path | None = None,
+    persona: str | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """``(proposals, resolved)`` for ``persona``.
+
+    ``resolved`` is the whole point. A ledger written before per-persona
+    proposals existed — or by a lone refresh that had no per-persona reports to
+    adapt — holds ONE whole-corpus list and cannot answer for a persona. Its
+    figures are not that persona's money, and serving them under that persona's
+    label is precisely the defect this parameter exists to fix. So the caller is
+    told, and a surface that publishes a figure must render NOT-YET-KNOWN rather
+    than a number (root anti-pattern 22: "not yet known" and "known and empty"
+    are different states and zero is the worst placeholder for the first).
+
+    ``resolved`` is ``True`` whenever no narrowing was asked for: the
+    whole-corpus list genuinely IS the answer to "everything".
     """
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.cost_proposals import (
         backfill_legacy_past_overspend_fields,
     )
+    from tokenjam.core.persona_scope import persona_scopes_population
 
     block = relearn_store.read_cost_proposals(path, config=config)
     if not isinstance(block, dict):
-        return []
+        return [], True
+
+    resolved = True
+    raw = block.get("cost_proposals") or []
+    if persona_scopes_population(persona):
+        by_persona = block.get("cost_proposals_by_persona") or {}
+        if block.get("cost_persona_scoped") and persona in by_persona:
+            raw = by_persona.get(persona) or []
+        else:
+            # NOT the whole-corpus list as a fallback. Falling back is how a
+            # mixed-corpus total came to be published under a persona label in
+            # the first place; an empty list plus `resolved=False` is the only
+            # honest answer, and the caller renders it as unknown.
+            raw, resolved = [], False
+
     return [
         backfill_legacy_past_overspend_fields(
             {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
         )
-        for pr in (block.get("cost_proposals") or []) if isinstance(pr, dict)
-    ]
+        for pr in raw if isinstance(pr, dict)
+    ], resolved
 
 
 def list_proposals(

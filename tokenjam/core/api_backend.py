@@ -380,6 +380,7 @@ class ApiBackend:
         compare: str = "previous",
         agent_id: str | None = None,
         top_n: int = 5,
+        persona: str | None = None,
     ) -> dict:
         """
         Fetch a window-vs-window cost diff from tj serve. Mirrors
@@ -393,6 +394,8 @@ class ApiBackend:
         }
         if agent_id:
             params["agent_id"] = agent_id
+        if persona:
+            params["persona"] = persona
         return self._get(
             "/api/v1/cost/compare", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
         )

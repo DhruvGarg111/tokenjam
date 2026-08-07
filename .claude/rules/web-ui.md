@@ -41,3 +41,22 @@ a `tj serve` restart to take effect; tests read the file from disk directly and 
 - **Spacing comes from the `:root` tokens, never from a hand-picked literal.** Every surface here is one of four shapes — a card/section body, a row inside one, a head strip, a table cell — and they share ONE horizontal inset (`--inset-x`) so a table lines up with the panel head above it; the vertical value varies by density (`--pad-card-y` / `--pad-row-y` / `--pad-head-y`), and `--stack-gap` separates stacked containers. Reach for the shared classes before writing a style attribute: `.panel-body` and `.panel-row` inset a panel's children (`.panel` is deliberately padding-free so it can hold a full-bleed table, which is exactly why its children kept being written with an ad-hoc padding, or none at all), `.opt-tile` is an `.opt-section` used as a flex column, and `.empty` + `.compact`/`.err` and `td.empty-cell` cover every not-here state. The failure mode is not ugliness, it is drift: an inline box and the loading skeleton that stands in for it are edited months apart and stop matching, and a re-declared `border`/`border-radius` in a style attribute hides that the class already owned it.
 - **A cell with `overflow-wrap:anywhere` + `min-width:0` has a min-content width of ONE CHARACTER,** so under auto table-layout its column is the first thing the browser sacrifices and it collapses into a vertical stack of letters rather than wrapping. Any such column needs an explicit `min-width` floor. The mirror image is a `td` left at the default `white-space:nowrap` holding long text: that one column then dictates the whole table's width, and sibling tables on the same page come out visibly different widths with only one of them overflowing. Cap it and let it wrap; `.table-wrap` absorbs the remainder. Both bite on small, unrelated changes (a few px of extra cell padding was enough), so re-check wide tables after any spacing edit.
 - **Testing the UI (no JS runner in CI):** the Python `test` job can't run JS. Guard UI work with tests that **execute** something — `test_lens_dashboard_states.py` and `test_lens_select_all_behaviour.py` extract a pure JS helper out of `index.html` and run it under `node`, and `test_ui_offline.py` asserts file-level invariants (no external hosts, no NUL bytes, and that the module script actually parses). **Do not add static-grep tests that assert on literal substrings of `index.html`.** A large test file of those was deleted: it pinned wording and markup structure rather than behaviour, so ordinary visual iteration broke assertions that guarded nothing, and one broke merely because an identifier was added to a `useEffect` dependency array it used as a slice anchor. If a UI behaviour is worth guarding, extract the logic into a pure function and execute it. When iterating locally, verify visually by running `tj serve` (or a seeded `create_app` + uvicorn on an alt port) and screenshotting with headless Chrome — there is intentionally no Playwright/Cypress.
+
+### Critical Rule 43 — Webfont verification in CSS
+
+A `font-family` name in CSS is not a loaded font; without an `@font-face` rule and a vendored file, the browser silently falls back and the stylesheet reads as valid. Verify a webfont with `document.fonts.check()` in a real browser, never by static CSS inspection.
+
+### Critical Rule 44 — Never write an HTML entity into an `html` template literal
+
+`htm` assigns text content; it does not parse entities. `&amp;`, `&rarr;`, `&#8594;` inside a
+template render as those literal characters to the reader. Write the character itself (`&`, `→`),
+or a JS escape (`→`). Grep `&[a-z]\+;\|&#[0-9]` inside `html\`` blocks before shipping copy.
+Entities in the SERVER-RENDERED sidebar markup are fine: that is real HTML, parsed by the browser.
+
+### Critical Rule 45 — Renaming UI copy: grep the SOURCE form, and run every UI-reading test
+
+Tests assert against `ui/index.html` as text, so they match the source, not the rendered output.
+Grepping `tests/` for `"Open ("` misses `assert "Open " in page` and the rename ships red. Grep the
+bare words, then run the whole set that reads the file:
+`grep -rln "index.html" tests/` — currently nine files, and they are cheap. Repair a broken guard by
+repinning it on the new wording AND asserting the old wording is absent, so a revert fails too.

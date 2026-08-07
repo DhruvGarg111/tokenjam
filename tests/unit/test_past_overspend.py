@@ -27,6 +27,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import re
 import pytest
 
 from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
@@ -704,28 +705,41 @@ def test_ui_never_derives_a_past_overspend_figure_client_side(ui):
 
 
 def test_the_observed_figure_renders_from_the_server_block_only(ui):
-    # The Dashboard hero band was removed and the inbox band became a compact
-    # tile, so this figure now has exactly ONE
-    # render site. The guarantee that survives is the one that mattered: it is
-    # read from the server's `past_overspend` block, never reduced client-side,
-    # so what renders cannot drift from what the endpoint computed.
-    assert ui.count("<${PastOverspendTile}") == 1
-    assert "PastOverspendBand" not in ui, "the removed band must not linger"
+    # SUPERSEDES the prior "exactly one render site" contract. The Dashboard
+    # hero band this test used to pin as removed shipped again on explicit
+    # founder direction (lead with one clubbed avoidable-dollar figure), and
+    # this time it brought its own fetch of the SAME endpoint with it -- the
+    # rule the old removal comment left behind for exactly this moment ("the
+    # number must come from GET /relearn/cost-proposals' own past_overspend
+    # block ... re-add the fetch WITH the band, not before it"). The
+    # invariant that actually mattered survives unchanged: every render site
+    # reads the server's `past_overspend` block verbatim, never reduces it
+    # client-side, so none of them can drift from what the endpoint computed
+    # or from each other.
+    assert ui.count("<${PastOverspendTile}") == 1, "the Review inbox's own tile"
+    assert "PastOverspendBand" not in ui, "the OLD hero's retired name must not linger"
     assert "setCostPastOverspend(r.past_overspend || null)" in ui
-    # One render site now has exactly one reader. The Dashboard used to keep its
-    # own `heroPast` copy of this read for a band it no longer renders, so the
-    # page paid for a request per mount and displayed nothing from it; it is gone.
-    # This assertion is the same guarantee stated the other way round: nothing may
-    # read that block except the surface that renders it.
-    assert "setHeroPast" not in ui
-    dash = ui[ui.index("function DashboardView"):ui.index("// Two lenses, one router")]
-    # The FETCH, not the string: a comment in that view still names the endpoint,
-    # deliberately, to say where the figure must come from if it is re-added.
-    assert "api('/relearn/cost-proposals')" not in dash
-    # If a Dashboard summary of this figure is ever re-added, it must read the
-    # server's own `past_overspend` block rather than reduce over rendered cards.
-    # That rule now lives in a comment at the old render site, so keep it findable.
-    assert "past_overspend` block, the same one" in ui
+    # Bounded by the next TOP-LEVEL declaration. This used to end at a
+    # "// Two lenses, one router" comment, which vanished with the dead
+    # Improve/Observe lens and took the assertions below down with it: an
+    # extractor anchored on prose is only as durable as the prose.
+    _start = ui.index("function DashboardView")
+    _nxt = re.search(r"\n(?:function|const|class) ", ui[_start + 10:])
+    assert _nxt, "no top-level declaration follows DashboardView; update this extractor"
+    dash = ui[_start:_start + 10 + _nxt.start()]
+    # The Dashboard hero (`HeroBand`) and the Total opportunity tile now both
+    # read this endpoint through `rollupFig` (`rollupFigure()`), computed
+    # ONCE per render and passed to both as the SAME object -- one fetch,
+    # one number, two consumers, never two independent reductions.
+    assert "api('/relearn/cost-proposals'" in dash
+    assert dash.count("const rollupFig = rollupFigure(costProposalsRead);") == 1
+    assert "<${HeroBand} fig=${rollupFig}" in dash
+    assert "<${TotalOpportunityTile} fig=${rollupFig}" in dash
+    # `rollupFigure()` reads `past_overspend_usd`/`_tokens` verbatim off the
+    # payload -- see test_lens_ui_regression.py's
+    # test_rollup_figure_reads_the_wire_total_verbatim_never_a_client_side_sum
+    # for the JS-level pin of that arithmetic-free contract.
+    assert "function rollupFigure(read)" in ui
 
 
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):

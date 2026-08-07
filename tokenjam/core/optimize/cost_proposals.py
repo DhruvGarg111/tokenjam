@@ -3103,6 +3103,61 @@ def recompute_cost_proposals(
                 on_adapter_error=_record_adapter_failure,
             )
             excluded = _adapter_failure_entries(adapter_failures)
+            # THE PER-PERSONA LEDGER. The adapters are a pure transformation of
+            # a report, so one scoped report in gives one scoped proposal list
+            # out — no second measurement, no extra corpus pass. What makes
+            # this necessary rather than a convenience is that a dollar figure
+            # summed over a mixed corpus cannot be narrowed on read: the
+            # `persona` parameter `/optimize` gets to honour by slicing an
+            # analyzer set has no equivalent here, so the narrowing has to have
+            # happened at compute time or it cannot happen at all.
+            #
+            # Only a caller whose report carries per-persona passes (the scan
+            # cycle — see `core/optimize/report_store.py`) can produce this. A
+            # lone refresh writes an unscoped ledger and says so, rather than
+            # relabelling one corpus-wide list as every persona's.
+            by_persona: dict[str, list[CostProposal]] = {}
+            # Relearn reaches the inbox headline through
+            # `inbox_contribution.gather_rollup_population`, NOT through an
+            # adapter tuple, so its money never appears in `by_persona` above.
+            # A persona-scoped rollup that folded in the whole-corpus relearn
+            # cache would put two populations into one total — so each scoped
+            # pass's own lane-partitioned finding is stored beside its
+            # proposals for the route to use instead.
+            relearn_by_persona: dict[str, Any] = {}
+            for scope_persona, sub in (
+                getattr(report, "persona_reports", None) or {}
+            ).items():
+                try:
+                    from tokenjam.core.optimize.runner import report_from_dict
+
+                    scoped_report = (
+                        report_from_dict(sub) if isinstance(sub, dict) else sub
+                    )
+                    by_persona[scope_persona] = cost_proposals_from_report(
+                        scoped_report, config=config, pricing_mode=pricing_mode,
+                        window_days=float(effective_window_days),
+                        # Adapter failures are recorded from the BASE pass
+                        # only. A per-persona pass failing the same adapter
+                        # would stamp the same `excluded` entry twice, and the
+                        # entry describes the analyzer, not the persona.
+                    )
+                    scoped_relearn = (scoped_report.findings or {}).get("relearn")
+                    if scoped_relearn is not None:
+                        from dataclasses import asdict as _asdict, is_dataclass
+
+                        relearn_by_persona[scope_persona] = (
+                            _asdict(scoped_relearn)
+                            if is_dataclass(scoped_relearn)
+                            and not isinstance(scoped_relearn, type)
+                            else scoped_relearn
+                        )
+                except Exception:
+                    # One persona's adaptation failing must not cost the other
+                    # its proposals, nor sink the whole recompute. The missing
+                    # persona simply has no entry, which the read side already
+                    # treats as "cannot answer for this persona".
+                    continue
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -3127,6 +3182,8 @@ def recompute_cost_proposals(
         try:
             written = relearn_store.write_cost_proposals(
                 proposals, config=config,
+                by_persona=by_persona or None,
+                relearn_by_persona=relearn_by_persona or None,
                 window_days=effective_window_days,
                 excluded=excluded or None,
                 # The RESOLVED bounds, not just the length. A day count alone
@@ -3311,7 +3368,18 @@ def _adapt_report(
     build them. Same adapters, same report either way.
     """
     findings = getattr(report, "findings", {}) or {}
-    persona = str(getattr(report, "persona", "") or "unknown")
+    # THE SCOPE FIRST, the corpus's own persona second. A report built for one
+    # side of the picker over a mixed corpus carries `persona="mixed"` — which
+    # gates nothing — beside rows that are entirely one persona's. Reading
+    # `persona` alone there adapts a card for a lever the reader does not have
+    # and prices it off their own sessions, which is a more convincing wrong
+    # answer than the unscoped version was. `persona_scope` is `None` on an
+    # unscoped report, so this is exactly the old behaviour for that case.
+    persona = str(
+        getattr(report, "persona_scope", None)
+        or getattr(report, "persona", "")
+        or "unknown"
+    )
     proposals: list[CostProposal] = []
 
     # Second half of the persona skip gate. `build_report` already refuses to
