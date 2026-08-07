@@ -387,9 +387,7 @@ core/context_diagnostic.py:_fix_for() return:79:94:2
 core/context_diagnostic.py:_fix_for() return:94:126:1
 core/optimize/analyzers/relearn.py:prompt:305:383:5
 core/optimize/cost_proposals.py:MODEL_SWAP_QUALITY_CAVEAT:183:183:2
-core/optimize/cost_proposals.py:PAST_OVERSPEND_OBSERVED_NOTE:170:170:2
 core/optimize/cost_proposals.py:_driver_role_advice() return:63:63:1
-core/optimize/cost_proposals.py:_driver_role_proposals() return:65:270:1
 core/optimize/cost_proposals.py:advise:103:190:1
 core/optimize/cost_proposals.py:advise:106:113:2
 core/optimize/cost_proposals.py:advise:133:133:1
@@ -407,20 +405,6 @@ core/optimize/cost_proposals.py:advise_extra:162:253:3
 core/optimize/cost_proposals.py:advise_extra:360:485:3
 core/optimize/cost_proposals.py:advise_text=:190:196:2
 core/optimize/cost_proposals.py:advise_text=:53:59:1
-core/optimize/cost_proposals.py:evidence:110:110:1
-core/optimize/cost_proposals.py:evidence:126:155:1
-core/optimize/cost_proposals.py:evidence:40:82:2
-core/optimize/cost_proposals.py:evidence:42:139:1
-core/optimize/cost_proposals.py:evidence:42:169:1
-core/optimize/cost_proposals.py:evidence:43:95:2
-core/optimize/cost_proposals.py:evidence:47:73:1
-core/optimize/cost_proposals.py:evidence:50:109:2
-core/optimize/cost_proposals.py:evidence:65:99:1
-core/optimize/cost_proposals.py:evidence:67:146:2
-core/optimize/cost_proposals.py:evidence:71:114:2
-core/optimize/cost_proposals.py:evidence:75:166:1
-core/optimize/cost_proposals.py:evidence:84:136:2
-core/optimize/cost_proposals.py:evidence:96:273:2
 core/optimize/cost_proposals.py:one_paste:59:94:2
 core/optimize/cost_proposals.py:reversible_note:133:250:2
 core/summarize/route.py:BEST_PRACTICES_SOURCE:46:46:1

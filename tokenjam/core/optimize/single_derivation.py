@@ -136,26 +136,6 @@ SEAMS: tuple[SingleSeam, ...] = (
         ),
     ),
     SingleSeam(
-        name="write allocation point",
-        description=(
-            "the permanent-write budget every report may spend, across "
-            "BOTH producers (relearn clusters, cost-proposal write cards)."
-        ),
-        symbol="build_write_budget",
-        kind="call",
-        allowed_modules=frozenset({"core/optimize/write_allocation.py"}),
-        reason=(
-            "relearn and cost_proposals used to each build their OWN "
-            "WriteBudget from their own constants and spend it inside "
-            "themselves — the bound a user actually faced was the SUM of "
-            "both caps, and ranking was per-producer so a high-net cost "
-            "write and a low-net relearn write never entered one ranked "
-            "list. write_allocation.allocate_report_writes() is now the "
-            "one place a budget is built and spent, over the union of both "
-            "producers' candidates."
-        ),
-    ),
-    SingleSeam(
         name="window length",
         description=(
             "the trailing look-back, in days, EVERY past-overspend surface "

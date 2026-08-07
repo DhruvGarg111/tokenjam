@@ -26,14 +26,12 @@ reuses that resolver rather than adding a third cwd-resolution path, and asks
 one further question of the result: which of those roots would a rule about
 THESE sessions have to land in, and what share of the finding belongs to each?
 
-**Why this is arithmetic and not aesthetics.** ``core/optimize/write_budget``
-already nets a rule's standing cost against its saving to decide whether the
-write is OFFERED at all. It priced exactly one destination. Once placement is
-real, ``N project files x their own session counts`` is frequently cheaper
-than ``1 root file x every session in the window``, so a rule that reads
-net-negative against the root file can legitimately flip to net-positive purely
-by landing in the right place. Placement is therefore an INPUT to whether the
-fix is worth offering, not a presentation detail.
+**Why this is arithmetic and not aesthetics.** A rule is offered whenever its
+analyzer is ``apply_capable`` — there is no dollar gate on top. Placement still
+matters: ``N project files x their own session counts`` is frequently cheaper
+to keep resident than ``1 root file x every session in the window``, so the
+CHOICE of destination changes what a rule costs to keep even though it never
+changes whether it is offered.
 
 Two costs, deliberately kept apart, because they answer different questions:
 
@@ -406,8 +404,8 @@ class PlacementChoice:
     #: The rejected alternative's standing cost, kept so the decision is
     #: inspectable rather than a bare verdict.
     alternative_standing_tokens: int = 0
-    #: Sessions that re-send the artifact under this choice — what
-    #: ``write_budget`` charges the standing cost against.
+    #: Sessions that re-send the artifact under this choice — the population
+    #: ``standing_tokens`` above is charged against.
     exposure_sessions: int = 0
     basis: str = ""
 

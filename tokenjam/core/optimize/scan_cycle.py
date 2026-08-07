@@ -421,9 +421,6 @@ def _write_relearn_from(
     config versus the function default, and the resolved report window versus
     the fixed label vocabulary), so the Dashboard and the Review inbox could
     disagree about which clusters to offer, not merely about a figure's size.
-    Which clusters are OFFERED a permanent rule is no longer decided in this
-    pass at all — see ``core/optimize/write_allocation.py``, which allocates
-    once over both producers at the end of the report build.
 
     The registered analyzer's version is the richer of the two on every one of
     those axes, so this is a merge toward it rather than a choice between them.

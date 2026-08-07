@@ -197,7 +197,8 @@ Structure-aware prompt summarization (advisory). Pure domain logic — no `token
   itself" amortization.
 - `load_semantics.py` is the single source of truth for how an agent-config file loads (always
   resident vs. frontmatter-now / body-on-invocation); `invocations.py` observes the invocation
-  multiplier from Claude Code transcripts. Both are consumed by `core/optimize/write_budget` — see
+  multiplier from Claude Code transcripts. `load_semantics.py`'s split is consumed on the write side
+  by `core/rulewrite/delivery.standing_tokens_per_session` — see
   `.claude/rules/optimize-architecture.md`.
 - `repo_roots.py` resolves recorded session cwds to repo roots for `core/optimize/rule_placement`.
 
@@ -225,6 +226,6 @@ Surfaced by `tj rules` (`cli/cmd_rules.py`) and `/api/v1/rules/*`.
 
 `delivery.py` is the delivery-mechanism seam: a `DeliveryKind` owns its own renderer AND its own
 pricer, and adding a mechanism is a registration plus two functions — never an edit to the staging,
-diff, apply, undo or budget machinery, none of which may name a CLAUDE.md. See
+diff, apply or undo machinery, none of which may name a CLAUDE.md. See
 `.claude/rules/optimize-architecture.md` for the full delivery-kind, hook-rails and path-scoped-rule
 contracts.

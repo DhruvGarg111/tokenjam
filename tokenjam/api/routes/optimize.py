@@ -360,8 +360,8 @@ def _with_window_scoped_relearn(
     one code path rather than two that happen to agree.
 
     Derived on read, not stored: the stored dict stays exactly what the
-    analyzers wrote (the unbounded fields feed the write budget's pre-net gross
-    and must not be shrunk in place — see ``core/optimize/write_budget``).
+    analyzers wrote — the unbounded fields are the full-corpus observation and
+    must not be shrunk in place.
 
     Immutable: returns new dicts, never writes into the stored body.
     """

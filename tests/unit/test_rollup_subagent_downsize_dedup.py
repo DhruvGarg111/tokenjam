@@ -98,15 +98,11 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     assert "downsize" in analyzers, "expected the session to trip downsize"
     assert "subagent" in analyzers, "expected the dispatch to trip subagent"
 
-    # Disjointness is a property of what the analyzers CLAIM, so it is checked
-    # on the pre-net (gross) figures: a write-bearing card is additionally
-    # netted against its own standing cost by the write budget, which can only
-    # ever subtract. Pre-fix the gross sum was 4_850 (downsize, whole session)
-    # + 4_300 (subagent) = 9_150 — nearly 2x the tokens the session spent.
+    # Disjointness is a property of what the analyzers CLAIM. Pre-fix the sum
+    # was 4_850 (downsize, whole session) + 4_300 (subagent) = 9_150 — nearly
+    # 2x the tokens the session spent.
     def _gross(p):
-        return (p.gross_recoverable_tokens
-                if p.gross_recoverable_tokens is not None
-                else (p.past_overspend_tokens or 0))
+        return p.past_overspend_tokens or 0
 
     def _gross_for(analyzer: str) -> int:
         return sum(_gross(p) for p in proposals if p.analyzer == analyzer)
@@ -170,8 +166,7 @@ def test_downsize_still_excludes_a_high_output_subagent_after_gate_fix(db):
 
     proposals = cost_proposals_from_report(report, None, window_days=30.0)
     downsize_tokens = sum(
-        (p.gross_recoverable_tokens if p.gross_recoverable_tokens is not None
-         else (p.past_overspend_tokens or 0))
+        (p.past_overspend_tokens or 0)
         for p in proposals if p.analyzer == "downsize"
     )
     assert downsize_tokens == MAIN_INPUT + MAIN_OUTPUT
@@ -304,7 +299,7 @@ def test_placement_weights_are_a_breakdown_of_the_analyzers_own_claim(db):
 def test_the_rollup_is_unchanged_by_the_placement_pass(db):
     """The end-to-end guard, re-asserted after placement.
 
-    Placement runs inside `cost_proposals._apply_write_decisions`, i.e. between the adapters and
+    Placement runs inside `cost_proposals._apply_placement`, i.e. between the adapters and
     the rollup. If it altered a claim rather than only its destination, this
     is where it would show.
     """
@@ -319,7 +314,3 @@ def test_the_rollup_is_unchanged_by_the_placement_pass(db):
     assert rollup["past_overspend_usd"] == pytest.approx(
         sum(p.past_overspend_usd or 0.0 for p in proposals)
     )
-    # A placed proposal still reports the netted figure and nothing larger.
-    for proposal in proposals:
-        if proposal.gross_recoverable_usd is not None and proposal.past_overspend_usd:
-            assert proposal.past_overspend_usd <= proposal.gross_recoverable_usd

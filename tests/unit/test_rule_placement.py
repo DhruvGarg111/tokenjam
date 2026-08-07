@@ -1,6 +1,6 @@
 """Where a permanent rule gets written, and what that does to the arithmetic.
 
-Three things are pinned here and each one is a defect if it breaks:
+Two things are pinned here and each one is a defect if it breaks:
 
 1. **A recorded cwd that no longer exists is COUNTED, never dropped.** Both
    analyzers that read live filesystem state return a plausible number rather
@@ -8,14 +8,13 @@ Three things are pinned here and each one is a defect if it breaks:
    31), so the only defence is a coverage statement — and it has to say the
    gap is what was NOT ANALYSED (Critical Rule 30), never what was
    unavoidable.
-2. **Placement changes the OFFER decision.** A rule whose standing cost is
-   charged against every session in the window can read net-negative and be
-   suppressed, while the same rule charged against only the projects that
-   exhibited the behaviour clears the bar. That flip is the whole point of the
-   feature, so it is asserted directly rather than inferred.
-3. **Tokens and dollars are split by the SAME weights**, so every
+2. **Tokens and dollars are split by the SAME weights**, so every
    destination's implied per-token rate equals the finding's own (Critical
    Rule 28).
+
+Placement no longer feeds an offer/suppress decision — there is no budget left
+to flip. A rule confined to fewer sessions is simply cheaper to KEEP; every
+`apply_capable` rule is offered regardless of which destination wins.
 """
 from __future__ import annotations
 
@@ -23,11 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
-
 from tokenjam.core.optimize import rule_placement as rp
-from tokenjam.core.optimize import write_budget as wb
-from tokenjam.core.optimize.projection import build_projection_basis
 
 
 def _repo(tmp_path: Path, name: str) -> Path:
@@ -244,172 +239,3 @@ def test_no_resolved_destination_falls_back_to_the_user_global_file(tmp_path):
     assert choice.standing_tokens == 30 * 90
 
 
-# --- 4. the flip: placement is an INPUT to whether a write is offered -------#
-
-def _candidate(**kw):
-    base = dict(
-        key="k", family="fam", delivery=DELIVERY_CLAUDE_MD_RULE,
-        # ~500 chars of real rule text: past the placeholder floor, and big
-        # enough that its standing cost matters.
-        artifact_text="Route context-heavy sub-tasks to a subagent. " * 12,
-        gross_tokens=40_000, gross_usd=12.0,
-    )
-    base.update(kw)
-    return wb.WriteCandidate(**base)
-
-
-def test_placement_flips_a_write_the_global_destination_would_have_suppressed():
-    """The core claim of this change, asserted end to end on the budget.
-
-    Charged against every session in the window the rule costs more to keep
-    than it recovers and is suppressed as net-negative. Charged against only
-    the sessions in the projects that actually exhibited the behaviour, the
-    same rule, with the same text and the same gross, clears the bar and is
-    offered. Nothing about the finding changed — only where the rule lands.
-    """
-    basis = build_projection_basis(30.0, 20, 400)
-    budget = wb.build_write_budget(budget_tokens=500, max_writes=3)
-
-    global_only = wb.allocate_writes([_candidate()], budget, basis)["k"]
-    assert global_only.net_negative is True
-    assert global_only.offered is False
-    assert global_only.reason == wb.REASON_NET_NEGATIVE
-    # A suppressed write claims nothing on any basis.
-    assert global_only.claimed_tokens == 0
-
-    placed = wb.allocate_writes(
-        [_candidate(exposure_sessions=12, destinations=("/repo/a/CLAUDE.md",))],
-        budget, basis,
-    )["k"]
-    assert placed.net_negative is False
-    assert placed.offered is True
-    assert placed.exposure_sessions == 12
-    assert placed.claimed_tokens > 0
-    # And the claim is still NET, never the gross — a proposal may never claim
-    # a saving larger than its net value.
-    assert placed.claimed_tokens == 40_000 - placed.standing_tokens
-
-
-def test_a_multi_destination_write_is_charged_for_every_file_it_grows():
-    """The two costs are distinct: standing follows the sessions, footprint
-    follows the files. Collapsing them would make a three-project split look
-    free to the budget."""
-    basis = build_projection_basis(30.0, 20, 400)
-    budget = wb.build_write_budget(budget_tokens=10_000, max_writes=3)
-    decision = wb.allocate_writes(
-        [_candidate(
-            exposure_sessions=30,
-            destinations=("/a/CLAUDE.md", "/b/CLAUDE.md", "/c/CLAUDE.md"),
-        )],
-        budget, basis,
-    )["k"]
-    assert decision.footprint_tokens == decision.standing_tokens_per_session * 3
-    assert decision.standing_tokens == decision.standing_tokens_per_session * 30
-    assert decision.destinations == (
-        "/a/CLAUDE.md", "/b/CLAUDE.md", "/c/CLAUDE.md",
-    )
-
-
-class _Cand:
-    """A summarize candidate, as the write budget reads it (duck-typed)."""
-
-    def __init__(self, path: str, total_chars: int) -> None:
-        self.path = path
-        self.total_chars = total_chars
-        self.always_resident_chars = total_chars
-
-
-class _Summarize:
-    def __init__(self, *candidates: _Cand) -> None:
-        self.candidates = list(candidates)
-
-
-def test_a_small_project_file_gets_a_small_growth_allowance_of_its_own(tmp_path):
-    """One coordinated budget PER DESTINATION, sized against THAT file.
-
-    While there was one destination, the aggregate agent-file footprint was the
-    right denominator for "may this window grow the files at all". It stops
-    being the right one the moment a rule can land in a small project
-    ``CLAUDE.md`` while a large root file makes the corpus-wide figure look
-    roomy: 10% of the aggregate can exceed the small file entirely, so two
-    rules converge on it and add more than it contained.
-    """
-    small = tmp_path / "small" / "CLAUDE.md"
-    large = tmp_path / "large" / "CLAUDE.md"
-    for path in (small, large):
-        path.parent.mkdir(parents=True)
-        path.write_text("x", encoding="utf-8")
-    finding = _Summarize(
-        _Cand(str(small), total_chars=4_000),        # ~1k tokens -> below the floor
-        _Cand(str(large), total_chars=160_000),      # ~40k tokens -> a real allowance
-    )
-    by_path = wb.measured_agent_file_tokens_by_path(finding)
-    assert by_path[str(small)] < by_path[str(large)]
-
-    budget = wb.build_write_budget(
-        budget_tokens=100_000, max_writes=9,
-        existing_agent_file_tokens=wb.measured_agent_file_tokens(finding),
-        existing_by_path=by_path,
-    )
-    # The small file's allowance is its own floor, not a share of the corpus.
-    assert budget.destination_budget(str(small)) == wb.MIN_WRITE_BUDGET_TOKENS
-    assert budget.destination_budget(str(large)) > wb.MIN_WRITE_BUDGET_TOKENS
-    # An unmeasured destination falls back to the lane budget — an unmeasured
-    # file is not evidence of a full one.
-    assert budget.destination_budget("/never/scanned/CLAUDE.md") == budget.budget_tokens
-
-
-def test_two_rules_cannot_both_land_in_one_file_past_its_own_allowance(tmp_path):
-    small = tmp_path / "small" / "CLAUDE.md"
-    other = tmp_path / "other" / "CLAUDE.md"
-    for path in (small, other):
-        path.parent.mkdir(parents=True)
-        path.write_text("x", encoding="utf-8")
-    # A rule block big enough that two of them exceed the floor allowance.
-    text = "Route context-heavy sub-tasks to a subagent. " * 26
-    per_session = wb.standing_tokens_per_session(1, text)
-    assert per_session <= wb.MIN_WRITE_BUDGET_TOKENS < per_session * 2
-
-    # A large third file lifts the AGGREGATE (and so the lane budget) without
-    # lifting either small file's own allowance — which is precisely the
-    # divergence a per-file budget exists to catch.
-    finding = _Summarize(
-        _Cand(str(small), total_chars=4_000),
-        _Cand(str(other), total_chars=4_000),
-        _Cand(str(tmp_path / "root" / "CLAUDE.md"), total_chars=160_000),
-    )
-    budget = wb.build_write_budget(
-        budget_tokens=100_000, max_writes=9,
-        existing_agent_file_tokens=wb.measured_agent_file_tokens(finding),
-        existing_by_path=wb.measured_agent_file_tokens_by_path(finding),
-    )
-    decisions = wb.allocate_writes(
-        [
-            _candidate(
-                key="first", family="f1", artifact_text=text,
-                gross_tokens=900_000, gross_usd=300.0,
-                exposure_sessions=10, destinations=(str(small),),
-            ),
-            _candidate(
-                key="second", family="f2", artifact_text=text,
-                gross_tokens=800_000, gross_usd=250.0,
-                exposure_sessions=10, destinations=(str(small),),
-            ),
-            # Same size, into a file nothing else touched — it must NOT be
-            # blocked by the first file being full.
-            _candidate(
-                key="third", family="f3", artifact_text=text,
-                gross_tokens=700_000, gross_usd=200.0,
-                exposure_sessions=10, destinations=(str(other),),
-            ),
-        ],
-        budget, build_projection_basis(30.0, 20, 400),
-    )
-    assert decisions["first"].offered is True
-    assert decisions["second"].offered is False
-    assert decisions["second"].reason == wb.REASON_BUDGET_FULL
-    assert decisions["third"].offered is True
-    # A deferred write is not a suppressed one: the saving is real and the
-    # snippet stays copyable, so its claim survives.
-    assert decisions["second"].claim_suppressed is False
-    assert decisions["second"].claimed_tokens > 0

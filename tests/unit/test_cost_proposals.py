@@ -765,12 +765,8 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep = _report()
     rep.findings["script"] = _workflow_finding()
-    # A saving big enough to clear the write budget's net-of-standing-cost
-    # gate, so this test measures ONLY the persona decision. The shared
-    # `_reuse_cluster` default (900 tokens over a 10-session window) is
-    # deliberately smaller than the CLAUDE.md rule it would write costs to
-    # keep, which is a net-negative write the budget is right to suppress —
-    # see `test_write_budget_suppresses_net_negative_cost_write`.
+    # A saving large enough to exercise a real write, so this test measures
+    # ONLY the persona decision.
     rep.findings["reuse"] = _reuse_finding(
         clusters=[_reuse_cluster(cache_reuse_recoverable_tokens=900_000,
                                  cache_reuse_recoverable_usd=30.0)],
@@ -1155,14 +1151,49 @@ def test_no_analyzer_figure_is_paced_however_rich_the_window():
 
 def test_the_window_length_never_rescales_a_figure():
     # Same report read over a 10-day window and a 30-day one: the figures are
-    # the analyzer's own observations either way. `window_days` is a LABEL for
-    # the write budget's standing-cost horizon, never a divisor.
+    # the analyzer's own observations either way. `window_days` is accepted
+    # for call-site compatibility only; it never rescales a figure.
     at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
     at_30d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=30.0)}
     assert at_10d.keys() == at_30d.keys()
     for sig, prop in at_10d.items():
         assert prop.past_overspend_usd == at_30d[sig].past_overspend_usd, sig
     assert at_30d["cost:trim:svc-a"].past_overspend_usd == pytest.approx(0.8)
+
+
+# --- apply is offered unconditionally: no write-budget gate survives ------- #
+
+def test_apply_capable_write_is_offered_however_huge_the_rule_would_be():
+    """Pins the new contract: an apply_capable cost proposal is offered
+    regardless of the size of the rule it would write, or how large the
+    instruction file it lands in already is. There is no MIN_NET_WRITE_USD
+    floor, no MAX_OFFERED_WRITES cap, and no AGENT_FILE_STANDING_CEILING_TOKENS
+    left to withhold the offer -- those were the write budget's job, and the
+    write budget is gone.
+    """
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    # A pathologically large cluster: far more recoverable tokens/dollars, and
+    # a far bigger implied rule, than any of the old write-budget constants
+    # would have tolerated for a single permanent block.
+    huge = _reuse_cluster(
+        cache_reuse_recoverable_usd=50_000.0,
+        cache_reuse_recoverable_tokens=200_000_000,
+        script_replacement_recoverable_usd=1.0,
+        script_replacement_recoverable_tokens=100,
+    )
+    rep = _report()
+    rep.findings["reuse"] = _reuse_finding(clusters=[huge])
+    # "mixed" (not "claude-code"): the pre-dispatch persona gate disables the
+    # `reuse` analyzer outright for a clean claude-code window (its levers live
+    # elsewhere), but a mixed window still runs it and offers the write.
+    rep.persona = "mixed"
+
+    prop = {p.analyzer: p for p in cost_proposals_from_report(rep)}["reuse"]
+    assert prop.apply_capable is True
+    assert prop.advise_only is False
+    assert prop.delivery
+    assert prop.proposed_fix
 
 
 # --- resend adapter (behavioral requirement #6) ------------------------------ #
@@ -1382,11 +1413,8 @@ def test_resend_persona_flows_through_the_report_dispatch():
     from dataclasses import replace
 
     rep = _report()
-    # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`): the
-    # report dispatch runs the write budget, which declines a permanent block
-    # for a 50-cent return, and this test is about persona threading rather
-    # than about whether a rule is worth writing. Tokens move with the dollars
-    # so the implied rate stays inside a real price band (CLAUDE.md rule 28).
+    # Tokens move with the dollars so the implied rate stays inside a real
+    # price band (CLAUDE.md rule 28).
     rep.findings["resend"] = replace(
         _resend_finding(),
         past_overspend_usd=60.0, past_overspend_tokens=20_000_000,

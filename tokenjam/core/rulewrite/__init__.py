@@ -8,11 +8,12 @@ session of every project, including the ones that never exhibited the problem,
 and it dilutes the one file whose dilution makes rules start being ignored.
 
 ``core/optimize/rule_placement`` answers WHERE from the working directories the
-sessions already recorded, and ``core/optimize/write_budget`` nets each
-destination's own standing cost — so a rule that reads net-negative against the
-global file can flip to net-positive by landing in the right place. This
-package is the lifecycle that follows: list -> stage -> check -> apply -> undo,
-per destination, dry-run by default.
+sessions already recorded, comparing each destination's own standing cost — so
+a rule that would be re-sent by fewer sessions in a project file lands there
+instead of the global one. This package is the lifecycle that follows: list ->
+stage -> check -> apply -> undo, per destination, dry-run by default. Every
+``apply_capable`` rule is offered; there is no budget/payback/ceiling gate on
+top of that.
 """
 from __future__ import annotations
 
