@@ -65,10 +65,8 @@ the rollup's ``excluded`` channel instead, which states waste the headline did
 not sum in rather than dropping it silently.
 
 THE UNBOUNDED FIELDS ARE NOT TOUCHED. ``past_overspend_usd``/``_tokens`` on the
-cluster stay exactly as the detector wrote them. They are the write budget's
-pre-net gross (``core/optimize/write_budget.py``), and shrinking them in place
-would silently flip clusters between "worth a permanent rule" and net-negative.
-The contribution is a new, separately named field beside them.
+cluster stay exactly as the detector wrote them — the unbounded, full-corpus
+observation. The contribution is a new, separately named field beside them.
 
 ONE FIGURE FOR THE FLOOR, THE TAIL AND THE HEADLINE. Every row gets
 ``inbox_contribution_usd`` stamped on it, cost and relearn alike, so the noise

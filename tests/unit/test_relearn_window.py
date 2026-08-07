@@ -239,8 +239,8 @@ def test_no_window_labels_leaves_the_unbounded_behaviour_exactly_as_it_was():
 
 
 def test_the_unbounded_fields_are_identical_with_and_without_windowing():
-    # The write budget nets against `past_overspend_tokens` as its pre-net
-    # gross, so windowing must not move it by a single token.
+    # Windowing is a new, PARALLEL set of fields; it must not move the
+    # unbounded observation by a single token.
     failures = [_failure(f"s{i}", days_ago) for i, days_ago in enumerate([1, 9, 40])]
     plain, _ = build_proposals([_cluster(failures)], min_sessions=3)
     windowed, _ = build_proposals(
@@ -250,8 +250,7 @@ def test_the_unbounded_fields_are_identical_with_and_without_windowing():
     for field_name in (
         "past_overspend_tokens", "past_overspend_usd", "past_reread_tokens",
         "past_reread_usd", "past_overspend_basis", "tail_multiplier",
-        "standing_cost_tokens", "payback_ratio", "net_negative",
-        "write_offered", "write_blocked_reason",
+        "advise_only",
     ):
         assert getattr(plain[0], field_name) == getattr(windowed[0], field_name)
 

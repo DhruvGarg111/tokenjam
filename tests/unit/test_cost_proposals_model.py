@@ -293,10 +293,8 @@ def _subagent_finding(sub_agent_type="explore",
         sessions_with_subagents=1, total_subagents=1, subagent_cost_usd=1.2,
         subagent_tokens=92_500, window_cost_usd=2.0, percent_of_cost=0.6,
         flagged_cost_usd=1.2, rows=[row], flagged=[row],
-        # Scaled past the $5 write floor (`write_budget.MIN_NET_WRITE_USD`) so
-        # these tests can exercise the OFFERED write path at all; the $/token
-        # rate is held constant so the pair still divides back into a real
-        # price band (CLAUDE.md rule 28).
+        # The $/token rate is held constant so the pair still divides back
+        # into a real price band (CLAUDE.md rule 28).
         past_overspend_usd=9.0, past_overspend_tokens=925_000,
     )
 

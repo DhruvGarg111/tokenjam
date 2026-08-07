@@ -450,33 +450,6 @@ def recompute_now(
                 getattr(config, "storage", None)
             ) if getattr(config, "storage", None) is not None else None,
         )
-        # WHICH OF THOSE CLUSTERS IS ACTUALLY OFFERED A PERMANENT RULE is not
-        # this detector's call, and is no longer decided inside it. It is one
-        # allocation over every candidate in a report — see
-        # `core/optimize/write_allocation.py`. A STANDALONE recompute has no
-        # cost lane to rank against, so it allocates over a report carrying
-        # just this finding: fewer candidates, the same single budget, the same
-        # code path. Skipping it here would cache clusters still carrying their
-        # construction-time `write_offered=True` and offer every one of them.
-        from tokenjam.core.optimize import write_allocation
-        from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
-        from tokenjam.utils.time_parse import utcnow as _utcnow
-
-        try:
-            write_allocation.allocate_report_writes(
-                OptimizeReport(
-                    window=WindowSummary(
-                        since=_utcnow(), until=_utcnow(), days=0.0, sessions=0,
-                        spans=0, total_tokens=0, total_cost_usd=0.0,
-                        thin_data=True,
-                    ),
-                    persona=persona,
-                    findings={"relearn": finding},
-                ),
-                config=config,
-            )
-        except Exception:  # noqa: BLE001 - a cache write must not sink on this
-            pass
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).

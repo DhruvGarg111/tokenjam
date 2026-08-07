@@ -27,11 +27,11 @@ Two load classes, both real:
     the surface is the frontmatter as WRITTEN — it is not truncated — so it is
     measured here rather than bounded by a constant.
 
-This is the read-side statement of the rule ``core/optimize/write_budget.py``
-already applies on the write side (``standing_tokens_per_session``: a
-skill write is charged only its always-loaded frontmatter). Both sides now
-resolve the split through this module so the product cannot answer the same
-question two ways.
+This is the read-side statement of the rule
+``core/rulewrite/delivery.standing_tokens_per_session`` already applies on the
+write side (a skill write is priced on only its always-loaded frontmatter).
+Both sides now resolve the split through this module so the product cannot
+answer the same question two ways.
 
 Nothing here reads telemetry. How many times an on-demand file was ACTUALLY
 invoked is a separate, observed quantity — see ``core/summarize/invocations``.
@@ -73,9 +73,7 @@ PATH_SCOPED = "path-scoped"
 ON_DEMAND_CLASSES: frozenset[str] = frozenset({SKILL, COMMAND, AGENT, PATH_SCOPED})
 
 #: Directory fragment -> load class. Matched against the POSIX-normalised path,
-#: so a Windows path and a `~`-relative one classify identically. Mirrors
-#: the three directories ``write_budget._always_loaded_chars`` treats as
-#: on-demand on the write side (it now classifies through this module).
+#: so a Windows path and a `~`-relative one classify identically.
 _CLASS_BY_FRAGMENT: tuple[tuple[str, str], ...] = (
     ("/skills/", SKILL),
     ("/commands/", COMMAND),

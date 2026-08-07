@@ -10616,13 +10616,13 @@ const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
 // control together. An enum has to pick one of those to report, so it
 // necessarily lies about that row. Two booleans cannot.
 //
-//   inboxCanApply(item)    tj makes the change itself. RELEARN: the write
-//                          budget offered a rule (`write_offered`) and the
-//                          cluster is not advise-only, which is exactly
+//   inboxCanApply(item)    tj makes the change itself. RELEARN: the cluster is
+//                          not advise-only, which is exactly
 //                          `RelearnApplyModal`'s own gate, so a row tagged this
 //                          way can never open a modal reading "nothing to
 //                          approve". COST: `apply_capable`, the same flag the
-//                          apply controls are gated on.
+//                          apply controls are gated on. No budget/ceiling gate
+//                          sits on top of either flag.
 //                          Drives: checkbox eligibility, the primary action,
 //                          and bulk scope.
 //
@@ -10630,9 +10630,8 @@ const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
 //                          `suggestion`. RELEARN: `advise_snippet_offered`,
 //                          stamped server-side
 //                          (`relearn_proposals.advise_snippet_offered`), true
-//                          when `proposed_fix` is a real derived recommendation
-//                          rather than the "no fix template matched"
-//                          placeholder.
+//                          for an advise-only cluster that still carries a
+//                          `proposed_fix` the user can copy by hand.
 //                          Drives: whether the copy box renders. The snippet IS
 //                          the deliverable where there is no writer, so it gets
 //                          a labelled box on the row, never a hover or a
@@ -10650,7 +10649,7 @@ const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
 // the apply control with no edit here.
 function inboxCanApply(item) {
   if (!item) return false;
-  if (item.kind === 'relearn') return !item.advise_only && item.write_offered !== false;
+  if (item.kind === 'relearn') return !item.advise_only;
   return !!item.apply_capable;
 }
 
@@ -10923,13 +10922,12 @@ function pluralItems(n) {
 // --- Relearn cluster: observed cost only, no forward claim ------------------
 //
 // A recurring-mistake row used to render a SECOND number — a forward
-// `estimated_monthly_*` claim, captioned "est. / mo". That figure was GATED:
-// `write_budget.py` zeroed it whenever no permanent rule was worth offering.
-// On a real corpus that meant 50 of 55 rows rendering "$0.00 est./mo" with no
-// reason given, while those same 55 clusters had already cost $46 of observed
-// spend between them. A zero with no explanation reads as "this was free",
-// which is the exact inversion of what the gate means: the gate is a gap in
-// OUR fix library, never a finding that the failure was harmless.
+// `estimated_monthly_*` claim, captioned "est. / mo". That figure was GATED by
+// the now-deleted write-budget module, which zeroed it whenever no permanent
+// rule was worth offering. On a real corpus that meant most rows rendering
+// "$0.00 est./mo" with no reason given, while those same clusters had already
+// cost real observed spend. A zero with no explanation reads as "this was
+// free", which is the exact inversion of what the gate meant.
 //
 // Founder decision: the forward claim is deleted from the card entirely, not
 // merely de-emphasised. A relearn cluster now shows its PAST figure only —
@@ -10945,15 +10943,12 @@ function relearnObservedFigure(cluster) {
   return null;
 }
 
-// A `writeGateNote(cluster)` helper used to live here, rendering the write
-// budget's verdict as a one-line "No permanent fix offered: <short label>". It
-// is GONE, not misplaced: `RecurringMistakeRow` now renders the budget's FULL
-// sentence (`advise_only_reason`) plus the payback arithmetic in its fix block,
-// because the compressed label named the gate without telling the reader what to
-// do instead. The short label itself is not dead: `write_blocked_short` is still
-// stamped server-side and still rendered by `tj optimize`'s relearn list
-// (`cmd_optimize._render_relearn`), where a dense terminal list genuinely needs
-// the compressed form.
+// A `writeGateNote(cluster)` helper used to live here, rendering a budget
+// verdict as a one-line "No permanent fix offered: <short label>". It is
+// GONE: there is no budget verdict to render any more. `RecurringMistakeRow`
+// renders `advise_only_reason` for the clusters that genuinely have no apply
+// path (no workspace, an advisory family, or a persona with no write
+// surface) — every other cluster's apply action is simply offered.
 //
 // --- Past overspend: the number this product LEADS with -------------------
 //
@@ -11212,24 +11207,11 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
   const canApply = inboxCanApply(cluster);
   const hasSnippet = inboxHasSnippet(cluster);
   const fixText = String(cluster.proposed_fix || '').trim();
-  // The FULL reason tokenjam will not write this one, not the compressed label.
-  // The short form (`writeGateNote`, still used nowhere else) existed because
-  // ~50 of 55 clusters are gated and the long sentence turned a dedicated tab
-  // into a wall of text. On the merged list the sub-$5 floor leaves one or two
-  // of these above the fold, so there is room for the real sentence, and the
-  // reader needs it: "no permanent fix offered" does not tell them what to do,
-  // whereas the budget's own wording explains that the recommendation is theirs
-  // to apply and why. `advise_only_reason` is stamped server-side by
-  // `relearn_proposals.advise_only_reason`, which is also the CLI's source, so
-  // the two cannot drift.
+  // The reason tokenjam will not write this one — a workspace-less cluster, an
+  // advisory family, or a persona with no write surface. `advise_only_reason`
+  // is stamped server-side by `relearn_proposals.advise_only_reason`, which is
+  // also the CLI's source, so the two cannot drift.
   const cannotApplyReason = canApply ? null : String(cluster.advise_only_reason || '').trim();
-  // The payback arithmetic, appended only where the budget actually computed
-  // one: an executing hook is run rather than sent as prompt text, so it has no
-  // standing cost and no ratio, and printing one there would invent a verdict
-  // the model never reached.
-  const payback = (!canApply && cluster.standing_cost_tokens_per_session && cluster.payback_ratio != null)
-    ? '~' + fmtTokens(cluster.standing_cost_tokens_per_session) + ' tokens would ride into every future session, forever; modelled payback ' + cluster.payback_ratio.toFixed(2) + '×.'
-    : null;
   return html`
     <div class="opt-section inbox-row" data-mechanism=${inboxMechanismTag(cluster)} key=${cluster.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
@@ -11261,11 +11243,10 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
             same height as a cost row's wall of text. Nothing is invented: every
             figure here is on the cluster.
 
-            The write-gate reason sits INSIDE the clamp on this row, unlike the
-            cost card's `blockedReason`. It is a paragraph of budget economics
-            rather than a one-line refusal, the mechanism tag already says the row
-            has no writer, and the fix block below carries the recommendation the
-            reader acts on. */ ''}
+            The no-apply-path reason sits INSIDE the clamp on this row, unlike
+            the cost card's `blockedReason`. The mechanism tag already says the
+            row has no writer, and the fix block below carries the
+            recommendation the reader acts on. */ ''}
       ${/* A DESCRIPTION, in words, before any counts. A relearn cluster carries no
             analyzer prose, so it used to render nothing but "Recurred in N
             sessions" and read as a different species of row from a cost card.
@@ -11279,20 +11260,18 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
       ${/* Counts are METADATA and follow the description, no longer standing in
             for it. */ ''}
       <div class="dim" style="font-size:11.5px;margin-top:6px">Recurred ${cluster.occurrences} time${cluster.occurrences === 1 ? '' : 's'} across ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
-      ${/* Why tokenjam will not write it, in the budget's own words. Its own
-            disclosure, collapsed: it is a paragraph of write economics, and the
+      ${/* Why tokenjam will not write it. Its own disclosure, collapsed: the
             mechanism tag above already says the row has no writer. */ ''}
-      ${cannotApplyReason || payback ? html`
+      ${cannotApplyReason ? html`
         <details class="po-basis">
           <summary>Why there is no permanent fix on offer</summary>
-          ${cannotApplyReason ? html`<p>${cannotApplyReason}</p>` : null}
-          ${payback ? html`<p>${payback} This is a modelled comparison, not an observed one; it does not count what the rule might save by preventing the failure.</p>` : null}
+          <p>${cannotApplyReason}</p>
         </details>` : null}
 
       ${/* The two fix facts are rendered INDEPENDENTLY, mirroring how the cost
             card has always rendered its own two. A relearn cluster happens never
-            to be both today (the write budget offers a rule OR declines it), but
-            writing them as one if/else would bake the coincidence into the
+            to be both today (a cluster either has an apply path or it doesn't),
+            but writing them as one if/else would bake the coincidence into the
             structure and break the day it stops holding. */ ''}
       ${hasSnippet ? html`
         ${/* THE case that must never read as a dead end, and the common one: 21
@@ -11441,19 +11420,6 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             <div class="opt-section" style="margin:0 0 6px">
               <div class="opt-title" style="font-size:13px">No apply path <span class="dim" style="font-weight:400">· advise-only</span></div>
               <div class="sz-note" style="margin-top:4px">${cluster.advise_only_reason || 'Every agent in this cluster is a service tokenjam has no workspace for, so there is no file to write a fix into. Apply the recommendation yourself, then measure it with tj relearn verify --otel.'}</div>
-              ${/* The arithmetic behind a net-negative verdict, shown rather
-                    than asserted: a permanent rule is re-sent on every future
-                    session, so its cost scales with the same session count the
-                    saving does and what survives is a ratio. Hedged on
-                    purpose — the model does not count what the rule saves by
-                    preventing the failure, and the measurement that would
-                    settle that returned null. */ ''}
-              ${(cluster.payback_ratio != null && cluster.standing_cost_tokens_per_session) ? html`
-                <div class="sz-note" style="margin-top:8px">
-                  A permanent rule for this would carry ~${fmtTokens(cluster.standing_cost_tokens_per_session)} tokens into every future session, forever.
-                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? '; under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
-                  <div style="margin-top:4px" class="dim">This is a modelled comparison, not an observed one. It does not count what the rule might save by preventing the failure in the first place; the measurement that would settle that returned no usable signal.</div>
-                </div>` : null}
             </div>
           ` : !result ? html`
             <div class="opt-section" style="margin:0 0 6px">
