@@ -271,6 +271,21 @@ code, .mono {
    each other in both directions. */
 .sidebar[data-persona="claude-code"] a.nav-link[data-view="cost"] { display: none !important; }
 .sidebar[data-persona="sdk"] a.nav-link[data-view="cost"] { display: none !important; }
+/* THE UNKNOWN-PERSONA WINDOW, for views hidden under every persona key. The two
+   rules above key on `[data-persona="..."]`, which is empty until the read
+   settles, so between first paint and that answer neither matched and Spend was
+   advertised as a live route: a nav row asserting reachability for a page the
+   router gates, which then vanished. `syncNavState` writes this flag from
+   PERSONA_HIDDEN_EVERYWHERE, derived from the lists themselves, so it stays
+   correct if an entry moves. It is deliberately NOT gated on the persona being
+   known: no resolution brings such a view back, so there is nothing to wait for.
+   The per-persona rules above stay as the enforcement once the answer lands. */
+.sidebar a.nav-link[data-persona-unreachable="1"] { display: none !important; }
+/* And the rows the read really does decide (`traces`: hidden for claude-code,
+   shown for sdk). Present, so an unresolved read removes nothing a reader may
+   be entitled to; visibly unsettled, so it asserts nothing either. Same third
+   state, and the same treatment, as the Optimize submenu's pending entries. */
+.sidebar a.nav-link.nav-link-pending { opacity: 0.42; }
 /* The Dashboard's health band summarises unread alerts, agents drifting and
    budgets at risk: pages a coding-agent user cannot open. Hidden for that
    persona rather than left pointing at nothing. */
@@ -13633,6 +13648,37 @@ const PERSONA_HIDDEN_DELIBERATE = {
 // that persona — the page silently loses entries it should have. Hiding
 // nothing is the honest default: a view that appears and then goes away is
 // recoverable, a view the reader never learns exists is not.
+// THE VIEWS NO RESOLUTION CAN MAKE REACHABLE: hidden under EVERY persona key.
+// DERIVED from the lists rather than written out, so removing an entry from one
+// of them moves a view out of this set automatically instead of leaving a
+// hardcoded copy hiding a row that is now legitimately reachable.
+//
+// This is the third state the nav was missing. `personaHides` answers "does
+// THIS persona hide it", and correctly answers no while the persona is unknown
+// (see its note). But a view every persona hides is not a question the persona
+// read can settle: whichever way it lands, the row goes. Showing it meanwhile
+// asserts a route the reader can click and get nothing from, which is the same
+// over-claim as any other surface stating more than its data supports; hiding
+// it costs nothing, because there is no answer under which it should return.
+//
+// `App()` resolves `persona` to a key of PERSONA_HIDDEN_VIEWS in every case (an
+// unclassified corpus falls back to `claude-code`), so an intersection over
+// those keys really is "under every persona a reader can end up as".
+const PERSONA_HIDDEN_EVERYWHERE = (() => {
+  const lists = Object.keys(PERSONA_HIDDEN_VIEWS).map(k => PERSONA_HIDDEN_VIEWS[k]);
+  if (!lists.length) return new Set();
+  return new Set(lists[0].filter(v => lists.every(l => l.indexOf(v) !== -1)));
+})();
+
+// Hidden under SOME persona but not all, so the persona read genuinely decides
+// it. These are the rows that get the not-yet-known treatment while it is in
+// flight: present, but visibly unsettled rather than asserted.
+function personaMayHide(view) {
+  return Object.keys(PERSONA_HIDDEN_VIEWS).some(
+    k => PERSONA_HIDDEN_VIEWS[k].indexOf(view) !== -1,
+  );
+}
+
 function personaHides(persona, view, known) {
   if (!known) return false;
   const hidden = PERSONA_HIDDEN_VIEWS[persona];
@@ -13755,6 +13801,11 @@ function syncNavState(view, param, persona, personaKnown) {
   document.body.dataset.persona = personaAttr;
   document.querySelectorAll('.nav-link').forEach(el => {
     const v = el.dataset.view || '';
+    // Independent of `personaKnown` on purpose, and the ONE hide that is: a view
+    // every persona hides has no answer under which it comes back, so waiting
+    // for the read buys nothing and showing it meanwhile advertises a route that
+    // renders nothing when clicked.
+    el.dataset.personaUnreachable = PERSONA_HIDDEN_EVERYWHERE.has(v) ? '1' : '0';
     if (el.classList.contains('nav-child')) {
       // "Click Optimize → expand": show a child only while its section is active.
       // A child gated out for the current persona (data-optimize-hidden, set by
@@ -13778,6 +13829,17 @@ function syncNavState(view, param, persona, personaKnown) {
       // them and the reader lost where they were.
       const alt = (el.dataset.viewAlt || '').split(',').filter(Boolean);
       el.classList.toggle('active', (v === view && !childActive) || alt.indexOf(view) !== -1);
+      // NOT-YET-KNOWN, for the rows the persona read actually decides. `traces`
+      // is hidden for claude-code and shown for sdk, so until the read lands
+      // neither rendering it normally nor removing it is honest: one advertises
+      // a route that may vanish, the other removes one the reader may be
+      // entitled to. It renders present but visibly unsettled instead, the same
+      // third state the Optimize submenu's own pending entries use.
+      const pending = !personaKnown && el.dataset.personaUnreachable !== '1'
+        && personaMayHide(v);
+      el.classList.toggle('nav-link-pending', pending);
+      if (pending) el.setAttribute('aria-busy', 'true');
+      else el.removeAttribute('aria-busy');
     }
   });
 }

@@ -93,6 +93,52 @@ def test_spend_is_hidden_for_both_personas(enforced):
     assert ("sdk", "cost") in enforced
 
 
+def test_the_hidden_everywhere_set_is_derived_not_transcribed(html: str, declared):
+    """The third category, and it must follow the lists rather than copy them.
+
+    A view hidden under EVERY persona key can never be made reachable by the
+    persona read landing, so it is the one thing the nav may hide while the
+    persona is still unknown. A hardcoded copy of that set would keep hiding a
+    row after an entry was removed from one of the lists, which is the same
+    declaration/enforcement drift this module exists to catch, one level up.
+    """
+    block = html[html.index("const PERSONA_HIDDEN_EVERYWHERE = ("):]
+    block = block[: block.index("})();")]
+    assert "PERSONA_HIDDEN_VIEWS" in block, "the set must be derived from the lists"
+    # No view name may appear as a literal in the derivation.
+    for views in declared.values():
+        for view in views:
+            assert f"'{view}'" not in block, (
+                f"'{view}' is transcribed into the derivation; derive it instead"
+            )
+
+
+def test_only_the_hidden_everywhere_views_are_hidden_before_the_persona_lands(
+    html: str, declared,
+):
+    """The rule that fires while `personaKnown` is false, checked against the lists.
+
+    This is the anti-over-hiding property, kept: a view hidden under only SOME
+    persona is still a question the read decides, so it must NOT be hidden here.
+    Only the intersection may be.
+    """
+    everywhere = set.intersection(*(set(v) for v in declared.values()))
+    union = set().union(*(set(v) for v in declared.values()))
+    assert everywhere, "no view is hidden everywhere; this test's premise moved"
+    assert union - everywhere, (
+        "every hidden view is hidden everywhere, so the persona-dependent case "
+        "is untested; this test's premise moved"
+    )
+    # The unknown-window hide is keyed on the derived flag, not on a view name.
+    assert '.sidebar a.nav-link[data-persona-unreachable="1"]' in html
+    assert "el.dataset.personaUnreachable = PERSONA_HIDDEN_EVERYWHERE.has(v)" in html
+    # A persona-DEPENDENT view must never reach that flag: it gets the unsettled
+    # treatment instead, so an unresolved read removes nothing.
+    assert "el.classList.toggle('nav-link-pending', pending)" in html
+    assert "const pending = !personaKnown && el.dataset.personaUnreachable !== '1'" in html
+    assert "&& personaMayHide(v);" in html
+
+
 def test_a_view_hidden_under_every_persona_records_why(html: str, declared):
     """Already the rule; asserted here because `cost` is the only such view."""
     everywhere = set.intersection(*(set(v) for v in declared.values()))

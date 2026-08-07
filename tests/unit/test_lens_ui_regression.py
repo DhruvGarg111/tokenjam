@@ -1034,12 +1034,21 @@ def test_the_drift_mechanism_is_kept_intact_behind_the_removed_surface(
 
 
 def test_persona_gate_hides_nothing_until_the_persona_is_known(html: str) -> None:
-    """A not-yet-known persona must apply NO hiding rules.
+    """A not-yet-known persona must apply no PERSONA-DEPENDENT hiding rules.
 
     The old fallback resolved an unknown persona to a concrete one, so an
     unresolved read silently applied a real persona's hiding rules to a reader
     who might be the other persona. Both halves of the gate — the JS predicate
     and the CSS attribute it pairs with — now key on `known`.
+
+    NARROWED, NOT WEAKENED. This still pins the anti-over-hiding property, which
+    is the whole point of it: a view the read genuinely decides may not be hidden
+    on a guess. What it no longer implies is that NOTHING may be hidden while
+    unknown. A view hidden under every persona key is not a question the read can
+    settle, and showing it advertised a route that renders nothing when clicked;
+    that one case is hidden immediately, keyed on a set derived from the lists.
+    See test_lens_persona_hidden_mirror.py for the split and for the assertion
+    that the persona-dependent case is still exempt.
     """
     assert "function personaHides(persona, view, known) {" in html
     assert "if (!known) return false;" in html
