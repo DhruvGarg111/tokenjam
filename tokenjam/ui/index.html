@@ -286,6 +286,12 @@ code, .mono {
    be entitled to; visibly unsettled, so it asserts nothing either. Same third
    state, and the same treatment, as the Optimize submenu's pending entries. */
 .sidebar a.nav-link.nav-link-pending { opacity: 0.42; }
+/* The picker gets the SAME unsettled treatment as a pending nav row: until
+   the persona read lands there is no answer to display, and a control
+   showing a settled-looking label beside a nav that admits it does not know
+   is the louder lie of the two. Still enabled: an explicit choice during
+   this window is exactly how a reader settles it. */
+.persona-select.persona-select-pending { opacity: 0.42; }
 /* The Dashboard's health band summarises unread alerts, agents drifting and
    budgets at risk: pages a coding-agent user cannot open. Hidden for that
    persona rather than left pointing at nothing. */
@@ -13708,11 +13714,20 @@ function PersonaPicker({ bare } = {}) {
   const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
   // `bare` (the Dashboard heading) renders just the dropdown, no "Viewing as"
   // label — it sits next to the "Dashboard" title, where the context is obvious.
+  // Until the read lands there is no persona to name, so the picker must not
+  // name one. It renders a neutral placeholder rather than the fallback value:
+  // asserting "Claude Code" on an SDK-dominant corpus and swapping a moment
+  // later is the same not-yet-known-rendered-as-known defect the nav had. It
+  // stays ENABLED throughout, because an explicit pick is how a reader answers
+  // the question early, and `onChange` marks the context settled.
   const select = html`
-    <select class="persona-select" aria-label="Persona"
-            value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
+    <select class=${'persona-select' + (known ? '' : ' persona-select-pending')}
+            aria-label="Persona" aria-busy=${known ? null : 'true'}
+            value=${known ? persona : ''} onChange=${(e) => onChange(e.currentTarget.value)}>
+      ${known ? null : html`
+        <option value="" disabled selected>Detecting workflow...</option>`}
       ${opts.map(([value, label]) => html`
-        <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
+        <option key=${value} value=${value} selected=${known && persona === value}>${label}</option>`)}
     </select>`;
   return html`
     <span class="persona-pick">

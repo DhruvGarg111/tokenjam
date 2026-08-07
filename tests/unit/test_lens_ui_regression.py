@@ -1470,3 +1470,40 @@ def test_the_compute_tile_never_renders_a_zero_duration(html: str) -> None:
     assert tile.index("fmtTokens(s.input_tokens)") < tokens_at
     # The old unconditional dash is gone.
     assert "${s.active_seconds != null ? fmtDurLong(s.active_seconds * 1000) : '-'}" not in html
+
+
+def test_the_picker_does_not_name_a_persona_it_has_not_read(html: str) -> None:
+    """Not-yet-known is a third state for the CONTROL too, not just the nav.
+
+    The nav now renders unsettled rows while the persona read is in flight. The
+    picker beside it went on asserting the fallback ("Claude Code") for that
+    whole window and swapped when the read landed, which on an SDK-dominant
+    corpus names the wrong persona and then corrects itself. Two surfaces
+    answering the same unresolved question differently is worse than either
+    alone, so the picker takes the same treatment.
+    """
+    picker = html[html.index("function PersonaPicker("):]
+    picker = picker[: picker.index("\nfunction ")]
+    # It reads the settled flag at all.
+    assert "known" in picker, "PersonaPicker must consult the persona-known flag"
+    # It does not display a persona it has not read.
+    assert "value=${known ? persona : ''}" in picker, (
+        "the picker must not select a persona while the read is unresolved"
+    )
+    assert 'value=${persona} onChange' not in picker, (
+        "the unconditional fallback value must not come back"
+    )
+    # It says so, rather than looking settled.
+    assert "persona-select-pending" in picker
+    assert "aria-busy=${known ? null : 'true'}" in picker
+    # ...and it stays usable: an explicit pick is how a reader settles it early.
+    assert "onChange=${(e) => onChange(e.currentTarget.value)}" in picker, (
+        "the picker must stay enabled while unsettled"
+    )
+    assert "disabled" not in picker.split("<select")[1].split(">")[0], (
+        "the SELECT itself must never be disabled; only the placeholder option is"
+    )
+    # The unsettled styling exists and matches the nav's.
+    assert ".persona-select.persona-select-pending { opacity: 0.42; }" in html
+    assert ".sidebar a.nav-link.nav-link-pending { opacity: 0.42; }" in html
+
