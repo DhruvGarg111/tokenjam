@@ -191,9 +191,17 @@ def test_recoverable_tiles_are_derived_only_from_an_answer_we_hold(html):
 
 
 def _dashboard(html: str) -> str:
+    """``DashboardView``'s body, bounded by the next TOP-LEVEL declaration.
+
+    This used to end at a ``// Two lenses, one router`` comment, which vanished
+    with the dead Improve/Observe lens and took all four assertions below down
+    with it -- an extractor anchored on prose is only as durable as the prose.
+    A column-0 declaration is a structural boundary instead.
+    """
     start = html.index("function DashboardView")
-    end = html.index("// Two lenses, one router", start)
-    return html[start:end]
+    nxt = re.search(r"\n(?:function|const|class) ", html[start + 10:])
+    assert nxt, "no top-level declaration follows DashboardView; update this extractor"
+    return html[start:start + 10 + nxt.start()]
 
 
 def test_no_panel_waits_on_another_panel_s_endpoint(html):

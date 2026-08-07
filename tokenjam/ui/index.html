@@ -2009,6 +2009,11 @@ code.md-code {
    --brand for links) so it reads as one system with the rest of Lens.
    ============================================================ */
 .sidebar a.nav-child { display: none; padding-left: 38px; font-size: 13px; color: var(--text-faint); }
+/* The submenu's not-yet-known state. These entries were computed for the
+   persona the reader just left, so until the new read lands they are shown as
+   unsettled rather than either asserted or removed. Still clickable: the pages
+   exist and each lands on its own persona-gated state. */
+.sidebar a.nav-child.nav-child-pending { opacity: 0.42; }
 .sidebar a.nav-child.active { color: var(--accent); }
 .sidebar a.nav-child .icon { font-size: 12px; opacity: .6; }
 /* A reference entry: always visible (NOT a nav-child), but set apart from the
@@ -6859,9 +6864,19 @@ function buildQualifier(scan) {
   return 'computed by ' + scan.computedBuild + ', you are on ' + scan.build;
 }
 
-function ScanBar({ scan, busy, error, declined, declinedDetail, onRescan }) {
+// `loading` is the THIRD state this bar needs and did not have. `scanState`
+// derives everything from the payload, so a null payload is indistinguishable
+// there between "the read failed" and "the read has not answered yet" — and it
+// resolved to the first, printing "scan state unavailable" over a read that was
+// merely in flight. That is a failure claim made about a working system, and it
+// is exactly what a persona switch produces now that a switch correctly drops
+// the previous persona's answer instead of holding it. Callers that know their
+// read is unresolved pass `loading`; the default keeps every other call site's
+// behaviour unchanged.
+function ScanBar({ scan, busy, error, declined, declinedDetail, onRescan, loading = false }) {
   const scanning = !!(busy || scan.computing);
-  const when = scan.fetchFailed ? 'scan state unavailable'
+  const when = loading ? 'checking scan state…'
+    : scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
       ? 'computed ' + fmtAgo(scan.computedAt)
       : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
@@ -7922,6 +7937,67 @@ function RecommendationsPanel({ rec }) {
     </section>`;
 }
 
+// The not-yet-known state for the whole Optimize read, in one place so the
+// initial mount and every question change (persona, window, agent, comparison)
+// reset to exactly the same thing. Every field is a NULL-ish "no answer", never
+// a zero or an empty report: `proposalsScoped` starts true only because nothing
+// renders off it while `loading` holds, and `bk: []` is never read as a known
+// empty because the block that reads it is behind the same gate.
+function optEmptyState() {
+  return {
+    loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null,
+    proposalAnalyzers: new Set(), proposals: [], proposalsScoped: true,
+  };
+}
+
+// THE QUESTION the Optimize reads answer. Every one of these four scopes the
+// server-side reads, so a change to any of them means the figures on screen
+// answer something the reader is no longer asking. Kept as one value so there
+// is a single definition of "same question" rather than four comparisons that
+// can drift apart.
+function optQuestionKey(since, agentId, compare, persona) {
+  return JSON.stringify([since || '', agentId || '', compare || '', persona || '']);
+}
+
+// What the page shows WHILE a read is in flight, which is the entire
+// stale-vs-skeleton decision in one pure function (root anti-pattern 22a).
+//
+//   same question  -> KEEP the held answer. A 30s poll tick, the Refresh
+//                     button and an apply-a-fix reload all re-ask the same
+//                     thing, and the last complete answer is still the best
+//                     available truth about it. Blanking it would make the page
+//                     flicker every half minute for no gain.
+//   question moved -> DROP it. The previous persona's analyzer rows, dollar
+//                     figures and gated-analyzer set under the new persona's
+//                     label are not stale truth, they are a fresh lie; same for
+//                     last window's numbers under this window's picker. Not-yet-
+//                     known is a skeleton, never a number and never a "no X".
+function optPendingState(prev, questionChanged) {
+  if (questionChanged) return optEmptyState();
+  return { ...prev, loading: !prev.opt, error: null };
+}
+
+// The Optimize page's skeleton, shaped like the page it stands in for: a spend
+// bar, the two summary cards, then the analyzer rows. A single 200px shimmer
+// used to stand in for a screen several times that tall, so every resolution
+// yanked the scroll position and the whole page jumped — most visibly on a
+// persona switch, which now correctly passes THROUGH this state rather than
+// holding the previous persona's numbers. Reserving roughly the real height is
+// what makes the switch read as a load instead of a glitch.
+function OptimizeSkeleton({ rows = 6 }) {
+  return html`<div aria-busy="true" aria-label="Loading">
+    <div class="shimmer" style="height:150px;border-radius:var(--radius-panel)"></div>
+    <div class="opt-cards">
+      <div class="shimmer" style="height:190px;border-radius:var(--radius-panel)"></div>
+      <div class="shimmer" style="height:190px;border-radius:var(--radius-panel)"></div>
+    </div>
+    <div style="margin-top:var(--stack-gap);display:grid;gap:8px">
+      ${Array.from({ length: rows }).map((_, i) => html`
+        <div key=${i} class="shimmer" style="height:56px;border-radius:var(--radius-panel)"></div>`)}
+    </div>
+  </div>`;
+}
+
 function OptimizeView({ params, navParam, persona }) {
   // `navParam` is the path segment after `#/optimize/` (e.g. `downsize`).
   // summarize/rules/guide route to their OWN primary views (see primaryKeyFor),
@@ -7939,37 +8015,74 @@ function OptimizeView({ params, navParam, persona }) {
   // nothing renders off it until `loading` clears; once a fetch answers it is
   // the server's own `persona_scoped`, and a false there withholds every inline
   // fix card rather than showing corpus-wide dollars under a persona label.
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set(), proposals: [], proposalsScoped: true });
+  const [st, setSt] = useState(optEmptyState());
   // Locally-dismissed proposal signatures (same lock-free browser store the old
   // Review-actions page used). A dismissed fix withdraws its OFFER only; the
   // analyzer's figure is untouched (Critical Rule 32).
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
 
+  // Generation counter + the question the data on screen answers, the same two
+  // refs DashboardView's recoverable-waste read carries (`optRun`,
+  // `optPersonaRef`). This page had NEITHER, which cost it both halves of the
+  // contract:
+  //   - no generation guard, so a slow settle for the persona the reader has
+  //     already switched AWAY from wrote itself into the new persona's view.
+  //     The reads are fast on a warm daemon, so this is a race rather than a
+  //     certainty — which is exactly the kind that ships.
+  //   - `loading: !s.opt` held the last answer across EVERY reload, including
+  //     the reloads that change the question. A persona switch therefore left
+  //     the previous persona's analyzer rows, dollar figures and gated-analyzer
+  //     set rendered under the new persona's label until the read landed. That
+  //     is correct for the 30s poll (same question, keep the last true answer)
+  //     and a fresh lie for a switch, exactly as useTriageRead's deps rule says.
+  const runRef = useRef(0);
+  const questionRef = useRef(null);
+
   const load = useCallback(async () => {
-    setSt(s => ({ ...s, loading: !s.opt, error: null }));
+    // The whole question, not just the persona: `since`, `agent_id` and the
+    // comparison window scope these reads too, so each of them invalidates the
+    // held answer for the same reason a persona switch does.
+    const question = optQuestionKey(since, agentId, compare, persona);
+    const changed = questionRef.current !== null && questionRef.current !== question;
+    questionRef.current = question;
+    const g = ++runRef.current;
+    setSt(s => optPendingState(s, changed));
     try {
       // `persona` is the SELECTED one, not the corpus's dominant one. The route
       // gates the analyzer set for what was asked, so the cards, the ranked
       // list and the gated-analyzer state below all describe the persona the
       // reader is actually looking at.
-      const opt = await api('/optimize', { since, agent_id: agentId || undefined, persona });
-      let cmp = null;
-      // SAME persona again. This comparison sits beside the analyzer rows as
-      // part of one answer, so an unscoped delta here would put the whole
-      // corpus's spend movement next to one persona's findings.
-      if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined, persona }).catch(() => null);
-      // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
-      // failure must not blank the Optimize screen.
-      // SAME persona as the /optimize read above. These two render as one
-      // answer on this screen — the analyzer rows and, right above them, the
-      // "biggest single cause" line drawn from this overlay. Scoping only one
-      // of them named an analyzer the row list had correctly dropped.
-      const comp = await api('/cost/components', { since, agent_id: agentId || undefined, persona }).catch(() => null);
-      // Applied summaries (for the Summarize box's applied-vs-outstanding progress).
-      const bk = await api('/summarize/backups').then(r => r.backups || []).catch(() => []);
-      // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
-      // Best-effort — must not blank the Optimize screen.
-      const rec = await api('/recommendations').catch(() => null);
+      // ONE round trip's worth of wall clock, not six. These six reads have no
+      // data dependency on each other, and awaiting them in sequence made the
+      // not-yet-known window the SUM of their latencies — the window a persona
+      // switch spends on skeletons is now the slowest single read instead.
+      // They still settle as one answer: this page publishes the analyzer rows,
+      // the spend bar and the fix cards together, and two of those covering
+      // different personas is the defect the whole surface exists to avoid.
+      const [opt, cmp, comp, bk, rec, cp] = await Promise.all([
+        // `persona` is the SELECTED one, not the corpus's dominant one. The route
+        // gates the analyzer set for what was asked, so the cards, the ranked
+        // list and the gated-analyzer state below all describe the persona the
+        // reader is actually looking at.
+        api('/optimize', { since, agent_id: agentId || undefined, persona }),
+        // SAME persona again. This comparison sits beside the analyzer rows as
+        // part of one answer, so an unscoped delta here would put the whole
+        // corpus's spend movement next to one persona's findings.
+        compare ? api('/cost/compare', { since, compare, agent_id: agentId || undefined, persona }).catch(() => null) : null,
+        // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
+        // failure must not blank the Optimize screen.
+        // SAME persona as the /optimize read above. These two render as one
+        // answer on this screen — the analyzer rows and, right above them, the
+        // "biggest single cause" line drawn from this overlay. Scoping only one
+        // of them named an analyzer the row list had correctly dropped.
+        api('/cost/components', { since, agent_id: agentId || undefined, persona }).catch(() => null),
+        // Applied summaries (for the Summarize box's applied-vs-outstanding progress).
+        api('/summarize/backups').then(r => r.backups || []).catch(() => []),
+        // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
+        // Best-effort — must not blank the Optimize screen.
+        api('/recommendations').catch(() => null),
+        api('/relearn/cost-proposals', { persona }).catch(() => null),
+      ]);
       // The open cost proposals — the applyable fix for each analyzer, now
       // rendered inline on the analyzer's own detail page (the retired
       // Review-actions page's job moved here). Best-effort: a failed or empty
@@ -7979,18 +8092,30 @@ function OptimizeView({ params, navParam, persona }) {
       // acts on. `persona_scoped: false` means the stored ledger predates
       // per-persona proposals and cannot answer — the cards are then withheld
       // rather than shown with corpus-wide money under this persona's label.
-      const cp = await api('/relearn/cost-proposals', { persona }).catch(() => null);
       const proposalsScoped = !cp || cp.persona_scoped !== false;
       const proposals = (proposalsScoped && cp && cp.proposals) || [];
       const proposalAnalyzers = new Set(proposals.map(p => p.analyzer));
+      // Only the settle whose generation is still current may write. A read
+      // issued for the persona (or window) the reader has since moved off is a
+      // complete, well-formed answer to a question nobody is asking any more.
+      if (runRef.current !== g) return;
       setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers, proposals, proposalsScoped });
-    } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
+    } catch (e) {
+      if (runRef.current !== g) return;
+      setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
     // `persona` is a real dependency, not decoration: switching the picker has
     // to re-read, or the page keeps rendering the previous persona's analyzer
     // set under the new persona's name.
   }, [since, agentId, compare, persona]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    // Bump the generation on teardown so a settle from the question this effect
+    // asked cannot write into the one that replaced it — the same cleanup
+    // useTriageRead and DashboardView's optimize read both use.
+    return () => { runRef.current++; };
+  }, [load]);
 
   // The open, non-dismissed cost proposals for one analyzer — the fixes rendered
   // inline on that analyzer's detail page. An analyzer can carry more than one
@@ -8121,7 +8246,7 @@ function OptimizeView({ params, navParam, persona }) {
     const meta = ANALYZER_META[detailName] || { title: capitalize(detailName) };
     const backLink = html`<div style="margin:0 0 16px"><a class="sz-back-link" href="#/optimize">← Back to Optimize</a></div>`;
     if (st.loading && !st.opt) {
-      return html`${backLink}<div class="shimmer" style="height:200px"></div>`;
+      return html`${backLink}<${OptimizeSkeleton} rows=${2} />`;
     }
     if (st.error) {
       return html`${backLink}<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>`;
@@ -8215,7 +8340,7 @@ function OptimizeView({ params, navParam, persona }) {
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:0">
         Optimize <${PersonaPicker} bare=${true} /> <${PlanBadge} framing=${framing} />
       </div>
-      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
+      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} loading=${st.loading && !st.opt} />
     </div>
     ${/* What this page is, in one line. Deliberately carries no total: the
           per-analyzer figures below overlap (two checks can price the same
@@ -8248,7 +8373,7 @@ function OptimizeView({ params, navParam, persona }) {
     ${scan.known && scan.windowDays ? html`<div class="sz-note" style="font-size:12px">Analyzer findings were computed over the last ${scan.windowDays} days by the background scan. The spend bar below is drawn over that same window, so the picker above does not move it.</div>` : null}
 
     ${st.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
-    ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
+    ${st.loading ? html`<${OptimizeSkeleton} />` : null}
     ${/* Cold store: no findings exist, and an empty set of analyzer cards would
           read as "we looked and found nothing". Say what is true instead. */ ''}
     ${!st.loading && !st.error && scan.cold ? html`
@@ -13673,16 +13798,25 @@ function App() {
   const personaHasNoData = personaInfo.known && personaInfo.counts
     ? (personaInfo.counts[persona] || 0) === 0
     : null;
-  const [optNav, setOptNav] = useState({ dynamic: [], showSummarize: false, showRules: false });
+  // `pending` is the submenu's not-yet-known state. The entries are an
+  // ANALYZER SET, which is persona-specific: switching to Claude Code left
+  // "Batch placement" and "Cache" sitting in the sidebar under the new
+  // persona's Optimize section for as long as the read took, naming analyzers
+  // that persona has no lever for. Blanking them instead would be the opposite
+  // false claim ("this persona has no analyzer pages"), so the honest third
+  // state is to keep them visibly unsettled until the read answers.
+  const [optNav, setOptNav] = useState({ dynamic: [], showSummarize: false, showRules: false, pending: true });
   useEffect(() => {
     // No data for the selected persona → empty submenu. Wait for the persona
     // read to answer (personaHasNoData === null) before deciding, so we don't
     // blank a real submenu on the first paint.
-    if (personaHasNoData === true) { setOptNav({ dynamic: [], showSummarize: false, showRules: false }); return; }
+    if (personaHasNoData === true) { setOptNav({ dynamic: [], showSummarize: false, showRules: false, pending: false }); return; }
     let cancelled = false;
+    setOptNav(s => (s.pending ? s : { ...s, pending: true }));
     api('/optimize', { fast: 'true', persona })
       .then(d => {
-        if (cancelled || !d) return;
+        if (cancelled) return;
+        if (!d) { setOptNav(s => ({ ...s, pending: false })); return; }
         // No mismatch check any more, and none is needed: the request names the
         // SELECTED persona, and the route gates the analyzer set for THAT
         // persona rather than for the corpus's dominant one. The workaround
@@ -13706,9 +13840,10 @@ function App() {
           // anti-pattern 22); the honest default for a route that exists is to
           // show it. Only a positive "this persona has no data" hides it now.
           showRules: personaHasNoData !== true,
+          pending: false,
         });
       })
-      .catch(() => { if (!cancelled) setOptNav({ dynamic: [], showSummarize: false, showRules: false }); });
+      .catch(() => { if (!cancelled) setOptNav({ dynamic: [], showSummarize: false, showRules: false, pending: false }); });
     return () => { cancelled = true; };
   }, [persona, personaHasNoData]);
 
@@ -13729,7 +13864,11 @@ function App() {
       const meta = ANALYZER_META[name] || { title: capitalize(name) };
       const a = document.createElement('a');
       a.href = '#/optimize/' + name;
-      a.className = 'nav-link nav-child';
+      // While the persona's own analyzer set is still being read, these entries
+      // are last persona's answer: reachable (the pages exist and land on their
+      // own persona-gated state), but not yet a claim about THIS persona.
+      a.className = 'nav-link nav-child' + (optNav.pending ? ' nav-child-pending' : '');
+      if (optNav.pending) a.setAttribute('aria-busy', 'true');
       a.dataset.view = 'optimize';
       a.dataset.param = name;
       a.dataset.optimizeDyn = '1';
