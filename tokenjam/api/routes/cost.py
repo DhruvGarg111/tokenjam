@@ -421,12 +421,15 @@ def _recoverable_overlap_note(recoverable: list[dict]) -> str:
 # deliberately NOT applied — the stored report is corpus-wide, so filtering the
 # denominator to one agent would reintroduce the same mismatch on the other axis.
 #
-# Nor is the denominator persona-scoped, and that is not an oversight either. The
-# persona picker selects which ANALYZERS contribute (a lever set), not which
-# traffic is measured: `_collect_recoverable` filters findings, and every finding
-# is computed over the whole corpus. Scoping the denominator to the persona's own
-# traffic would divide a whole-corpus ceiling by a fraction of the spend it was
-# derived from. `recoverable_basis_note` says all of this on the bar itself.
+# The denominator IS persona-scoped, and the two sentences that used to sit here
+# saying otherwise were left behind by the change that scoped it. They claimed
+# the picker selects a lever set only, and that every finding is computed over
+# the whole corpus. Both stopped being true when the daemon started storing a
+# separately-scoped sub-report per persona: `stored_report_for_persona` serves
+# THAT persona's pass, and `_component_costs` below takes the same `persona` so
+# the ceiling and its denominator cover one population. A stale comment asserting
+# the old contract is worse than none, because the next reader trusts it over the
+# code. `recoverable_basis_note` states the live contract on the bar itself.
 def _recoverable_window_bounds(scan: dict) -> tuple[datetime | None, datetime | None]:
     """The window the stored report actually observed, as datetimes.
 
@@ -460,13 +463,43 @@ def _recoverable_window_bounds(scan: dict) -> tuple[datetime | None, datetime | 
     return since, until
 
 
+#: How the picker's values read in the note. The bar is prose, so it uses the
+#: same words the picker shows rather than the wire key.
+_PERSONA_TRAFFIC_LABEL = {
+    "claude-code": "Claude Code",
+    "sdk": "SDK workflow",
+}
+
+
 def _recoverable_basis_note(
     since_dt: datetime | None, until_dt: datetime | None, window_days,
+    persona: str | None = None, lever_persona: str | None = None,
 ) -> str:
     """What the bar's two figures cover, stated on the bar.
 
     Prominence is the point: the mismatch this replaces was invisible precisely
     because nothing on screen said which window the shaded region came from.
+
+    TWO OF THE THREE SENTENCES USED TO BE FALSE, and they were false in the same
+    way the defect they were written to fix was: a figure asserting more than its
+    population supports. The note said "Both figures cover every agent" and "the
+    persona picker changes which analyzers contribute to the ceiling, not which
+    traffic is measured". Once the daemon began storing a separately-scoped pass
+    per persona, the picker moved BOTH halves: on one real corpus the same bar's
+    denominator reads 13733.55 as Claude Code and 1.37 as SDK. A disclosure that
+    contradicts the payload it travels with is worse than no disclosure. The
+    middle sentence (this bar does not follow the range picker; the estimate
+    comes from the stored scan) was and is true, and is kept verbatim.
+
+    WHAT THIS MAY NOT CLAIM, and deliberately does not: that the ceiling's
+    POPULATION is persona-scoped. The analyzer SET is (`findings_for_persona`),
+    and the spend below it is (`add_persona_clause`), but a contributing analyzer
+    is free to measure on a wider basis than this window; `relearn` scans
+    unbounded on-disk history by design and lands the same figure in a scoped
+    total as in an unscoped one. So the sentence says the ceiling counts the
+    analyzers that persona can act on, "each measured on its own basis", which is
+    true of every contributor. Naming which contributors are wider than the
+    window needs a per-analyzer disclosure this note cannot carry.
     """
     if since_dt is None or until_dt is None:
         return (
@@ -475,12 +508,36 @@ def _recoverable_basis_note(
         )
     span = f"{since_dt.date().isoformat()} to {until_dt.date().isoformat()}"
     days = f"{int(window_days)} days" if isinstance(window_days, (int, float)) else "window"
+    stable = (
+        f"over the analyzer scan's own {days}, {span}. This bar does not follow "
+        "the range selected above: the recoverable estimate comes from the stored "
+        "scan and is never recomputed per request."
+    )
+    label = _PERSONA_TRAFFIC_LABEL.get(persona or "")
+    if label:
+        return (
+            f"Both figures cover {label} traffic {stable} The persona picker "
+            "scopes both halves: the spend is measured over that persona's own "
+            "traffic, and the ceiling counts only the analyzers it can act on, "
+            "each measured on its own basis."
+        )
+    # NO PERSONA SELECTED, and this case is NOT a clean corpus total, so the note
+    # may not imply one. The spend covers every agent, but the ceiling is still
+    # filtered by a lever set: `_collect_recoverable` falls back to the corpus's
+    # own dominant persona, so a corpus that resolves to Claude Code drops the
+    # analyzers only an SDK user could act on while keeping every agent's spend
+    # underneath. Saying so is the whole reason this branch is separate.
+    lever_label = _PERSONA_TRAFFIC_LABEL.get(lever_persona or "")
+    if lever_label:
+        return (
+            f"The spend covers every agent {stable} The ceiling does not: with no "
+            f"persona selected it counts only the analyzers a {lever_label} user "
+            "can act on, each measured on its own basis. Select a persona above "
+            "to put both figures on one population."
+        )
     return (
-        f"Both figures cover every agent over the analyzer scan's own {days}, "
-        f"{span}. This bar does not follow the range selected above: the "
-        "recoverable estimate comes from the stored scan and is never recomputed "
-        "per request. The persona picker changes which analyzers contribute to "
-        "the ceiling, not which traffic is measured."
+        f"Both figures cover every agent {stable} Every analyzer contributes to "
+        "the ceiling, each measured on its own basis."
     )
 
 
@@ -638,8 +695,14 @@ async def get_cost_components(
         # Travels WITH the pair, exactly like `recoverable_overlap_note`: the
         # window and scope disclosure is part of the claim, not decoration a
         # renderer may drop.
+        # `lever_persona` mirrors the fallback `_collect_recoverable` applies, so
+        # the note describes the set that actually built the ceiling rather than
+        # the one the caller asked for. It is an argument, not a payload field.
         "recoverable_basis_note": (
-            _recoverable_basis_note(rec_since_dt, rec_until_dt, scan["window_days"])
+            _recoverable_basis_note(
+                rec_since_dt, rec_until_dt, scan["window_days"], persona,
+                str(getattr(stored, "persona", "") or "") if stored is not None else None,
+            )
             if known else ""
         ),
         # The one entry in `recoverable` that is honest as a standalone claim:

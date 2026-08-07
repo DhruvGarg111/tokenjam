@@ -400,12 +400,25 @@ async def test_the_disclosure_travels_with_the_pair(persona, window, monkeypatch
     # It names the window it is actually drawn over, and says the picker does
     # not move it. Both are the claims the old bar failed to make.
     assert str(REPORT_WINDOW_DAYS) in note
-    assert "every agent" in note
     assert "does not follow the range selected above" in note
-    # The persona sentence: what the picker DOES change, stated plainly, because
-    # this bar's denominator is not persona-scoped and a reader must not assume
-    # it is.
-    assert "persona picker changes which analyzers" in note
+    # THE PERSONA SENTENCE, INVERTED. This used to assert `"every agent" in note`
+    # and `"persona picker changes which analyzers" in note`, pinning a claim
+    # that the denominator is NOT persona-scoped. It is: `_component_costs` takes
+    # the same persona the ceiling was built under, so on a two-persona corpus
+    # the same bar reports a different denominator per persona. The assertions
+    # kept passing because they matched the string rather than the behaviour,
+    # which is exactly how the wording outlived the change that falsified it.
+    assert "not which traffic is measured" not in note
+    if persona in ("claude-code", "sdk"):
+        # A scoped read names its persona and drops the corpus-wide claim.
+        assert "every agent" not in note, (
+            f"persona={persona}: the note still claims to cover every agent"
+        )
+        assert "scopes both halves" in note
+    else:
+        # Unscoped is a hybrid, not a clean corpus total: every agent's spend
+        # under a ceiling still filtered by the dominant persona's lever set.
+        assert "every agent" in note
     # House rule: no em dashes in user-facing copy.
     assert "—" not in note
 
