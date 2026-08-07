@@ -2771,5 +2771,9 @@ def run(ctx: AnalyzerContext) -> None:
         claude_home=resolve_write_scope(scope=scope).suggest_root,
         distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
-        persona=ctx.persona,
+        # The WRITE gate, and it follows the scope for the same reason the
+        # population does: a pass scoped to `sdk` must not be handed the
+        # corpus's `mixed` verdict and offer a CLAUDE.md write off the back of
+        # it. Distinct from `persona_scope` above, which chooses the lanes.
+        persona=ctx.effective_persona,
     )

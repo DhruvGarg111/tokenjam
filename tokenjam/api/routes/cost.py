@@ -16,6 +16,7 @@ from tokenjam.core.framing import (
     plan_determination_mix,
 )
 from tokenjam.core.models import CostFilters
+from tokenjam.core.persona_scope import add_persona_clause, persona_scopes_population
 from tokenjam.core.pricing_coverage import coverage_note, summarize_pricing_coverage
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -229,7 +230,7 @@ _COMPONENT_LABELS = [
 ]
 
 
-def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
+def _component_costs(conn, agent_id, since_dt, until_dt, persona=None) -> dict:
     """Split the window's spend into the four token components (#211).
 
     Computes each component's cost per (provider, model, variant) via the
@@ -278,6 +279,15 @@ def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
     if until_dt is not None:
         params.append(until_dt)
         clauses.append("start_time <= $" + str(len(params)))
+    # The persona POPULATION scope. These bars used to be deliberately
+    # unscoped, on the reasoning that measured spend is measured spend whatever
+    # persona is selected. That held only while nothing ELSE on the surface was
+    # scoped. The overlay drawn on top of them is now this persona's, and the
+    # ceiling's denominator comes from the same split — so leaving the bars
+    # whole-corpus published one persona's overspend as a share of everybody's
+    # spend, which rendered as "exceeds measured spend" on a corpus where it
+    # did not.
+    add_persona_clause(clauses, persona)
     where = " AND ".join(clauses)
     # Grouped by UTC day as well as (provider, model) so each bucket prices at
     # the rate that actually billed it — a UTC day never straddles a rate change
@@ -518,7 +528,7 @@ async def get_cost_components(
         raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
     conn = getattr(db, "conn", None)
 
-    comp = _component_costs(conn, agent_id, since_dt, until_dt)
+    comp = _component_costs(conn, agent_id, since_dt, until_dt, persona)
     components = [
         {"key": key, "label": label,
          "cost_usd": round(comp[key]["cost_usd"], 8), "tokens": comp[key]["tokens"]}
@@ -537,7 +547,20 @@ async def get_cost_components(
     from tokenjam.core.optimize import report_store
 
     scan = report_store.stored_report_block(config)
-    stored = report_store.stored_report(config)
+    # THE PERSONA'S OWN SCOPED REPORT, not the corpus-wide one with its analyzer
+    # set sliced. Slicing the set drops findings this persona has no lever for;
+    # it does nothing about the fact that the surviving findings were computed
+    # over everybody's sessions. The daemon stores one fully-scoped report per
+    # persona for exactly this reason (`runner.build_persona_reports`).
+    body = report_store.stored_report_dict(config)
+    if persona_scopes_population(persona) and isinstance(body, dict):
+        scoped_body = (body.get("persona_reports") or {}).get(persona)
+        # No scoped report means an artifact from before per-persona passes.
+        # `None` here reports the overlay as NOT YET KNOWN — which is what
+        # `recoverable_status` already exists to say — rather than publishing
+        # the corpus's recoverable figures under this persona's label.
+        body = scoped_body if isinstance(scoped_body, dict) else None
+    stored = report_store.report_from_stored_dict(body)
     recoverable: list[dict] = (
         _collect_recoverable(stored, persona=persona) if stored is not None else []
     )
@@ -574,7 +597,13 @@ async def get_cost_components(
             # already computed above rather than running the aggregate twice.
             basis_cost, basis_tokens = total_cost, total_tokens
         else:
-            basis = _component_costs(conn, None, rec_since_dt, rec_until_dt)
+            # SAME persona as the numerator above. `agent_id` is deliberately
+            # dropped here (the ceiling spans every agent in the scan) but the
+            # persona is not: it is the population the ceiling was computed
+            # over, so it has to be the population the denominator covers.
+            basis = _component_costs(
+                conn, None, rec_since_dt, rec_until_dt, persona,
+            )
             basis_cost = sum(v["cost_usd"] for v in basis.values())
             basis_tokens = sum(v["tokens"] for v in basis.values())
 

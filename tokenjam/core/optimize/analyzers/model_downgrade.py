@@ -871,7 +871,12 @@ def run(ctx: AnalyzerContext) -> None:
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
         ctx.persona_scope,
     )
-    if "placement" in disabled_analyzers_for_persona(ctx.persona):
+    # `effective_persona`, not `persona`: this pass may be scoped to one side of
+    # the picker over a corpus that resolves to `mixed`, and `mixed` disables
+    # nothing. Keying off the window's own persona there attaches a batch-lane
+    # card to a Claude-Code-scoped pass — a dollar figure for a lever that
+    # persona structurally cannot pull.
+    if "placement" in disabled_analyzers_for_persona(ctx.effective_persona):
         return
     optimize_cfg = getattr(ctx.config, "optimize", None)
     ctx.report.findings["placement"] = analyze_batch_placement(

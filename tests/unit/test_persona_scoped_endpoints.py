@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tokenjam.api.app import create_app
-from tokenjam.core.config import ApiAuthConfig, ApiConfig, TjConfig
+from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import build_default_pipeline
 from tokenjam.utils.time_parse import utcnow
@@ -38,7 +38,19 @@ def db():
 
 @pytest.fixture
 def config(tmp_path):
-    cfg = TjConfig(version="1", api=ApiConfig(auth=ApiAuthConfig(enabled=False)))
+    # `storage.path` IS THE ISOLATION and it is not optional. The proposal and
+    # report stores resolve their location through
+    # `relearn_apply._storage_base_dir`, which falls through to the REAL
+    # `~/.tj` when a config carries no storage path — so a fixture that omits
+    # it does not merely fail to isolate, it reads and writes the operator's
+    # own ledger. That is a test reaching outside its sandbox to read live
+    # data, and the symptom is a test whose result depends on the machine it
+    # runs on (root anti-pattern 26).
+    cfg = TjConfig(
+        version="1",
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        storage=StorageConfig(path=str(tmp_path / "telemetry.duckdb")),
+    )
     path = tmp_path / "tokenjam.toml"
     path.write_text('version = "1"\n')
     cfg.config_path = path

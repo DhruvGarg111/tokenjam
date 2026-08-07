@@ -3343,7 +3343,18 @@ def _adapt_report(
     two callers cannot see different cards.
     """
     findings = getattr(report, "findings", {}) or {}
-    persona = str(getattr(report, "persona", "") or "unknown")
+    # THE SCOPE FIRST, the corpus's own persona second. A report built for one
+    # side of the picker over a mixed corpus carries `persona="mixed"` — which
+    # gates nothing — beside rows that are entirely one persona's. Reading
+    # `persona` alone there adapts a card for a lever the reader does not have
+    # and prices it off their own sessions, which is a more convincing wrong
+    # answer than the unscoped version was. `persona_scope` is `None` on an
+    # unscoped report, so this is exactly the old behaviour for that case.
+    persona = str(
+        getattr(report, "persona_scope", None)
+        or getattr(report, "persona", "")
+        or "unknown"
+    )
     proposals: list[CostProposal] = []
 
     # Second half of the persona skip gate. `build_report` already refuses to

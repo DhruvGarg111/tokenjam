@@ -4720,6 +4720,13 @@ function RunDetailView({ runId }) {
 // dedicated entry point onto the most expensive traces in the window.
 const TRACE_SORTS = ['recent', 'cost'];
 
+// Whether the picker is actually excluding rows right now. `mixed`/`unknown`
+// scope to everything server-side, so an empty list under one of them is a
+// genuinely empty result and must not be blamed on the picker.
+function personaFiltersTraces(persona) {
+  return persona === 'claude-code' || persona === 'sdk';
+}
+
 function TracesListView({ params, persona }) {
   // Filters come from the URL (issue #112). `result` maps to the API's `status`.
   const DEFAULTS = { since: DEFAULT_SINCE, result: '', agent_id: '', sort: 'recent', min_cost: '' };
@@ -4838,7 +4845,23 @@ function TracesListView({ params, persona }) {
       ${traces.length > 0 ? `Showing ${traces.length} of ${totalCount} traces` : ''}${(traces.length > 0 && outlierNote) ? ' · ' : ''}${outlierNote || ''}
     </div>` : null}
     ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
-      : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
+      /* The empty state has to name the RIGHT absence. This page is
+         persona-scoped now, so "no traces yet, go set up recording" is wrong
+         the moment the corpus has plenty of traces and none of them belong to
+         the selected persona: it sends a reader to fix an ingestion problem
+         they do not have. Filters get the same treatment for the same reason,
+         since a min_cost or result filter that excludes everything is not an
+         empty corpus either. Written as a PLAIN JS COMMENT, not the
+         interpolating comment-then-empty-string form used between markup
+         nodes: this sits inside a ternary EXPRESSION, where that form is a
+         syntax error which takes the whole module down with it. */
+      : traces.length === 0 ? html`<div class="empty">${
+          personaFiltersTraces(persona)
+            ? html`No ${persona === 'sdk' ? 'SDK' : 'Claude Code'} traces in this window. Other traces may exist under the other persona — switch "Viewing as" above.`
+            : (result || minCost !== '' || agentId)
+              ? html`No traces match these filters in this window.`
+              : html`No traces yet. Run an agent with ${'`@watch()`'} to start recording.`
+        }</div>` : html`
       <div class="panel">
       <div class="table-wrap"><table>
         <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Tokens <span class="info-btn">i<span class="info-tip">Input + output tokens for this trace.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th class="num">Spans</th><th></th></tr></thead>

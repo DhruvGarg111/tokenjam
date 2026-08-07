@@ -511,6 +511,20 @@ class AnalyzerContext:
     # prefix test, which would be a second bucketing rule free to drift from
     # `alerts.is_interactive_coding_agent`.
     persona_scope:          str | None     = None
+
+    @property
+    def effective_persona(self) -> str:
+        """THE persona a gate in this pass must key off.
+
+        `persona_scope` when the pass is scoped to one, else the window's own
+        dominant `persona`. Any gate that reads `persona` directly is wrong for
+        a scoped pass over a MIXED corpus: the window resolves to `mixed`, which
+        disables nothing, so a `claude-code`-scoped pass still attaches findings
+        for levers a Claude Code user does not have — measured over Claude Code
+        rows and then labelled with their persona, which is worse than the
+        unscoped version of the same card.
+        """
+        return self.persona_scope or self.persona
     # Which filesystem the filesystem-reading analyzers (deadweight, relearn,
     # summarize) may read, and why. Resolved once in `runner.build_report` via
     # `core.optimize.scope.resolve_analyzer_scope` — an analyzer must never
