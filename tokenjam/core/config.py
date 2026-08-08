@@ -104,7 +104,13 @@ class StorageConfig:
     # nothing the rest of the time. `threads` is capped for the same reason —
     # each carries its own allocation arenas, and the daemon opens a second
     # backend for transcript catch-up while the request path is live.
-    memory_limit:   str = "1GB"
+    # 2GB rather than 1GB because 1GB was measured failing here: on a 768k-span
+    # database the daemon OOMed on a request-path aggregate while the startup
+    # transcript catch-up already held the pool ("1.0 GiB/953.6 MiB used" — the
+    # query needed 16 KB more). The ceiling has to fit the request path AND the
+    # catch-up backend that runs beside it, not either alone. Raise it if a scan
+    # ever spills enough to feel slow.
+    memory_limit:   str = "2GB"
     threads:        int = 4
     # Runtime provenance, never read from or written to TOML: True when `path`
     # came from an explicit `--db` rather than config discovery. The
