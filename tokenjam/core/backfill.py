@@ -24,11 +24,12 @@ import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from tokenjam.core.cost import calculate_cost
 from tokenjam.core.distill import is_tokenjam_invoke_cwd
 from tokenjam.core.pricing import classify_pricing_source
+from tokenjam.core import system_prefix
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
 from tokenjam.core.optimize.repeat_task import hash_task_statement
@@ -325,6 +326,10 @@ def _read_project_claude_md(cwd: str | None) -> str:
     system prompt goes out with every request — which is exactly the
     stable, repeated prefix cache-recommend looks for. Returns "" when cwd is
     unknown or the file is missing/unreadable; never raises.
+
+    The text is read in full but **never stored** — see
+    `_system_prefix_attrs`, which reduces it to the three values the analyzer
+    actually consumes before it reaches a span.
     """
     if not cwd:
         return ""
@@ -332,6 +337,29 @@ def _read_project_claude_md(cwd: str | None) -> str:
         return (Path(cwd) / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _system_prefix_attrs(text: str) -> dict[str, Any]:
+    """The prefix as it goes onto a span: identity, a display sample, a length.
+
+    Storing the text itself is what took a real database to 4.06 GB — the value
+    is identical across every span of a project, so its cost is (size x span
+    count), and 92,514 spans were each holding a ~43 KB copy of one of 61
+    distinct files. `cache_recommend` never used the text as text: it hashed a
+    fixed-size head of it, kept 120 characters for display, and compared its
+    length against a floor. All three survive here at ~230 bytes per span.
+
+    Derivation lives in `core.system_prefix` so the producer and the consumer
+    cannot drift on what a prefix's identity is.
+    """
+    summary = system_prefix.summarize(text)
+    if not summary:
+        return {}
+    return {
+        TjAttributes.SYSTEM_PREFIX_HASH: summary["hash"],
+        TjAttributes.SYSTEM_PREFIX_SAMPLE: summary["sample"],
+        TjAttributes.SYSTEM_PREFIX_LENGTH: summary["length"],
+    }
 
 
 def _provider_for_model(model: str) -> str:
@@ -590,7 +618,7 @@ def parse_claude_code_session(
             if claude_md_text is None and cwd is not None:
                 claude_md_text = _read_project_claude_md(cwd)
             if claude_md_text:
-                llm_attrs[TjAttributes.SYSTEM_PREFIX_CONTENT] = claude_md_text
+                llm_attrs.update(_system_prefix_attrs(claude_md_text))
         if capture.completions:
             completion_text = _block_text(msg.get("content"))
             if completion_text.strip():
