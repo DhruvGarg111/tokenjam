@@ -922,6 +922,12 @@ def test_capture_off_extracts_no_content_only_provenance(tmp_path):
         GenAIAttributes.PROMPT_CONTENT, GenAIAttributes.COMPLETION_CONTENT,
         GenAIAttributes.TOOL_INPUT, GenAIAttributes.TOOL_OUTPUT,
         TjAttributes.SYSTEM_PREFIX_CONTENT,
+        # The compact prefix keys ride the same capture toggle: SAMPLE is
+        # literal prompt text, and HASH/LENGTH are a fingerprint of a file the
+        # user just said not to capture.
+        TjAttributes.SYSTEM_PREFIX_HASH,
+        TjAttributes.SYSTEM_PREFIX_SAMPLE,
+        TjAttributes.SYSTEM_PREFIX_LENGTH,
     }
     for span in (llm, tool):
         assert span.attributes["source"] == "backfill.claude_code"
@@ -999,9 +1005,15 @@ def test_capture_prompts_reads_project_claude_md_as_system_prefix(tmp_path):
     """#272: the human's per-turn message never repeats verbatim, so
     cache-recommend's prefix-hash needs a different, genuinely stable
     signal. The project's CLAUDE.md is read straight off disk (it's not in
-    the transcript) and stamped as `TjAttributes.SYSTEM_PREFIX_CONTENT` --
+    the transcript) and stamped as `TjAttributes.SYSTEM_PREFIX_HASH` --
     identical on every assistant span for the same project, unlike
-    PROMPT_CONTENT."""
+    PROMPT_CONTENT.
+
+    The prefix is stored as a fingerprint rather than as the text: it was the
+    same value on every span, so keeping it whole cost (size x span count).
+    What this asserts is unchanged -- that a stable per-project signal exists
+    and that it is NOT the per-turn prompt."""
+    from tokenjam.core.system_prefix import prefix_hash
     from tokenjam.otel.semconv import TjAttributes
 
     project_dir = tmp_path / "proj"
@@ -1031,9 +1043,11 @@ def test_capture_prompts_reads_project_claude_md_as_system_prefix(tmp_path):
     assert parsed is not None
     llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
     assert len(llm_spans) == 2
+    expected = prefix_hash("# Project rules\nAlways use tabs.")
     for span in llm_spans:
-        assert span.attributes[TjAttributes.SYSTEM_PREFIX_CONTENT] == \
-            "# Project rules\nAlways use tabs."
+        assert span.attributes[TjAttributes.SYSTEM_PREFIX_HASH] == expected
+        # The text itself is never stored -- that is the 4.06 GB defect.
+        assert TjAttributes.SYSTEM_PREFIX_CONTENT not in span.attributes
     # The per-turn human prompt still differs call to call -- confirming the
     # two signals are genuinely distinct, not the same field renamed.
     assert llm_spans[0].attributes[GenAIAttributes.PROMPT_CONTENT] == "turn one"
@@ -1043,6 +1057,7 @@ def test_capture_prompts_reads_project_claude_md_as_system_prefix(tmp_path):
     # prompts=False captures neither.
     parsed_off = parse_claude_code_session(path, capture=CaptureConfig(prompts=False))
     llm_off = next(s for s in parsed_off.spans if s.name == "gen_ai.llm.call")
+    assert TjAttributes.SYSTEM_PREFIX_HASH not in llm_off.attributes
     assert TjAttributes.SYSTEM_PREFIX_CONTENT not in llm_off.attributes
 
 
@@ -1051,6 +1066,7 @@ def test_claude_md_lookup_retries_after_a_record_with_no_cwd(tmp_path):
     A leading record with no `cwd` can't resolve anything, so it must NOT
     commit the `""` outcome -- doing so locked the sentinel permanently and
     every later record that DID carry a cwd silently lost its system prefix."""
+    from tokenjam.core.system_prefix import prefix_hash
     from tokenjam.otel.semconv import TjAttributes
 
     project_dir = tmp_path / "proj"
@@ -1082,8 +1098,8 @@ def test_claude_md_lookup_retries_after_a_record_with_no_cwd(tmp_path):
     llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
     assert len(llm_spans) == 2
     # The retry happened: the later, cwd-bearing record resolved the file.
-    assert llm_spans[-1].attributes[TjAttributes.SYSTEM_PREFIX_CONTENT] == \
-        "# Project rules\nAlways use tabs."
+    assert llm_spans[-1].attributes[TjAttributes.SYSTEM_PREFIX_HASH] == \
+        prefix_hash("# Project rules\nAlways use tabs.")
 
 
 def test_capture_prompts_on_without_claude_md_omits_system_prefix(tmp_path):
@@ -1094,6 +1110,7 @@ def test_capture_prompts_on_without_claude_md_omits_system_prefix(tmp_path):
     path = _content_session_file(tmp_path)
     parsed = parse_claude_code_session(path, capture=CaptureConfig(prompts=True))
     llm, _tool = _llm_and_tool(parsed)
+    assert TjAttributes.SYSTEM_PREFIX_HASH not in llm.attributes
     assert TjAttributes.SYSTEM_PREFIX_CONTENT not in llm.attributes
 
 
