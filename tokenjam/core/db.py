@@ -2625,7 +2625,10 @@ def _connect_bounded(db_path: str, memory_limit: str, threads: int):
     value DuckDB rejects must never make the database unopenable, so a bad
     override degrades to the default rather than propagating.
     """
-    settings = {
+    # Annotated because duckdb's `config=` parameter is typed as an invariant
+    # dict over a union: an inferred dict[str, str] is rejected by mypy even
+    # though every value here is a str.
+    settings: dict[str, str | bool | int | float | list[str]] = {
         "memory_limit": memory_limit or StorageConfig.memory_limit,
         "threads": str(threads or StorageConfig.threads),
         "temp_directory": str(Path(db_path).parent / "duckdb_temp"),
