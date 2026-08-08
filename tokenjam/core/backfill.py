@@ -325,13 +325,29 @@ def _read_project_claude_md(cwd: str | None) -> str:
     system prompt goes out with every request — which is exactly the
     stable, repeated prefix cache-recommend looks for. Returns "" when cwd is
     unknown or the file is missing/unreadable; never raises.
+
+    **Truncated to the number of characters the consumer actually reads.**
+    `cache_recommend` uses this value three ways and no others: it hashes
+    `text[:PREFIX_HASH_BYTES]`, it keeps `text[:120]` as the display sample, and
+    it skips the span when `len(text) < 200`. Nothing downstream ever looks past
+    character `PREFIX_HASH_BYTES`, so storing the rest is pure weight — and it
+    is weight paid *per span*, on a value that is identical across every span of
+    a project. Measured on a real machine: 92,514 spans each holding a ~43 KB
+    copy of 61 distinct files, 4.06 GB on disk to carry 1.8 MB of distinct text,
+    which then had to be paged through DuckDB's buffer pool on every scan.
+
+    Truncating here is behaviour-preserving rather than a trade-off: for a file
+    longer than the cap the hash and the sample are computed from bytes that all
+    survive, and the length gate still sees a value well over 200; for a shorter
+    file nothing is removed at all.
     """
     if not cwd:
         return ""
     try:
-        return (Path(cwd) / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
+        text = (Path(cwd) / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+    return text[:TjAttributes.SYSTEM_PREFIX_CAPTURE_CHARS]
 
 
 def _provider_for_model(model: str) -> str:

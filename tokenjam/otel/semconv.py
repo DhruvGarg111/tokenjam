@@ -266,6 +266,15 @@ class TjAttributes:
     # carries the one thing that actually IS resent identically call after
     # call. Gated by the same [capture] `prompts` toggle as PROMPT_CONTENT.
     SYSTEM_PREFIX_CONTENT = "tokenjam.system_prefix.content"
+    # How much of that prefix is worth storing. The value is written once per
+    # LLM span but is identical across every span of a project, so its true cost
+    # is (size x span count): on a real machine, 92,514 spans holding ~43 KB
+    # each came to 4.06 GB on disk carrying 1.8 MB of distinct text, which then
+    # had to be paged through DuckDB's buffer pool on every scan of the table.
+    # `cache_recommend` — the only consumer — never reads past
+    # `PREFIX_HASH_BYTES`, so this cap must stay >= that constant;
+    # `test_system_prefix_capture_covers_hash_window` fails if it drifts under.
+    SYSTEM_PREFIX_CAPTURE_CHARS = 2000
 
     # Enforcement-plane self-observation (#223). The proxy emits one span per
     # recorded policy decision under this namespace so the web UI + drift see

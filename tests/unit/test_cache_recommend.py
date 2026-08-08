@@ -460,3 +460,51 @@ def test_render_cache_recommend_snippet_uses_plain_console_print(db, capsys):
     out = capsys.readouterr().out
 
     assert c.cache_control_snippet in out
+
+
+def test_system_prefix_capture_covers_hash_window():
+    """The capture cap must never fall below the window the analyzer hashes.
+
+    `_read_project_claude_md` truncates to `SYSTEM_PREFIX_CAPTURE_CHARS` because
+    nothing downstream reads past `PREFIX_HASH_BYTES`. That is only true while
+    the cap is >= the hash window: drop it under, and two different prefixes
+    that diverge after the cap start colliding onto one hash — the analyzer
+    would merge unrelated prefixes into a single candidate and report an
+    occurrence count that was never real. Nothing else would fail.
+    """
+    from tokenjam.core.optimize.analyzers.cache_recommend import PREFIX_HASH_BYTES
+    from tokenjam.otel.semconv import TjAttributes
+
+    assert TjAttributes.SYSTEM_PREFIX_CAPTURE_CHARS >= PREFIX_HASH_BYTES
+
+
+def test_read_project_claude_md_truncates_to_capture_cap(tmp_path):
+    """A large CLAUDE.md is stored capped, not whole — the 4 GB defect.
+
+    Also pins the behaviour-preserving half of the claim: the truncated value
+    hashes to the same prefix as the full text, so existing candidates keep
+    their identity across the change.
+    """
+    from tokenjam.core.backfill import _read_project_claude_md
+    from tokenjam.core.optimize.analyzers.cache_recommend import _prefix_hash
+    from tokenjam.otel.semconv import TjAttributes
+
+    full = "x" * 50_000
+    (tmp_path / "CLAUDE.md").write_text(full, encoding="utf-8")
+
+    captured = _read_project_claude_md(str(tmp_path))
+
+    assert len(captured) == TjAttributes.SYSTEM_PREFIX_CAPTURE_CHARS
+    assert _prefix_hash(captured) == _prefix_hash(full)
+    # Still comfortably over the analyzer's own `len(text) < 200` skip.
+    assert len(captured) >= 200
+
+
+def test_read_project_claude_md_leaves_short_files_intact(tmp_path):
+    """Under the cap, nothing is removed — truncation is not a rewrite."""
+    from tokenjam.core.backfill import _read_project_claude_md
+
+    body = "# rules\n" + ("short enough\n" * 10)
+    (tmp_path / "CLAUDE.md").write_text(body, encoding="utf-8")
+
+    assert _read_project_claude_md(str(tmp_path)) == body

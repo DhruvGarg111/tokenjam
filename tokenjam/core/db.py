@@ -2609,6 +2609,41 @@ _SESSION_TOTALS_ACCUMULATE = """
 """
 
 
+def _connect_bounded(db_path: str, memory_limit: str, threads: int):
+    """Open `db_path` with an explicit buffer-pool ceiling.
+
+    Every connection to the telemetry database goes through here — `__init__`
+    AND `_reopen`. That matters more than it looks: a bound applied only at
+    startup silently disappears the first time the backend recovers from a
+    fatal error, and the recovered daemon then runs unbounded with no symptom
+    until the machine is swapping. See `StorageConfig.memory_limit` for why the
+    default is small.
+
+    `temp_directory` is what makes the ceiling safe rather than fatal — past the
+    limit DuckDB spills there instead of raising — and it sits beside the
+    database so the spill lands on the volume already allotted to this tool. A
+    value DuckDB rejects must never make the database unopenable, so a bad
+    override degrades to the default rather than propagating.
+    """
+    settings = {
+        "memory_limit": memory_limit or StorageConfig.memory_limit,
+        "threads": str(threads or StorageConfig.threads),
+        "temp_directory": str(Path(db_path).parent / "duckdb_temp"),
+    }
+    try:
+        return duckdb.connect(db_path, config=settings)
+    except duckdb.Error:
+        logger.warning(
+            "storage.memory_limit=%r / storage.threads=%r rejected by DuckDB; "
+            "falling back to %s / %s",
+            memory_limit, threads,
+            StorageConfig.memory_limit, StorageConfig.threads,
+        )
+        settings["memory_limit"] = StorageConfig.memory_limit
+        settings["threads"] = str(StorageConfig.threads)
+        return duckdb.connect(db_path, config=settings)
+
+
 class DuckDBBackend:
     """Concrete DuckDB implementation of StorageBackend."""
 
@@ -2616,7 +2651,9 @@ class DuckDBBackend:
         db_path = Path(config.path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path: str | None = str(db_path)
-        self._conn = duckdb.connect(str(db_path))
+        self._memory_limit = config.memory_limit
+        self._threads = config.threads
+        self._conn = _connect_bounded(str(db_path), config.memory_limit, config.threads)
         run_migrations(self._conn)
         self._local = threading.local()
         # Every cursor `conn` has handed out. Recovery must close ALL of them —
@@ -2730,7 +2767,9 @@ class DuckDBBackend:
             return False
         try:
             with self._conn_lock:
-                self._conn = duckdb.connect(self._db_path)
+                self._conn = _connect_bounded(
+                    self._db_path, self._memory_limit, self._threads,
+                )
                 run_migrations(self._conn)
             return self.check_health()
         except Exception as exc:  # noqa: BLE001

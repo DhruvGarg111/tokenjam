@@ -95,6 +95,17 @@ class StorageConfig:
     # nothing else — every config written before the coupling existed — has its
     # value read AS the span, so nothing about that setup changes.
     retention_days: int | None = None
+    # DuckDB's buffer pool, bounded. Left unset, DuckDB sizes `memory_limit` at
+    # 80% of physical RAM — 19.1 GiB on a 24 GB Mac — and its buffer manager has
+    # no reason to evict below that, so a daemon that should idle near 200 MB
+    # instead grows until the machine is swapping. This is a *ceiling*, not a
+    # reservation: past it DuckDB spills to `temp_directory` rather than
+    # failing, so a small number costs disk I/O on the rare large scan and
+    # nothing the rest of the time. `threads` is capped for the same reason —
+    # each carries its own allocation arenas, and the daemon opens a second
+    # backend for transcript catch-up while the request path is live.
+    memory_limit:   str = "1GB"
+    threads:        int = 4
     # Runtime provenance, never read from or written to TOML: True when `path`
     # came from an explicit `--db` rather than config discovery. The
     # filesystem-reading analyzers scope themselves off it (see
@@ -802,6 +813,8 @@ def _parse(raw: dict) -> TjConfig:
         # would erase that distinction.
         analysis_span=storage_raw.get("analysis_span"),
         retention_days=storage_raw.get("retention_days"),
+        memory_limit=storage_raw.get("memory_limit", StorageConfig.memory_limit),
+        threads=storage_raw.get("threads", StorageConfig.threads),
     )
 
     export_raw = raw.get("export", {})
