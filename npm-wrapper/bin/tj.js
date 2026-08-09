@@ -31,9 +31,19 @@
  * tokenjam==<version>` / `--spec tokenjam==<version>` to this wrapper's OWN
  * version (kept in sync with the release tag by publish-npm.yml's `npm
  * version ${GITHUB_REF_NAME#v}` step) forces the resolver past that shortcut,
- * so `npx tokenjam` always runs the release it shipped with. If the pinned
- * spec can't be resolved yet (this wrapper published slightly ahead of PyPI
- * propagation), we fall back to the unpinned form rather than fail outright.
+ * so `npx tokenjam` always runs the release it shipped with.
+ *
+ * Fail-closed on an unresolved pin: publish-npm.yml's wrapper job now blocks
+ * on the matching PyPI release actually being visible before it publishes
+ * this wrapper, so "pinned spec doesn't resolve" should no longer happen in
+ * the ordinary run. Silently falling back to the unpinned form here traded a
+ * loud, correct, RETRYABLE failure for a silent PERMANENT one: uv/pipx cache
+ * whatever the unpinned spec resolves to and never re-resolve on their own,
+ * so one unlucky run during any remaining propagation gap left a stale
+ * version cached forever — surfacing as "0.6.2 shipped a palette rework but
+ * npx still shows the old colors" with no obvious cause. A resolution
+ * failure is now reported and the next runner (or an already-installed PATH
+ * `tj`) is tried instead — never a silent unpinned run.
  *
  * Staleness note: pinning only fixes what THIS wrapper runs. A bare `tj`
  * invoked directly (no `npx`) still runs whatever was separately installed
@@ -247,11 +257,28 @@ function main() {
     : { ...process.env, TJ_NPX_ZERO_INSTALL_REPORT: "1" };
 
   const version = ownVersion();
+  let sawUnresolvedPin = false;
 
   for (const { bin, pinnedPrefix, prefix } of runners(version)) {
     if (!has(bin)) continue;
-    const args =
-      pinnedPrefix && resolves(bin, pinnedPrefix) ? pinnedPrefix : prefix;
+
+    let args;
+    if (pinnedPrefix) {
+      if (!resolves(bin, pinnedPrefix)) {
+        // Fail closed: never silently drop to the unpinned spec (see the
+        // version-pinning comment at the top of this file for why). Report
+        // and move on to the next runner instead.
+        sawUnresolvedPin = true;
+        process.stderr.write(
+          `Note: ${bin} can't resolve tokenjam==${version} yet — skipping it rather than running an unpinned (potentially stale-cached) version.\n`
+        );
+        continue;
+      }
+      args = pinnedPrefix;
+    } else {
+      args = prefix;
+    }
+
     const result = spawnSync(bin, [...args, ...passthrough], {
       stdio: "inherit",
       env: childEnv,
@@ -259,6 +286,17 @@ function main() {
     if (result.error) continue; // try the next runner on spawn failure
     warnIfShadowedByStaleInstall(version);
     process.exit(result.status === null ? 1 : result.status);
+  }
+
+  if (sawUnresolvedPin) {
+    process.stderr.write(
+      "\n" +
+        `tj (TokenJam): couldn't resolve tokenjam==${version} on PyPI through uv/pipx, and no already-installed 'tj' was found on PATH.\n` +
+        "This should be transient — PyPI's CDN can lag briefly right after a release. Wait a minute and re-run `npx tokenjam`.\n" +
+        "If it persists, check https://pypi.org/project/tokenjam/#history for the release, or install an unpinned copy yourself:\n" +
+        "  uvx --from tokenjam tj   /   pipx run --spec tokenjam tj\n\n"
+    );
+    process.exit(1);
   }
 
   process.stderr.write(
