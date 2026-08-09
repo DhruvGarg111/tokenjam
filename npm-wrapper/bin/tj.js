@@ -54,6 +54,7 @@
 "use strict";
 
 const { spawnSync } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 
 // PyPI package name vs. command name differ (`tokenjam` ships the `tj` script),
@@ -110,6 +111,43 @@ function runners(version) {
 function resolves(bin, args) {
   const probe = spawnSync(bin, [...args, "--version"], { stdio: "ignore" });
   return probe.status === 0;
+}
+
+// Resolve `bin` to an absolute path the way the OS would launch it, without
+// spawning it — a plain PATH walk, no shell involved.
+function resolveOnPath(bin) {
+  const dirs = (process.env.PATH || "").split(path.delimiter);
+  const exts =
+    process.platform === "win32"
+      ? (process.env.PATHEXT || ".EXE;.CMD;.BAT").split(";")
+      : [""];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = path.join(dir, bin + ext);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        // not here, keep looking
+      }
+    }
+  }
+  return null;
+}
+
+// True when `candidatePath` resolves (through symlinks) to this very file.
+// `npx` symlinks this package's own `tj`/`tokenjam` bin into a temp bin dir
+// and puts that dir on PATH, so a naive "is tj on PATH" probe finds
+// ourselves — re-spawning that would recurse into this same wrapper forever
+// instead of ever reaching a real, separately-installed CLI.
+function isOwnShim(candidatePath) {
+  if (!candidatePath) return false;
+  try {
+    return fs.realpathSync(candidatePath) === fs.realpathSync(__filename);
+  } catch {
+    return false; // couldn't stat either side — don't claim a match
+  }
 }
 
 // --- stale shadowing install detection ------------------------------------
@@ -260,7 +298,15 @@ function main() {
   let sawUnresolvedPin = false;
 
   for (const { bin, pinnedPrefix, prefix } of runners(version)) {
-    if (!has(bin)) continue;
+    if (bin === COMMAND) {
+      // The installed-CLI fallback: only real if it resolves to something
+      // OTHER than this wrapper (see isOwnShim above). Under npx, `has(bin)`
+      // alone would find our own re-exec'd shim and spawn it recursively.
+      const resolved = resolveOnPath(bin);
+      if (!resolved || isOwnShim(resolved)) continue;
+    } else if (!has(bin)) {
+      continue;
+    }
 
     let args;
     if (pinnedPrefix) {

@@ -3644,6 +3644,57 @@ def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
     )
 
 
+def _parse_launchctl_arguments(output: str) -> list[str] | None:
+    """Extract the ``arguments = { ... }`` array `launchctl print` reports
+    for a loaded unit out of its text output.
+
+    Returns ``None`` when the block isn't present at all (unit not loaded,
+    or a launchctl version whose output this doesn't understand) so a
+    caller can tell "couldn't check" apart from "checked, and it's empty" —
+    the two must never be conflated into a false positive.
+    """
+    lines = output.splitlines()
+    in_block = False
+    found = False
+    args: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not in_block:
+            if stripped.startswith("arguments = {"):
+                in_block = True
+                found = True
+            continue
+        if stripped == "}":
+            break
+        if stripped:
+            args.append(stripped)
+    return args if found else None
+
+
+def _launchd_registration_matches(
+    target: str, program_args: list[str],
+) -> bool | None:
+    """Does the ACTIVELY loaded unit at `target` run `program_args` — the
+    plist that was just written?
+
+    `launchctl print` exiting 0 only proves SOME unit is registered under
+    this label; it says nothing about whether that's the registration this
+    run just wrote versus an old one `bootout` failed to clear (the label
+    is loaded either way, and "already bootstrapped" is exactly the signal
+    that the old one may still be active). Comparing the live argv against
+    what this run intended to install is what actually answers the
+    question. Returns `None` — not confirmed, not refuted — when the unit
+    isn't registered or its output can't be parsed at all.
+    """
+    verify = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+    if verify.returncode != 0:
+        return None
+    active_args = _parse_launchctl_arguments(verify.stdout)
+    if active_args is None:
+        return None
+    return active_args == program_args
+
+
 def _launchd_target(label: str = "com.tokenjam.serve") -> tuple[str, str]:
     """``(domain, service-target)`` for this user's GUI launchd domain —
     ``gui/<uid>/<label>``, the specifier `bootstrap`/`bootout`/`enable`/`print`
@@ -3733,15 +3784,43 @@ def _install_launchd(config_path: str, *, suppress_headsup: bool = False) -> str
         return None
 
     # Verify registration independently rather than trusting bootstrap's exit
-    # status either — `launchctl print <target>` exits non-zero only when the
-    # service genuinely isn't registered, which is the actual question here.
-    verify = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
-    if verify.returncode != 0:
+    # status either — but "some unit is registered under this label" is the
+    # WRONG question when bootstrap reported "already bootstrapped": that
+    # means the old registration may still be the one actually loaded (bootout
+    # above raced or no-op'd against a job still shutting down), and a bare
+    # `launchctl print` happily confirms that stale unit — verifying the plist
+    # is on disk, not that it's what's running. Compare the ACTIVE unit's
+    # program arguments against what this run just wrote instead.
+    matches = _launchd_registration_matches(target, program_args)
+    if not matches:
+        # One retry of the full bootout -> enable -> bootstrap cycle before
+        # giving up — covers the "bootout raced" case outright.
+        subprocess.run(["launchctl", "bootout", target], capture_output=True, text=True)
+        subprocess.run(["launchctl", "enable", target], capture_output=True, text=True)
+        subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist_path)],
+            capture_output=True, text=True,
+        )
+        matches = _launchd_registration_matches(target, program_args)
+
+    if matches is None:
         console.print(f"[warn]Daemon plist written to {plist_path} but "
                       f"launchctl could not confirm it registered.[/warn]")
         console.print(f"[dim]Check manually:[/dim]  launchctl print {target}")
         console.print("[dim]Or run the server directly:[/dim]")
         console.print("  tj serve &")
+        return None
+    if matches is False:
+        console.print(
+            f"[warn]Daemon plist written to {plist_path}, but launchd is "
+            f"still running an OLD registration under {target} — its active "
+            f"program arguments don't match what was just written, so the "
+            f"new config/executable is NOT in effect.[/warn]"
+        )
+        console.print("[dim]Force a clean reload, then re-check:[/dim]")
+        console.print(f"  launchctl bootout {target}")
+        console.print(f"  launchctl bootstrap {domain} {plist_path}")
+        console.print(f"  launchctl print {target}")
         return None
 
     # The --claude-code completion (#675) moves this heads-up to the very BOTTOM

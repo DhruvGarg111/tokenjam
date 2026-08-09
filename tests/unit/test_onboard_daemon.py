@@ -6,6 +6,23 @@ from unittest.mock import patch, MagicMock
 from tokenjam.cli.cmd_onboard import _daemon_already_running
 
 
+def _print_stdout(program_args: list[str]) -> str:
+    """A `launchctl print` text body reporting an active unit whose
+    `arguments` array is exactly `program_args` — what `_install_launchd`'s
+    post-install content check parses out and compares."""
+    args_block = "\n".join(f"\t\t{a}" for a in program_args)
+    return (
+        "gui/501/com.tokenjam.serve = {\n"
+        "\tactive count = 1\n"
+        "\tstate = running\n\n"
+        f"\tprogram = {program_args[0]}\n"
+        "\targuments = {\n"
+        f"{args_block}\n"
+        "\t}\n"
+        "}\n"
+    )
+
+
 class TestDaemonAlreadyRunning:
     def test_darwin_plist_exists_and_loaded(self, tmp_path, monkeypatch):
         """Returns True on macOS when plist exists and launchctl list succeeds."""
@@ -197,7 +214,14 @@ class TestLaunchdInstallSurvivesRegistration:
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.os.getuid", lambda: 501, raising=False)
 
-        run_mock = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        program_args = ["/usr/bin/tj", "--config", "/tmp/cfg.toml", "serve"]
+
+        def _run(cmd, **kwargs):
+            if cmd[1] == "print":
+                return MagicMock(returncode=0, stdout=_print_stdout(program_args), stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        run_mock = MagicMock(side_effect=_run)
         with patch("tokenjam.cli.cmd_onboard.subprocess.run", run_mock):
             result = _install_launchd("/tmp/cfg.toml")
 
@@ -242,24 +266,62 @@ class TestLaunchdInstallSurvivesRegistration:
 
         assert result is None
 
-    def test_install_tolerates_already_bootstrapped_as_idempotent(self, tmp_path, monkeypatch):
+    def test_install_tolerates_already_bootstrapped_when_content_matches(
+        self, tmp_path, monkeypatch,
+    ):
         """A re-onboard racing the `bootout` above (or one that no-op'd
         against a job still shutting down) must not be reported as a failed
-        install, so long as the independent verification confirms it's
-        actually registered."""
+        install, so long as the independent verification confirms the
+        ACTIVE unit's program arguments match what was just written — not
+        merely that some unit with that label exists."""
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
 
+        program_args = ["/usr/bin/tj", "--config", "/tmp/cfg.toml", "serve"]
+
         def _run(cmd, **kwargs):
             if cmd[1] == "bootstrap":
                 return MagicMock(returncode=1, stdout="", stderr="Service already bootstrapped")
+            if cmd[1] == "print":
+                return MagicMock(returncode=0, stdout=_print_stdout(program_args), stderr="")
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=_run):
             result = _install_launchd("/tmp/cfg.toml")
 
         assert result is not None
+
+    def test_install_fails_when_already_bootstrapped_verifies_the_old_unit(
+        self, tmp_path, monkeypatch,
+    ):
+        """The exact defect this fix closes: `bootout` didn't actually clear
+        the previous registration, `bootstrap` reports "already bootstrapped"
+        (meaning the OLD unit is still loaded), and `launchctl print` happily
+        confirms that old label — with OLD program arguments (a stale
+        executable/config path), not the new plist just written. A bare
+        "label exists" check would pass this; the content check must fail
+        it loudly instead of reporting a false success."""
+        from tokenjam.cli.cmd_onboard import _install_launchd
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
+
+        old_program_args = ["/usr/bin/tj", "--config", "/tmp/OLD-cfg.toml", "serve"]
+
+        def _run(cmd, **kwargs):
+            if cmd[1] == "bootstrap":
+                return MagicMock(returncode=1, stdout="", stderr="Service already bootstrapped")
+            if cmd[1] == "print":
+                # Always reports the OLD unit, even after the retry's
+                # bootout/bootstrap — simulating a registration that never
+                # actually gets replaced.
+                return MagicMock(returncode=0, stdout=_print_stdout(old_program_args), stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=_run):
+            result = _install_launchd("/tmp/cfg.toml")
+
+        assert result is None
 
 
 class TestTjBinaryResolution:
@@ -433,10 +495,17 @@ class TestDaemonSurvivesUvCachePrune:
             "tokenjam.cli.cmd_onboard.shutil.which",
             lambda b: "/Users/x/.local/bin/uvx" if b == "uvx" else None,
         )
-        with patch(
-            "tokenjam.cli.cmd_onboard.subprocess.run",
-            MagicMock(return_value=MagicMock(returncode=0)),
-        ):
+        program_args = [
+            "/Users/x/.local/bin/uvx", "--from", "tokenjam", "tj",
+            "--config", "/tmp/cfg.toml", "serve",
+        ]
+
+        def _run(cmd, **kwargs):
+            if cmd[1] == "print":
+                return MagicMock(returncode=0, stdout=_print_stdout(program_args), stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=_run):
             result = _install_launchd("/tmp/cfg.toml")
 
         assert result is not None

@@ -1177,10 +1177,16 @@ def _check_corpus_freshness(config: object, db: object, daemon_alive: bool) -> d
     interval_minutes` cadence (`core/ingest_freshness.py`, shared with `tj
     status`'s advisory line so the two can't disagree on what "stale" means).
 
-    Severity depends on whether anything is currently positioned to close a
-    real gap on its own: with the daemon down, a stale corpus can only get
-    staler, so this FAILS; with the daemon up, the same gap is a WARNING —
-    the next scheduled catch-up may well close it before anyone needs to act.
+    Wall-clock age alone can't tell "ingestion is lagging" apart from "the
+    user simply hasn't run Claude Code since" — both look identical from the
+    `sessions` table. So a stale-by-age result is only PROVISIONAL: it's
+    confirmed as a real gap by checking for on-disk transcript data newer
+    than what's ingested (the same reconciliation `_check_transcript_ingest_gap`
+    below uses), and downgraded to healthy when there is none. Severity for a
+    confirmed gap depends on whether anything is currently positioned to
+    close it on its own: with the daemon down, a real gap can only get
+    staler, so this FAILS; with the daemon up, it's a WARNING — the next
+    scheduled catch-up may well close it before anyone needs to act.
     """
     name = "Corpus freshness"
     conn = getattr(db, "conn", None)
@@ -1205,6 +1211,38 @@ def _check_corpus_freshness(config: object, db: object, daemon_alive: bool) -> d
         return {"name": name, "level": "ok",
                 "message": f"Newest session started {freshness.age_hours:.1f}h ago."}
 
+    # Stale by age — confirm there's actually un-ingested data waiting,
+    # rather than the user just being idle, before calling it a gap.
+    try:
+        from tokenjam.core.transcript_sync import reconcile_claude_code
+
+        report = reconcile_claude_code(db, since=freshness.newest_session_at)
+    except Exception as e:  # never let a health check crash `tj doctor`
+        return {"name": name, "level": "info",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago; "
+                           f"couldn't check on-disk transcripts to confirm this is "
+                           f"a real ingestion gap: {e}"}
+
+    if not report.verified:
+        # Same "can't confidently render either way" case _check_transcript_
+        # ingest_gap guards against (#642) — the anti-join never ran, so the
+        # missing-count below would be meaningless.
+        return {"name": name, "level": "info",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago; "
+                           "couldn't verify against on-disk transcripts to confirm "
+                           "this is a real ingestion gap."}
+
+    if report.missing_count == 0:
+        return {
+            "name": name,
+            "level": "ok",
+            "message": (
+                f"Newest session started {freshness.age_hours:.1f}h ago, but "
+                "there's no newer on-disk Claude Code data waiting to be "
+                "ingested — you just haven't run it since."
+            ),
+        }
+
     level = "warning" if daemon_alive else "error"
     remedy = (
         " `tj serve` is running, so this should close on its own by the next "
@@ -1219,7 +1257,8 @@ def _check_corpus_freshness(config: object, db: object, daemon_alive: bool) -> d
         "level": level,
         "message": (
             f"Newest session started {freshness.age_hours:.1f}h ago (expected "
-            f"roughly every {interval_minutes}m).{remedy}"
+            f"roughly every {interval_minutes}m), and {report.missing_count} "
+            f"newer on-disk session(s) aren't ingested yet.{remedy}"
         ),
     }
 
