@@ -3644,6 +3644,14 @@ def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
     )
 
 
+def _launchd_target(label: str = "com.tokenjam.serve") -> tuple[str, str]:
+    """``(domain, service-target)`` for this user's GUI launchd domain —
+    ``gui/<uid>/<label>``, the specifier `bootstrap`/`bootout`/`enable`/`print`
+    all take (see the ``launchctl`` man page's SUBCOMMANDS section)."""
+    domain = f"gui/{os.getuid()}"
+    return domain, f"{domain}/{label}"
+
+
 def _install_launchd(config_path: str, *, suppress_headsup: bool = False) -> str | None:
     program_args = _daemon_program_args(config_path)
     if program_args is None:
@@ -3675,27 +3683,67 @@ def _install_launchd(config_path: str, *, suppress_headsup: bool = False) -> str
 </dict>
 </plist>"""
     plist_path.write_text(plist_content)
-    # Unload any existing registration before loading the updated plist.
-    # Ignore errors — the service may not be registered yet on first install.
-    subprocess.run(
-        ["launchctl", "unload", "-w", str(plist_path)],
-        capture_output=True, text=True,
-    )
-    # `-w` clears the Disabled=true flag that `tj stop` writes via
-    # `launchctl unload -w`. Without `-w` here, the daemon stays disabled
-    # in launchd's database and load is a no-op even though it returns 0.
+
+    domain, target = _launchd_target()
+
+    # `bootstrap`/`bootout`/`enable` replace the legacy `load`/`unload` this
+    # used to call. The `launchctl` man page lists them as the "Recommended
+    # alternative subcommands" for load/unload, and spells out exactly why
+    # trusting load/unload's exit status is unsafe: "the load and unload
+    # subcommands will only return a non-zero exit code due to improper
+    # usage. Otherwise, zero is always returned." A registration that
+    # silently never took (the label just isn't re-loaded into launchd) is
+    # therefore INDISTINGUISHABLE from success by exit code alone under the
+    # legacy call — which is exactly the failure mode observed in production:
+    # the plist was present with RunAtLoad/KeepAlive both true and no
+    # Disabled key, yet `launchctl list` showed nothing loaded, with no
+    # crash and no stderr trace. Because of that, this install path no
+    # longer trusts ANY single call's exit code — see the independent
+    # `print` verification below.
+
+    # Remove any existing registration first, so re-onboarding is idempotent
+    # regardless of prior state. `bootout` on a label that isn't currently
+    # loaded exits non-zero ("Could not find service") — ignored, since
+    # "nothing to remove" is exactly the common first-install case.
+    subprocess.run(["launchctl", "bootout", target], capture_output=True, text=True)
+
+    # `enable` clears the persisted Disabled bit that `tj stop`'s `launchctl
+    # unload -w` sets (`cmd_stop.py`) — the modern equivalent of `load -w`'s
+    # disable-clearing half. Without it the daemon stays disabled in
+    # launchd's on-disk database and `bootstrap` below is a no-op even
+    # though it still reports success.
+    subprocess.run(["launchctl", "enable", target], capture_output=True, text=True)
+
     result = subprocess.run(
-        ["launchctl", "load", "-w", str(plist_path)],
+        ["launchctl", "bootstrap", domain, str(plist_path)],
         capture_output=True, text=True,
     )
-    if result.returncode != 0:
+    combined = f"{result.stdout}\n{result.stderr}".lower()
+    # "already bootstrapped" would mean the `bootout` above raced or no-op'd
+    # against a job still shutting down — treat it as success and fall
+    # through to the independent verification rather than failing an
+    # otherwise-fine idempotent re-install.
+    if result.returncode != 0 and "already bootstrapped" not in combined:
         console.print(f"[warn]Daemon plist written to {plist_path} but "
-                      f"launchctl load failed.[/warn]")
+                      f"launchctl bootstrap failed.[/warn]")
         console.print("[dim]Try loading manually:[/dim]")
-        console.print(f"  launchctl load {plist_path}")
+        console.print(f"  launchctl bootstrap {domain} {plist_path}")
         console.print("[dim]Or run the server directly:[/dim]")
         console.print("  tj serve &")
         return None
+
+    # Verify registration independently rather than trusting bootstrap's exit
+    # status either — `launchctl print <target>` exits non-zero only when the
+    # service genuinely isn't registered, which is the actual question here.
+    verify = subprocess.run(["launchctl", "print", target], capture_output=True, text=True)
+    if verify.returncode != 0:
+        console.print(f"[warn]Daemon plist written to {plist_path} but "
+                      f"launchctl could not confirm it registered.[/warn]")
+        console.print(f"[dim]Check manually:[/dim]  launchctl print {target}")
+        console.print("[dim]Or run the server directly:[/dim]")
+        console.print("  tj serve &")
+        return None
+
     # The --claude-code completion (#675) moves this heads-up to the very BOTTOM
     # of the payoff screen (after Next steps) so it reads top-to-bottom, hence
     # `suppress_headsup` there; every other onboard path prints it inline here as

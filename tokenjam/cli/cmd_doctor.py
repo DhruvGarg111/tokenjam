@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import platform
+from pathlib import Path
 
 import click
 import duckdb
@@ -11,6 +13,7 @@ from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import load_config, resolve_config_path
 from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
 from tokenjam.core.db import SPANS_INDEXES
+from tokenjam.core.server_state import find_own_serve_pid
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -78,6 +81,19 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
 
+    # 10b. Background daemon liveness — is `tj serve` actually running, not
+    #      just installed. Computed once and reused by the corpus-freshness
+    #      and transcript-gap checks below so all three agree on whether
+    #      anything is currently positioned to self-heal a gap.
+    daemon_alive = find_own_serve_pid() is not None
+    checks.append(_check_daemon_liveness(daemon_alive))
+
+    # 10c. Corpus freshness — newest ingested session vs the configured
+    #      ingest cadence. FAILS (not warns) when nothing is live to close
+    #      the gap on its own, since that's silent, unbounded data loss
+    #      rather than a transient lag.
+    checks.append(_check_corpus_freshness(config, ctx.obj["db"], daemon_alive))
+
     # 11. Proxy base-URL wiring consistency (issue #219)
     checks.append(_check_proxy_wiring(config))
 
@@ -95,7 +111,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 16. Transcript ingest completeness — on-disk sessions never ingested,
     #     still recoverable only until Claude Code prunes the transcript.
-    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"]))
+    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"], daemon_alive))
 
     # 17. Cost integrity — sessions.total_cost_usd vs SUM(spans.cost_usd)
     checks.append(_check_cost_integrity(ctx.obj["db"]))
@@ -1089,7 +1105,126 @@ def _check_span_staleness(db: object) -> dict:
             "message": f"Most recent span is {age_hours:.1f}h old."}
 
 
-def _check_transcript_ingest_gap(config: object, db: object) -> dict:
+# macOS/Linux paths a background daemon installs itself under (see
+# `cmd_onboard._install_launchd` / `_install_systemd`). Presence means the
+# user opted into continuous background capture — used only to phrase the
+# liveness message; the liveness question itself is answered by
+# `find_own_serve_pid()`, which works the same whether `tj serve` is running
+# as a managed daemon or was started by hand.
+def _daemon_install_path() -> Path | None:
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
+    if system == "Linux":
+        return Path.home() / ".config/systemd/user/tokenjam.service"
+    return None
+
+
+def _daemon_liveness_hint() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return ("Check with `launchctl print gui/$(id -u)/com.tokenjam.serve`, then "
+                "re-register with `tj onboard --claude-code --reconfigure` or run "
+                "`tj serve` manually.")
+    if system == "Linux":
+        return ("Check with `systemctl --user status tokenjam`, then re-register with "
+                "`tj onboard --claude-code --reconfigure` or run `tj serve` manually.")
+    return "Run `tj serve` manually."
+
+
+def _check_daemon_liveness(daemon_alive: bool) -> dict:
+    """Is `tj serve` actually running right now — not just installed.
+
+    `find_own_serve_pid()` reads the state file `tj serve`'s own lifespan
+    writes after binding its port, so this is true liveness (a real running
+    process), independent of HOW it was started — managed daemon or a
+    manually foregrounded `tj serve` both count. A background install that
+    exists on disk but isn't currently loaded/running is the exact failure
+    mode that motivated this check: on a real machine the launchd plist was
+    present with `RunAtLoad`/`KeepAlive` both true and no `Disabled` key, yet
+    `launchctl list` showed nothing loaded and there was no error trace —
+    ingestion had simply stopped, silently, with no signal anywhere else.
+    """
+    name = "Background daemon liveness"
+    if daemon_alive:
+        return {"name": name, "level": "ok", "message": "`tj serve` is running."}
+
+    install_path = _daemon_install_path()
+    if install_path is None or not install_path.exists():
+        return {
+            "name": name,
+            "level": "info",
+            "message": ("No background daemon installed and `tj serve` is not "
+                        "running — run `tj serve` manually, or `tj onboard` to "
+                        "install one."),
+        }
+    return {
+        "name": name,
+        "level": "error",
+        "message": (
+            f"A background daemon is installed ({install_path}) but `tj serve` "
+            f"is not running. Ingestion, alerts, and the web UI are all silently "
+            f"paused — Claude Code prunes its own on-disk transcripts, so every "
+            f"hour this stays down is history moving closer to being unrecoverable. "
+            f"{_daemon_liveness_hint()}"
+        ),
+    }
+
+
+def _check_corpus_freshness(config: object, db: object, daemon_alive: bool) -> dict:
+    """Compare the newest ingested `sessions.started_at` to wall-clock,
+    against a threshold derived from the daemon's own `[ingest]
+    interval_minutes` cadence (`core/ingest_freshness.py`, shared with `tj
+    status`'s advisory line so the two can't disagree on what "stale" means).
+
+    Severity depends on whether anything is currently positioned to close a
+    real gap on its own: with the daemon down, a stale corpus can only get
+    staler, so this FAILS; with the daemon up, the same gap is a WARNING —
+    the next scheduled catch-up may well close it before anyone needs to act.
+    """
+    name = "Corpus freshness"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    interval_minutes = getattr(getattr(config, "ingest", None), "interval_minutes", 30)
+    try:
+        from tokenjam.core.ingest_freshness import corpus_freshness
+        from tokenjam.utils.time_parse import utcnow
+
+        freshness = corpus_freshness(conn, interval_minutes, now=utcnow())
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not query session timestamps: {e}"}
+
+    if freshness.newest_session_at is None:
+        return {"name": name, "level": "info",
+                "message": "No sessions recorded yet — nothing to check."}
+    if not freshness.is_stale:
+        return {"name": name, "level": "ok",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago."}
+
+    level = "warning" if daemon_alive else "error"
+    remedy = (
+        " `tj serve` is running, so this should close on its own by the next "
+        "scheduled catch-up; run `tj backfill claude-code` to close it now."
+        if daemon_alive else
+        " The background daemon is not running (see the liveness check above) "
+        "— nothing is ingesting until it's back. Run `tj backfill claude-code` "
+        "to close the gap once it is."
+    )
+    return {
+        "name": name,
+        "level": level,
+        "message": (
+            f"Newest session started {freshness.age_hours:.1f}h ago (expected "
+            f"roughly every {interval_minutes}m).{remedy}"
+        ),
+    }
+
+
+def _check_transcript_ingest_gap(config: object, db: object, daemon_alive: bool = True) -> dict:
     """Surface on-disk Claude Code sessions that were never ingested.
 
     The live OTLP path drops any session whose shell lacked the telemetry env
@@ -1103,6 +1238,12 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     Scoped to a recent window so the check stays fast and only reports sessions
     that are still recoverable — anything older than the rotation horizon is
     gone regardless of what we say about it.
+
+    Severity mirrors `_check_corpus_freshness`: a gap is only a WARNING while
+    the daemon is up and `auto_catch_up` is on — both conditions under which
+    the gap can plausibly close on its own on the next scheduled pass. Either
+    one being false means nothing is going to fix this without a human
+    running `tj backfill claude-code`, which is a FAIL, not a nag.
     """
     from datetime import timedelta
 
@@ -1136,13 +1277,19 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     horizon = (f" Oldest is ~{days_left:.0f} day(s) from being pruned."
                if days_left is not None else "")
     auto = getattr(getattr(config, "ingest", None), "auto_catch_up", False)
-    remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
-              "to close it now." if auto else
-              " Automatic catch-up is off ([ingest] auto_catch_up) — run "
-              "`tj backfill claude-code`.")
+    self_heals = daemon_alive and auto
+    if self_heals:
+        remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
+                  "to close it now.")
+    elif not daemon_alive:
+        remedy = (" The background daemon is not running, so nothing will close this "
+                  "automatically — run `tj backfill claude-code`.")
+    else:
+        remedy = (" Automatic catch-up is off ([ingest] auto_catch_up) — run "
+                  "`tj backfill claude-code`.")
     return {
         "name": name,
-        "level": "warning",
+        "level": "warning" if self_heals else "error",
         "message": (
             f"{report.missing_count} on-disk session(s) are not ingested."
             f"{horizon}{remedy}"

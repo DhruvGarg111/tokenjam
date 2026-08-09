@@ -172,27 +172,94 @@ class TestRepeatOnboardDoesNotChurnDaemon:
         assert restart_msg == "restarted"
 
 
-class TestLaunchdInstallUsesWFlag:
-    """`_install_launchd` must pass -w to both unload and load so it clears
-    the Disabled=true flag that `tj stop` writes (C1)."""
+class TestLaunchdInstallSurvivesRegistration:
+    """`_install_launchd` must use the modern `bootstrap`/`enable`/`bootout`
+    subcommands, never the legacy `load`/`unload` — the `launchctl` man page
+    marks load/unload legacy and warns they "will only return a non-zero exit
+    code due to improper usage. Otherwise, zero is always returned", so a
+    silently-failed registration is invisible to a caller that only checks
+    the exit code (the actual production failure mode this fix addresses:
+    the plist was present, `RunAtLoad`/`KeepAlive` both true, no `Disabled`
+    key, yet the unit was simply never re-loaded into launchd).
 
-    def test_load_uses_w_flag(self, tmp_path, monkeypatch):
+    Formerly `TestLaunchdInstallUsesWFlag` (C1), which pinned `load -w` /
+    `unload -w` clearing the Disabled flag `tj stop` writes. `enable` is the
+    modern equivalent of that disable-clearing half; this class re-asserts
+    the same guarantee against the new mechanism (Critical Rule 23 in the
+    project's `.claude/rules` — invert a superseded assertion rather than
+    dropping the coverage) and adds the independent post-install
+    verification the old mechanism never did.
+    """
+
+    def test_install_bootouts_enables_bootstraps_and_verifies(self, tmp_path, monkeypatch):
+        from tokenjam.cli.cmd_onboard import _install_launchd
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.os.getuid", lambda: 501, raising=False)
+
+        run_mock = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", run_mock):
+            result = _install_launchd("/tmp/cfg.toml")
+
+        assert result is not None
+        calls = [c.args[0] for c in run_mock.call_args_list]
+        subcommands = [c[1] for c in calls]
+        assert "bootout" in subcommands
+        assert "enable" in subcommands
+        assert "bootstrap" in subcommands
+        assert "print" in subcommands
+        # Never the deprecated legacy calls this replaces.
+        assert "load" not in subcommands
+        assert "unload" not in subcommands
+
+        target = "gui/501/com.tokenjam.serve"
+        enable_call = next(c for c in calls if c[1] == "enable")
+        assert enable_call[-1] == target
+        bootout_call = next(c for c in calls if c[1] == "bootout")
+        assert bootout_call[-1] == target
+        print_call = next(c for c in calls if c[1] == "print")
+        assert print_call[-1] == target
+        bootstrap_call = next(c for c in calls if c[1] == "bootstrap")
+        assert bootstrap_call[2] == "gui/501"
+
+    def test_install_fails_when_verification_shows_not_registered(self, tmp_path, monkeypatch):
+        """`bootstrap` can report success while the service never actually
+        registers — the same "exit code lies" failure mode this fix exists
+        for. The install must be reported as FAILED when the independent
+        `print` verification can't find the label, not only when bootstrap
+        itself errors."""
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
 
-        run_mock = MagicMock(return_value=MagicMock(returncode=0))
-        with patch("tokenjam.cli.cmd_onboard.subprocess.run", run_mock):
-            _install_launchd("/tmp/cfg.toml")
+        def _run(cmd, **kwargs):
+            if cmd[1] == "print":
+                return MagicMock(returncode=3, stdout="", stderr="Could not find service")
+            return MagicMock(returncode=0, stdout="", stderr="")
 
-        # Both unload and load must include -w
-        calls = [c.args[0] for c in run_mock.call_args_list]
-        assert any("unload" in c and "-w" in c for c in calls), (
-            f"unload should use -w; calls were {calls}"
-        )
-        assert any("load" in c and "-w" in c for c in calls), (
-            f"load should use -w; calls were {calls}"
-        )
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=_run):
+            result = _install_launchd("/tmp/cfg.toml")
+
+        assert result is None
+
+    def test_install_tolerates_already_bootstrapped_as_idempotent(self, tmp_path, monkeypatch):
+        """A re-onboard racing the `bootout` above (or one that no-op'd
+        against a job still shutting down) must not be reported as a failed
+        install, so long as the independent verification confirms it's
+        actually registered."""
+        from tokenjam.cli.cmd_onboard import _install_launchd
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
+
+        def _run(cmd, **kwargs):
+            if cmd[1] == "bootstrap":
+                return MagicMock(returncode=1, stdout="", stderr="Service already bootstrapped")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("tokenjam.cli.cmd_onboard.subprocess.run", side_effect=_run):
+            result = _install_launchd("/tmp/cfg.toml")
+
+        assert result is not None
 
 
 class TestTjBinaryResolution:
