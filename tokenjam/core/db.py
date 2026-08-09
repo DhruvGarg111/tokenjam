@@ -3601,7 +3601,7 @@ class DuckDBBackend:
         # columns on `spans` (see migration 17).
         attribution_dims = ("tenant", "feature", "environment", "prompt_version")
         group_col_map = {
-            "day": "CAST(start_time AS DATE)",
+            "day": "CAST(start_time AT TIME ZONE 'UTC' AS DATE)",
             "agent": "agent_id",
             "model": "model",
             "tool": "tool_name",
@@ -3610,7 +3610,9 @@ class DuckDBBackend:
             "environment": "environment",
             "prompt_version": "prompt_template_version",
         }
-        group_expr = group_col_map.get(filters.group_by, "CAST(start_time AS DATE)")
+        group_expr = group_col_map.get(
+            filters.group_by, "CAST(start_time AT TIME ZONE 'UTC' AS DATE)"
+        )
 
         # gen_ai.tool.call spans are separate rows from the LLM completion
         # spans that carry model/cost/tokens (otel/otlp_parsing.py) — a span
