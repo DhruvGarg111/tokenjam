@@ -1,7 +1,7 @@
 """Integration tests for the database layer."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -684,6 +684,33 @@ def test_get_cost_summary_tenant_equality_filter(db):
     assert len(results) == 1
     assert abs(results[0].cost_usd - 3.0) < 0.001
     assert results[0].model == "claude-haiku-4-5"
+
+
+@pytest.mark.parametrize("db_timezone", ["UTC", "Asia/Kolkata", "America/Los_Angeles"])
+def test_get_cost_summary_by_day_buckets_on_the_utc_date(db, db_timezone):
+    """``--group-by day`` must bucket by the UTC date, not the session's local
+    timezone.
+
+    A bare ``CAST(start_time AS DATE)`` resolves a TIMESTAMPTZ through the
+    connection's local timezone before truncating, so a span logged late in
+    the UTC day gets stamped with tomorrow's date on any machine running
+    ahead of UTC (e.g. Asia/Kolkata, +05:30) — the CLI's per-day total would
+    then disagree with anything computed on a UTC basis.
+    """
+    db.conn.execute(f"SET TimeZone='{db_timezone}'")
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    late_utc = datetime(2026, 3, 14, 23, 30, tzinfo=timezone.utc)
+    db.insert_span(make_llm_span(
+        model="claude-haiku-4-5", cost_usd=5.0,
+        session_id=session.session_id, start_time=late_utc,
+    ))
+
+    results = db.get_cost_summary(CostFilters(group_by="day"))
+    assert len(results) == 1
+    assert results[0].group == "2026-03-14"
 
 
 def test_get_cost_summary_returns_empty_when_dimension_never_set(db):
