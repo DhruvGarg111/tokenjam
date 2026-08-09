@@ -95,6 +95,23 @@ class StorageConfig:
     # nothing else — every config written before the coupling existed — has its
     # value read AS the span, so nothing about that setup changes.
     retention_days: int | None = None
+    # DuckDB's buffer pool, bounded. Left unset, DuckDB sizes `memory_limit` at
+    # 80% of physical RAM — 19.1 GiB on a 24 GB Mac — and its buffer manager has
+    # no reason to evict below that, so a daemon that should idle near 200 MB
+    # instead grows until the machine is swapping. This is a *ceiling*, not a
+    # reservation: past it DuckDB spills to `temp_directory` rather than
+    # failing, so a small number costs disk I/O on the rare large scan and
+    # nothing the rest of the time. `threads` is capped for the same reason —
+    # each carries its own allocation arenas, and the daemon opens a second
+    # backend for transcript catch-up while the request path is live.
+    # 2GB rather than 1GB because 1GB was measured failing here: on a 768k-span
+    # database the daemon OOMed on a request-path aggregate while the startup
+    # transcript catch-up already held the pool ("1.0 GiB/953.6 MiB used" — the
+    # query needed 16 KB more). The ceiling has to fit the request path AND the
+    # catch-up backend that runs beside it, not either alone. Raise it if a scan
+    # ever spills enough to feel slow.
+    memory_limit:   str = "2GB"
+    threads:        int = 4
     # Runtime provenance, never read from or written to TOML: True when `path`
     # came from an explicit `--db` rather than config discovery. The
     # filesystem-reading analyzers scope themselves off it (see
@@ -329,12 +346,6 @@ class OptimizeConfig:
     # section this is a SCOPE, not a sensitivity threshold — it decides which
     # filesystem is evidence, not how eager an analyzer is about it.
     projects_root: str | None = None
-    # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
-    # server needs to be configured-present in at least this many distinct
-    # sessions, with zero invocations across all of them, to be flagged dead.
-    # Default 5 (was 10) -- see MIN_SESSIONS_DEADWEIGHT's comment for the
-    # false-positive-rate reasoning behind the lowered bar.
-    min_sessions_deadweight: int = 5
     # deadweight (core/optimize/mcp_probe.py): whether the analyzer may MEASURE
     # each configured MCP server's tool schemas, which means STARTING that
     # server, sending it `initialize` + `tools/list`, and terminating it. That is
@@ -808,6 +819,8 @@ def _parse(raw: dict) -> TjConfig:
         # would erase that distinction.
         analysis_span=storage_raw.get("analysis_span"),
         retention_days=storage_raw.get("retention_days"),
+        memory_limit=storage_raw.get("memory_limit", StorageConfig.memory_limit),
+        threads=storage_raw.get("threads", StorageConfig.threads),
     )
 
     export_raw = raw.get("export", {})
@@ -919,8 +932,6 @@ def _parse(raw: dict) -> TjConfig:
     optimize = OptimizeConfig(
         min_cluster_instances=optimize_raw.get(
             "min_cluster_instances", OptimizeConfig.min_cluster_instances),
-        min_sessions_deadweight=optimize_raw.get(
-            "min_sessions_deadweight", OptimizeConfig.min_sessions_deadweight),
         measure_mcp_schemas=bool(optimize_raw.get(
             "measure_mcp_schemas", OptimizeConfig.measure_mcp_schemas)),
         min_cache_input_tokens=optimize_raw.get(

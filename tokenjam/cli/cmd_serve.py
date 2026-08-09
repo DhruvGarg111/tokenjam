@@ -3,7 +3,7 @@ from __future__ import annotations
 import click
 import socket
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.server_state import server_state_path
@@ -114,6 +114,36 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     from tokenjam.core.db import DuckDBBackend as _DuckDBBackend
     from tokenjam.core.optimize import scan_cycle
 
+    def _guard_fatal_db(label: str, run: "Callable[[], object]") -> None:
+        """Dispatch a background job, treating a fatal DuckDB error as a fatal.
+
+        These jobs open their OWN `DuckDBBackend`, which is precisely why a
+        fatal in one is not contained to it: DuckDB caches database instances
+        per path within a process, so a background job's "own" connection is
+        the same instance the request path is using. A fatal raised while a
+        scan persists one agent-config row invalidates the web server's
+        connections too, and every route starts returning 500 on a daemon that
+        is still happily accepting requests.
+
+        **This guard covers the DISPATCH only.** Both jobs are fire-and-forget:
+        they start a daemon thread and return, and each already swallows
+        exceptions inside that thread. So the fatal that caused the outage is
+        caught at those two handlers, not here — see `handle_if_fatal`, which
+        both now call. What is left for this guard is a failure on the dispatch
+        path itself, which would otherwise die unheard on a scheduler thread.
+        """
+        from tokenjam.core.db import handle_if_fatal
+
+        try:
+            run()
+        except Exception as exc:  # noqa: BLE001 - classified immediately below
+            if not handle_if_fatal(exc, what=label):
+                raise
+            console.print(
+                f"[red]{label}: the database was invalidated by a fatal DuckDB "
+                f"error ({exc}); recovery was attempted. Check /health.[/red]"
+            )
+
     def _scan_cycle_job() -> None:
         # Resolved through the module (not a from-import) so the scheduled and
         # startup passes share one patchable seam. `force` defaults False here
@@ -123,9 +153,9 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         # — an idle machine with no new spans since the last pass is a no-op.
         # The startup kick's own first call still always proceeds: this
         # process has no prior watermark to compare against yet.
-        scan_cycle.trigger_scan_cycle(
+        _guard_fatal_db("Analyzer scan", lambda: scan_cycle.trigger_scan_cycle(
             lambda: _DuckDBBackend(config.storage), config,
-        )
+        ))
 
     # `scan_enabled = false` is the kill switch for automatic scanning, and it
     # now gates every store rather than only the report — it is documented as
@@ -156,9 +186,9 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     def _catch_up_job(lookback) -> None:
         # Resolved through the module (not a from-import) so the scheduled and
         # startup passes share one patchable seam.
-        transcript_sync.start_catch_up(
+        _guard_fatal_db("Transcript catch-up", lambda: transcript_sync.start_catch_up(
             lambda: DuckDBBackend(config.storage), config=config, lookback=lookback,
-        )
+        ))
 
     if ingest_cfg.auto_catch_up:
         scheduler.add_job(

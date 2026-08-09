@@ -29,6 +29,7 @@ they ARE different mechanisms, each carrying its own pricer. Read the flag.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -44,6 +45,62 @@ from tokenjam.core.rulewrite.kinds import (
 )
 from tokenjam.core.rulewrite.legacy import UNRESOLVED_DELIVERY_LABEL
 from tokenjam.core.rulewrite.types import RuleWrite, RuleWriteRefused
+from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+
+#: ``relearn_apply.render_skill_content`` truncates the description at 200
+#: chars; the name line and frontmatter fences add a little more. The
+#: always-loaded surface of a skill is bounded by that, however long its body.
+SKILL_ALWAYS_LOADED_CHARS = 260
+
+
+def tokens_from_chars(chars: int) -> int:
+    """Chars to tokens on the shared summarize-pipeline constant, never a
+    local ``/4``. The one conversion every artifact-size figure in this module
+    goes through so a size in chars and a size in tokens can never drift
+    apart."""
+    return math.ceil(max(0, int(chars)) / CHARS_PER_TOKEN)
+
+
+def artifact_tokens(text: str) -> int:
+    """Token estimate for a written artifact."""
+    return tokens_from_chars(len(text)) if text else 0
+
+
+def standing_tokens_per_session(delivery: str, text: str) -> int:
+    """Tokens this artifact adds to EVERY future session, by DELIVERY MECHANISM.
+
+    Each mechanism answers for itself, because the answers genuinely differ and
+    nothing about an artifact's appearance predicts them:
+
+    * a ``CLAUDE.md`` rule re-sends its entire block, in full, forever;
+    * a skill re-sends only its frontmatter name + description — the harness
+      lists skills by description and loads a body only when one is invoked;
+    * an EXECUTING hook costs zero. A guard, a formatter, a lint gate: run by
+      the harness, never sent to the model as text. This zero is earned;
+    * an INJECTING hook costs the text it injects, per nudge, times the cap the
+      generated script enforces on itself. **It is not zero**, and it is
+      worse-behaved than a rule: the injected block lands in the conversation
+      and is re-sent on every later turn, so this is a floor, not a ceiling.
+
+    Used purely for INFORMATIONAL pricing today — a staged write's own
+    ``standing_tokens_per_session`` field and ``rule_placement``'s choice of
+    project-scoped vs. user-global destination. It no longer feeds any
+    offer/suppress decision: every ``apply_capable`` finding offers its apply
+    action regardless of what this returns.
+    """
+    tokens = artifact_tokens(text)
+    if delivery == DELIVERY_EXECUTING_HOOK:
+        return 0
+    if delivery == DELIVERY_INJECTING_HOOK:
+        return tokens * MAX_NUDGES_PER_SESSION
+    if delivery == DELIVERY_SKILL:
+        return min(tokens, tokens_from_chars(SKILL_ALWAYS_LOADED_CHARS))
+    # A CLAUDE.md rule, and a path-scoped rule reaching this pricer without its
+    # rendered frontmatter to measure. Charging a path-scoped rule the whole
+    # block over-states it — its precise price lives on its own delivery kind,
+    # which reads the rendered file — but over-stating a COST is the safe
+    # direction here, and inventing a discount from text we cannot see is not.
+    return tokens
 
 
 @dataclass(frozen=True)
@@ -116,16 +173,14 @@ def _render_skill(rule: RuleWrite, existing: str) -> str:
 
 
 def _standing_tokens_claude_md(rule: RuleWrite, rendered: str, existing: str) -> int:
-    """Priced on the DELTA this write introduces, through
-    ``write_budget.standing_tokens_per_session`` so one module owns the
-    always-resident model rather than each caller restating it.
+    """Priced on the DELTA this write introduces, through this module's own
+    ``standing_tokens_per_session`` so one place owns the always-resident
+    model rather than each caller restating it.
 
     A re-apply that replaces an existing block adds nothing, and pricing it as
     if it added a whole block would overstate the cost of keeping a rule
     current.
     """
-    from tokenjam.core.optimize.write_budget import standing_tokens_per_session
-
     added = max(0, len(rendered) - len(existing))
     return standing_tokens_per_session(
         DELIVERY_CLAUDE_MD_RULE, rendered[:added] if added else "",
@@ -136,8 +191,6 @@ def _standing_tokens_skill(rule: RuleWrite, rendered: str, existing: str) -> int
     """A skill's always-loaded surface: its frontmatter name + description,
     bounded however long the body is. Same delta discipline as the rule above —
     a re-apply that replaces an existing file adds nothing new to carry."""
-    from tokenjam.core.optimize.write_budget import standing_tokens_per_session
-
     del rule
     added = max(0, len(rendered) - len(existing))
     return standing_tokens_per_session(
@@ -229,7 +282,6 @@ def _standing_tokens_path_scoped(
     that priced itself at nothing would be making the same unearned free claim
     this seam exists to stop being made by default.
     """
-    from tokenjam.core.optimize.write_budget import tokens_from_chars
     from tokenjam.core.summarize.load_semantics import (
         PATH_SCOPED,
         split_always_resident,
@@ -288,8 +340,6 @@ def _standing_tokens_injecting_hook(
     ceiling. Erring low on a COST is the wrong direction, so it is stated as a
     floor rather than dressed up as exact.
     """
-    from tokenjam.core.optimize.write_budget import tokens_from_chars
-
     del rendered, existing
     injected = rule.artifact_text or ""
     return tokens_from_chars(len(injected)) * MAX_NUDGES_PER_SESSION
@@ -298,9 +348,9 @@ def _standing_tokens_injecting_hook(
 #: Every delivery mechanism this product can offer, by name.
 #:
 #: Adding one means adding an entry here plus its two functions. It must NOT
-#: mean touching ``apply.py``, ``store.py``, ``plan.py`` or ``write_budget`` —
-#: if it does, the seam has been welded shut again and that is the thing to fix
-#: rather than to work around.
+#: mean touching ``apply.py``, ``store.py`` or ``plan.py`` — if it does, the
+#: seam has been welded shut again and that is the thing to fix rather than to
+#: work around.
 DELIVERY_KINDS: dict[str, DeliveryKind] = {
     DELIVERY_CLAUDE_MD_RULE: DeliveryKind(
         name=DELIVERY_CLAUDE_MD_RULE,

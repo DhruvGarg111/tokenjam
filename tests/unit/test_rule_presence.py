@@ -308,10 +308,20 @@ def _rules_page() -> str:
     return src[start:src.index("\nfunction ", start + 10)]
 
 
-def test_the_rules_page_has_open_and_applied_tabs():
+def test_the_rules_page_has_pending_and_in_place_tabs():
+    """Two tabs, one per population: something to do, or something already done.
+
+    The LABELS moved (Open/Applied -> Pending/In place) when this page was
+    brought onto the lens design; the STATE KEYS did not, which is why the
+    `setTab` assertions are the ones that read unchanged. Both spellings are
+    pinned — the new one present, the old one absent — so a revert to the old
+    wording is a failure rather than a silent drift back.
+    """
     page = _rules_page()
-    assert "Open " in page
-    assert "Applied " in page
+    assert "Pending " in page
+    assert "In place " in page
+    assert "Open " not in page
+    assert "Applied (" not in page
     assert "setTab('open')" in page and "setTab('applied')" in page
 
 
@@ -335,7 +345,7 @@ def test_neither_tab_count_can_render_before_its_fetch_resolves():
     worst thing this page can say wrongly (root anti-pattern 22). Both counts sit
     behind `rules === null`."""
     page = _rules_page()
-    for label in ("Open ", "Applied "):
+    for label in ("Pending ", "In place "):
         idx = page.index(label)
         window = page[idx:idx + 400]
         assert "rules === null" in window, f"{label} count is not gated on its fetch"
@@ -351,3 +361,75 @@ def test_the_applied_tab_shows_which_route_put_a_rule_there():
     assert "Applied by tokenjam" in page
     assert "Already in your instruction files" in page
     assert "presence_evidence" in page
+
+
+def test_the_surface_is_labelled_relearn_everywhere_the_user_reads_it():
+    """One name for one thing.
+
+    The screen used to be called "Relearn" in one place and "Rules" in another,
+    which made the Dashboard tile unfindable from the nav. The label is now
+    "Relearn" at every site a user reads; the ROUTE (`#/optimize/rules`), the
+    registry KEY (`relearn`) and the CLI group (`tj rules`) are deliberately
+    unchanged. Each site pins the new spelling present AND the old one absent,
+    so a drift back is a failure rather than a silent revert.
+    """
+    src = _ui()
+    for site, present, absent in (
+        ("sidebar nav-child", "&#8627;</span> Relearn</a>", "&#8627;</span> Rules</a>"),
+        ("dashboard action tile", "relearn:    { title: 'Relearn'", "relearn:    { title: 'Rules'"),
+        ("optimize card", '<div class="opt-card-title">Relearn</div>',
+         '<div class="opt-card-title">Rules</div>'),
+        ("optimize card link", 'href="#/optimize/rules">Open Relearn',
+         'href="#/optimize/rules">Open Rules'),
+        ("persona-empty header title", "rules: 'Relearn'", "rules: 'Rules'"),
+        ("page title", '<div class="page-title" style="margin-bottom:0">Relearn</div>',
+         '<div class="page-title" style="margin-bottom:0">Rules</div>'),
+        ("faq entry", "title: 'Relearn',", "title: 'Rules',"),
+    ):
+        assert present in src, f"{site} must read Relearn"
+        assert absent not in src, f"{site} still reads Rules"
+    # The label moved; the command did not. `tj rules` is the group that drives
+    # this surface (list / stage / apply / undo / dismiss, one subcommand per
+    # button); `tj relearn` only emits an eval-case artifact and reaches none of
+    # it, so renaming the chip to match the page would name a command that
+    # cannot do what the page does.
+    assert '<span class="opt-cli-chip">tj rules</span>' in src
+    # Route, key and nav wiring are untouched by the rename.
+    assert 'href="#/optimize/rules"' in src
+    assert 'data-view="optimize" data-param="rules"' in src
+
+
+def test_each_tab_owns_the_stat_tiles_that_describe_it():
+    """Tiles caption the list directly beneath them, or they lie.
+
+    A single strip in the page head, pinned to the pending population, sat above
+    a tab reading "In place (2)" — two real rules with real figures — and
+    captioned them 0 / 0 / 0, which reads as a broken page. Each tab now renders
+    its own strip inside its own branch, in its own vocabulary, and a tab that is
+    known-empty renders no strip at all: "0 rules waiting to be written" is a
+    true measurement that still reads as a broken tile, and the empty-state
+    sentence is the only honest home for that claim (root anti-pattern 22a).
+    """
+    page = _rules_page()
+    # Anchored on the RENDER branch (`? html`), not on the bare condition —
+    # the same expression also drives each tab button's active class.
+    open_at = page.index("${tab === 'open' ? html")
+    applied_at = page.index("${tab === 'applied' ? html")
+    head, open_branch, applied_branch = (
+        page[:open_at], page[open_at:applied_at], page[applied_at:],
+    )
+    # No strip in the head any more — that was the mis-captioning.
+    assert "opt-stats" not in head
+    # Each tab's vocabulary is confined to its own branch.
+    assert "'rules waiting to be written'" in open_branch
+    assert "'rules waiting to be written'" not in applied_branch
+    assert "'rules in place'" in applied_branch
+    assert "'rules in place'" not in open_branch
+    # A known-empty tab shows no numbers; not-yet-known still shows a skeleton.
+    assert "rules === null || openRules.length > 0" in open_branch
+    assert "rules === null || inPlaceRules.length > 0" in applied_branch
+    # The staged tile keeps its OWN fetch's gate rather than borrowing /rules'.
+    assert "staged === null ? null : staged.length" in open_branch
+    # The two in-place route tiles are a split of the population tile, derived as
+    # a complement so they cannot fail to add up (root anti-pattern 22b).
+    assert "inPlaceRules.length - inPlaceWritten" in page

@@ -95,3 +95,81 @@ def test_the_rubric_does_not_strengthen_any_claim(monkeypatch):
         lowered = text.lower()
         for banned in ("safe to", "would have worked", "no quality", "guaranteed"):
             assert banned not in lowered
+
+
+# --- The evidence= field: a declaration/enforcement pair, not a catalog string -
+#
+# Every test above scans `SUBAGENT_RUBRIC_INTRO` / `RIGHTSIZE_FIX_TEMPLATE` —
+# catalog constants. The `evidence=` sentence on an `over_powered` card is built
+# inline in `cost_proposals._subagent_to_proposals`, at call time, from the
+# finding's own rows: none of the tests above can see it, which is exactly how
+# it said "did little work (small output, few tool calls)" — the
+# `over_provisioned` gate's language, not `over_powered`'s — while every test in
+# this file stayed green. `over_powered` is set by `is_premium_tier(model)` plus
+# `MIN_FLAG_COST_USD` alone (`subagent_rightsizing._flags_for`); it never reads
+# `output_tokens` or `tool_calls`. These tests build a real proposal through the
+# actual construction path and pin the two to AGREE: the evidence states only
+# what the gate tests, on a fixture whose numbers would directly contradict the
+# banned language if it ever came back.
+
+def _over_powered_row(**overrides):
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import SubagentRow
+
+    fields = dict(
+        session_id="s1", sub_agent_id="sa0", model="claude-opus-4-8",
+        llm_calls=200, tool_calls=340, input_tokens=400_000, output_tokens=40_000,
+        cache_tokens=0, cache_write_tokens=0, cost_usd=6.5, provider="anthropic",
+        flags=["over_powered"],
+    )
+    fields.update(overrides)
+    return SubagentRow(**fields)
+
+
+def test_over_powered_evidence_agrees_with_its_own_gate():
+    """The gate this card fires on (`is_premium_tier` + the cost floor) is what
+    the evidence sentence must state — never output size or tool-call count,
+    which is `over_provisioned`'s test, not this one."""
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+    )
+    from tokenjam.core.optimize.cost_proposals import _subagent_to_proposals
+
+    # Deliberately the OPPOSITE of "little work": hundreds of tool calls and a
+    # large output. If the banned language ever came back, this fixture is
+    # exactly the case that would make it self-contradicting on the same card.
+    row = _over_powered_row()
+    finding = SubagentRightsizingFinding(
+        flagged=[row], percent_of_cost=0.5, flagged_cost_usd=6.5,
+        subagent_cost_usd=6.5, past_overspend_usd=2.0, past_overspend_tokens=440_000,
+    )
+    props = _subagent_to_proposals(finding)
+    assert len(props) == 1
+    evidence = props[0].evidence
+
+    # Guard: the extractor actually parsed something. A test asserting only
+    # absence of the banned phrases would pass vacuously against an empty or
+    # unrelated string once the code moves.
+    assert evidence and "premium-tier" in evidence and row.model in evidence
+
+    lowered = evidence.lower()
+    for banned in (
+        "did little work", "small output", "few tool calls",
+        "little tool work", "short result", "short conclusion", "short output",
+    ):
+        assert banned not in lowered, (
+            f"over_powered evidence claims {banned!r}, a property its gate "
+            "never tests"
+        )
+
+
+def test_over_provisioned_keeps_its_own_low_output_language():
+    """The other half of the pair: `over_provisioned` legitimately earns the
+    low-output framing (it is exactly what its gate tests), and it must not
+    lose that language to the fix above. `_derived_effort` (cost_proposals.py)
+    is where that framing survives today — it pins `effort: low` only for an
+    `over_provisioned` row, never for `over_powered` alone."""
+    from tokenjam.core.optimize.cost_proposals import _derived_effort
+
+    assert _derived_effort({"over_provisioned": True}) == "low"
+    assert _derived_effort({"over_provisioned": False}) is None
+    assert _derived_effort({}) is None

@@ -512,6 +512,15 @@ class TraceFilters:
     # Cost-floor filter: only traces whose summed cost_usd is >= this value.
     # Applied via HAVING on the same per-trace aggregate, no extra scan.
     min_cost_usd: float | None = None
+    # One side of the dashboard's "Viewing as" persona picker, or `None` for
+    # every trace. Bucketed by `alerts.is_interactive_coding_agent` over
+    # `agent_id` — the same single source of truth `GET /sessions` and
+    # `framing.agent_persona_mix` use, never a second rule and never
+    # `spans.source` (which records the ingestion path, an unrelated axis).
+    # It belongs on the FILTERS rather than at the route, so the row list, the
+    # total count and the outlier quartiles are all computed over one
+    # population: an unscoped `total_count` beside a scoped list is its own bug.
+    persona:    str | None   = None
 
 
 @dataclass
@@ -528,6 +537,11 @@ class CostFilters:
     feature:        str | None = None
     environment:    str | None = None
     prompt_version: str | None = None
+    # One side of the "Viewing as" persona picker, or `None` for all spend.
+    # Same `alerts.is_interactive_coding_agent` bucketing every other
+    # persona-scoped surface uses. On the FILTERS so the grouped rows and any
+    # total computed from the same filters cover one population.
+    persona:        str | None = None
 
 
 @dataclass
@@ -538,3 +552,8 @@ class AlertFilters:
     type:      AlertType | None = None
     unread:    bool          = False
     limit:     int           = 100
+    # One side of the "Viewing as" persona picker, or `None` for every alert.
+    # Same `alerts.is_interactive_coding_agent` bucketing the alert ENGINE
+    # already gates several of its checks on, applied to the history so the
+    # list matches the surface the reader is looking at.
+    persona:   str | None   = None

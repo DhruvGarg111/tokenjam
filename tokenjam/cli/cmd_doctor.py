@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import platform
+from pathlib import Path
 
 import click
 import duckdb
@@ -11,6 +13,7 @@ from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.config import load_config, resolve_config_path
 from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
 from tokenjam.core.db import SPANS_INDEXES
+from tokenjam.core.server_state import find_own_serve_pid
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -70,8 +73,26 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     #     above cannot see, and one that makes the retention DELETE unreliable.
     checks.append(_check_spans_indexes(ctx.obj["db"]))
 
+    # 9c. Every OTHER explicit index, swept. 9b covers spans specifically
+    #     (including absent ones); this one asks the same divergence question
+    #     of the whole catalogue, because the fault is not confined to spans.
+    checks.append(_check_index_divergence(ctx.obj["db"]))
+
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
+
+    # 10b. Background daemon liveness — is `tj serve` actually running, not
+    #      just installed. Computed once and reused by the corpus-freshness
+    #      and transcript-gap checks below so all three agree on whether
+    #      anything is currently positioned to self-heal a gap.
+    daemon_alive = find_own_serve_pid() is not None
+    checks.append(_check_daemon_liveness(daemon_alive))
+
+    # 10c. Corpus freshness — newest ingested session vs the configured
+    #      ingest cadence. FAILS (not warns) when nothing is live to close
+    #      the gap on its own, since that's silent, unbounded data loss
+    #      rather than a transient lag.
+    checks.append(_check_corpus_freshness(config, ctx.obj["db"], daemon_alive))
 
     # 11. Proxy base-URL wiring consistency (issue #219)
     checks.append(_check_proxy_wiring(config))
@@ -90,7 +111,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 16. Transcript ingest completeness — on-disk sessions never ingested,
     #     still recoverable only until Claude Code prunes the transcript.
-    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"]))
+    checks.append(_check_transcript_ingest_gap(config, ctx.obj["db"], daemon_alive))
 
     # 17. Cost integrity — sessions.total_cost_usd vs SUM(spans.cost_usd)
     checks.append(_check_cost_integrity(ctx.obj["db"]))
@@ -594,6 +615,72 @@ def _check_spans_indexes(db: object) -> dict:
                        f"agree with the table."}
 
 
+def _check_index_divergence(db: object) -> dict:
+    """Sweep EVERY explicit index for disagreement with its table.
+
+    One cause, two harms, which is why this is an error and not a note:
+
+    * **Reads silently under-report.** A `WHERE col = ...` served by a damaged
+      index returns fewer rows than the table holds, with no error at all, so
+      analyzers understate whatever they read through it.
+    * **Writes are fatal.** A statement that must REMOVE an index entry raises
+      a DuckDB `FatalException`, which invalidates the whole database instance
+      and every connection in the process.
+
+    The sweep covers every explicit index because the fault has been seen on
+    more than one table. It reports what it can PROVE: an index is called sound
+    only when every distinct value was compared, and anything less is reported
+    as not proven rather than counted as passing. `--repair` therefore rebuilds
+    every index rather than only the ones named here -- see the repair handler.
+    """
+    from tokenjam.core.db import check_index_divergence, explicit_indexes
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Index integrity", "level": "info",
+                "message": "Skipped \u2014 CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults, unproven = check_index_divergence(conn)
+        total = len(explicit_indexes(conn))
+    except duckdb.Error as e:
+        return {"name": "Index integrity", "level": "info",
+                "message": f"Skipped \u2014 could not probe the indexes: {e}"}
+
+    if faults:
+        detail = "; ".join(f"{name} on {table} {reason}" for name, table, reason in faults)
+        caveat = (
+            f" A further {len(unproven)} index(es) could not be proven sound; "
+            f"the repair rebuilds every index, not only the ones listed here."
+            if unproven else ""
+        )
+        return {
+            "name": "Index integrity",
+            "level": "error",
+            "message": f"Index damage \u2014 {detail}. Queries served by these "
+                       f"indexes return incomplete results, and the next write "
+                       f"that removes an entry will invalidate the database and "
+                       f"500 every route. Run `tj doctor --repair` to rebuild "
+                       f"every index from its table (no rows are read or moved)."
+                       f"{caveat}",
+            "repair_action": "rebuild_diverged_indexes",
+        }
+    if unproven:
+        listed = "; ".join(f"{name} ({reason})" for name, _t, reason in unproven)
+        return {
+            "name": "Index integrity",
+            "level": "warn",
+            "message": f"No divergence found, but only {total - len(unproven)} of "
+                       f"{total} explicit indexes could be PROVEN sound. Not "
+                       f"proven: {listed}. `tj doctor --repair` rebuilds every "
+                       f"index regardless, which is the only way to be certain.",
+            "repair_action": "rebuild_diverged_indexes",
+        }
+    return {"name": "Index integrity", "level": "ok",
+            "message": f"All {total} explicit indexes compared against every "
+                       f"distinct value in their tables and agree."}
+
+
 def _check_retention(config: object, db: object) -> dict:
     """Report the analysis span, the retention derived from it, and the last delete.
 
@@ -1018,7 +1105,165 @@ def _check_span_staleness(db: object) -> dict:
             "message": f"Most recent span is {age_hours:.1f}h old."}
 
 
-def _check_transcript_ingest_gap(config: object, db: object) -> dict:
+# macOS/Linux paths a background daemon installs itself under (see
+# `cmd_onboard._install_launchd` / `_install_systemd`). Presence means the
+# user opted into continuous background capture — used only to phrase the
+# liveness message; the liveness question itself is answered by
+# `find_own_serve_pid()`, which works the same whether `tj serve` is running
+# as a managed daemon or was started by hand.
+def _daemon_install_path() -> Path | None:
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
+    if system == "Linux":
+        return Path.home() / ".config/systemd/user/tokenjam.service"
+    return None
+
+
+def _daemon_liveness_hint() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return ("Check with `launchctl print gui/$(id -u)/com.tokenjam.serve`, then "
+                "re-register with `tj onboard --claude-code --reconfigure` or run "
+                "`tj serve` manually.")
+    if system == "Linux":
+        return ("Check with `systemctl --user status tokenjam`, then re-register with "
+                "`tj onboard --claude-code --reconfigure` or run `tj serve` manually.")
+    return "Run `tj serve` manually."
+
+
+def _check_daemon_liveness(daemon_alive: bool) -> dict:
+    """Is `tj serve` actually running right now — not just installed.
+
+    `find_own_serve_pid()` reads the state file `tj serve`'s own lifespan
+    writes after binding its port, so this is true liveness (a real running
+    process), independent of HOW it was started — managed daemon or a
+    manually foregrounded `tj serve` both count. A background install that
+    exists on disk but isn't currently loaded/running is the exact failure
+    mode that motivated this check: on a real machine the launchd plist was
+    present with `RunAtLoad`/`KeepAlive` both true and no `Disabled` key, yet
+    `launchctl list` showed nothing loaded and there was no error trace —
+    ingestion had simply stopped, silently, with no signal anywhere else.
+    """
+    name = "Background daemon liveness"
+    if daemon_alive:
+        return {"name": name, "level": "ok", "message": "`tj serve` is running."}
+
+    install_path = _daemon_install_path()
+    if install_path is None or not install_path.exists():
+        return {
+            "name": name,
+            "level": "info",
+            "message": ("No background daemon installed and `tj serve` is not "
+                        "running — run `tj serve` manually, or `tj onboard` to "
+                        "install one."),
+        }
+    return {
+        "name": name,
+        "level": "error",
+        "message": (
+            f"A background daemon is installed ({install_path}) but `tj serve` "
+            f"is not running. Ingestion, alerts, and the web UI are all silently "
+            f"paused — Claude Code prunes its own on-disk transcripts, so every "
+            f"hour this stays down is history moving closer to being unrecoverable. "
+            f"{_daemon_liveness_hint()}"
+        ),
+    }
+
+
+def _check_corpus_freshness(config: object, db: object, daemon_alive: bool) -> dict:
+    """Compare the newest ingested `sessions.started_at` to wall-clock,
+    against a threshold derived from the daemon's own `[ingest]
+    interval_minutes` cadence (`core/ingest_freshness.py`, shared with `tj
+    status`'s advisory line so the two can't disagree on what "stale" means).
+
+    Wall-clock age alone can't tell "ingestion is lagging" apart from "the
+    user simply hasn't run Claude Code since" — both look identical from the
+    `sessions` table. So a stale-by-age result is only PROVISIONAL: it's
+    confirmed as a real gap by checking for on-disk transcript data newer
+    than what's ingested (the same reconciliation `_check_transcript_ingest_gap`
+    below uses), and downgraded to healthy when there is none. Severity for a
+    confirmed gap depends on whether anything is currently positioned to
+    close it on its own: with the daemon down, a real gap can only get
+    staler, so this FAILS; with the daemon up, it's a WARNING — the next
+    scheduled catch-up may well close it before anyone needs to act.
+    """
+    name = "Corpus freshness"
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": name, "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    interval_minutes = getattr(getattr(config, "ingest", None), "interval_minutes", 30)
+    try:
+        from tokenjam.core.ingest_freshness import corpus_freshness
+        from tokenjam.utils.time_parse import utcnow
+
+        freshness = corpus_freshness(conn, interval_minutes, now=utcnow())
+    except duckdb.Error as e:
+        return {"name": name, "level": "info",
+                "message": f"Skipped — could not query session timestamps: {e}"}
+
+    if freshness.newest_session_at is None:
+        return {"name": name, "level": "info",
+                "message": "No sessions recorded yet — nothing to check."}
+    if not freshness.is_stale:
+        return {"name": name, "level": "ok",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago."}
+
+    # Stale by age — confirm there's actually un-ingested data waiting,
+    # rather than the user just being idle, before calling it a gap.
+    try:
+        from tokenjam.core.transcript_sync import reconcile_claude_code
+
+        report = reconcile_claude_code(db, since=freshness.newest_session_at)
+    except Exception as e:  # never let a health check crash `tj doctor`
+        return {"name": name, "level": "info",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago; "
+                           f"couldn't check on-disk transcripts to confirm this is "
+                           f"a real ingestion gap: {e}"}
+
+    if not report.verified:
+        # Same "can't confidently render either way" case _check_transcript_
+        # ingest_gap guards against (#642) — the anti-join never ran, so the
+        # missing-count below would be meaningless.
+        return {"name": name, "level": "info",
+                "message": f"Newest session started {freshness.age_hours:.1f}h ago; "
+                           "couldn't verify against on-disk transcripts to confirm "
+                           "this is a real ingestion gap."}
+
+    if report.missing_count == 0:
+        return {
+            "name": name,
+            "level": "ok",
+            "message": (
+                f"Newest session started {freshness.age_hours:.1f}h ago, but "
+                "there's no newer on-disk Claude Code data waiting to be "
+                "ingested — you just haven't run it since."
+            ),
+        }
+
+    level = "warning" if daemon_alive else "error"
+    remedy = (
+        " `tj serve` is running, so this should close on its own by the next "
+        "scheduled catch-up; run `tj backfill claude-code` to close it now."
+        if daemon_alive else
+        " The background daemon is not running (see the liveness check above) "
+        "— nothing is ingesting until it's back. Run `tj backfill claude-code` "
+        "to close the gap once it is."
+    )
+    return {
+        "name": name,
+        "level": level,
+        "message": (
+            f"Newest session started {freshness.age_hours:.1f}h ago (expected "
+            f"roughly every {interval_minutes}m), and {report.missing_count} "
+            f"newer on-disk session(s) aren't ingested yet.{remedy}"
+        ),
+    }
+
+
+def _check_transcript_ingest_gap(config: object, db: object, daemon_alive: bool = True) -> dict:
     """Surface on-disk Claude Code sessions that were never ingested.
 
     The live OTLP path drops any session whose shell lacked the telemetry env
@@ -1032,6 +1277,12 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     Scoped to a recent window so the check stays fast and only reports sessions
     that are still recoverable — anything older than the rotation horizon is
     gone regardless of what we say about it.
+
+    Severity mirrors `_check_corpus_freshness`: a gap is only a WARNING while
+    the daemon is up and `auto_catch_up` is on — both conditions under which
+    the gap can plausibly close on its own on the next scheduled pass. Either
+    one being false means nothing is going to fix this without a human
+    running `tj backfill claude-code`, which is a FAIL, not a nag.
     """
     from datetime import timedelta
 
@@ -1065,13 +1316,19 @@ def _check_transcript_ingest_gap(config: object, db: object) -> dict:
     horizon = (f" Oldest is ~{days_left:.0f} day(s) from being pruned."
                if days_left is not None else "")
     auto = getattr(getattr(config, "ingest", None), "auto_catch_up", False)
-    remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
-              "to close it now." if auto else
-              " Automatic catch-up is off ([ingest] auto_catch_up) — run "
-              "`tj backfill claude-code`.")
+    self_heals = daemon_alive and auto
+    if self_heals:
+        remedy = (" `tj serve` will catch up automatically; run `tj backfill claude-code` "
+                  "to close it now.")
+    elif not daemon_alive:
+        remedy = (" The background daemon is not running, so nothing will close this "
+                  "automatically — run `tj backfill claude-code`.")
+    else:
+        remedy = (" Automatic catch-up is off ([ingest] auto_catch_up) — run "
+                  "`tj backfill claude-code`.")
     return {
         "name": name,
-        "level": "warning",
+        "level": "warning" if self_heals else "error",
         "message": (
             f"{report.missing_count} on-disk session(s) are not ingested."
             f"{horizon}{remedy}"
@@ -1087,6 +1344,8 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
         ensure_expected_columns,
         ensure_expected_tables,
         purge_sentinel_timestamp_rows,
+        check_index_divergence,
+        repair_explicit_indexes,
         repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
@@ -1395,6 +1654,47 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool, config: 
                     f"  [green]Spans table rebuilt — {before} rows preserved "
                     f"(verified: {after}).[/green]"
                 )
+            continue
+        if action == "rebuild_diverged_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped \u2014 CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                # EVERY index, not only the ones the probe flagged. The probe
+                # compares particular values, so a clean verdict from it is not
+                # proof -- on a real damaged database a sampled sweep missed one
+                # of four, and repairing only its verdict left the table still
+                # raising the fatal. Measured at ~1.1s for all fourteen indexes
+                # of a 3.9GB database, so there is nothing to be clever about.
+                rebuilt = repair_explicit_indexes(conn)
+                still_diverged, _ = check_index_divergence(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Repair failed \u2014 {e}. If the database is locked, "
+                        f"stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if still_diverged:
+                    detail = "; ".join(
+                        f"{n} on {t} {r}" for n, t, r in still_diverged
+                    )
+                    console.print(
+                        f"  [red]Rebuilt {len(rebuilt)} index(es) but divergence "
+                        f"remains \u2014 {detail}.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(rebuilt)} damaged index(es) from "
+                        f"their tables \u2014 {', '.join(rebuilt)}. No rows read or "
+                        f"moved; re-probe is clean.[/green]"
+                    )
 
 
 def _is_local_url(url: str) -> bool:

@@ -7,9 +7,11 @@ from typing import Any, NoReturn
 import click
 from rich.markup import escape as _rich_escape
 from rich.padding import Padding
+from rich.table import Table
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.cli.tj_status import TjCommand, tj_status
+from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
 from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
@@ -811,6 +813,32 @@ def _format_plan_multiplier(multiplier: float) -> str:
     return f"{multiplier:.1f}×"
 
 
+#: The analyzers whose evidence is the filesystem rather than the span table
+#: (docs/configuration.md, "Which filesystem the analyzers read") — the ones a
+#: skipped scan actually costs the reader.
+_FILESYSTEM_SCAN_ANALYZERS = ("deadweight", "relearn", "summarize")
+
+
+def _filesystem_scan_note(report: OptimizeReport) -> str | None:
+    """The "these did not look" line for a skipped filesystem scan, or None.
+
+    Hardcoding the three names made the note assert something false for a
+    persona whose gate had already dropped some of them: `deadweight` and
+    `summarize` are gated off for `sdk`, so naming them under a SCOPE reason
+    blames the scope for an absence the persona gate caused. Names are filtered
+    against the gate, and a skip that cost this reader nothing says nothing.
+    """
+    reason = report.filesystem_scan_skipped_reason
+    if not reason:
+        return None
+    disabled = _disabled_analyzers(report.persona or "unknown")
+    names = [n for n in _FILESYSTEM_SCAN_ANALYZERS if n not in disabled]
+    if not names:
+        return None
+    joined = f"{', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else names[0]
+    return f"  [dim]{joined} did not run: {_rich_escape(str(reason))}.[/dim]"
+
+
 def _render_report(
     report: OptimizeReport,
     agent: str | None,
@@ -910,14 +938,12 @@ def _render_report(
     if report.notes:
         console.print()
 
-    # Said out loud, because the alternative is three analyzers rendering as
+    # Said out loud, because the alternative is analyzers rendering as
     # "nothing found" when the truth is that they never looked (root
     # anti-pattern 22). See `core/optimize/scope.py`.
-    if report.filesystem_scan_skipped_reason:
-        console.print(
-            "  [dim]deadweight, relearn and summarize did not run: "
-            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
-        )
+    scan_note = _filesystem_scan_note(report)
+    if scan_note:
+        console.print(scan_note)
         console.print()
 
     # An analyzer the user typed by name that this persona's skip gate dropped
@@ -930,9 +956,20 @@ def _render_report(
             set(requested) & _disabled_analyzers(report.persona or "unknown")
         )
         if gated:
+            # The REASON is persona-specific, and one sentence cannot carry
+            # both: a `claude-code` window loses analyzers whose lever lives on
+            # the harness's side of the line, while an `sdk` window loses ones
+            # whose INPUT it structurally does not have (a Claude Code
+            # transcript, a populated `sub_agent_id`, an agent instruction
+            # file). Stating the wrong one is worse than terse. Per-analyzer
+            # reasons live in `PERSONA_DISABLED_ANALYZERS`.
+            reason = (
+                "No fix for these exists inside an interactive coding-agent session"
+                if (report.persona or "") == "claude-code"
+                else "These read an input an SDK/API window does not have"
+            )
             console.print(
-                f"  [dim]Not run: {', '.join(gated)}. No fix for these exists "
-                f"inside an interactive coding-agent session, so they are "
+                f"  [dim]Not run: {', '.join(gated)}. {reason}, so they are "
                 f"skipped rather than reported as findings you cannot act "
                 f"on.[/dim]\n"
             )
@@ -1196,10 +1233,17 @@ def _summarize_verbosity(f: Any) -> tuple[str, str] | None:
 
 
 def _summarize_deadweight(f: Any) -> tuple[str, str] | None:
-    dead = list(f.dead_servers) if f.dead_servers else []
-    if not dead:
+    unused = list(f.unused_servers) if f.unused_servers else []
+    unused_plugins = list(getattr(f, "unused_plugins", None) or [])
+    total = len(unused) + len(unused_plugins)
+    if not total:
         return None
-    return f"{_plural(len(dead), 'MCP server')} injected, never invoked", "which servers"
+    parts = []
+    if unused:
+        parts.append(_plural(len(unused), "MCP server"))
+    if unused_plugins:
+        parts.append(_plural(len(unused_plugins), "plugin"))
+    return f"{' + '.join(parts)} injected, never invoked", "which servers/plugins"
 
 
 def _summarize_placement(f: Any) -> tuple[str, str] | None:
@@ -1409,16 +1453,14 @@ def _render_scoreboard(
         f"{_plural(len(rows), 'finding')}[/dim]\n"
     )
 
-    # Said out loud rather than left as three quiet absences: an analyzer that
+    # Said out loud rather than left as quiet absences: an analyzer that
     # never looked is not an analyzer that found nothing (root anti-pattern 22).
     for note in report.notes:
         console.print(f"  [warn]![/warn] {_rich_escape(note)}")
-    if report.filesystem_scan_skipped_reason:
-        console.print(
-            "  [dim]deadweight, relearn and summarize did not run: "
-            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
-        )
-    if report.notes or report.filesystem_scan_skipped_reason:
+    scan_note = _filesystem_scan_note(report)
+    if scan_note:
+        console.print(scan_note)
+    if report.notes or scan_note:
         console.print()
 
     if rows:
@@ -1919,6 +1961,51 @@ def _usd_with_tokens(usd: float, tokens: int | None) -> str:
     return format_cost(usd)
 
 
+def _render_prose(
+    text: str, *, marker: str = "", style: str | None = None, escape: bool = True,
+    indent: int = 5,
+) -> None:
+    """Render an analyzer prose field (`caveat`, `estimate_basis`, `notes`,
+    `coverage_note`, and their siblings — `friction`, `measurement_note`,
+    `accounting_note`) so every line hangs indented under the first
+    paragraph's text, not just the first line.
+
+    These fields were rewritten from single 40-90 word run-on paragraphs into
+    short sentences grouped into paragraphs separated by a literal blank line
+    (`"\\n\\n"`), which the web dashboard already renders correctly. A
+    hand-written prefix like `f"     [yellow]![/yellow] [italic]{caveat}[/italic]"`
+    only indents line 1 — rich reflows everything after it, both the
+    soft-wrapped continuation of a long sentence and every paragraph after a
+    blank line, starting back at column 0 and visually detaching it from the
+    marker it belongs to.
+
+    Built on a borderless two-column `Table.grid` (elsewhere in this file,
+    `_render_scoreboard`'s `priced_rows` note reaches for `Padding` to solve
+    the same class of problem for an unmarked block): the marker column is
+    `no_wrap` so it never reflows and fixes a left column, and rich aligns
+    every line of the prose column — wrapped or blank-line-broken alike —
+    under that same column start (root anti-pattern 30: pin the indent to
+    every line the renderer produces, not just the first one it happened to
+    be written for).
+
+    `marker` is one-time leading markup (e.g. `"[yellow]![/yellow]"` for a
+    caveat, `""` for a plain dim line) rendered once at `indent` spaces;
+    continuation paragraphs align under the TEXT, not under the marker.
+    `style` wraps the prose itself (`"italic"`, `"dim"`). `escape` must match
+    each call site's PRE-EXISTING `_rich_escape` usage — several of these
+    fields (caveat, estimate_basis) print unescaped today, and this helper
+    only fixes indentation, not that.
+    """
+    body = _rich_escape(text) if escape else text
+    content = f"[{style}]{body}[/{style}]" if style else body
+    lead = " " * indent + (f"{marker} " if marker else "")
+    grid = Table.grid(padding=0)
+    grid.add_column(no_wrap=True)
+    grid.add_column()
+    grid.add_row(lead, content)
+    console.print(grid)
+
+
 def _render_cache_control_or_no_lever(snippet: str, persona: str) -> None:
     """Persona-gated `cache_control` snippet render, shared by every
     cache-family CLI renderer that prints one (`cache`'s A1/A2/A3
@@ -2347,7 +2434,7 @@ def _render_workflow_restructure(
                 f"replacing with a deterministic script would eliminate it.[/dim]"
             )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_prompt_bloat(
@@ -2532,10 +2619,11 @@ def _render_reuse(
             )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     if finding.clusters:
-        console.print(
-            f"     [yellow]![/yellow] [italic]{finding.clusters[0].caveat}[/italic]"
+        _render_prose(
+            finding.clusters[0].caveat, marker="[yellow]![/yellow]", style="italic",
+            escape=False,
         )
 
 
@@ -2621,7 +2709,7 @@ def _render_subagent(
             f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
         )
 
-    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
@@ -2654,64 +2742,22 @@ def _relearn_past_overspend(cluster, *, pricing_mode: str = "api") -> str:
     return ""
 
 
-def _relearn_write_gate_line(cluster) -> str:
-    """Why no permanent fix is on offer for this cluster, or "" when one is.
-
-    The reason string is the write budget's OWN sentence
-    (``core/optimize/write_budget.py`` owns the wording so the CLI, the API
-    payload and the Review inbox row cannot drift into three explanations of
-    one flag). The payback arithmetic is appended only where the budget
-    actually computed one: an executing hook is never sent as prompt text, so
-    it has no standing cost and no ratio at all.
-    """
-    if getattr(cluster, "write_offered", True):
-        return ""
-    # The SHORT label here, not the full sentence: a real corpus gates ~50 of
-    # 55 clusters, so the long form would print a paragraph under every row.
-    # The full sentence still renders where there is room for it (the expanded
-    # Review card, `--json`).
-    short = str(getattr(cluster, "write_blocked_short", "") or "").strip()
-    if not short:
-        short = _short_reason_fallback(cluster)
-    if not short:
-        return ""
-    per_session = getattr(cluster, "standing_cost_tokens_per_session", 0) or 0
-    ratio = getattr(cluster, "payback_ratio", None)
-    if not per_session or ratio is None:
-        return f"no permanent fix offered: {short}"
-    return (
-        f"no permanent fix offered: {short} "
-        f"(~{format_tokens(per_session)} tok/session forever, "
-        f"modelled payback {ratio:.2f}x)"
-    )
-
-
-def _short_reason_fallback(cluster) -> str:
-    """Derive the short label from the long reason for a cluster read out of a
-    cache written before ``write_blocked_short`` existed. Keeps an older cache
-    rendering the verdict instead of silently dropping it."""
-    from tokenjam.core.optimize.write_budget import short_reason
-
-    return short_reason(getattr(cluster, "write_blocked_reason", "") or "")
-
-
 def _render_relearn_gate_summary(clusters) -> None:
-    """One line naming how many clusters carry no permanent fix, and why.
-
-    Without it the list reads as though every cluster is actionable. It is
-    stated as a gap in what WE can act on — never as a finding that the
-    remaining failures were harmless, which is the reading a bare count
-    invites.
+    """One line naming how many clusters have no apply path at all (advisory
+    families, or a workspace/persona that has no write surface). Without it
+    the list reads as though every cluster is actionable, when a few carry no
+    apply path of their own — never a finding that those failures were
+    harmless, which is the reading a bare count invites.
     """
-    gated = [c for c in clusters if not getattr(c, "write_offered", True)]
+    gated = [c for c in clusters if getattr(c, "advise_only", False)]
     if not gated:
         return
     console.print(
-        f"     [dim]{len(gated)} of {len(clusters)} carry no permanent fix of "
-        f"their own (no derived template, a rule modelled as costing more to "
-        f"keep than it returns, or this window's rule budget). Each still cost "
-        f"what is shown above: the gate is a gap in what we can act on, not a "
-        f"finding that the failure was harmless.[/dim]"
+        f"     [dim]{len(gated)} of {len(clusters)} have no permanent-rule "
+        f"apply path of their own (no workspace to write into, or the "
+        f"harness already self-corrects). Each still cost what is shown "
+        f"above: the gap is in what we can act on, not a finding that the "
+        f"failure was harmless.[/dim]"
     )
 
 
@@ -2743,13 +2789,9 @@ def _render_relearn(
         f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
         f"recurring blockers this agent silently re-hits"
     )
-    # Lead each row with what the recurrence ALREADY COST, not with the
-    # fix-gated forward claim. The write budget zeroes that claim whenever no
-    # permanent rule is worth offering, which on a real corpus is the large
-    # majority of clusters — so a forward-only line printed "$0.00" for most
-    # of the list while those same clusters had spent real money. A gate on
-    # our side is a gap in OUR fix library, never a finding that the failure
-    # was free (CLAUDE.md anti-pattern 32b).
+    # Lead each row with what the recurrence ALREADY COST, never a fix-gated
+    # forward claim — a cluster's cost stands whether or not it has a
+    # permanent-rule apply path (CLAUDE.md anti-pattern 32b).
     for c in finding.clusters[:10]:
         cost = _relearn_past_overspend(c, pricing_mode=pricing_mode)
         console.print(
@@ -2759,9 +2801,11 @@ def _render_relearn(
             f"[dim]({delivery_label(getattr(c, 'delivery', ''))})[/dim]"
             + (f"  [bold]{cost}[/bold] [dim]already spent[/dim]" if cost else "")
         )
-        gate = _relearn_write_gate_line(c)
-        if gate:
-            console.print(f"         [dim]{gate}[/dim]")
+        if getattr(c, "advise_only", False):
+            console.print(
+                "         [dim]no permanent-rule apply path — see the "
+                "example sessions for what to change by hand[/dim]"
+            )
     if len(finding.clusters) > 10:
         console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
     _render_relearn_gate_summary(finding.clusters)
@@ -2770,7 +2814,7 @@ def _render_relearn(
         "full detail with [bold]tj optimize relearn --json[/bold].[/dim]"
     )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_verbosity(
@@ -2835,7 +2879,7 @@ def _render_verbosity(
             f"[bold]tj optimize --validate[/bold].[/dim]"
         )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_summarize(
@@ -2909,7 +2953,7 @@ def _render_summarize(
         "then [bold]tj summarize prep <path>[/bold] to generate a rewrite."
     )
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
@@ -2919,6 +2963,15 @@ def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
     gap is the story: on a real machine most of what is installed is switched
     off or scoped to one project and costs nothing, and a reader shown only a
     dollar figure has no way to know which of those they are looking at.
+
+    Three-state gating per plugin (never a number with no evidence behind
+    it): `unused` gets the priced row + disable arrow; `partial_use_no_fix`
+    names which components are unused and says plainly no fix is available
+    (enable/disable is whole-plugin only); `insufficient_history` renders as
+    "not enough history yet" — never a number, never a fix arrow. A plugin
+    with nothing measurable (no components, or only unmeasured MCP servers)
+    never reaches ANY of these three rows — see `PluginDeadweight.unused`'s
+    vacuous-truth guard — so a `$0` row with a disable arrow cannot render.
     """
     plugins = list(getattr(finding, "plugins", []) or [])
     if not plugins:
@@ -2929,11 +2982,17 @@ def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
         f"(the rest are disabled or scoped to one project and cost "
         f"nothing).[/dim]"
     )
-    for plugin in getattr(finding, "dead_plugins", []) or []:
+    for plugin in getattr(finding, "unused_plugins", []) or []:
+        # Guaranteed by the analyzer's own vacuous-truth guard, but re-asserted
+        # here rather than trusted blindly: a $0 row must never carry a
+        # disable arrow (Part C). If this ever fires it is a bug upstream,
+        # not a row worth printing.
+        if not plugin.estimated_tax_tokens_window:
+            continue
         console.print(
             f"       [bold]{plugin.name}[/bold] [dim]({plugin.skills} skill"
-            f"{'s' if plugin.skills != 1 else ''} listed every session)[/dim]  "
-            f"[yellow]{plugin.usage_count}[/yellow] recorded uses"
+            f"{'s' if plugin.skills != 1 else ''}, {plugin.agents} agent"
+            f"{'s' if plugin.agents != 1 else ''} listed every session)[/dim]"
         )
         if pricing_mode == "api" and plugin.estimated_tax_usd_window is not None:
             tax = (
@@ -2952,6 +3011,21 @@ def _render_deadweight_plugins(finding, *, pricing_mode: str = "api") -> None:
             console.print(f"          [dim]{_rich_escape(plugin.tax_construction)}[/dim]")
         if plugin.fix:
             console.print(f"          [yellow]→[/yellow] {_rich_escape(plugin.fix)}")
+    for plugin in getattr(finding, "plugins", []) or []:
+        if plugin.partial_use_no_fix:
+            console.print(
+                f"       [bold]{plugin.name}[/bold] [dim](some components used, "
+                f"some not)[/dim]"
+            )
+            console.print(f"          [dim]{_rich_escape(plugin.fix)}[/dim]")
+    insufficient = [p for p in plugins if p.resident and p.insufficient_history]
+    if insufficient:
+        names = ", ".join(p.name for p in insufficient)
+        console.print(
+            f"     [dim]Not enough session history yet to say whether "
+            f"{names} {'is' if len(insufficient) == 1 else 'are'} used "
+            f"(need {UNUSED_RECENCY_WINDOW_DAYS} days).[/dim]"
+        )
 
 
 def _render_deadweight(
@@ -2983,32 +3057,38 @@ def _render_deadweight(
         # nobody has a path to does not exist).
         _render_deadweight_plugins(finding, pricing_mode=pricing_mode)
         if finding.coverage_note:
-            console.print(
-                f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
-            )
+            _render_prose(finding.coverage_note, marker="[yellow]![/yellow]", style="dim")
         return
 
-    if not finding.dead_servers:
-        # _rich_escape: the analyzer's own note names the config key in
-        # bracket form ("Lower [optimize] min_sessions_deadweight..."), which
-        # Rich would otherwise parse as an unknown style tag and silently
-        # drop from the printed line.
+    if not finding.unused_servers:
+        # _rich_escape: the analyzer's own note may name a config key in
+        # bracket form, which Rich would otherwise parse as an unknown style
+        # tag and silently drop from the printed line.
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
         if not finding.notes:
             console.print(
                 f"     [dim]All {finding.configured_servers} configured MCP "
                 f"server{'s' if finding.configured_servers != 1 else ''} were "
                 f"invoked at least once in this window.[/dim]"
             )
+        insufficient = [s for s in finding.servers if s.insufficient_history]
+        if insufficient:
+            names = ", ".join(s.name for s in insufficient)
+            console.print(
+                f"     [dim]Not enough session history yet to say whether "
+                f"{names} {'is' if len(insufficient) == 1 else 'are'} used "
+                f"(need {UNUSED_RECENCY_WINDOW_DAYS} days).[/dim]"
+            )
     else:
-        n = len(finding.dead_servers)
+        n = len(finding.unused_servers)
         console.print(
-            f"     • [bold]{n}[/bold] dead MCP server{'s' if n != 1 else ''} of "
+            f"     • [bold]{n}[/bold] unused MCP server{'s' if n != 1 else ''} of "
             f"[bold]{finding.configured_servers}[/bold] configured "
-            f"[dim](schemas injected every session, never called)[/dim]"
+            f"[dim](schemas injected every session, nothing fired in the last "
+            f"{UNUSED_RECENCY_WINDOW_DAYS} days)[/dim]"
         )
-        for s in finding.dead_servers:
+        for s in finding.unused_servers:
             console.print(
                 f"       [bold]{s.name}[/bold] [dim]({s.scope} · {s.source})[/dim]  "
                 f"present in {s.sessions_present} session"
@@ -3059,21 +3139,17 @@ def _render_deadweight(
             )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     # The MEASUREMENT coverage note, beside the figure it qualifies. Without it
     # the terminal showed a priced dollar total for the servers that could be
     # measured and said nothing about the ones excluded — an undisclosed FLOOR
     # rendered as a total. The number was honest; the presentation was not.
     if getattr(finding, "measurement_note", ""):
-        console.print(
-            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.measurement_note)}[/dim]"
-        )
+        _render_prose(finding.measurement_note, marker="[yellow]![/yellow]", style="dim")
     if finding.coverage_note:
-        console.print(
-            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
-        )
+        _render_prose(finding.coverage_note, marker="[yellow]![/yellow]", style="dim")
     if finding.caveat:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+        _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _cadence_phrase(seconds: float) -> str:
@@ -3159,9 +3235,9 @@ def _render_placement(
         )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
     if finding.friction:
-        console.print(f"     [yellow]![/yellow] [italic]{finding.friction}[/italic]")
+        _render_prose(finding.friction, marker="[yellow]![/yellow]", style="italic", escape=False)
 
 
 def _render_resend(
@@ -3187,7 +3263,7 @@ def _render_resend(
         # Below the data threshold (too few sessions/turns) — empty-state
         # discipline: never a bare "nothing found", always the reason.
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
         if not finding.notes:
             console.print("     [dim]No LLM turns in this window.[/dim]")
         return
@@ -3243,7 +3319,7 @@ def _render_resend(
             console.print(f"          [green]→[/green] {_rich_escape(r.fix)}")
     else:
         for note in finding.notes:
-            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+            _render_prose(note, style="dim")
 
     # Recoverable figure: fed through framing.render_savings rather than a
     # hand-rolled pricing_mode branch, so it can't quietly disagree with the
@@ -3275,9 +3351,9 @@ def _render_resend(
             f"avoidable across every session with repeat volume.[/dim]"
         )
     if finding.estimate_basis:
-        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim", escape=False)
 
-    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_prose(finding.caveat, marker="[yellow]![/yellow]", style="italic", escape=False)
     _render_resend_fix(finding, persona)
 
 
@@ -3417,8 +3493,8 @@ def _render_stream_usage(
         )
 
     if finding.estimate_basis:
-        console.print(f"     [dim]{_rich_escape(finding.estimate_basis)}[/dim]")
-    console.print(f"     [dim]{_rich_escape(finding.accounting_note)}[/dim]")
+        _render_prose(finding.estimate_basis, style="dim")
+    _render_prose(finding.accounting_note, style="dim")
 
 
 # Dispatch table — analyzer registration name → renderer.

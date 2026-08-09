@@ -334,9 +334,23 @@ def _trigger_analyzer_pass(
                 backend, config, report=report, provenance=record,
             )
             _refresh_rule_presence(config)
-        except Exception:  # noqa: BLE001 - background job, never crash a thread
-            pass
+        except Exception as exc:  # noqa: BLE001 - classified, then swallowed
+            # "Never crash a thread" is right for an analyzer that failed and
+            # wrong for a DuckDB fatal, which invalidates the whole database
+            # instance — every connection in the process, the request path's
+            # included. Swallowing THAT is what turns one failed write into a
+            # daemon whose every route 500s with nothing saying why.
+            from tokenjam.core.db import handle_if_fatal
+
+            handle_if_fatal(exc, what="analyzer scan cycle")
         finally:
+            # Swallow-proof: a fatal raised by an analyzer's write crosses
+            # several broad handlers on its way here and any of them can absorb
+            # it, so recovery keys off the process-wide record rather than off
+            # this frame having seen the exception.
+            from tokenjam.core.db import recover_if_fatal_noted
+
+            recover_if_fatal_noted(what="analyzer scan cycle")
             # Cleared here and NOWHERE else on the success path: the flag has to
             # outlive the report write, since the two stores built after it are
             # exactly the ones a report-only flag went silent about.
@@ -407,9 +421,6 @@ def _write_relearn_from(
     config versus the function default, and the resolved report window versus
     the fixed label vocabulary), so the Dashboard and the Review inbox could
     disagree about which clusters to offer, not merely about a figure's size.
-    Which clusters are OFFERED a permanent rule is no longer decided in this
-    pass at all — see ``core/optimize/write_allocation.py``, which allocates
-    once over both producers at the end of the report build.
 
     The registered analyzer's version is the richer of the two on every one of
     those axes, so this is a merge toward it rather than a choice between them.

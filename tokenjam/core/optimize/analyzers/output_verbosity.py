@@ -53,6 +53,7 @@ from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.core.persona_scope import add_persona_clause
 
 # A task-shape cohort needs at least this many sessions before its median is a
 # meaningful baseline. Below this, "the median" is one or two sessions and any
@@ -72,7 +73,7 @@ MAX_EXAMPLES = 5
 # recoverable finding's caveat so no surface can drop it. States the ONE thing
 # that makes this the least-grounded analyzer: output length is not waste.
 VERBOSITY_HONESTY_CAVEAT = (
-    "Predicted high-verbosity output — review before constraining a response. "
+    "Predicted high-verbosity output. Review before constraining a response. "
     "Output length is not waste: a terse answer can drop information the task "
     "needed. This is a candidate to look at, never a claim you are wasting "
     "tokens. Measure a brevity constraint before applying it."
@@ -81,9 +82,9 @@ VERBOSITY_HONESTY_CAVEAT = (
 # The `estimate_basis` surfaced behind the "estimated recoverable" tag. Names
 # the softer basis explicitly and points at measurement (#477).
 VERBOSITY_ESTIMATE_BASIS = (
-    "output tokens above the per-task-shape median, priced at output rates — a "
-    "SOFT upper bound, not a measured saving: a brevity constraint can be "
-    "net-negative once its own overhead is counted, so measure before claiming"
+    "output tokens above the per-task-shape median, priced at output rates. a "
+    "SOFT upper bound, not a measured saving. a brevity constraint can be "
+    "net-negative once its own overhead is counted. measure before claiming"
 )
 
 # Surfaced remedy (not applied, and never written into a workspace file — see
@@ -211,6 +212,10 @@ def run(ctx: AnalyzerContext) -> None:
     if ctx.agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(ctx.agent_id)
+    # The persona POPULATION scope. Without it this analyzer's dollar figure is
+    # computed over the whole mixed corpus and then published under whichever
+    # persona the reader picked. See `core/persona_scope.py`.
+    add_persona_clause(clauses, ctx.persona_scope)
     where = " AND ".join(clauses)
 
     # LLM spans: output tokens per session (task shape carries no model on tool

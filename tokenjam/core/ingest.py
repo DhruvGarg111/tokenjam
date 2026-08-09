@@ -144,9 +144,16 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
         stripped[TjAttributes.TOOL_ARG_SIG] = sig
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
-        # The recovered system prefix (a project's CLAUDE.md text, stamped by
-        # backfill) is prompt content and rides the same toggle.
+        # The recovered system prefix (derived from a project's CLAUDE.md by
+        # backfill) is prompt content and rides the same toggle. All four keys
+        # go: the legacy text one for spans that still carry it, and the three
+        # compact ones that replaced it — SAMPLE is literal prompt text, and
+        # leaving HASH/LENGTH behind would keep a fingerprint of a file the
+        # user just said not to capture.
         stripped.pop(TjAttributes.SYSTEM_PREFIX_CONTENT, None)
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_HASH, None)
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_SAMPLE, None)
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_LENGTH, None)
         for key in _REQUEST_PARAM_ATTRS:
             stripped.pop(key, None)
     if not capture.completions:

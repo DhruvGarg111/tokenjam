@@ -75,29 +75,25 @@ COST_CORRELATIONAL_CAVEAT = (
 #: Review inbox's Cost-advisories tab.
 #:
 #: ``summarize`` (prompt summarization) IS here (re-filing the
-#: purged #326). It used to be deliberately excluded — own review surface, the
-#: write-budget's denominator, "don't add cards" — and #326 tried to soften the
-#: consequence with a link-only "$X more, not summed here" footnote instead of
-#: a card. The founder decision that revisited this rejects the old reasoning
-#: outright: **the Review inbox is the complete index of everything
-#: actionable, not the list of things whose apply flow happens to live here.**
-#: Where the fix is APPLIED is a routing detail, not a reason to keep a real,
-#: measured figure off the one surface a user reads for "what's outstanding".
-#: So ``summarize`` gets a normal card like every other analyzer here — see
+#: purged #326). It used to be deliberately excluded — own review surface,
+#: "don't add cards" — and #326 tried to soften the consequence with a
+#: link-only "$X more, not summed here" footnote instead of a card. The
+#: founder decision that revisited this rejects the old reasoning outright:
+#: **the Review inbox is the complete index of everything actionable, not the
+#: list of things whose apply flow happens to live here.** Where the fix is
+#: APPLIED is a routing detail, not a reason to keep a real, measured figure
+#: off the one surface a user reads for "what's outstanding". So
+#: ``summarize`` gets a normal card like every other analyzer here — see
 #: ``_summarize_to_proposals`` — except its card routes to the ``tj summarize``
 #: curate/diff surface instead of offering an inline apply (``advise_only``,
 #: no ``apply_kind``): unlike a model-id swap or an MCP-server removal, the fix
 #: is a reviewed rewrite (structure kept, prose compressed), not a value this
-#: adapter can safely one-click. The write-budget coupling that motivated the
-#: old exclusion is unaffected: ``core/optimize/write_allocation`` reads
-#: ``report.findings["summarize"]`` directly (not this proposal list) to size
-#: every OTHER analyzer's rule-writing budget, and this card is never
-#: ``apply_capable`` so it never enters that netting pass itself.
+#: adapter can safely one-click.
 #: ``relearn`` (recurring agent failures) is a member but produces NO cost
 #: proposal any more — there is no adapter for it. Membership is what keeps the
-#: analyzer running inside the inbox recompute (its per-cluster rows and the write
-#: budget both depend on the finding); the one aggregate card it used to also emit
-#: is deleted, because the only figure that card ever carried was the retired
+#: analyzer running inside the inbox recompute (its per-cluster rows depend on
+#: the finding); the one aggregate card it used to also emit is deleted,
+#: because the only figure that card ever carried was the retired
 #: total-observed-cost field. See the note above ``_summarize_to_proposals``'s
 #: neighbours where that card used to live.
 COST_ANALYZERS = (
@@ -340,28 +336,6 @@ class CostProposal:
     # The exact fix, with this agent's own measured values already substituted
     # in. Every advise-only card carries one.
     one_paste_fix:        str  = ""
-    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`), filled
-    # for every card whose fix is a PERMANENT artifact the user keeps: a
-    # CLAUDE.md rule or a skill note. Those are re-sent on every future
-    # session, so the four `estimated_*` fields above are reported NET of that
-    # standing cost and the pre-net figures are parked here, inspectable. A
-    # card with no write to offer (every advise-only cost card) writes nothing,
-    # therefore stands nothing, and passes through untouched.
-    gross_recoverable_usd:    float | None = None
-    gross_recoverable_tokens: int | None   = None
-    standing_cost_tokens_per_session: int = 0
-    standing_cost_tokens:     int          = 0
-    standing_cost_usd:        float | None = None
-    standing_cost_basis:      str          = ""
-    #: gross / standing. Below 1.0 the rule costs more to keep than it saves.
-    payback_ratio:            float | None = None
-    net_negative:             bool         = False
-    # Whether the permanent write is actually on offer after the budget pass,
-    # and why not when it isn't. A suppressed write degrades exactly the way
-    # the persona gate already degrades one: advise-only, with the identical
-    # text still carried as a copyable `suggestion`.
-    write_offered:            bool         = False
-    write_blocked_reason:     str          = ""
     # WHERE the permanent rule would be written (`core/optimize/rule_placement`).
     # Every field here describes placement, never a saving: `placement_paths` is
     # the set of CLAUDE.md files the rule lands in, `placement_scope` is
@@ -369,13 +343,11 @@ class CostProposal:
     # and the rejected alternative, kept side by side so the decision is
     # inspectable rather than a bare verdict. `placement_footprint_tokens` is
     # what the FILES have to carry (per-session x files written) as distinct
-    # from what the rule costs to KEEP — see `write_budget.WriteCandidate.
-    # destinations` for why those are two different questions.
+    # from what the rule costs to KEEP.
     #
-    # These carry no dollars on purpose. Placement changes what a rule COSTS,
-    # and that change is already expressed in the netted `past_overspend_usd`
-    # and the `standing_cost_*` fields above; a second dollar figure here would
-    # be a fourth name for a quantity the field contract allows one name.
+    # These carry no dollars on purpose: placement changes what a rule costs to
+    # KEEP, never whether it is offered — a rule is offered whenever the card
+    # is `apply_capable`, with no budget/ceiling gate on top.
     placement_scope:          str          = ""
     placement_paths:          list[str]    = field(default_factory=list)
     #: Per-destination session counts, parallel to `placement_paths`. Carried
@@ -427,10 +399,15 @@ def _downsize_to_proposal(
     delta-verify pass measures the model-mix cost delta across ALL flagged
     models, so one proposal listing them keeps that aggregate estimate coherent.
 
-    ``persona`` gates the CTA exactly like ``cmd_optimize._render_downgrade_
-    cta`` gates the CLI's: a ``"claude-code"`` window can't switch its own
-    interactive model, so it never gets the raw "route to a cheaper model"
-    instruction — see ``_DOWNSIZE_CC_LEVER``.
+    ``persona`` gates which of the two cards fire, not just their wording.
+    DECISION (persona/actionability matrix, downsize row): for
+    ``"claude-code"``, this analyzer emits ONLY the driver-role card. Both
+    the window-wide and per-agent tiny-session cards end in "switch your own
+    interactive model" for this persona — above the CC actionable ceiling —
+    so a Claude Code reader used to hit a card that stated a number with no
+    fix. Retired for that persona only: ``_downsize_agent_proposals`` and the
+    window-wide card below are unchanged and still fire for ``sdk``, where
+    routing a request to a cheaper model is a real lever.
     """
     if finding is None:
         return []
@@ -441,6 +418,13 @@ def _downsize_to_proposal(
     # Exactly one window-wide card, never one per agent, so this adds at most a
     # single row to the inbox.
     proposals = _driver_role_proposals(finding, persona)
+    if persona == "claude-code":
+        # See the docstring above: the tiny-session/per-agent cards never had
+        # a fix on this persona's action surface, only a pointer to other
+        # commands — retiring them here means a claude-code window either
+        # gets the driver-role card (a real one-paste fix) or nothing, never
+        # a number with no fix attached.
+        return proposals
     if getattr(finding, "candidate_sessions", 0) <= 0:
         return proposals
     per_agent = _downsize_agent_proposals(finding, config, persona)
@@ -1803,10 +1787,20 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
     subagents = len({(r.session_id, r.sub_agent_id) for r in over_powered})
     pct = float(getattr(finding, "percent_of_cost", 0.0) or 0.0) * 100
     model_list = ", ".join(models)
+    # State what the `over_powered` gate actually tests — `is_premium_tier(model)`
+    # plus the cost floor, and NOTHING about output size or tool-call count (see
+    # `subagent_rightsizing._flags_for`). The old wording ("did little work,
+    # small output, few tool calls") described `over_provisioned`'s gate, not
+    # this one, so a dispatch that ran hundreds of tool calls and returned a
+    # large result was told it did little work — contradicting the numbers
+    # rendered on the same card. `over_provisioned` legitimately keeps that
+    # language on its own evidence (see `_derived_effort`); this sentence must
+    # not borrow it.
+    floor = float(getattr(finding, "min_flag_cost_usd", 0.0) or 0.0)
     evidence = (
         f"{subagents} subagent dispatch(es) ran on a premium-tier model "
-        f"({model_list}) but did little work (small output, few tool calls). "
-        f"Subagents are {pct:.0f}% of the window's cost."
+        f"({model_list}), above the {_money(floor)} per-dispatch cost floor "
+        f"this flag applies. Subagents are {pct:.0f}% of the window's cost."
     )
     # The trailing sentence here used to RESTATE the rubric — "route that shape
     # to the cheaper same-family model next time" is the rubric's own core
@@ -1969,9 +1963,9 @@ def _mcp_remove_plumbing(server: Any) -> dict[str, Any]:
 
 
 def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
-    """One proposal per dead-weight MCP server (Component C1).
+    """One proposal per unused MCP server (Component C1).
 
-    Reads ONLY ``DeadweightFinding.dead_servers`` — the C2 tax table (which
+    Reads ONLY ``DeadweightFinding.unused_servers`` — the C2 tax table (which
     lists every configured server, dead or alive, purely for ranked
     visibility) never feeds a proposal here, so a server's schema-injection
     tax is never counted both in the tax table AND a proposal (the same
@@ -2013,7 +2007,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     measurement_note = str(getattr(finding, "measurement_note", "") or "")
     if measurement_note:
         coverage_note = " ".join(x for x in (coverage_note, measurement_note) if x)
-    for server in getattr(finding, "dead_servers", []) or []:
+    for server in getattr(finding, "unused_servers", []) or []:
         # A server measured to cost NOTHING has nothing to recover, so it gets
         # no card at all. This is also what keeps the two figures on one basis:
         # `tokens or None` coerces a measured zero to None while the dollar
@@ -2109,6 +2103,74 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             target_path=str(plumbing.get("target_path", "")),
             scope=server.scope,
             apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
+        ))
+    return proposals
+
+
+def _deadweight_plugin_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per unused plugin — reaches the Review inbox with the
+    same lifecycle as an unused MCP server's card (Part D).
+
+    Reads ONLY ``DeadweightFinding.unused_plugins``: a plugin with SOME
+    components used and some not (``PluginDeadweight.partial_use_no_fix``)
+    never gets a card here — the toggle is whole-plugin only, so there is
+    genuinely no fix to offer, and a card dangling a number with no action
+    behind it is worse than no card (root anti-pattern 22 in the meta-repo
+    `CLAUDE.md`). A plugin with nothing priced (`estimated_tax_tokens_window
+    == 0`) is skipped the same way `_deadweight_to_proposals` skips a
+    zero-tax server — never a card that reads "$0, disable it".
+
+    Never apply-capable. Unlike the MCP server's deterministic config-file
+    splice, there is no file this adapter can edit on the user's behalf: the
+    real fix is the CLI command `claude plugin disable <name>`, which the
+    user runs themselves (see
+    ``core/fixes/registry.DEADWEIGHT_DISABLE_PLUGIN``). Every card is
+    advise-only with that command as its copy-pasteable ``suggestion`` —
+    the same shape the MCP card falls back to when a direct splice isn't
+    offered, just without the apply-capable branch, since no splice exists
+    to attempt.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import UNUSED_RECENCY_WINDOW_DAYS
+
+    if finding is None:
+        return []
+    proposals: list[CostProposal] = []
+    for plugin in getattr(finding, "unused_plugins", []) or []:
+        if not plugin.estimated_tax_tokens_window:
+            continue
+        component_names = ", ".join(
+            f"{c.kind} `{c.name}`" for c in getattr(plugin, "components", []) or []
+        )
+        evidence = (
+            f"`{plugin.name}` (enabled, resident): {component_names} — "
+            f"nothing fired in {UNUSED_RECENCY_WINDOW_DAYS} days."
+        )
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="deadweight",
+            signature=f"cost:deadweight:plugin:{plugin.name}",
+            title=f"Unused plugin: {plugin.name}",
+            target_key={"plugin": plugin.name, "install_scope": plugin.install_scope},
+            evidence=evidence,
+            baseline={
+                "skills": plugin.skills,
+                "agents": plugin.agents,
+                "components": [
+                    {"kind": c.kind, "name": c.name}
+                    for c in getattr(plugin, "components", []) or []
+                ],
+                "sessions_present": plugin.sessions_present,
+                "priced_model": plugin.priced_model,
+            },
+            advise_text=plugin.fix,
+            suggestion=f"claude plugin disable {plugin.name}",
+            past_overspend_tokens=plugin.estimated_tax_tokens_window or None,
+            past_overspend_usd=plugin.estimated_tax_usd_window,
+            estimate_basis=plugin.tax_construction,
+            advise_only=True,
+            apply_capable=False,
+            agent_name=plugin.name,
+            scope=plugin.install_scope,
         ))
     return proposals
 
@@ -3063,6 +3125,61 @@ def recompute_cost_proposals(
                 on_adapter_error=_record_adapter_failure,
             )
             excluded = _adapter_failure_entries(adapter_failures)
+            # THE PER-PERSONA LEDGER. The adapters are a pure transformation of
+            # a report, so one scoped report in gives one scoped proposal list
+            # out — no second measurement, no extra corpus pass. What makes
+            # this necessary rather than a convenience is that a dollar figure
+            # summed over a mixed corpus cannot be narrowed on read: the
+            # `persona` parameter `/optimize` gets to honour by slicing an
+            # analyzer set has no equivalent here, so the narrowing has to have
+            # happened at compute time or it cannot happen at all.
+            #
+            # Only a caller whose report carries per-persona passes (the scan
+            # cycle — see `core/optimize/report_store.py`) can produce this. A
+            # lone refresh writes an unscoped ledger and says so, rather than
+            # relabelling one corpus-wide list as every persona's.
+            by_persona: dict[str, list[CostProposal]] = {}
+            # Relearn reaches the inbox headline through
+            # `inbox_contribution.gather_rollup_population`, NOT through an
+            # adapter tuple, so its money never appears in `by_persona` above.
+            # A persona-scoped rollup that folded in the whole-corpus relearn
+            # cache would put two populations into one total — so each scoped
+            # pass's own lane-partitioned finding is stored beside its
+            # proposals for the route to use instead.
+            relearn_by_persona: dict[str, Any] = {}
+            for scope_persona, sub in (
+                getattr(report, "persona_reports", None) or {}
+            ).items():
+                try:
+                    from tokenjam.core.optimize.runner import report_from_dict
+
+                    scoped_report = (
+                        report_from_dict(sub) if isinstance(sub, dict) else sub
+                    )
+                    by_persona[scope_persona] = cost_proposals_from_report(
+                        scoped_report, config=config, pricing_mode=pricing_mode,
+                        window_days=float(effective_window_days),
+                        # Adapter failures are recorded from the BASE pass
+                        # only. A per-persona pass failing the same adapter
+                        # would stamp the same `excluded` entry twice, and the
+                        # entry describes the analyzer, not the persona.
+                    )
+                    scoped_relearn = (scoped_report.findings or {}).get("relearn")
+                    if scoped_relearn is not None:
+                        from dataclasses import asdict as _asdict, is_dataclass
+
+                        relearn_by_persona[scope_persona] = (
+                            _asdict(scoped_relearn)
+                            if is_dataclass(scoped_relearn)
+                            and not isinstance(scoped_relearn, type)
+                            else scoped_relearn
+                        )
+                except Exception:
+                    # One persona's adaptation failing must not cost the other
+                    # its proposals, nor sink the whole recompute. The missing
+                    # persona simply has no entry, which the read side already
+                    # treats as "cannot answer for this persona".
+                    continue
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -3087,6 +3204,8 @@ def recompute_cost_proposals(
         try:
             written = relearn_store.write_cost_proposals(
                 proposals, config=config,
+                by_persona=by_persona or None,
+                relearn_by_persona=relearn_by_persona or None,
                 window_days=effective_window_days,
                 excluded=excluded or None,
                 # The RESOLVED bounds, not just the length. A day count alone
@@ -3178,13 +3297,8 @@ def trigger_background_cost_recompute(
 # figure on the reference corpus) that a surface could render by mistake —
 # which is exactly what happened.
 #
-# Do not reintroduce a ratio here. The 30-day pace basis still exists for the
-# ONE calculation that genuinely needs a per-month horizon —
-# `core/optimize/projection.build_projection_basis`, used by
-# `core/optimize/write_budget` to price how many future sessions will re-send
-# a permanent CLAUDE.md rule. It is reached only through `_write_budget_basis`
-# below, it never touches a past-tense figure, and nothing it produces lands
-# on a payload. See the field contract in the repo `CLAUDE.md`.
+# Do not reintroduce a ratio here. See the field contract in the repo
+# `CLAUDE.md`.
 # --------------------------------------------------------------------------- #
 
 
@@ -3252,23 +3366,16 @@ def cost_proposals_from_report(
     (that helper's conservative default runs the other way — see its own
     docstring) — neither ever assumes ``"claude-code"``.
 
-    ``window_days`` (the shared report window — see ``cost_window_days_for``)
-    is used for exactly ONE thing: sizing the
-    write budget's per-month standing-cost comparison
-    (``_write_budget_basis``). It never rescales a proposal's figure. Every
-    card's ``past_overspend_usd``/``_tokens`` is its analyzer's own
+    ``window_days`` is accepted for call-site compatibility but no longer
+    used: every card's ``past_overspend_usd``/``_tokens`` is its analyzer's own
     observation of THIS window, carried through unscaled — there is no
-    projection step here any more (see the block comment above
-    ``_write_budget_basis``).
+    projection or netting step here any more.
     """
     proposals = _adapt_report(
         report, config=config, pricing_mode=pricing_mode,
         on_adapter_error=on_adapter_error,
     )
-    proposals = _apply_write_decisions(proposals, report, window_days, config)
-    # Order matters: the write allocation can NET a proposal's figure down
-    # against what its rule costs to keep, and the past-overspend basis stamp
-    # must describe the netted figure, never the gross.
+    proposals = _apply_placement(proposals, report, config)
     return [_with_past_overspend(p) for p in proposals]
 
 
@@ -3276,17 +3383,25 @@ def _adapt_report(
     report: Any, *, config: Any = None, pricing_mode: str = "api",
     on_adapter_error: Any = None,
 ) -> list[CostProposal]:
-    """Run every cost adapter over one report. PURE, and no write decision.
+    """Run every cost adapter over one report. PURE, no placement.
 
-    Split out of :func:`cost_proposals_from_report` because the single write
-    allocation (:mod:`tokenjam.core.optimize.write_allocation`) needs this
-    producer's write-bearing cards BEFORE anything has been decided — it ranks
-    them against relearn's clusters in one list — while the public function
-    needs the finished, decided proposals. Same adapters, same report, so the
-    two callers cannot see different cards.
+    Split out of :func:`cost_proposals_from_report` so placement can run over
+    this producer's write-bearing cards separately from the adapters that
+    build them. Same adapters, same report either way.
     """
     findings = getattr(report, "findings", {}) or {}
-    persona = str(getattr(report, "persona", "") or "unknown")
+    # THE SCOPE FIRST, the corpus's own persona second. A report built for one
+    # side of the picker over a mixed corpus carries `persona="mixed"` — which
+    # gates nothing — beside rows that are entirely one persona's. Reading
+    # `persona` alone there adapts a card for a lever the reader does not have
+    # and prices it off their own sessions, which is a more convincing wrong
+    # answer than the unscoped version was. `persona_scope` is `None` on an
+    # unscoped report, so this is exactly the old behaviour for that case.
+    persona = str(
+        getattr(report, "persona_scope", None)
+        or getattr(report, "persona", "")
+        or "unknown"
+    )
     proposals: list[CostProposal] = []
 
     # Second half of the persona skip gate. `build_report` already refuses to
@@ -3328,6 +3443,7 @@ def _adapt_report(
             _pick("placement"),
         ),
         ("deadweight", _deadweight_to_proposals, _pick("deadweight")),
+        ("deadweight", _deadweight_plugin_to_proposals, _pick("deadweight")),
         ("script", lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
         ("reuse", lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
         ("verbosity", lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
@@ -3447,39 +3563,6 @@ def _net_cross_analyzer_session_overlap(
             coverage_note=(p.coverage_note + " " + note).strip(),
         ))
     return out
-
-
-def _write_budget_basis(report: Any, window_days: float) -> Any:
-    """The 30-day pace basis for this report's window — THE ONLY remaining
-    consumer of pacing in the cost pipeline, and deliberately internal.
-
-    ``write_budget`` prices a permanent CLAUDE.md rule against how many future
-    sessions will re-send it, so it genuinely needs a per-month horizon: a rule
-    written today is charged on every one of those sessions. That is a
-    standing-cost comparison, not a claim about the user's spend, and nothing
-    it produces reaches a payload — only the NETTED
-    ``past_overspend_*`` figure and the ``standing_cost_*`` fields do.
-
-    The per-analyzer forward projection this basis used to ALSO feed
-    (``estimated_monthly_*`` via ``compute_projection_ratio``) is gone; do not
-    route a past-tense figure back through here. See the field contract in the
-    repo ``CLAUDE.md``.
-
-    Reads ``active_days``/``sessions`` off the window summary the runner already
-    computed. A hand-constructed report (a test, an older cached one) carries
-    neither, which resolves to an unprojected basis with a zero session count:
-    the netting then charges a rule nothing and only the quality floor and the
-    write cap apply. Degrading toward "claim no standing cost" is the only safe
-    direction, since the alternative would invent one.
-    """
-    from tokenjam.core.optimize.projection import build_projection_basis
-
-    window = getattr(report, "window", None)
-    return build_projection_basis(
-        float(getattr(window, "days", 0.0) or window_days or 0.0),
-        int(getattr(window, "active_days", 0) or 0),
-        int(getattr(window, "sessions", 0) or 0),
-    )
 
 
 #: Cap on the sessions whose transcript is opened to resolve a destination.
@@ -3620,15 +3703,13 @@ def _placement_for(
 def _placements_for(
     writers: list[CostProposal], report: Any, config: Any,
 ) -> dict[str, Any]:
-    """WHERE each rule goes, decided before HOW MUCH it may cost — placement is
-    an input to the netting, not a presentation of it. A rule confined to the
-    three projects that actually exhibited the behaviour is re-sent in those
-    projects only, so its standing cost falls by the ratio of their sessions
-    to the window's, and a rule that reads net-negative against the
-    user-global file can legitimately flip to net-positive purely by landing
-    in the right place.
+    """WHERE each rule goes. A rule confined to the projects that actually
+    exhibited the behaviour is re-sent in those projects only, so its standing
+    cost falls by the ratio of their sessions to the window's — cheaper to
+    keep, never a reason it would or wouldn't be offered.
     """
-    from tokenjam.core.optimize import rule_placement, write_budget as wb
+    from tokenjam.core.optimize import rule_placement
+    from tokenjam.core.rulewrite.delivery import standing_tokens_per_session
 
     placements: dict[str, Any] = {}
     for p in writers:
@@ -3640,7 +3721,7 @@ def _placements_for(
             continue
         choice = rule_placement.choose_placement(
             plan,
-            standing_tokens_per_session=wb.standing_tokens_per_session(
+            standing_tokens_per_session=standing_tokens_per_session(
                 p.delivery, p.proposed_fix,
             ),
             total_sessions=int(getattr(getattr(report, "window", None), "sessions", 0) or 0),
@@ -3652,141 +3733,53 @@ def _placements_for(
 def write_bearing(proposals: list[CostProposal]) -> list[CostProposal]:
     """The cards that actually write something: ``apply_capable`` with a
     write-bearing ``proposed_fix``. Everything else (the advise-only majority,
-    the model-id swaps, the MCP-server removals) writes no standing prompt text
-    and is never priced, ranked or charged against the budget."""
+    the model-id swaps, the MCP-server removals) writes no standing prompt
+    text and has no destination to place."""
     return [p for p in proposals if p.apply_capable and p.delivery and p.proposed_fix]
 
 
-def write_candidates_from_report(
-    report: Any, *, config: Any = None, pricing_mode: str = "api",
-) -> tuple[list[Any], dict[str, Any]]:
-    """This producer's proposed permanent writes, for the ONE allocation pass.
-
-    Returns ``(candidates, placements)``. Peer of
-    ``analyzers.relearn.write_candidates`` — both hand their candidates to
-    :mod:`tokenjam.core.optimize.write_allocation`, which sizes one budget and
-    ranks the union. Neither may size or spend a budget of its own; that split
-    is exactly the defect this shape removes.
-
-    Candidates are grouped by ``(analyzer, delivery)`` because that is
-    genuinely one block: every ``reuse`` cluster writes the same skeleton note,
-    every ``script`` cluster the same script note. Nine clusters used to mean
-    nine identical appended blocks; now the family's largest carries the write
-    and its siblings say they are covered by it.
-    """
-    from tokenjam.core.optimize import write_budget as wb
-
-    writers = write_bearing(_adapt_report(
-        report, config=config, pricing_mode=pricing_mode,
-    ))
-    if not writers:
-        return [], {}
-    placements = _placements_for(writers, report, config)
-    candidates = [
-        wb.WriteCandidate(
-            key=p.signature,
-            family=f"{p.analyzer}:{p.delivery}",
-            delivery=p.delivery,
-            artifact_text=p.proposed_fix,
-            gross_tokens=int(p.past_overspend_tokens or 0),
-            gross_usd=p.past_overspend_usd,
-            exposure_sessions=(
-                placements[p.signature][1].exposure_sessions
-                if p.signature in placements else None
-            ),
-            destinations=tuple(
-                d.path for d in placements[p.signature][1].destinations
-            ) if p.signature in placements else (),
-        )
-        for p in writers
-    ]
-    return candidates, placements
-
-
-def _apply_write_decisions(
-    proposals: list[CostProposal], report: Any, window_days: float,
-    config: Any = None,
+def _apply_placement(
+    proposals: list[CostProposal], report: Any, config: Any = None,
 ) -> list[CostProposal]:
-    """Stamp the single allocation pass's verdicts onto this producer's cards.
+    """Fill in WHERE each write-bearing card's rule would land.
 
-    It no longer decides anything. The budget is one pool shared with relearn
-    and is sized and spent once, over both producers' candidates ranked
-    together — see :mod:`tokenjam.core.optimize.write_allocation`. This pass
-    reads that answer and applies it, plus the placement fields the same
-    candidate build resolved.
-
-    A suppressed write degrades the same way the persona gate already degrades
-    one: advise-only, with the identical text still carried as a copyable
-    ``suggestion``.
+    Every ``apply_capable`` card is already offered — this only resolves and
+    stamps placement's ``placement_*`` fields; it never withdraws an offer.
     """
-    from tokenjam.core.optimize import write_allocation
-
-    # ASKED BEFORE the no-writers early return, deliberately. This call is what
-    # allocates when nobody has yet, and the OTHER lane's candidates do not
-    # depend on this one having any: a window with zero write-bearing cost
-    # cards can still hold relearn clusters, and returning early would leave
-    # them carrying their construction-time `write_offered=True` — every one of
-    # them offered, by a budget that never ran.
-    decisions = write_allocation.decisions_for(
-        report, write_allocation.LANE_COST,
-        config=config, window_days=window_days,
-    )
     writers = write_bearing(proposals)
     if not writers:
         return proposals
 
     placements = _placements_for(writers, report, config)
+    if not placements:
+        return proposals
 
     out: list[CostProposal] = []
     for p in proposals:
-        decision = decisions.get(p.signature)
-        if decision is None or not (p.apply_capable and p.delivery and p.proposed_fix):
+        placed = placements.get(p.signature)
+        if placed is None:
             out.append(p)
             continue
-        updates: dict[str, Any] = {
-            "gross_recoverable_usd": p.past_overspend_usd,
-            "gross_recoverable_tokens": p.past_overspend_tokens,
-            "past_overspend_tokens": (
-                decision.claimed_tokens if p.past_overspend_tokens is not None else None
+        plan, choice = placed
+        out.append(replace(
+            p,
+            placement_scope=choice.scope,
+            placement_paths=[d.path for d in choice.destinations],
+            placement_sessions=[d.sessions for d in choice.destinations],
+            placement_standing_tokens=choice.standing_tokens,
+            placement_alternative_standing_tokens=(
+                choice.alternative_standing_tokens
             ),
-            "past_overspend_usd": decision.claimed_usd,
-            "standing_cost_tokens_per_session": decision.standing_tokens_per_session,
-            "standing_cost_tokens": decision.standing_tokens,
-            "standing_cost_usd": decision.standing_usd,
-            "standing_cost_basis": decision.basis,
-            "payback_ratio": decision.payback_ratio,
-            "net_negative": decision.net_negative,
-            "write_offered": decision.offered,
-            "write_blocked_reason": decision.reason,
-        }
-        placed = placements.get(p.signature)
-        if placed is not None:
-            plan, choice = placed
-            updates.update(
-                placement_scope=choice.scope,
-                placement_paths=[d.path for d in choice.destinations],
-                placement_sessions=[d.sessions for d in choice.destinations],
-                placement_standing_tokens=choice.standing_tokens,
-                placement_alternative_standing_tokens=(
-                    choice.alternative_standing_tokens
-                ),
-                placement_footprint_tokens=choice.footprint_tokens,
-                placement_basis=choice.basis,
-                # The placement gap rides on its OWN note rather than being
-                # merged into the analyzer's `coverage_note`: that field states
-                # what the analyzer's FIGURE covers, and this states which
-                # sessions the rule could be PLACED for. Two different
-                # populations, so merging them would recreate exactly the
-                # ratio-of-two-populations defect Critical Rule 30 is about.
-                placement_coverage_note=plan.coverage_note,
-            )
-        if not decision.offered:
-            updates.update(
-                apply_capable=False, advise_only=True, delivery="", scope="",
-                proposed_fix="", suggestion=p.suggestion or p.proposed_fix,
-                apply_blocked_reason=decision.reason,
-            )
-        out.append(replace(p, **updates))
+            placement_footprint_tokens=choice.footprint_tokens,
+            placement_basis=choice.basis,
+            # The placement gap rides on its OWN note rather than being
+            # merged into the analyzer's `coverage_note`: that field states
+            # what the analyzer's FIGURE covers, and this states which
+            # sessions the rule could be PLACED for. Two different
+            # populations, so merging them would recreate exactly the
+            # ratio-of-two-populations defect Critical Rule 30 is about.
+            placement_coverage_note=plan.coverage_note,
+        ))
     return out
 
 

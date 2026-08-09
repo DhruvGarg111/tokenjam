@@ -607,35 +607,6 @@ def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
     )
 
 
-def artifact_for_delivery(
-    cluster: dict, signature: str, delivery: str, slug: str = "",
-) -> str:
-    """The EXACT text this cluster's apply would write for a delivery
-    mechanism, without writing anything.
-
-    The write budget (``core/optimize/write_budget.py``) has to price an
-    artifact before offering it, and pricing the ``proposed_fix`` alone would
-    undercount: the real block also carries a marker, a heading and an evidence
-    line that are re-sent on every future session just the same. Rendering the
-    same functions the apply path renders keeps the price and the artifact from
-    drifting apart.
-
-    Both hook mechanisms return ``""``: the SCRIPT is executed, never sent to
-    the model as prompt text, so its source has no standing cost to price. That
-    is a real zero for the script and it is not the whole answer for an
-    injecting hook, whose INJECTED text does cost — that half is priced by the
-    delivery kind's own pricer (``core/rulewrite/delivery``) off the fix text,
-    not from anything rendered here.
-    """
-    if delivery == DELIVERY_SKILL:
-        return render_skill_content(
-            cluster, signature, slug or slugify(str(cluster.get("title") or signature)),
-        )
-    if delivery in ENFORCEMENT_DELIVERIES:
-        return ""
-    return _note_block(cluster, signature)
-
-
 # --- The hook mechanisms: enforcement artifact (disabled by default) -----------
 #
 # SPEC §6/§10 mandate: precision over coverage. A false positive on normal

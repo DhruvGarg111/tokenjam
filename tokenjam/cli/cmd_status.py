@@ -172,6 +172,9 @@ def cmd_status(
         teaser = _recoverable_teaser(ctx.obj.get("config"))
         if teaser:
             console.print(teaser)
+        freshness_note = _ingest_freshness_note(ctx.obj.get("config"), db)
+        if freshness_note:
+            console.print(freshness_note)
 
     ctx.exit(1 if has_active_alerts else 0)
 
@@ -218,18 +221,28 @@ def _recoverable_teaser(config) -> str | None:
         return None
     try:
         from tokenjam.core.optimize import report_store
-        from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+        from tokenjam.core.optimize.cost_proposals import cost_analyzers_for_persona
 
         report = report_store.stored_report(config)
         if report is None:
             return _COLD_TEASER
+        # PERSONA-SCOPED membership, not the raw `COST_ANALYZERS` tuple. The
+        # daemon's pass now dispatches the union across personas so one stored
+        # report answers for either side of the dashboard's persona picker
+        # (`runner.build_report`'s `personas`), which means a claude-code
+        # window's report can carry findings that persona has no lever for.
+        # Teasing the largest of THOSE would point a user at a fix they cannot
+        # apply.
+        cost_analyzers = set(cost_analyzers_for_persona(
+            str(getattr(report, "persona", "") or "unknown"),
+        ))
         estimates: list[tuple[float, int]] = []
         if report.downgrade is not None:
             usd = report.downgrade.past_overspend_usd
             if usd is not None:
                 estimates.append((usd, getattr(report.downgrade, "past_overspend_tokens", None) or 0))
         for name, finding in (report.findings or {}).items():
-            if name not in COST_ANALYZERS:
+            if name not in cost_analyzers:
                 continue
             usd = getattr(finding, "past_overspend_usd", None)
             if usd is not None:
@@ -246,6 +259,41 @@ def _recoverable_teaser(config) -> str | None:
     except Exception:
         # Never let a teaser computation break `tj status` itself.
         return None
+
+
+def _ingest_freshness_note(config: object, db: object) -> str | None:
+    """One-line nudge when nothing has been ingested for far longer than the
+    configured `[ingest] interval_minutes` cadence.
+
+    Shares its staleness math with `tj doctor`'s "Corpus freshness" check
+    (`core/ingest_freshness.py`) so the two surfaces can't silently disagree
+    about what "stale" means. Three-state gating (root anti-pattern 22):
+    silent when there's no config/DB to read (not-yet-known — never a
+    fabricated claim), silent when the corpus genuinely isn't stale
+    (known-and-fine — nothing worth a line), and a line ONLY once it's known
+    to actually be stale. This is purely advisory — unlike `tj doctor`, `tj
+    status` never fails on it, since a quiet corpus is also the everyday
+    state of a user who simply hasn't run an agent in a while.
+    """
+    if config is None:
+        return None
+    try:
+        if not hasattr(db, "conn"):
+            return None
+        from tokenjam.core.ingest_freshness import corpus_freshness
+
+        interval_minutes = getattr(getattr(config, "ingest", None), "interval_minutes", 30)
+        freshness = corpus_freshness(db.conn, interval_minutes, now=utcnow())
+    except Exception:
+        # Never let an advisory note break `tj status` itself.
+        return None
+    if freshness.newest_session_at is None or not freshness.is_stale:
+        return None
+    return (
+        f"[warn]⚠ Last session ingested {freshness.age_hours:.0f}h ago[/warn] "
+        f"(expected roughly every {interval_minutes}m) — run "
+        f"[bold]tj doctor[/bold] to check the background daemon."
+    )
 
 
 def _fmt_dur(seconds: float | None, *, coarse: bool = False) -> str:

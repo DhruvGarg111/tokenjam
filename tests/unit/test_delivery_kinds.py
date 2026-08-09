@@ -13,8 +13,6 @@ import json
 import pytest
 
 from tokenjam.core.fixes import fix_for
-from tokenjam.core.optimize import write_budget as wb
-from tokenjam.core.optimize.projection import build_projection_basis
 from tokenjam.core.optimize.rule_scope import globs_for, may_be_path_scoped
 from tokenjam.core.rulewrite.delivery import (
     DELIVERY_CLAUDE_MD_RULE,
@@ -23,6 +21,7 @@ from tokenjam.core.rulewrite.delivery import (
     DELIVERY_KINDS,
     DELIVERY_PATH_SCOPED_RULE,
     MAX_BRACE_EXPANSIONS,
+    standing_tokens_per_session,
 )
 from tokenjam.core.rulewrite.types import RuleDestination, RuleWrite, RuleWriteRefused
 from tokenjam.core.summarize import load_semantics as ls
@@ -173,36 +172,29 @@ def test_no_glob_is_ever_inferred_from_prose():
     assert globs_for(record) == ()                # ...but it named none.
 
 
-# --- the offerability flip: the point of the whole thing ---------------------#
+# --- the pricing split survives; the offer decision it used to feed is gone -#
 
-def test_path_scoped_pricing_makes_a_write_offerable_that_claude_md_could_not():
-    """Standing cost is an INPUT to whether a write is offered at all, so a
-    near-zero-rent destination does not merely discount an existing
-    recommendation — it makes one possible that was net-negative before."""
+def test_path_scoped_pricing_is_still_cheaper_but_never_gates_the_offer():
+    """Standing cost pricing (per delivery kind) is still real and still
+    differs between a path-scoped rule and a CLAUDE.md rule — but it is purely
+    informational now. There is no budget left for it to feed: BOTH kinds are
+    offered regardless of how expensive either prices out, however large the
+    artifact.
+    """
     rule = _rule()
-    basis = build_projection_basis(30.0, 20, 400)
-    budget = wb.build_write_budget(budget_tokens=500, max_writes=3)
-
-    decisions = {}
+    huge_text = "x" * 50_000
+    per_session = {}
     for kind_name in (DELIVERY_CLAUDE_MD_RULE, DELIVERY_PATH_SCOPED_RULE):
         kind = DELIVERY_KINDS[kind_name]
-        per_session = kind.standing_tokens(rule, kind.render(rule, ""), "")
-        decisions[kind_name] = wb.allocate_writes(
-            [wb.WriteCandidate(
-                key="k", family="f", delivery=kind_name,
-                artifact_text="x" * (per_session * 4),
-                gross_tokens=9_000, gross_usd=8.0, exposure_sessions=40,
-            )],
-            budget, basis,
-        )["k"]
+        rendered = kind.render(rule, "") + huge_text
+        per_session[kind_name] = kind.standing_tokens(rule, rendered, "")
 
-    assert decisions[DELIVERY_CLAUDE_MD_RULE].offered is False
-    assert decisions[DELIVERY_PATH_SCOPED_RULE].offered is True
-    # Same observation on both sides — only the rent changed.
-    assert (
-        decisions[DELIVERY_PATH_SCOPED_RULE].standing_tokens
-        < decisions[DELIVERY_CLAUDE_MD_RULE].standing_tokens
-    )
+    # The rent genuinely differs (the path-scoped rule only carries its
+    # frontmatter, not the huge body).
+    assert per_session[DELIVERY_PATH_SCOPED_RULE] < per_session[DELIVERY_CLAUDE_MD_RULE]
+    # And neither figure gates anything: a `RuleWrite` for either kind is
+    # `offered` purely from its own construction (see `core/rulewrite/plan.py`),
+    # never from what `standing_tokens` returns.
 
 
 # --- hooks: the zero is earned by ONE of the two kinds ----------------------#
@@ -219,7 +211,7 @@ def test_an_injecting_hook_does_not_price_to_zero():
     rule = _rule(delivery=DELIVERY_INJECTING_HOOK)
     kind = DELIVERY_KINDS[DELIVERY_INJECTING_HOOK]
 
-    assert wb.standing_tokens_per_session(
+    assert standing_tokens_per_session(
         DELIVERY_INJECTING_HOOK, rule.artifact_text,
     ) > 0
     assert kind.standing_tokens(rule, "", "") > 0
@@ -231,7 +223,7 @@ def test_an_executing_hook_still_prices_to_zero():
     the model. Removing this would over-charge a genuinely free fix."""
     rule = _rule(delivery=DELIVERY_EXECUTING_HOOK)
     kind = DELIVERY_KINDS[DELIVERY_EXECUTING_HOOK]
-    assert wb.standing_tokens_per_session(
+    assert standing_tokens_per_session(
         DELIVERY_EXECUTING_HOOK, rule.artifact_text,
     ) == 0
     assert kind.standing_tokens(rule, "", "") == 0

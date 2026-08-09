@@ -168,7 +168,7 @@ def test_an_unpriced_finding_renders_the_null_marker_never_zero(capsys):
     from tokenjam.cli.cmd_optimize import _render_scoreboard
 
     report = _synthetic_report(deadweight=SimpleNamespace(
-        dead_servers=["some-mcp"],
+        unused_servers=["some-mcp"],
         past_overspend_usd=None,
         past_overspend_tokens=None,
     ))
@@ -347,7 +347,7 @@ def test_rows_are_ordered_by_the_recoverable_column_they_print(capsys):
             past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
         ),
         deadweight=SimpleNamespace(
-            dead_servers=["some-mcp"],
+            unused_servers=["some-mcp"],
             past_overspend_usd=296.74, past_overspend_tokens=1_000,
         ),
         relearn=SimpleNamespace(
@@ -371,7 +371,7 @@ def test_unpriced_rows_sort_last_and_keep_the_null_marker(capsys):
 
     report = _synthetic_report(
         deadweight=SimpleNamespace(
-            dead_servers=["some-mcp"],
+            unused_servers=["some-mcp"],
             past_overspend_usd=None, past_overspend_tokens=None,
         ),
         relearn=SimpleNamespace(
@@ -421,7 +421,7 @@ def test_next_block_points_at_the_largest_recoverable_finding(capsys):
             past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
         ),
         deadweight=SimpleNamespace(
-            dead_servers=["some-mcp"],
+            unused_servers=["some-mcp"],
             past_overspend_usd=296.74, past_overspend_tokens=1_000,
         ),
     )
@@ -450,7 +450,7 @@ def test_scoreboard_prints_no_summed_total(capsys):
             past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
         ),
         deadweight=SimpleNamespace(
-            dead_servers=["some-mcp"],
+            unused_servers=["some-mcp"],
             past_overspend_usd=296.74, past_overspend_tokens=1_000,
         ),
     )
@@ -475,7 +475,7 @@ def test_two_or_more_priced_rows_carry_the_overlap_disclosure(capsys):
             past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
         ),
         deadweight=SimpleNamespace(
-            dead_servers=["some-mcp"],
+            unused_servers=["some-mcp"],
             past_overspend_usd=296.74, past_overspend_tokens=1_000,
         ),
     )
@@ -499,7 +499,7 @@ def test_unpriced_rows_do_not_count_toward_the_disclosure(capsys):
             past_overspend_usd=48.55, past_overspend_tokens=9_000_000,
         ),
         deadweight=SimpleNamespace(
-            dead_servers=["some-mcp"],
+            unused_servers=["some-mcp"],
             past_overspend_usd=None, past_overspend_tokens=None,
         ),
     )

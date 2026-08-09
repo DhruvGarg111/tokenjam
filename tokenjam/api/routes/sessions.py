@@ -32,15 +32,21 @@ import bisect
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _child_sessions, _run_sessions
-from tokenjam.core.db import delete_session_label, set_session_label
+from tokenjam.core.alerts import agent_display_name, is_interactive_coding_agent
+from tokenjam.core.db import (
+    delete_session_label,
+    session_active_seconds,
+    set_session_label,
+)
 from tokenjam.core.distill import _default_cache_dir, distill_titles_cached, peek_cached_titles
 from tokenjam.core.method_capture import capture_session_method, load_session_method
 from tokenjam.core.framing import (
+    PERSONAS,
     WindowSummary,
     compute_framing,
     plan_determination_mix,
@@ -85,6 +91,7 @@ async def list_sessions(
     status: str | None = None,
     agent_id: str | None = None,
     limit: int | None = None,
+    persona: str | None = None,
 ) -> dict:
     """Enumerate sessions one row per session, newest first.
 
@@ -94,11 +101,31 @@ async def list_sessions(
     for callers that only need the head of the list (e.g. `tj session-story`'s
     ApiBackend.find_last_substantial_session, which otherwise pulled the whole
     table just to inspect the first few rows).
+
+    `persona` scopes the list to one side of the dashboard's "Viewing as"
+    picker: `claude-code` keeps the interactive coding agents, `sdk` keeps
+    everything else. `mixed` / `unknown` filter nothing, matching the
+    conservative default the analyzer gate takes for an unclassified window.
+
+    **The bucketing is `alerts.is_interactive_coding_agent` over `agent_id`, the
+    SAME single source of truth `framing.agent_persona_mix` classifies with —
+    never a second rule.** It is an `agent_id` PREFIX check and deliberately not
+    a `sessions.source` test: `source` records the ingestion path, which is an
+    unrelated axis (a Claude Code session can arrive over OTLP). It is applied
+    in Python rather than pushed into SQL for the same reason: a `LIKE` clause
+    here would be a copy of that predicate, free to drift from it.
     """
     db = request.app.state.db
     conn = getattr(db, "conn", None)
     if conn is None:
         return {"sessions": [], "count": 0}
+
+    if persona is not None and persona not in PERSONAS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown persona {persona!r}. Expected one of {sorted(PERSONAS)}.",
+        )
+    persona_filters = persona in ("claude-code", "sdk")
 
     clauses: list[str] = []
     params: list = []
@@ -115,15 +142,28 @@ async def list_sessions(
         "input_tokens, output_tokens, tool_call_count, error_count "
         f"FROM sessions{where} ORDER BY started_at DESC"
     )
-    if limit is not None:
+    # LIMIT AFTER the persona filter, never before: pushing it into SQL would
+    # cap the pre-filter rows, so asking for the newest 20 SDK sessions on a
+    # coding-dominated corpus would return the handful that happened to survive
+    # out of the newest 20 overall — indistinguishable from "that is all there
+    # is". The filter is in Python, so the cap has to be too.
+    if limit is not None and not persona_filters:
         params.append(limit)
         query += f" LIMIT ${len(params)}"
 
     rows = conn.execute(query, params).fetchall()
+    if persona_filters:
+        want_coding = persona == "claude-code"
+        rows = [r for r in rows if is_interactive_coding_agent(r[1]) == want_coding]
+        if limit is not None:
+            rows = rows[:limit]
     sessions = [
         {
             "session_id": r[0],
             "agent_id": r[1],
+            # Display only; `agent_id` beside it stays the identity. See
+            # `alerts.agent_display_name`.
+            "agent_display_name": agent_display_name(r[1]),
             "started_at": r[2].isoformat() if r[2] else None,
             "total_cost_usd": float(r[3]) if r[3] else 0.0,
             "input_tokens": r[4] or 0,
@@ -634,6 +674,9 @@ async def get_session_detail(request: Request, session_id: str):
         "session": {
             "session_id": session.session_id,
             "agent_id": session.agent_id,
+            # Display only; the session-detail header falls back to this when
+            # the session has no user-set label.
+            "agent_display_name": agent_display_name(session.agent_id),
             "label": session.service_instance_id,
             "namespace": session.service_namespace,
             "run_id": session.run_id,
@@ -648,6 +691,7 @@ async def get_session_detail(request: Request, session_id: str):
                 session.ended_at.isoformat() if session.ended_at else None
             ),
             "duration_seconds": session.duration_seconds,
+            "active_seconds": session_active_seconds(db.conn, session_id),
             "total_cost_usd": (
                 float(session.total_cost_usd)
                 if session.total_cost_usd is not None else 0.0

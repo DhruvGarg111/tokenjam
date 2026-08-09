@@ -56,15 +56,14 @@ def _diff(path: str, before: str, after: str) -> str:
 def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
     """Render + stage one diff per destination. Writes nothing to the targets.
 
-    Refuses a rule the write budget did not offer: the budget's verdict is the
-    product's own answer to "is this worth a permanent block", and a staging
-    path that ignored it would be a way to spend the budget without consulting
-    it. The rule's text stays copyable either way — a deferral is not a
-    deletion.
+    Refuses a rule that is not on offer — already applied, already present in
+    the user's own files, or dismissed. Those are the only reasons `offered`
+    is ever False; every `apply_capable` rule is otherwise offered, with no
+    budget/ceiling gate on top. The rule's text stays copyable either way — a
+    withdrawn offer is not a deletion.
     """
     # Checked BEFORE the generic not-offered refusal so the message names the
-    # real reason. "The budget did not select it" would be both wrong and
-    # actively confusing for a rule the user has already applied.
+    # real reason.
     if rule.already_applied:
         raise RuleWriteRefused(
             f"{rule.signature} is already applied — you told tokenjam you made "
@@ -73,9 +72,7 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
         )
     # Same shape as the applied check above, and for the same reason: the message
     # has to name the real state. Writing this rule would append guidance the file
-    # already carries, which is the duplication the presence check exists to stop —
-    # and on a corpus whose instruction files are already at the write budget's
-    # ceiling, a duplicate block is not free.
+    # already carries, which is the duplication the presence check exists to stop.
     if rule.already_present:
         raise RuleWriteRefused(
             f"{rule.signature} is already in your instruction files"
@@ -86,7 +83,7 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
     if not rule.offered:
         raise RuleWriteRefused(
             f"{rule.signature} is not on offer: "
-            f"{rule.blocked_reason or 'the write budget did not select it'}. "
+            f"{rule.blocked_reason or 'it is not currently offered'}. "
             "Its text is still shown so you can apply it by hand.",
         )
     if not rule.destinations:

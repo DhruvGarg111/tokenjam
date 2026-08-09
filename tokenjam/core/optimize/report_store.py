@@ -294,9 +294,51 @@ def stored_report(
     persona gate, `gather_planning_texts`. A route that only needs to SERVE the
     report wants :func:`stored_report_dict` instead.
     """
+    return report_from_stored_dict(stored_report_dict(config, path=path))
+
+
+def stored_report_for_persona(
+    config: TjConfig | None = None, persona: str | None = None, *,
+    path: Path | None = None,
+) -> Any | None:
+    """The stored report ANSWERING FOR ``persona``, or ``None`` if none can.
+
+    THE one seam every persona-scoped consumer of the report store goes
+    through, so the "which artifact answers for this persona" rule lives in one
+    place rather than being re-implemented per route.
+
+    * a persona that narrows nothing (``mixed`` / ``unknown`` / ``None``) gets
+      the top-level report, which is the corpus and therefore its own answer;
+    * ``claude-code`` / ``sdk`` get their own fully-scoped sub-report out of
+      :attr:`OptimizeReport.persona_reports`;
+    * an artifact written before per-persona passes existed has no sub-report,
+      and the answer is ``None`` — NOT the corpus-wide report. Its figures are
+      not that persona's money, and a caller must render the absence as
+      not-yet-known rather than publish them under that persona's label.
+    """
+    from tokenjam.core.persona_scope import persona_scopes_population
+
+    if not persona_scopes_population(persona):
+        return stored_report(config, path=path)
+    body = stored_report_dict(config, path=path)
+    if not isinstance(body, dict):
+        return None
+    scoped = (body.get("persona_reports") or {}).get(persona)
+    return report_from_stored_dict(scoped) if isinstance(scoped, dict) else None
+
+
+def report_from_stored_dict(body: dict | None) -> Any | None:
+    """Rehydrate a report dict this store produced, or ``None`` if it cannot be.
+
+    Split out from :func:`stored_report` so a caller that has ALREADY selected
+    which stored dict it is serving — notably ``GET /optimize`` picking a
+    persona-scoped sub-report out of ``persona_reports`` — can rehydrate THAT
+    one. Re-reading the top-level report instead would derive the ranking, the
+    window and the framing from the whole corpus while the findings beside them
+    came from one persona, which is two populations in one response.
+    """
     from tokenjam.core.optimize import report_from_dict
 
-    body = stored_report_dict(config, path=path)
     if body is None:
         return None
     try:
@@ -399,7 +441,11 @@ def recompute_now(
     with _LAST_RUN_LOCK:
         _LAST_RUN_MONOTONIC = time.monotonic()
     try:
-        from tokenjam.core.optimize import build_report, report_to_dict
+        from tokenjam.core.optimize import (
+            GATED_PERSONAS,
+            build_persona_reports,
+            report_to_dict,
+        )
         from tokenjam.utils.time_parse import utcnow
 
         record = provenance if isinstance(provenance, CycleProvenance) else begin_cycle(
@@ -424,7 +470,28 @@ def recompute_now(
         # replaced.
         record = record.with_window(since_dt, until_dt, days)
         try:
-            report = build_report(db=db, config=config, since=since_dt, until=until_dt)
+            # ONE artifact, EITHER persona — but a pass EACH, not one widened
+            # pass. The dashboard's "Viewing as" picker asks for a persona the
+            # corpus may not be dominated by, and no request path may run an
+            # analyzer to answer that (the whole reason this store exists).
+            #
+            # Widening the ANALYZER SET and slicing on read is sound: a set of
+            # names is separable. Widening the POPULATION is not — an analyzer
+            # summing Claude Code and SDK rows together yields one figure
+            # containing both, and no read-time filter can take one back out.
+            # Selecting the union alone is exactly how every "gated" Optimize
+            # figure came to be computed over the whole mixed corpus. So the
+            # background pass runs once per scoping persona under that
+            # persona's own row scope, and the route picks the matching one
+            # (`runner.findings_for_persona` still narrows the analyzer set
+            # within it). The top-level report stays the unscoped, union-gated
+            # one: its `persona` records what the corpus IS, and a
+            # persona-blind reader gets the corpus rather than whichever side
+            # happens to dominate it.
+            report = build_persona_reports(
+                db=db, config=config, since=since_dt, until=until_dt,
+                personas=GATED_PERSONAS,
+            )
         except Exception as exc:  # noqa: BLE001 - stored, never propagated
             return write_report_error(f"{type(exc).__name__}: {exc}", path, config=config)
         # SEALED, NOT RE-DERIVED. `build_report` resolves the window's dominant

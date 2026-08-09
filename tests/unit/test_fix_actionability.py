@@ -193,22 +193,6 @@ def test_an_advisory_only_family_never_offers_a_write():
     assert "no rule or hook is needed" in family["fix"]
 
 
-def test_the_advisory_reason_is_distinct_from_the_placeholder_one():
-    """"No fix template matched" and "the harness already handles this" are
-    different statements, and collapsing them would tell a user we have no
-    remedy when the truth is that none is needed."""
-    from tokenjam.core.optimize.write_budget import (
-        REASON_ADVISORY_ONLY,
-        REASON_PLACEHOLDER,
-        short_reason,
-    )
-
-    assert REASON_ADVISORY_ONLY != REASON_PLACEHOLDER
-    assert short_reason(REASON_ADVISORY_ONLY) == "awareness only — nothing to change"
-    # And it does NOT read as a suppression of the figure.
-    assert "still reported in full" in REASON_ADVISORY_ONLY
-
-
 def test_only_the_swept_family_is_advisory_only():
     """The sweep result, pinned. If a later family acquires a do-nothing fix
     text, the catalog lint catches the text and this catches the flag."""

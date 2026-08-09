@@ -98,9 +98,9 @@ subset with `tj optimize downsize resend relearn`.
 |---|:--:|:--:|---|
 | `relearn` | ✅ | ✅ | Blockers your agent keeps re-hitting across sessions, and what the repeated recovery costs |
 | `resend` | ✅ | ✅ | How much of each turn's prompt is context you already sent, whether or not caching is on |
-| `summarize` | ✅ | ✅ | Instruction files large enough to tax every session, scanned from disk |
 | `downsize` | ✅ | ✅ | Sessions where a cheaper same-family model is a candidate. Never claims quality equivalence |
-| `subagent` | ✅ | ✅ | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
+| `subagent` | ✅ | — | Per-subagent cost hidden inside the parent session's total, and which dispatches ran over-powered |
+| `summarize` | ✅ | — | Agent instruction files (`CLAUDE.md`, `AGENTS.md`, rules, skills, commands) large enough to tax every session, scanned from disk |
 | `deadweight` | ✅ | — | MCP servers whose schemas load into every session and are never called |
 | `cache` | — | ✅ | Your caching ratio per (provider, model), and where it is worst |
 | `cache-recommend` | — | ✅ | Where to place prompt-cache breakpoints, from the prefixes you actually repeat |
@@ -111,7 +111,7 @@ subset with `tj optimize downsize resend relearn`.
 
 They find where your agents are overspending. They also tell you where they are not, so you don't spend a week optimizing something that was never costing you anything.
 
-That balance is why some checks stay dark for you: when the lever that would recover a category of spend belongs to your harness rather than to you, quoting the figure only makes you feel worse. It is also why a quiet result is an answer rather than a failed scan. Optimizing has a price of its own, paid in your attention and sometimes in the agent's output, and a bill lowered by making your agent terser or dumber was never a saving.
+That balance is why some checks stay dark for you: when the lever that would recover a category of spend belongs to your harness rather than to you, quoting the figure only makes you feel worse. A check also stays dark when its evidence does not exist on your setup; `summarize` reads agent instruction files off disk, which an SDK or API workload does not have, so it is not offered there. It is also why a quiet result is an answer rather than a failed scan. Optimizing has a price of its own, paid in your attention and sometimes in the agent's output, and a bill lowered by making your agent terser or dumber was never a saving.
 
 ---
 

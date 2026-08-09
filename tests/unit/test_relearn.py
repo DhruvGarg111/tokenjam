@@ -495,10 +495,17 @@ def test_single_repo_cluster_scopes_to_project(tmp_path):
 # persona — see test_relearn_otel.test_workspace_cluster_is_not_advise_only,
 # which now has to opt back into "claude-code" to isolate the workspace seam
 # from this gate.
+#
+# Uses `_command_not_found_session`, NOT `_edit_before_read_session`: the
+# `edit_before_read` family is ADVISORY-ONLY (its own fix says no rule is
+# needed), which now folds into `advise_only` at construction regardless of
+# persona — exactly the "fixture stopped being a valid vehicle" trap. These
+# tests are about the PERSONA gate in isolation, so the family must not carry
+# a gate of its own.
 
 def _one_repo_sessions(tmp_path, label):
     for i in range(MIN_RECURRING_SESSIONS):
-        _edit_before_read_session(tmp_path, f"-Users-test-{label}", f"{label}-{i}")
+        _command_not_found_session(tmp_path, f"-Users-test-{label}", f"{label}-{i}")
     return [(f"{label}-{i}", label) for i in range(MIN_RECURRING_SESSIONS)]
 
 
