@@ -211,6 +211,12 @@ class TestLaunchdInstallSurvivesRegistration:
     def test_install_bootouts_enables_bootstraps_and_verifies(self, tmp_path, monkeypatch):
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        # No real `tj` sibling next to this fake interpreter, so
+        # `_resolve_tj_binary` falls through to the mocked `which` below —
+        # on a real venv (CI installs the package editable) a genuine `tj`
+        # console-script sibling can otherwise outrank the mock and change
+        # the actual program args this test hardcodes.
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.os.getuid", lambda: 501, raising=False)
 
@@ -254,6 +260,7 @@ class TestLaunchdInstallSurvivesRegistration:
         itself errors."""
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
 
         def _run(cmd, **kwargs):
@@ -276,6 +283,7 @@ class TestLaunchdInstallSurvivesRegistration:
         merely that some unit with that label exists."""
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
 
         program_args = ["/usr/bin/tj", "--config", "/tmp/cfg.toml", "serve"]
@@ -304,6 +312,7 @@ class TestLaunchdInstallSurvivesRegistration:
         it loudly instead of reporting a false success."""
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
 
         old_program_args = ["/usr/bin/tj", "--config", "/tmp/OLD-cfg.toml", "serve"]
