@@ -61,7 +61,7 @@ tj rules list        # the fixes that came out of it, and the files they'd land 
 
 ### Claude Code plugin
 
-TokenJam also ships as a Claude Code plugin (this repo is the plugin source — `.claude-plugin/plugin.json` at the root). It adds slash commands that wrap the `tj` CLI; it does not install anything on its own, so `tj` still needs to be on your `PATH` (`npx tokenjam@latest` or `pipx install tokenjam`).
+TokenJam also ships as a Claude Code plugin — see [`plugin/`](plugin/) for the plugin source (`plugin/.claude-plugin/plugin.json`) and install instructions. It adds slash commands that wrap the `tj` CLI; it does not install anything on its own, so `tj` still needs to be on your `PATH` (`npx tokenjam@latest` or `pipx install tokenjam`).
 
 ```
 /plugin install tokenjam
