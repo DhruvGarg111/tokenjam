@@ -23,6 +23,17 @@ jobs:
             exit 1
           fi
 
+      - name: Check pyproject.toml and plugin manifest versions match
+        run: |
+          PY_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          PLUGIN_VERSION=$(jq -r '.version' plugin/.claude-plugin/plugin.json)
+          echo "pyproject.toml:               $PY_VERSION"
+          echo "plugin/.claude-plugin/plugin.json:  $PLUGIN_VERSION"
+          if [ "$PY_VERSION" != "$PLUGIN_VERSION" ]; then
+            echo "::error::Version mismatch — pyproject.toml ($PY_VERSION) and plugin/.claude-plugin/plugin.json ($PLUGIN_VERSION) must match before cutting a release, or the plugin marketplace entry will lag. Run: ./scripts/release.sh <version>"
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:
