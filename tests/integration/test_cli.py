@@ -2128,6 +2128,65 @@ def test_optimize_export_templates_writes_markdown(runner, db, tmp_path, monkeyp
     assert list(tmp_path.glob("reuse-*.html")) == []   # markdown only, no HTML
 
 
+def test_optimize_export_templates_requires_reuse_finding(runner, db, config):
+    """#578: --export-templates without reuse must fail fast, not claim no
+    repeated planning was detected."""
+    result = _invoke(runner, db, config,
+                     ["optimize", "downsize", "--export-templates"])
+    assert result.exit_code != 0
+    assert "requires the reuse finding" in result.output
+    assert "No repeated planning detected" not in result.output
+
+
+def test_optimize_export_templates_reuse_disabled_for_claude_code_persona(
+    runner, db, tmp_path, monkeypatch,
+):
+    """#578 follow-up: on a claude-code-dominant window, reuse is persona-
+    gated out of build_report even when named explicitly — must fail fast
+    instead of printing the misleading nothing-to-export message."""
+    from datetime import timedelta
+
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+
+    for i in range(6):
+        started = utcnow() - timedelta(days=i + 1)
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"cc-{i}", plan_tier="api",
+            started_at=started,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider="anthropic", model="claude-opus-4-7",
+            input_tokens=4000, output_tokens=800, cost_usd=0.12,
+            session_id=f"cc-{i}", start_time=started,
+        ))
+
+    # Named explicitly — the case build_report silently drops.
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "reuse", "--export-templates"])
+    assert result.exit_code != 0, result.output
+    assert "skipped for the claude-code persona" in result.output
+    assert "No repeated planning detected" not in result.output
+    assert list(tmp_path.glob("reuse-*.md")) == []
+
+    # No finding list at all — the same hole, since findings=None selects
+    # every analyzer and the persona gate then removes reuse.
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "--export-templates"])
+    assert result.exit_code != 0, result.output
+    assert "skipped for the claude-code persona" in result.output
+    assert "No repeated planning detected" not in result.output
+
+    # A finding list WITHOUT reuse, on this same gated window: the advice must
+    # be the persona reason, never "add `reuse` to the finding list" — that
+    # command is itself the broken path here.
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "downsize", "--export-templates"])
+    assert result.exit_code != 0, result.output
+    assert "skipped for the claude-code persona" in result.output
+    assert "include" not in result.output.lower()
+    assert list(tmp_path.glob("reuse-*.md")) == []
+
+
 def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatch):
     """#154: with the daemon holding the DB lock, `tj report --reuse` fetches
     the finding + skeleton text from /api/v1/reuse/clusters via ApiBackend and
