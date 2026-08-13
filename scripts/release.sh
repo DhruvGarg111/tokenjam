@@ -4,10 +4,12 @@
 # Usage: scripts/release.sh X.Y.Z
 #
 # Updates:
-#   - pyproject.toml            (PyPI package version)
-#   - sdk-ts/package.json       (npm @tokenjam/sdk version — hand-published, not CI-synced)
-#   - npm-wrapper/package.json  (local `npm pack` floor; CI overwrites this from the release
-#                                tag on publish, but keeping it current avoids local drift)
+#   - pyproject.toml                    (PyPI package version)
+#   - sdk-ts/package.json               (npm @tokenjam/sdk version — hand-published, not CI-synced)
+#   - npm-wrapper/package.json          (local `npm pack` floor; CI overwrites this from the release
+#                                        tag on publish, but keeping it current avoids local drift)
+#   - plugin/.claude-plugin/plugin.json (Claude Code plugin manifest version — CI's
+#                                        version-lockstep job checks this against pyproject.toml)
 #
 # After bumping, greps the repo for any other literal occurrence of the OLD version
 # string outside the files above, so a straggler (Dockerfile ARG, docs snippet, etc.)
@@ -72,7 +74,9 @@ echo "  updated pyproject.toml"
 # npm-wrapper is CI-synced from the release tag on publish, so its checked-in value
 # is only a floor for local `npm pack` and may already be behind — bump it too for
 # hygiene, but don't require it to have matched pyproject.toml beforehand.
-for pkg in sdk-ts/package.json npm-wrapper/package.json; do
+# plugin.json must also stay in lockstep with pyproject.toml — CI's version-lockstep
+# job checks it, and Claude Code only offers plugin updates when this field changes.
+for pkg in sdk-ts/package.json npm-wrapper/package.json plugin/.claude-plugin/plugin.json; do
   # Targeted regex replace (not JSON.parse + stringify) so the diff stays a
   # one-line version bump instead of reformatting the whole file.
   node -e "
@@ -105,6 +109,6 @@ fi
 
 echo
 echo "Done. Review the diff, commit, then cut the release:"
-echo "  git add pyproject.toml sdk-ts/package.json npm-wrapper/package.json"
+echo "  git add pyproject.toml sdk-ts/package.json npm-wrapper/package.json plugin/.claude-plugin/plugin.json"
 echo "  git commit -m 'chore: bump version to $NEW_VERSION'"
 echo "  gh release create v$NEW_VERSION --generate-notes"

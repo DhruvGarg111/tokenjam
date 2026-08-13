@@ -1,0 +1,15 @@
+{
+  "name": "tokenjam",
+  "owner": {
+    "name": "Metabuilder Labs",
+    "url": "https://tokenjam.dev"
+  },
+  "description": "Claude Code plugin marketplace for tokenjam: local-first token-cost observability and fixes.",
+  "plugins": [
+    {
+      "name": "tokenjam",
+      "source": "./plugin",
+      "description": "Local-first observability and cost control for Claude Code agents: a zero-token statusline showing context re-read %, savings/optimize reports, and a health check."
+    }
+  ]
+}

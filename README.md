@@ -64,6 +64,7 @@ tj rules list        # the fixes that came out of it, and the files they'd land 
 TokenJam also ships as a Claude Code plugin — see [`plugin/`](plugin/) for the plugin source (`plugin/.claude-plugin/plugin.json`) and install instructions. It adds slash commands that wrap the `tj` CLI; it does not install anything on its own, so `tj` still needs to be on your `PATH` (`npx tokenjam@latest` or `pipx install tokenjam`).
 
 ```
+/plugin marketplace add Metabuilder-Labs/tokenjam
 /plugin install tokenjam
 /onboard    # wires the statusline, resume-brief hook, and local telemetry ingest — same as `tj onboard --claude-code`
 /status     # tj status
