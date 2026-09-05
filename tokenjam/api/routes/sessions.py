@@ -53,6 +53,7 @@ from tokenjam.core.framing import (
 )
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.models import AlertFilters, SessionRecord
+from tokenjam.core.optimize.accounting import four_type_token_total
 from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.sessionmap import build_session_map
 from tokenjam.core.transcript import (
@@ -516,12 +517,20 @@ def _session_subagents(db: Any, session_id: str) -> dict:
     ).fetchall()
 
     out: list[dict] = []
+    total_tokens = 0
     for r in rows:
         in_t, out_t = int(r[4] or 0), int(r[5] or 0)
         cache_t, cw_t = int(r[6] or 0), int(r[7] or 0)
         cost = float(r[8] or 0.0)
         model = str(r[1] or "unknown")
         tool_calls = int(r[3] or 0)
+        tokens = four_type_token_total({
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "cache_tokens": cache_t,
+            "cache_write_tokens": cw_t,
+        })
+        total_tokens += tokens
         out.append({
             "sub_agent_id": str(r[0]),
             "model": model,
@@ -541,11 +550,7 @@ def _session_subagents(db: Any, session_id: str) -> dict:
         "rows": out,
         "total": len(out),
         "cost_usd": sum(x["cost_usd"] for x in out),
-        "tokens": sum(
-            x["input_tokens"] + x["output_tokens"]
-            + x["cache_tokens"] + x["cache_write_tokens"]
-            for x in out
-        ),
+        "tokens": total_tokens,
         "flagged": sum(1 for x in out if x["flags"]),
     }
 
