@@ -1,10 +1,9 @@
-"""Tests for tokenjam.core.schema_validator — schema validation, inference, skipping."""
+"""Tests for tokenjam.core.schema_validator — schema validation and skipping."""
 from __future__ import annotations
 
 import json
 from typing import Any
 
-import pytest
 
 from tokenjam.core.config import TjConfig, AgentConfig
 from tokenjam.core.models import (
@@ -210,8 +209,8 @@ class TestSchemaSkipping:
 
 class TestSchemaSource:
 
-    def test_uses_baseline_inferred_schema(self):
-        """When no declared schema, falls back to baseline's inferred schema."""
+    def test_ignores_baseline_inferred_schema_without_declaration(self):
+        """Captured history does not implicitly activate schema enforcement."""
         inferred = {
             "type": "object",
             "properties": {"value": {"type": "integer"}},
@@ -222,70 +221,5 @@ class TestSchemaSource:
 
         validator.validate(span)
 
-        assert len(db.validations) == 1
-        assert db.validations[0].passed is True
-
-    def test_baseline_schema_catches_invalid(self):
-        inferred = {
-            "type": "object",
-            "properties": {"value": {"type": "integer"}},
-            "required": ["value"],
-        }
-        validator, db, alerts = _make_validator(baseline_schema=inferred)
-        span = _tool_span_with_output({"value": "not an int"})
-
-        validator.validate(span)
-
-        assert len(db.validations) == 1
-        assert db.validations[0].passed is False
-        assert len(alerts.fired) == 1
-
-    def test_schema_cached_after_first_lookup(self):
-        """Schema should be loaded once and cached."""
-        inferred = {"type": "object"}
-        validator, db, alerts = _make_validator(baseline_schema=inferred)
-        span1 = _tool_span_with_output({"a": 1})
-        span2 = _tool_span_with_output({"b": 2})
-
-        validator.validate(span1)
-        validator.validate(span2)
-
-        assert "test-agent" in validator._schema_cache
-
-
-# ===========================================================================
-# Schema inference tests
-# ===========================================================================
-
-class TestSchemaInference:
-
-    def test_infer_schema_produces_valid_schema(self):
-        validator, _, _ = _make_validator()
-        outputs = [
-            {"result": "ok", "score": 0.9},
-            {"result": "fail", "score": 0.1},
-        ]
-
-        schema = validator.infer_schema_from_outputs(outputs)
-
-        assert schema is not None
-        assert schema.get("type") == "object"
-        assert "result" in schema.get("properties", {})
-        assert "score" in schema.get("properties", {})
-
-    def test_infer_schema_returns_none_when_no_outputs(self):
-        validator, _, _ = _make_validator()
-        schema = validator.infer_schema_from_outputs([])
-        assert schema is None
-
-    def test_infer_schema_handles_string_json_outputs(self):
-        validator, _, _ = _make_validator()
-        outputs = [
-            json.dumps({"key": "val1"}),
-            json.dumps({"key": "val2"}),
-        ]
-
-        schema = validator.infer_schema_from_outputs(outputs)
-
-        assert schema is not None
-        assert "key" in schema.get("properties", {})
+        assert len(db.validations) == 0
+        assert len(alerts.fired) == 0
