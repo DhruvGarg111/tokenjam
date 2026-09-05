@@ -140,7 +140,8 @@ async def list_sessions(
 
     query = (
         "SELECT session_id, agent_id, started_at, total_cost_usd, "
-        "input_tokens, output_tokens, tool_call_count, error_count "
+        "input_tokens, output_tokens, cache_tokens, cache_write_tokens, "
+        "tool_call_count, error_count "
         f"FROM sessions{where} ORDER BY started_at DESC"
     )
     # LIMIT AFTER the persona filter, never before: pushing it into SQL would
@@ -169,8 +170,10 @@ async def list_sessions(
             "total_cost_usd": float(r[3]) if r[3] else 0.0,
             "input_tokens": r[4] or 0,
             "output_tokens": r[5] or 0,
-            "tool_call_count": r[6] or 0,
-            "error_count": r[7] or 0,
+            "cache_tokens": r[6] or 0,
+            "cache_write_tokens": r[7] or 0,
+            "tool_call_count": r[8] or 0,
+            "error_count": r[9] or 0,
         }
         for r in rows
     ]
@@ -704,6 +707,7 @@ async def get_session_detail(request: Request, session_id: str):
             "input_tokens": session.input_tokens,
             "output_tokens": session.output_tokens,
             "cache_tokens": session.cache_tokens,
+            "cache_write_tokens": session.cache_write_tokens,
             "tool_call_count": session.tool_call_count,
             "error_count": session.error_count,
             "conversation_count": conversation_count,
