@@ -5,7 +5,9 @@ import json
 from typing import Any
 
 
-from tokenjam.core.config import TjConfig, AgentConfig
+from tokenjam.core.config import CaptureConfig, TjConfig, AgentConfig
+from tokenjam.core.db import InMemoryBackend as DuckDBBackend
+from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.models import (
     AlertType,
     DriftBaseline,
@@ -223,3 +225,56 @@ class TestSchemaSource:
 
         assert len(db.validations) == 0
         assert len(alerts.fired) == 0
+
+
+def test_pipeline_capture_off_strips_output_before_validation(tmp_path):
+    schema_path = tmp_path / "tool-output.schema.json"
+    schema_path.write_text(json.dumps(_SIMPLE_SCHEMA), encoding="utf-8")
+    config = TjConfig(
+        version="1",
+        capture=CaptureConfig(tool_outputs=False),
+        agents={"test-agent": AgentConfig(output_schema=str(schema_path))},
+    )
+    db = DuckDBBackend()
+    alerts = RecordingAlertEngine()
+    validator = SchemaValidator(db=db, alert_engine=alerts, config=config)
+    pipeline = IngestPipeline(
+        db=db,
+        config=config,
+        alert_engine=alerts,
+        schema_validator=validator,
+    )
+    span = _tool_span_with_output({"result": "private"})
+
+    try:
+        pipeline.process(span)
+        stored = db.get_trace_spans(span.trace_id)[0]
+        assert GenAIAttributes.TOOL_OUTPUT not in stored.attributes
+        assert db.conn.execute("SELECT COUNT(*) FROM schema_validations").fetchone()[0] == 0
+        assert alerts.fired == []
+    finally:
+        db.close()
+
+
+def test_legacy_inferred_baseline_is_read_but_never_enables_validation():
+    db = DuckDBBackend()
+    alerts = RecordingAlertEngine()
+    baseline = DriftBaseline(
+        agent_id="test-agent",
+        sessions_sampled=3,
+        computed_at=utcnow(),
+        output_schema_inferred=_SIMPLE_SCHEMA,
+    )
+    db.upsert_baseline(baseline)
+    config = TjConfig(version="1")
+    validator = SchemaValidator(db=db, alert_engine=alerts, config=config)
+
+    try:
+        stored_baseline = db.get_baseline("test-agent")
+        assert stored_baseline is not None
+        assert stored_baseline.output_schema_inferred == _SIMPLE_SCHEMA
+        validator.validate(_tool_span_with_output({"unexpected": "value"}))
+        assert db.conn.execute("SELECT COUNT(*) FROM schema_validations").fetchone()[0] == 0
+        assert alerts.fired == []
+    finally:
+        db.close()
