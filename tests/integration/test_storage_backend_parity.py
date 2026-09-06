@@ -85,6 +85,7 @@ SHIM_PARITY_METHODS = {
     "get_baseline",
     "get_session_commits",
     "get_session",
+    "get_unattributed_spend",
 }
 
 # Methods the shim implements but that intentionally return a degraded / stub
@@ -123,6 +124,8 @@ SHIM_NOT_IMPLEMENTED = {
     "get_trace_cost_stats",
     "get_session_active_seconds",
     "get_session_by_conversation",
+    "get_session_ids_for_trace",
+    "get_marker_session_ids_for_trace",
     "get_window_cost_totals",
     "increment_session_cost",
     "insert_alert",
@@ -132,6 +135,7 @@ SHIM_NOT_IMPLEMENTED = {
     "insert_validation",
     "mark_sessions_completed",
     "update_span_cost",
+    "reconcile_trace_session_attribution",
     "upsert_agent",
     "upsert_baseline",
     "upsert_session",
@@ -274,6 +278,15 @@ def _proj_baseline(baseline) -> tuple | None:
     )
 
 
+def _proj_unattributed_spend(data: dict) -> tuple:
+    return (
+        round(float(data.get("cost_usd", 0.0) or 0.0), 6),
+        round(float(data.get("spend_usd", 0.0) or 0.0), 6),
+        int(data.get("trace_count", 0) or 0),
+        int(data.get("span_count", 0) or 0),
+    )
+
+
 # (invoke, project) per parity method. ``now``/``trace_id`` are bound at seed
 # time so get_daily_cost targets the seeded historical day and get_trace_spans a
 # real trace. The historical daily-cost target is load-bearing: querying today
@@ -291,6 +304,7 @@ def _parity_specs(now, trace_id, span_id="span-id"):
         "get_baseline": (lambda b: b.get_baseline(AGENT), _proj_baseline),
         "get_session_commits": (lambda b: b.get_session_commits(SESSION), _proj_commits),
         "get_session": (lambda b: b.get_session(SESSION), _proj_session),
+        "get_unattributed_spend": (lambda b: b.get_unattributed_spend(), _proj_unattributed_spend),
     }
 
 
