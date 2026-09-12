@@ -159,7 +159,7 @@ def cmd_status(
     if hasattr(db, "get_unattributed_spend"):
         try:
             unatt = db.get_unattributed_spend(agent_id=agent_filter)
-            if unatt and float(unatt.get("spend_usd") or 0.0) > 0.0:
+            if unatt and float(unatt.get("cost_usd") or 0.0) > 0.0:
                 unattributed_spend = unatt
         except Exception:
             unattributed_spend = None
@@ -199,13 +199,14 @@ def cmd_status(
                 f"(or [bold]--codex[/bold]) to set it.[/dim]"
             )
         if unattributed_spend:
-            spend_val = float(unattributed_spend["spend_usd"])
+            cost_val = float(unattributed_spend["cost_usd"])
             span_cnt = int(unattributed_spend.get("span_count") or 0)
             trace_cnt = int(unattributed_spend.get("trace_count") or 0)
             console.print(
-                f"[yellow]Note: {format_cost(spend_val)} across {span_cnt} span(s) "
-                f"({trace_cnt} trace(s)) is unattributed (shared traces without unambiguous parentage).[/yellow]"
+                f"[yellow]Note: {format_cost(cost_val)} across {span_cnt} span(s) "
+                f"({trace_cnt} trace(s)) is unattributed (not assigned to a named session).[/yellow]"
             )
+            console.print("Inspect the breakdown with [accent]tj cost --group-by session[/accent].")
         teaser = _recoverable_teaser(ctx.obj.get("config"))
         if teaser:
             console.print(teaser)
