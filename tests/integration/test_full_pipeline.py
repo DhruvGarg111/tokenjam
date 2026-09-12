@@ -406,6 +406,10 @@ def test_real_pipeline_leaves_shared_trace_cost_unattributed(full_stack):
     assert cost_rows[0].session_id is None
     assert full_stack.db.get_session("w1").input_tokens == 0
     assert full_stack.db.get_session("w2").input_tokens == 0
+    unattributed = full_stack.db.get_unattributed_spend()
+    assert unattributed["span_count"] == 1
+    assert unattributed["trace_count"] == 1
+    assert unattributed["cost_usd"] == pytest.approx(cost_rows[0].cost_usd)
 
 
 def test_real_pipeline_uses_parent_for_shared_trace_cost(full_stack):
@@ -501,7 +505,10 @@ def test_real_pipeline_generic_custom_markers_multi_marker_unattributed(full_sta
     assert cost_row.attribution_step == "step3_unattributed"
     assert full_stack.db.get_session("wf-1").input_tokens == 0
     assert full_stack.db.get_session("wf-2").input_tokens == 0
-    assert float(full_stack.db.get_unattributed_spend()["spend_usd"]) > 0.0
+    unattributed = full_stack.db.get_unattributed_spend()
+    assert unattributed["span_count"] == 1
+    assert unattributed["trace_count"] == 1
+    assert unattributed["cost_usd"] == pytest.approx(cost_row.cost_usd)
 
 
 def test_real_pipeline_generic_custom_marker_reverse_arrival_reconciliation(full_stack):
@@ -621,10 +628,8 @@ def test_real_pipeline_generic_custom_markers_same_name_same_session(full_stack)
     assert full_stack.db.get_session("wf-sole-dup").input_tokens == 80
 
 
-def test_real_pipeline_child_spans_inheriting_conversation_id_resolve_via_step1_parent(full_stack):
-    """Child spans inheriting conversation_id in real DuckDB pipeline resolve to
-    step1_parent, preserving parent cache without triggering full-trace reconciliation on each child (#749).
-    """
+def test_real_pipeline_child_spans_with_known_conversation_resolve_by_conversation(full_stack):
+    """A known conversation remains the explicit owner even when a parent agrees."""
     trace_id = "real-pipe-conv-inherit"
     conv_id = "real-conv-42"
 
@@ -646,12 +651,40 @@ def test_real_pipeline_child_spans_inheriting_conversation_id_resolve_via_step1_
 
     child_stored = next(s for s in full_stack.db.get_trace_spans(trace_id) if s.span_id == child.span_id)
     assert child_stored.session_id == root_stored.session_id
-    assert child_stored.attribution_step == "step1_parent"
-    assert full_stack.pipeline._is_session_marker(child_stored) is False
+    assert child_stored.attribution_step == "conversation"
 
     # Parent cache must remain populated
     assert (trace_id, root.span_id) in full_stack.pipeline._parent_cache
     assert (trace_id, child.span_id) in full_stack.pipeline._parent_cache
+
+
+def test_real_pipeline_known_conversation_overrides_different_parent_session(full_stack):
+    """An explicit conversation must not be billed to an inferred parent session."""
+    conversation_id = "conversation-owner"
+    conversation_marker = make_invoke_agent_span(conversation_id=conversation_id)
+    conversation_marker.session_id = None
+    full_stack.pipeline.process(conversation_marker)
+    conversation_session_id = full_stack.db.get_trace_spans(conversation_marker.trace_id)[0].session_id
+    assert conversation_session_id is not None
+
+    trace_id = "conversation-vs-parent"
+    parent = make_invoke_agent_span(session_id="parent-owner", trace_id=trace_id)
+    full_stack.pipeline.process(parent)
+
+    child = make_llm_span(
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        input_tokens=55,
+        output_tokens=22,
+    )
+    child.session_id = None
+    child.parent_span_id = parent.span_id
+    full_stack.pipeline.process(child)
+
+    stored_child = next(s for s in full_stack.db.get_trace_spans(trace_id) if s.span_id == child.span_id)
+    assert stored_child.session_id == conversation_session_id
+    assert stored_child.attribution_step == "conversation"
+    assert full_stack.db.get_session("parent-owner").input_tokens == 0
 
 
 def test_real_pipeline_reconciliation_rolls_back_on_refresh_failure(full_stack, monkeypatch):
@@ -713,12 +746,15 @@ def test_real_pipeline_session_attribution_invariant(full_stack):
     total_spans_cost = float(cur.fetchone()[0] or 0.0)
 
     # Query sessions total (excluding superseded)
-    cur = full_stack.db.conn.execute("SELECT SUM(total_cost_usd) FROM sessions WHERE status != 'superseded'")
+    cur = full_stack.db.conn.execute(
+        "SELECT SUM(total_cost_usd) FROM sessions "
+        "WHERE (status IS NULL OR status != 'superseded')"
+    )
     active_sessions_cost = float(cur.fetchone()[0] or 0.0)
 
     # Query unattributed spend
     unatt_data = full_stack.db.get_unattributed_spend()
-    unatt_cost_val = float(unatt_data["spend_usd"])
+    unatt_cost_val = float(unatt_data["cost_usd"])
 
     assert pytest.approx(total_spans_cost, rel=1e-5) == active_sessions_cost + unatt_cost_val
 
@@ -787,7 +823,7 @@ def test_real_pipeline_multi_marker_reverse_arrival_preserves_parentage(full_sta
 
     # Check unattributed spend
     unatt = full_stack.db.get_unattributed_spend()
-    assert pytest.approx(unatt["spend_usd"]) == stored["u"].cost_usd
+    assert pytest.approx(unatt["cost_usd"]) == stored["u"].cost_usd
     assert unatt["span_count"] == 1
 
 
@@ -824,7 +860,7 @@ def test_real_pipeline_five_trace_only_spans_mint_one_session(full_stack):
     assert sess.total_cost_usd > 0.0
 
     cur = full_stack.db.conn.execute(
-        "SELECT COUNT(*) FROM sessions WHERE status != 'superseded'"
+        "SELECT COUNT(*) FROM sessions WHERE (status IS NULL OR status != 'superseded')"
     )
     assert cur.fetchone()[0] == 1
 
@@ -885,6 +921,24 @@ def test_real_pipeline_reconciliation_idempotency(full_stack):
 
     snap1_spans, snap1_sessions, snap1_unatt = _snapshot()
 
+    assert {
+        span_id: (session_id, attribution_step)
+        for span_id, session_id, attribution_step, _ in snap1_spans
+    } == {
+        "c_0": ("session-root", "step1_parent"),
+        "c_1": ("session-root", "step1_parent"),
+        "c_2": ("session-root", "step1_parent"),
+        "marker_other": ("session-other", "explicit"),
+        "marker_root": ("session-root", "explicit"),
+        "unparented": (None, "step3_unattributed"),
+    }
+    assert full_stack.db.get_session("session-root").input_tokens == 300
+    assert full_stack.db.get_session("session-other").input_tokens == 0
+    unparented_cost = next(cost for span_id, _, _, cost in snap1_spans if span_id == "unparented")
+    assert snap1_unatt["cost_usd"] == pytest.approx(unparented_cost)
+    assert snap1_unatt["span_count"] == 1
+    assert snap1_unatt["trace_count"] == 1
+
     # Reconcile again explicitly (second time)
     full_stack.db.reconcile_trace_session_attribution(trace_id)
     snap2_spans, snap2_sessions, snap2_unatt = _snapshot()
@@ -903,7 +957,7 @@ def test_real_pipeline_reconciliation_idempotency(full_stack):
 
 
 def test_real_pipeline_reconciliation_scale_benchmark(full_stack):
-    """Benchmark reconciliation of 1,000 spans on DuckDB under 2.0s bound (#749)."""
+    """A real pipeline marker reconciles 1,000 DuckDB spans under 2.0s (#749)."""
     import time
     trace_id = "scale-bench-trace"
     now = utcnow()
@@ -936,22 +990,17 @@ def test_real_pipeline_reconciliation_scale_benchmark(full_stack):
     )
     full_stack.db.bulk_insert_spans(spans)
 
-    # Insert a marker span to establish the real session
+    # Ingest the marker through the production pipeline. The timed path must
+    # include marker resolution, persistence, session upsert, and reconciliation
+    # so an O(n²) trace hydration regression cannot hide behind direct DB setup.
     marker = make_invoke_agent_span(
         session_id="canonical-bench-session",
         agent_id="bench-agent",
         trace_id=trace_id,
     )
-    full_stack.db.insert_span(marker)
-    full_stack.db.upsert_session(
-        make_session(
-            session_id="canonical-bench-session",
-            agent_id="bench-agent",
-        )
-    )
 
     start = time.perf_counter()
-    full_stack.db.reconcile_trace_session_attribution(trace_id)
+    full_stack.pipeline.process(marker)
     duration = time.perf_counter() - start
 
     assert duration < 2.0, f"Reconciliation of 1,000 spans took {duration:.3f}s (must be < 2.0s)"
@@ -1034,7 +1083,7 @@ def test_real_pipeline_multi_marker_all_unparented_spans_unattributed(full_stack
     # Unattributed spend should report all 3 spans
     unatt = full_stack.db.get_unattributed_spend()
     expected_cost = sum(trace_spans[f"unparented_{i}"].cost_usd or 0.0 for i in range(3))
-    assert pytest.approx(expected_cost) == unatt["spend_usd"]
+    assert pytest.approx(expected_cost) == unatt["cost_usd"]
     assert unatt["span_count"] == 3
     assert unatt["trace_count"] == 1
 
