@@ -319,6 +319,17 @@ class IngestPipeline:
             )
             return
 
+        # Reconciliation is required when a trace gains a *new* marker session,
+        # not for every later span that carries the same conversation-derived
+        # session. The latter cannot change the ownership ladder, and clearing
+        # the trace's parent cache after it turns a repeated known-conversation
+        # child into unnecessary parent lookups on subsequent descendants.
+        is_new_marker_session = False
+        if self._is_session_marker(span) and span.trace_id:
+            marker_lookup = getattr(self.db, "get_marker_session_ids_for_trace", None)
+            marker_ids = marker_lookup(span.trace_id) if marker_lookup is not None else []
+            is_new_marker_session = span.session_id not in marker_ids
+
         # 4. Write span
         self.db.insert_span(span)
         if span.trace_id and span.span_id:
@@ -334,7 +345,7 @@ class IngestPipeline:
         # A marker can arrive after trace-only spans. Reconcile provisional or
         # trace-derived ownership now that the marker is durable, before the
         # session lifecycle hooks inspect the totals.
-        if self._is_session_marker(span):
+        if is_new_marker_session:
             reconcile = getattr(self.db, "reconcile_trace_session_attribution", None)
             if reconcile is not None:
                 if session is not None:
@@ -583,6 +594,7 @@ class IngestPipeline:
             cache_key = (span.trace_id, parent_id)
             cached = self._parent_cache.get(cache_key)
             if cached is not None:
+                self._parent_cache.move_to_end(cache_key)
                 next_parent_id, parent_session_id, parent_attr_step = cached
             else:
                 get_span_fn = getattr(self.db, "get_span", None)
@@ -616,7 +628,7 @@ class IngestPipeline:
         Resolve or create a session_id for the span.
 
         Ownership 3-step ladder (first match wins):
-        1. Explicit session_id / conversation_id on span.
+        1. Explicit session_id, then a known conversation_id on span.
         2. Step 1: Parent-span ownership (child attaches to parent span's session if resolved).
         3. Step 2: Sole-marker ownership (trace carries exactly 1 explicit session marker).
         4. Step 3: Unattributed (more than 1 marker & no parentage -> genuinely ambiguous, goes to named unattributed bucket, never split or dropped).
@@ -626,6 +638,13 @@ class IngestPipeline:
             span.attribution_step = "explicit"
             return span
 
+        if span.conversation_id:
+            existing = self.db.get_session_by_conversation(span.conversation_id)
+            if existing is not None:
+                span.session_id = existing.session_id
+                span.attribution_step = "conversation"
+                return span
+
         # Step 1: Parent resolution (child attaches to parent span's session if resolved)
         parent_resolution = self._session_from_parent_chain(span)
         if parent_resolution:
@@ -633,13 +652,6 @@ class IngestPipeline:
             span.session_id = parent_session_id
             span.attribution_step = "provisional" if parent_is_provisional else "step1_parent"
             return span
-
-        if span.conversation_id:
-            existing = self.db.get_session_by_conversation(span.conversation_id)
-            if existing is not None:
-                span.session_id = existing.session_id
-                span.attribution_step = "conversation"
-                return span
 
         # Trace markers
         if span.trace_id:
