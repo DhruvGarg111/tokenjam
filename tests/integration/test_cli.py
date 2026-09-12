@@ -2018,7 +2018,8 @@ def test_cost_group_by_session_cli(runner, db, config):
     assert "sess-named-1" in result.output
     assert "unattributed" in result.output
     assert "is unattributed" in result.output
-    assert "unambiguous parentage" in result.output
+    assert "not assigned" in result.output
+    assert "unambiguous parentage" not in result.output
 
 
 def test_cost_group_by_session_json_cli(runner, db, config):
@@ -2050,7 +2051,8 @@ def test_status_unattributed_disclosure_cli(runner, db, config):
     result = _invoke(runner, db, config, ["status"])
     assert result.exit_code == 0
     assert "is unattributed" in result.output
-    assert "unambiguous parentage" in result.output
+    assert "not assigned" in result.output
+    assert "unambiguous parentage" not in result.output
 
 
 def test_optimize_compare_appends_window_diff(runner, db, config):
