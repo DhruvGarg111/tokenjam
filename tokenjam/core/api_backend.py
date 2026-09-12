@@ -306,7 +306,6 @@ class ApiBackend:
             return unatt
         return {
             "cost_usd": 0.0,
-            "spend_usd": 0.0,
             "trace_count": 0,
             "span_count": 0,
         }
@@ -629,6 +628,7 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
         billing_account=d.get("billing_account"),
+        attribution_step=d.get("attribution_step"),
     )
 
 
