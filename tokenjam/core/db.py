@@ -1406,7 +1406,7 @@ def get_unattributed_spend_summary(
     until: datetime | None = None,
     agent_id: str | None = None,
 ) -> dict[str, Any]:
-    """Summary of unattributed spend (spans where session_id IS NULL)."""
+    """Summary of spend not assigned to a named session."""
     clauses = ["session_id IS NULL"]
     params: list[Any] = []
     if since:
@@ -1419,6 +1419,10 @@ def get_unattributed_spend_summary(
         clauses.append(f"agent_id = ${len(params) + 1}")
         params.append(agent_id)
     where = " AND ".join(clauses)
+    # This intentionally sums stored sessionless observations. The
+    # session-keyed duplicate-observation winner rule cannot apply without a
+    # session key; revisit this query if sessionless cross-source deduplication
+    # is introduced.
     row = conn.execute(
         f"SELECT COALESCE(SUM(cost_usd), 0.0), "
         f"COUNT(DISTINCT trace_id), "
@@ -1431,7 +1435,6 @@ def get_unattributed_spend_summary(
     spans = int(row[2] or 0) if row else 0
     return {
         "cost_usd": round(cost, 8),
-        "spend_usd": round(cost, 8),
         "trace_count": traces,
         "span_count": spans,
     }
@@ -3303,7 +3306,7 @@ class DuckDBBackend:
         session is split across files that share one session_id (the main-thread
         transcript plus each subagents/agent-<id>.jsonl). Because upsert_session
         uses replace semantics, the per-file upserts would otherwise leave the
-        the row holding only the last-processed file's totals. Cross-source
+        row holding only the last-processed file's totals. Cross-source
         restatements are counted once using the duplicate-observation winner
         rule; same-source repeats remain real calls. Scoped to the given ids so
         it never touches unrelated sessions. Idempotent.
@@ -3490,6 +3493,7 @@ class DuckDBBackend:
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None:
         cur = self.conn.execute(
             "SELECT * FROM sessions WHERE conversation_id = $1 "
+            "AND (status IS NULL OR status != 'superseded') "
             "ORDER BY started_at DESC LIMIT 1",
             [conversation_id],
         )
@@ -3873,7 +3877,8 @@ class DuckDBBackend:
                         return None
                     visited.add(p_id)
                     res = resolve_chain(p_id, visited)
-                    resolved_cache[span_id] = res
+                    if res is not None:
+                        resolved_cache[span_id] = res
                     return res
 
                 updates: list[tuple[str, str | None, str]] = []
