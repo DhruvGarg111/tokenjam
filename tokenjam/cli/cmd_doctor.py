@@ -2087,7 +2087,7 @@ def _check_onboarding_first_signal(config: object, db: object) -> dict:
 
 
 def _check_unattributed_spend(db: object) -> dict:
-    """Report unattributed spend on shared traces without parentage (#749)."""
+    """Report spend not assigned to a named session (#749)."""
     name = "Unattributed spend"
     get_unatt = getattr(db, "get_unattributed_spend", None)
     if get_unatt is None:
@@ -2101,11 +2101,11 @@ def _check_unattributed_spend(db: object) -> dict:
     except Exception as e:
         return {"name": name, "level": "info", "message": f"Skipped — could not query unattributed spend: {e}"}
 
-    spend_usd = float(data.get("spend_usd") or 0.0)
+    cost_usd = float(data.get("cost_usd") or 0.0)
     span_count = int(data.get("span_count") or 0)
     trace_count = int(data.get("trace_count") or 0)
 
-    if spend_usd <= 0.0 and span_count == 0:
+    if cost_usd <= 0.0 and span_count == 0:
         return {
             "name": name,
             "level": "ok",
@@ -2117,8 +2117,9 @@ def _check_unattributed_spend(db: object) -> dict:
         "name": name,
         "level": "info",
         "message": (
-            f"{format_cost(spend_usd)} across {span_count} span(s) on {trace_count} trace(s) "
-            "is in the unattributed bucket (shared traces without unambiguous parentage)."
+            f"{format_cost(cost_usd)} across {span_count} span(s) on {trace_count} trace(s) "
+            "is in the unattributed bucket (not assigned to a named session). "
+            "Inspect it with tj cost --group-by session."
         ),
     }
 
