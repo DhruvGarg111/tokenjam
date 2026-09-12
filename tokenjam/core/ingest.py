@@ -319,16 +319,28 @@ class IngestPipeline:
             )
             return
 
-        # Reconciliation is required when a trace gains a *new* marker session,
+        # Reconciliation is required when a trace gains a *new* marker span,
         # not for every later span that carries the same conversation-derived
         # session. The latter cannot change the ownership ladder, and clearing
         # the trace's parent cache after it turns a repeated known-conversation
         # child into unnecessary parent lookups on subsequent descendants.
-        is_new_marker_session = False
+        is_new_marker_span = False
         if self._is_session_marker(span) and span.trace_id:
-            marker_lookup = getattr(self.db, "get_marker_session_ids_for_trace", None)
-            marker_ids = marker_lookup(span.trace_id) if marker_lookup is not None else []
-            is_new_marker_session = span.session_id not in marker_ids
+            # A child that merely inherited a known conversation is not a new
+            # reconciliation marker; it cannot change ownership and should not
+            # evict the parent cache. Root conversation markers still reconcile
+            # late trace-only spans, while explicit session markers are always
+            # identified by their span id so repeated session ids are handled.
+            if not (span.attribution_step == "conversation" and span.parent_span_id):
+                get_span = getattr(self.db, "get_span", None)
+                if get_span is not None:
+                    is_new_marker_span = get_span(span.trace_id, span.span_id) is None
+                else:
+                    # Preserve compatibility with minimal backends that expose
+                    # marker discovery but not targeted span lookup.
+                    marker_lookup = getattr(self.db, "get_marker_session_ids_for_trace", None)
+                    marker_ids = marker_lookup(span.trace_id) if marker_lookup is not None else []
+                    is_new_marker_span = span.session_id not in marker_ids
 
         # 4. Write span
         self.db.insert_span(span)
@@ -345,7 +357,7 @@ class IngestPipeline:
         # A marker can arrive after trace-only spans. Reconcile provisional or
         # trace-derived ownership now that the marker is durable, before the
         # session lifecycle hooks inspect the totals.
-        if is_new_marker_session:
+        if is_new_marker_span:
             reconcile = getattr(self.db, "reconcile_trace_session_attribution", None)
             if reconcile is not None:
                 if session is not None:
