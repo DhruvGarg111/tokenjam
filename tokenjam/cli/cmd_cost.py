@@ -172,15 +172,16 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                       f"[bold]{sum(r.call_count for r in rows)}[/bold]")
 
     console.print(table)
-    if unattributed and float(unattributed.get("spend_usd") or 0.0) > 0.0:
-        spend_val = float(unattributed["spend_usd"])
+    if unattributed and float(unattributed.get("cost_usd") or 0.0) > 0.0:
+        cost_val = float(unattributed["cost_usd"])
         span_cnt = int(unattributed.get("span_count") or 0)
         trace_cnt = int(unattributed.get("trace_count") or 0)
         console.print()
         console.print(
-            f"[yellow]Note: {format_cost(spend_val)} across {span_cnt} span(s) "
-            f"({trace_cnt} trace(s)) is unattributed (shared traces without unambiguous parentage).[/yellow]"
+            f"[yellow]Note: {format_cost(cost_val)} across {span_cnt} span(s) "
+            f"({trace_cnt} trace(s)) is unattributed (not assigned to a named session).[/yellow]"
         )
+        console.print("Inspect the breakdown with [accent]tj cost --group-by session[/accent].")
     _print_pricing_coverage(db, agent, since, since_dt)
 
 
