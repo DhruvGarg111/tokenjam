@@ -514,7 +514,7 @@ async def get_status(
     if hasattr(db, "get_unattributed_spend"):
         try:
             unatt = db.get_unattributed_spend(agent_id=agent_id)
-            if unatt and float(unatt.get("spend_usd") or 0.0) > 0.0:
+            if unatt and float(unatt.get("cost_usd") or 0.0) > 0.0:
                 unattributed_spend = unatt
         except Exception:
             unattributed_spend = None
