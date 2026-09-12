@@ -687,6 +687,44 @@ def test_real_pipeline_known_conversation_overrides_different_parent_session(ful
     assert full_stack.db.get_session("parent-owner").input_tokens == 0
 
 
+def test_real_pipeline_reconciles_repeated_marker_session_with_late_parent(full_stack):
+    """A repeated session marker can make an earlier child parent-resolvable."""
+    trace_id = "repeated-marker-late-parent"
+
+    first_marker = make_invoke_agent_span(session_id="session-a", trace_id=trace_id)
+    first_marker.span_id = "marker-a"
+    full_stack.pipeline.process(first_marker)
+
+    second_marker = make_invoke_agent_span(session_id="session-b", trace_id=trace_id)
+    second_marker.span_id = "marker-b"
+    full_stack.pipeline.process(second_marker)
+
+    child = make_llm_span(
+        trace_id=trace_id,
+        input_tokens=33,
+        output_tokens=11,
+    )
+    child.span_id = "orphan-child"
+    child.parent_span_id = "late-parent"
+    child.session_id = None
+    child.conversation_id = None
+    full_stack.pipeline.process(child)
+
+    before = next(s for s in full_stack.db.get_trace_spans(trace_id) if s.span_id == child.span_id)
+    assert before.session_id is None
+    assert before.attribution_step == "step3_unattributed"
+
+    late_parent = make_invoke_agent_span(session_id="session-a", trace_id=trace_id)
+    late_parent.span_id = "late-parent"
+    full_stack.pipeline.process(late_parent)
+
+    after = next(s for s in full_stack.db.get_trace_spans(trace_id) if s.span_id == child.span_id)
+    assert after.session_id == "session-a"
+    assert after.attribution_step == "step1_parent"
+    assert full_stack.db.get_session("session-a").input_tokens == 33
+    assert full_stack.db.get_session("session-b").input_tokens == 0
+
+
 def test_real_pipeline_reconciliation_rolls_back_on_refresh_failure(full_stack, monkeypatch):
     """A failed aggregate refresh rolls back reconciliation without rejecting the marker span (#749)."""
     trace_id = "real-reconcile-rollback"
