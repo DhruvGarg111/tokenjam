@@ -32,3 +32,4 @@ def test_unattributed_spend_check_discloses_spans_and_traces():
     assert "$7.00" in check["message"]
     assert "3 span(s)" in check["message"]
     assert "2 trace(s)" in check["message"]
+    assert "not assigned to a named session" in check["message"]
