@@ -90,7 +90,7 @@ def repo(tmp_path, monkeypatch) -> Path:
     _commit(path, "README", "hello\n", "init", T0 - timedelta(days=1))
     # A bare "origin" so origin/HEAD resolves the way a clone's does.
     origin = tmp_path / "origin.git"
-    _git(path, "init", "-q", "--bare", str(origin))
+    _git(path, "init", "-q", "--bare", "-b", "main", str(origin))
     _git(path, "remote", "set-url", "origin", str(origin))
     _git(path, "push", "-q", "origin", "main")
     _git(path, "remote", "set-head", "origin", "main")
