@@ -424,10 +424,13 @@ def parse_claude_code_session(
     # Captured unconditionally (never gated on `[capture] prompts` — see
     # `ParsedSession.first_user_prompt`'s docstring for why that's safe).
     first_user_prompt: str | None = None
-    # `gitBranch` at the first and last record that carries one (see
-    # `ParsedSession.git_branch_start` / `git_branch_end`).
+    # `gitBranch` at the earliest and latest DATED main-thread record that
+    # carries one (see `ParsedSession.git_branch_start` / `git_branch_end`).
     git_branch_start: str | None = None
     git_branch_end: str | None = None
+    branch_start_ts: datetime | None = None
+    branch_end_ts: datetime | None = None
+    is_subagent_file = "subagents" in path.parts
     # Main-thread-only per-model token totals, for `ParsedSession.dominant_model`.
     _model_tokens: dict[str, int] = {}
 
@@ -494,11 +497,24 @@ def parse_claude_code_session(
         git_branch = record.get("gitBranch")
         # A detached checkout is recorded as the literal "HEAD", which is
         # not a branch; storing it would let the next wave join on it.
-        if isinstance(git_branch, str) and git_branch.strip() and git_branch.strip() != "HEAD":
-            git_branch = git_branch.strip()
-            if git_branch_start is None:
-                git_branch_start = git_branch
-            git_branch_end = git_branch
+        # Endpoints are chosen by record TIMESTAMP, not file order: an
+        # undated or replayed record contributes no session time, so it
+        # must not name the branch the session started or ended on either.
+        # Subagent files carry the parent's sessionId and run inside its
+        # window, so only the main transcript supplies endpoints.
+        if (
+            not is_subagent_file
+            and isinstance(git_branch, str)
+            and git_branch.strip()
+            and git_branch.strip() != "HEAD"
+        ):
+            bts = _parse_ts(record.get("timestamp"))
+            if bts is not None:
+                git_branch = git_branch.strip()
+                if branch_start_ts is None or bts < branch_start_ts:
+                    branch_start_ts, git_branch_start = bts, git_branch
+                if branch_end_ts is None or bts >= branch_end_ts:
+                    branch_end_ts, git_branch_end = bts, git_branch
 
         rtype = record.get("type")
         if rtype == "user" and not record.get("isMeta"):

@@ -201,6 +201,53 @@ def test_claude_code_backfill_re_run_is_idempotent_and_fills_a_null_row(repo, tm
         db.close()
 
 
+def test_claude_code_branch_endpoints_follow_timestamps_not_file_order(repo, tmp_path):
+    """Claude Code replays and re-snapshots records on resume, so file order is
+    not chronology. The branch the session started and ended on is the one at
+    the earliest and latest DATED record; an undated record contributes no
+    session time and must not name an endpoint either."""
+    root = tmp_path / "projects"
+    late = _assistant("m2", "2026-09-01T10:05:00.000Z", "cc-6", str(repo), "feat/late")
+    early = _assistant("m1", "2026-09-01T10:00:00.000Z", "cc-6", str(repo), "main")
+    undated = _assistant("m3", "", "cc-6", str(repo), "feat/replayed")
+    del undated["timestamp"]
+    # Written out of order: latest first, then earliest, then an undated replay.
+    _write_transcript(root, "cc-6", [late, early, undated])
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=root)
+        ctx = _context_row(db, "cc-6")
+        assert ctx.branch_start == "main"
+        assert ctx.branch_end == "feat/late"
+    finally:
+        db.close()
+
+
+def test_subagent_transcripts_never_supply_branch_endpoints(repo, tmp_path):
+    """A subagent file carries the PARENT session id and runs inside its
+    window; merging its branches by write order would let a subagent that
+    happened to be flushed last overwrite the real end branch."""
+    root = tmp_path / "projects"
+    _write_transcript(root, "cc-7", [
+        _assistant("m1", "2026-09-01T10:00:00.000Z", "cc-7", str(repo), "main"),
+        _assistant("m2", "2026-09-01T10:09:00.000Z", "cc-7", str(repo), "feat/real-end"),
+    ])
+    sub_dir = root / "proj" / "subagents"
+    sub_dir.mkdir(parents=True)
+    sub = sub_dir / "agent-abc.jsonl"
+    sub.write_text(json.dumps(
+        _assistant("s1", "2026-09-01T10:04:00.000Z", "cc-7", str(repo), "feat/subagent")
+    ) + "\n")
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=root)
+        ctx = _context_row(db, "cc-7")
+        assert ctx.branch_start == "main"
+        assert ctx.branch_end == "feat/real-end"
+    finally:
+        db.close()
+
+
 def test_claude_code_backfill_treats_a_detached_head_as_no_branch(repo, tmp_path):
     """Claude Code records `gitBranch: "HEAD"` on a detached checkout. That is
     not a branch, and storing it would let the next wave join on it."""

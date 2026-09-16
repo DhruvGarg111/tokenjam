@@ -99,6 +99,21 @@ def test_normalised_urls_never_carry_credentials():
     assert "t0ken" not in (normalise_remote_url("https://u:t0ken@host.com/a/b.git") or "")
 
 
+@pytest.mark.parametrize("raw", [
+    "https://github.com/Acme/widgets.git?token=t0ken",
+    "https://github.com/Acme/widgets?access_token=t0ken#frag",
+    "ssh://git@github.com/Acme/widgets.git#t0ken",
+    "git@github.com:Acme/widgets.git?x=t0ken",
+])
+def test_query_strings_and_fragments_are_dropped_from_the_normalised_url(raw):
+    """A remote can carry a token in its query or fragment; the normalised
+    value is persisted as `repo_remote` and served by unauthenticated read
+    APIs, so neither part may survive."""
+    got = normalise_remote_url(raw)
+    assert got == "https://github.com/Acme/widgets"
+    assert "t0ken" not in got
+
+
 def test_repo_name_is_the_last_two_segments():
     assert repo_name_from_url("https://github.com/Acme/widgets") == "Acme/widgets"
     assert repo_name_from_url("https://gitlab.example.com/group/sub/repo") == "sub/repo"

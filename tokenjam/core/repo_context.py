@@ -136,6 +136,10 @@ def normalise_remote_url(url: str | None) -> str | None:
             host, path = m.group(1), m.group(2)
     if not host or not path:
         return None
+    # A query string or fragment is never part of a repo's identity, and a
+    # remote can carry a token there (`?token=...`); the normalised value is
+    # persisted and served by unauthenticated read APIs, so drop both.
+    path = path.split("?", 1)[0].split("#", 1)[0]
     path = path.strip("/")
     if path.endswith(".git"):
         path = path[:-4]
