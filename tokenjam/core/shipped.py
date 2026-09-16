@@ -1032,7 +1032,7 @@ def _add_rework(conn, summary: ShippedSummary, where: str, params: list[Any]) ->
         )
         return
     reworked = {r[0]: float(r[3] or 0.0) for r in measured if r[2] / r[1] >= REWORK_SHARE}
-    summary.cost_rework_usd = round(sum(reworked.values()), 6)
+    summary.cost_rework_usd = round(float(sum(reworked.values())), 6)
     summary.rework_basis = (
         f"Measured over {len(measured)} session(s) whose joined commits have line "
         f"counts: a session is reworked when at least {int(REWORK_SHARE * 100)}% of "
