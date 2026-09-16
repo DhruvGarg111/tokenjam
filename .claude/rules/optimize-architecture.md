@@ -39,6 +39,7 @@ Registry strings (the user-facing names) and file names are **decoupled** (Criti
 - `plan_reuse.py` → `@register("reuse")` — repeated-planning cluster detection; a savings analyzer (carries `past_overspend_usd`). Has a dedicated endpoint/report path (`GET /api/v1/reuse/clusters`, `tj report --reuse`) because its per-cluster planner text can be many KB
 - `prompt_bloat.py` → `@register("trim")` — LLMLingua-2 token-significance classification (requires `tokenjam[bloat]` extra)
 - `subagent_rightsizing.py` → `@register("subagent")` — per-subagent right-sizing, Claude Code-only (keys off `sub_agent_id`, populated only by CC backfill)
+- `shipped.py` → `@register("shipped")` — session → commit join read side: shipped / unshipped / committed-off-default per session, measured cost of each, rework and loop cost. A MEASUREMENT analyzer, not a fix: its dollars are `cost_*_usd` (measured), never recoverable. Depends on `core/shipped.py`'s daemon-pass matcher and the `session_commits` / `repo_commits` tables (ledger contracts §4)
 - `batch_placement.py` → `placement` — the Batch API lane; produced INSIDE `downsize` and unregistered, so selection cannot reach it
 
 The live list is `ANALYZER_REGISTRY` / `ANALYZER_ORDER` in `runner.py` — derive it from there rather
@@ -72,4 +73,5 @@ A cost analyzer's avoidable figure is `past_overspend_usd` / `_tokens` / `_basis
 One per user-facing product, under `docs/optimize/`: [`downsize.md`](../../../docs/optimize/downsize.md),
 [`cache.md`](../../../docs/optimize/cache.md) (`cache` + `cache-recommend`),
 [`script.md`](../../../docs/optimize/script.md), [`trim.md`](../../../docs/optimize/trim.md),
-[`reuse.md`](../../../docs/optimize/reuse.md), [`subagent.md`](../../../docs/optimize/subagent.md).
+[`reuse.md`](../../../docs/optimize/reuse.md), [`subagent.md`](../../../docs/optimize/subagent.md),
+[`shipped.md`](../../../docs/optimize/shipped.md).

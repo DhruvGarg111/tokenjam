@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.alerts import agent_display_name, is_interactive_coding_agent
 from tokenjam.core.repo_context import repo_name_from_url
+from tokenjam.core.shipped import STATE_NO_REPO, shipped_states
 from tokenjam.core.transcript import (
     resolve_projects_root,
     session_transcript_mtime,
@@ -170,6 +171,9 @@ def _build_archive(
 
     rows = db.conn.execute(sql, params).fetchall()
     cols = [d[0] for d in db.conn.description]
+    id_col = cols.index("session_id")
+    # Shipped state per row in ONE query (ledger W2), never one per session.
+    states = shipped_states(db.conn, [r[id_col] for r in rows])
     archived: list[dict] = []
     for r in rows:
         s = _row_to_session(r, cols)
@@ -210,6 +214,7 @@ def _build_archive(
             # on /sessions and /sessions/{id}.
             "repo": repo_name_from_url(s.repo_remote),
             "branch": s.branch_end or s.branch_start,
+            **states.get(s.session_id, {"shipped_state": STATE_NO_REPO, "commit_count": 0}),
         })
         if len(archived) >= ARCHIVE_LIMIT:
             break

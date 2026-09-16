@@ -183,6 +183,11 @@ class ParsedSession:
     # a cwd outside a repo).
     git_branch_start: str | None = None
     git_branch_end: str | None = None
+    # The remote bridge's own id for this session (`cse_...`), from the
+    # transcript's `bridge-session` record; None when it never ran under the
+    # bridge. A `Claude-Session:` commit trailer resolves through this, not
+    # through the local uuid (see `SessionRecord.bridge_session_id`).
+    bridge_session_id: str | None = None
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -430,6 +435,7 @@ def parse_claude_code_session(
     git_branch_end: str | None = None
     branch_start_ts: datetime | None = None
     branch_end_ts: datetime | None = None
+    bridge_session_id: str | None = None
     is_subagent_file = "subagents" in path.parts
     # Main-thread-only per-model token totals, for `ParsedSession.dominant_model`.
     _model_tokens: dict[str, int] = {}
@@ -517,6 +523,11 @@ def parse_claude_code_session(
                     branch_end_ts, git_branch_end = bts, git_branch
 
         rtype = record.get("type")
+        if rtype == "bridge-session" and bridge_session_id is None:
+            bridge = record.get("bridgeSessionId")
+            if isinstance(bridge, str) and bridge.strip():
+                bridge_session_id = bridge.strip()
+            continue
         if rtype == "user" and not record.get("isMeta"):
             # First genuine MAIN-THREAD human prompt, captured UNCONDITIONALLY
             # (never gated on `capture.prompts` — see `ParsedSession
@@ -779,6 +790,7 @@ def parse_claude_code_session(
         ),
         git_branch_start=git_branch_start,
         git_branch_end=git_branch_end,
+        bridge_session_id=bridge_session_id,
     )
 
 
@@ -927,6 +939,7 @@ def session_record_from_parsed(
         source="claude-code",
         task_statement_hash=hash_task_statement(parsed.first_user_prompt),
         dominant_model=parsed.dominant_model,
+        bridge_session_id=parsed.bridge_session_id,
         # Repo context + identity (contracts §3/§4): branch from the
         # transcript, repo + author from git in the session's cwd, HEAD sha
         # deliberately absent (git today cannot name the commit the session

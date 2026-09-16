@@ -35,7 +35,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import uvicorn
@@ -57,6 +57,7 @@ from tokenjam.core.models import (
     AlertType,
     CostFilters,
     DriftBaseline,
+    SessionCommit,
     Severity,
     TraceFilters,
 )
@@ -82,6 +83,7 @@ SHIM_PARITY_METHODS = {
     "get_tool_calls",
     "get_daily_cost",
     "get_baseline",
+    "get_session_commits",
 }
 
 # Methods the shim implements but that intentionally return a degraded / stub
@@ -133,6 +135,7 @@ SHIM_NOT_IMPLEMENTED = {
     "upsert_agent",
     "upsert_baseline",
     "upsert_session",
+    "upsert_session_commits",
 }
 
 # Lifecycle, not a data method — parity is not meaningful.
@@ -233,6 +236,17 @@ def _proj_daily_cost(value) -> float:
     return round(value, 6)
 
 
+def _proj_commits(commits) -> list:
+    # (sha, confidence, source, author, committed_at) — the ledger row as
+    # every session surface renders it; `matched_at` is a write-side stamp the
+    # /sessions/{id} payload deliberately does not carry.
+    return [
+        (c.commit_sha, c.confidence, c.source, c.author_email,
+         c.committed_at.isoformat() if c.committed_at else None, c.match_delta_s)
+        for c in commits
+    ]
+
+
 def _proj_baseline(baseline) -> tuple | None:
     if baseline is None:
         return None
@@ -260,6 +274,7 @@ def _parity_specs(now, trace_id, span_id="span-id"):
         "get_tool_calls": (lambda b: b.get_tool_calls(AGENT, None, None), _proj_tool_calls),
         "get_daily_cost": (lambda b: b.get_daily_cost(AGENT, historical_day), _proj_daily_cost),
         "get_baseline": (lambda b: b.get_baseline(AGENT), _proj_baseline),
+        "get_session_commits": (lambda b: b.get_session_commits(SESSION), _proj_commits),
     }
 
 
@@ -338,6 +353,15 @@ def _seed(db: StorageBackend, dataset: _Dataset) -> None:
         db.insert_span(span)
     db.insert_alert(dataset.alert)
     db.upsert_baseline(dataset.baseline)
+    db.upsert_session_commits([
+        SessionCommit(SESSION, "a" * 40, "deterministic", "tool_span_git_log",
+                      author_email="dev@example.com",
+                      committed_at=datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc),
+                      match_delta_s=-2.5),
+        SessionCommit(SESSION, "b" * 40, "inferred", "trailer_window",
+                      author_email="dev@example.com",
+                      committed_at=datetime(2026, 5, 1, 12, 1, tzinfo=timezone.utc)),
+    ])
 
 
 def _config() -> TjConfig:

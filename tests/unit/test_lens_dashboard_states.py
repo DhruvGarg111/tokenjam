@@ -329,14 +329,16 @@ def test_an_unknown_health_tile_says_which_kind_of_unknown_it_is(html):
 def test_every_health_tile_declares_the_status_of_its_source(html):
     # A tile without a status= defaults to 'ready' and would silently resume
     # publishing derived zeros, so every one of them must pass one. The count is
-    # four since the "Agents drifting" tile was removed with the rest of the
-    # Drift surface (founder decision, un-surfaced not deleted): pinned as a
-    # number so a tile that arrives without a status is still caught.
+    # five: four after the "Agents drifting" tile was removed with the rest of
+    # the Drift surface (founder decision, un-surfaced not deleted), plus the
+    # "Shipped this week" tile the ledger added, whose own read is `/shipped`.
+    # Pinned as a number so a tile that arrives without a status is still caught.
     start = html.index('<div class="section-band">Health at a glance</div>')
     end = html.index("<!-- The HERO", start)
     band = html[start:end]
-    assert band.count("<${HealthTile}") == 4
-    assert band.count("status=$") == 4
+    assert band.count("<${HealthTile}") == 5
+    assert band.count("status=$") == 5
+    assert 'label="Shipped this week"' in band and "readStatus(shippedRead)" in band
     # The removed tile, pinned absent: it published a figure and a reassuring
     # caption ("within baseline") for a surface nothing else links to.
     assert 'label="Agents drifting"' not in band

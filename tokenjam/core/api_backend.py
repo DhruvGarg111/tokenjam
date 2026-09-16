@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from tokenjam.core.models import (
+    SessionCommit,
     Alert,
     AlertFilters,
     AlertType,
@@ -555,6 +556,35 @@ class ApiBackend:
         return self._get(
             "/api/v1/quota-audit", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
         )
+
+    def get_session_commits(self, session_id: str) -> list[SessionCommit]:
+        """The commits joined to a session, read off `/sessions/{id}`'s
+        `commits` block. Same order the DB backend returns (best confidence,
+        then newest); parity-covered."""
+        try:
+            data = self._get(f"/api/v1/sessions/{session_id}")
+        except (httpx.HTTPError, ValueError):
+            return []
+        out: list[SessionCommit] = []
+        for c in data.get("commits") or []:
+            at = c.get("committed_at")
+            out.append(SessionCommit(
+                session_id=session_id, commit_sha=c["sha"], confidence=c["confidence"],
+                source=c["source"], author_email=c.get("author_email"),
+                committed_at=datetime.fromisoformat(at) if at else None,
+                match_delta_s=c.get("match_delta_s"),
+            ))
+        return out
+
+    def fetch_shipped(
+        self, *, since: str = "30d", agent_id: str | None = None,
+    ) -> dict:
+        """Server-computed shipped / unshipped summary (`/api/v1/shipped`),
+        for `tj status` when the daemon holds the write lock."""
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/shipped", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT)
 
     def close(self) -> None:
         self.client.close()
