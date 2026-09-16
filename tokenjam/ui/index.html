@@ -853,6 +853,12 @@ a.tab { text-decoration: none; display: inline-block; }
    two-card layout is gone — one status/name/id/badge row, then a 4-tile stat
    grid (cost / tool calls / active compute time / elapsed wall clock). */
 .ses-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.ship-chip { font-size: 11px; color: var(--text-dim); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 2px 7px; white-space: nowrap; }
+.ship-chip.ship-yes { color: var(--text); border-color: var(--success); }
+.commit-chip { color: var(--text); }
+.ship-filter { color: var(--text-dim); margin-left: 8px; text-decoration: none; }
+.ship-filter.active { color: var(--text); font-weight: 600; }
+table.archive-list td.a-shipped { white-space: nowrap; }
 .ses-id-chip {
   font-family: 'Geist Mono', monospace;
   font-size: 11px;
@@ -3098,6 +3104,34 @@ function repoBranchLabel(row) {
   return parts.join(' · ');
 }
 
+// Shipped-value ledger (contracts §2): the three-state confidence glyph every
+// joined figure carries. `deterministic` = the session produced this commit,
+// `inferred` = AI was involved and the window points at this session,
+// `estimated` = allocation only (never written by tj itself, kept for the
+// enum). Anything else renders nothing rather than a wrong glyph.
+const CONFIDENCE_GLYPH = { deterministic: '●', inferred: '◐', estimated: '○' };
+function confidenceGlyph(confidence) {
+  return CONFIDENCE_GLYPH[confidence] || '';
+}
+// The Sessions view's shipped filter (URL `shipped=`), on the contracts §1
+// definitions exactly: `shipped` keeps a row whose session left a commit that
+// reached the default branch; `unshipped` keeps rows with no joined commit and
+// rows whose only commits were reverted. A committed-but-unmerged session and
+// a session with no repo context are neither, and appear only unfiltered:
+// folding "not analysed" into "unshipped" would claim an absence the matcher
+// never tested. No filter keeps everything.
+function shippedFilterKeep(row, filter) {
+  if (!filter) return true;
+  const state = row && row.shipped_state;
+  if (filter === 'shipped') return state === 'shipped';
+  if (filter === 'unshipped') return state === 'unshipped' || state === 'reverted';
+  return true;
+}
+const SHIPPED_STATE_LABEL = {
+  shipped: 'shipped', committed: 'committed, not merged', reverted: 'reverted',
+  unshipped: 'no commit', no_repo: 'no repo',
+};
+
 // Stripping a shared prefix can make two DIFFERENT agents render identically:
 // `claude-code-api` and `codex-api` both shorten to `api`. That is a list-level
 // property, so it cannot be decided per row on the server. Any short name
@@ -3390,6 +3424,8 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // (bounded work → archived list) and SDK services (unbounded telemetry →
   // inactive list). Content, not a user toggle, decides what renders.
   const agentId = readParam(params, 'agent_id', '');
+  // Shipped / unshipped filter (ledger W2), URL-backed like every other filter.
+  const shippedFilter = readParam(params, 'shipped', '');
   const [data, setData] = useState(null);
   // Inline session-card rename (#306): which session's title is being edited,
   // its working value, and a ref so the input autofocuses + selects on open.
@@ -3477,7 +3513,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
   // SDK zone = data.sdk_services, rendered by SdkServicesPanel. The two zones
   // are content-defined, not a user-selected view (#306).
   const codingAgents = agents.filter(a => a.kind === 'coding');
-  const codingArchived = (data.archived || []).filter(s => s.kind === 'coding' && (!agentId || s.agent_id === agentId));
+  const codingArchived = (data.archived || []).filter(s => s.kind === 'coding' && (!agentId || s.agent_id === agentId) && shippedFilterKeep(s, shippedFilter));
   // WHETHER THE CODING ZONE PUTS ANYTHING ON THE PAGE, hoisted because three
   // places need the same answer and they must agree: the header's active/
   // archived count, the zone itself, and the separator below it. `showCodingZone`
@@ -3597,6 +3633,11 @@ function StatusView({ params, persona, personaKnown, routeView }) {
         <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}${s.status === 'stale' ? html` <span class="badge badge-stale" style="margin-left:4px">stale</span>` : null}</td>
         <td class="a-agent" title=${s.agent_id || ''}>${archNames.get(s.agent_id) || agentName(s)}</td>
         <td class="dim a-repo" title=${repoBranchLabel(s)}>${repoBranchLabel(s) || '-'}</td>
+        ${/* Shipped state, derived server-side from the session -> commit
+              join (contracts §4). "no repo" is its own state: such a session
+              was never analysed, and rendering it as "no commit" would claim
+              an absence the matcher could not test. */ ''}
+        <td class="dim a-shipped">${s.shipped_state === 'shipped' ? html`<span class="ship-chip ship-yes">shipped${s.commit_count > 1 ? ' · ' + s.commit_count : ''}</span>` : html`<span class="ship-chip">${SHIPPED_STATE_LABEL[s.shipped_state] || '-'}</span>`}</td>
         <td class="num" style="color:var(--text);font-weight:600">${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
         <td class="dim">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
         <td class="dim">${dur}</td>
@@ -3659,10 +3700,15 @@ function StatusView({ params, persona, personaKnown, routeView }) {
         <div class="zone-head">
           <span class="zone-title">Archived</span>
           <span class="zone-sub">closed / stale · ${archivedCountLabel(codingArchived.length, data.archived_total)}</span>
+          <span class="zone-sub" style="margin-left:auto">
+            ${[['', 'all'], ['shipped', 'shipped'], ['unshipped', 'unshipped']].map(([v, label]) => html`
+              <a key=${v} href=${'#/sessions?' + new URLSearchParams({ ...(agentId ? { agent_id: agentId } : {}), ...(v ? { shipped: v } : {}) }).toString()}
+                 class=${'ship-filter' + (shippedFilter === v ? ' active' : '')}>${label}</a>`)}
+          </span>
         </div>
         <div class="panel">
           <div class="table-wrap"><table class="archive-list">
-            <thead><tr><th>Session</th><th>Agent</th><th>Repo · branch</th><th class="num">Cost</th><th>Tokens in / out</th><th>Duration</th><th class="num">Tools</th><th>Ended</th><th></th></tr></thead>
+            <thead><tr><th>Session</th><th>Agent</th><th>Repo · branch</th><th>Shipped</th><th class="num">Cost</th><th>Tokens in / out</th><th>Duration</th><th class="num">Tools</th><th>Ended</th><th></th></tr></thead>
             <tbody>
               ${codingArchived.map(archRow)}
             </tbody>
@@ -4449,6 +4495,12 @@ function SessionDetailView({ sessionId }) {
       <span class="ses-id-chip">${s.session_id}</span>
       ${repoBranchLabel(s) ? html`<span class="ses-id-chip" title=${s.repo_remote || ''}>${repoBranchLabel(s)}</span>` : null}
       <span class="badge badge-${s.status}">${s.status}</span>
+      ${/* The commits this session produced (contracts §4), each with its
+            confidence glyph, and the derived shipped state beside them. A
+            session with no repo context shows nothing here: it was never
+            analysed, so there is no absence to report. */ ''}
+      ${s.shipped_state && s.shipped_state !== 'no_repo' ? html`<span class=${'ship-chip' + (s.shipped_state === 'shipped' ? ' ship-yes' : '')}>${SHIPPED_STATE_LABEL[s.shipped_state] || s.shipped_state}</span>` : null}
+      ${(data.commits || []).map(c => html`<span key=${c.sha} class="ses-id-chip commit-chip" title=${c.confidence + ' · ' + c.source + (c.committed_at ? ' · ' + c.committed_at : '')}>${confidenceGlyph(c.confidence)} ${c.sha.slice(0, 7)}</span>`)}
     </div>
 
     <div class="ses-stats">
@@ -6598,6 +6650,7 @@ const ANALYZER_META = {
   summarize:  { title: 'Summarize', hint: 'Compress oversized prompt files' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
+  shipped:    { title: 'Shipped',    hint: 'Which sessions left a commit, and what the rest cost' },
 };
 
 // Fallback threshold values for the `placement` empty state, mirroring
@@ -7414,7 +7467,7 @@ const OPT_MECH = {
   downsize: 'apply', subagent: 'apply', deadweight: 'apply',
   resend: 'snippet', cache: 'snippet', 'cache-recommend': 'snippet',
   script: 'snippet', trim: 'snippet', reuse: 'snippet', verbosity: 'snippet',
-  placement: 'read',
+  placement: 'read', shipped: 'read',
 };
 const OPT_MECH_LABEL = { apply: 'writes the change', snippet: 'hands you the fix', read: 'read-only finding' };
 
@@ -8607,6 +8660,36 @@ function OptimizeView({ params, navParam, persona }) {
             has not resolved", which renders no number at all rather than a 0
             that would read as "nothing to compress" (root anti-pattern 22). */ ''}
       <div class="opt-cards">
+        ${/* MEASURE ROI, not a saving: the shipped card reads the `shipped`
+              finding the same background scan stored, and its dollars are
+              measured spend on sessions that left no commit, never a
+              recoverable figure. That is why it is a card here and not a row
+              in the action list above, whose figure column means "waste". The
+              caveat is the finding's own and renders every time. */ ''}
+        ${(() => {
+          const sh = st.opt && st.opt.findings ? st.opt.findings.shipped : null;
+          const fmtMeasured = v => (compFraming && compFraming.pricing_mode === 'local') ? 'no dollar figure' : fmtCost(v) + ' measured';
+          return html`
+          <div class="opt-card">
+            <div class="opt-card-title">Shipped</div>
+            ${!sh ? html`<div class="opt-card-stats"><div class="shimmer" style="height:44px;width:100%"></div></div>`
+              : !sh.sessions_total ? html`<div class="opt-card-body">No session in this window ran inside a git repo, so nothing could be joined to a commit.</div>`
+              : html`
+                <div class="opt-card-stats">
+                  <div><div class="v">${sh.sessions_shipped} / ${sh.sessions_total}</div><div class="l">sessions shipped a commit</div></div>
+                  <div><div class="v">${fmtMeasured(sh.cost_unshipped_usd)}</div><div class="l">unshipped · ${sh.sessions_unshipped} session${sh.sessions_unshipped !== 1 ? 's' : ''}</div></div>
+                  ${sh.cost_rework_usd != null ? html`<div><div class="v">${fmtMeasured(sh.cost_rework_usd)}</div><div class="l">rework within 14 days</div></div>` : null}
+                </div>
+                ${sh.coverage != null ? html`<div class="opt-card-body">${Math.round(sh.coverage * 100)}% of your default-branch commits in this window are joined to a session${sh.sessions_no_repo ? '; ' + sh.sessions_no_repo + ' session' + (sh.sessions_no_repo !== 1 ? 's' : '') + ' had no repo context and were not analysed' : ''}.</div>` : null}
+                ${(sh.top_unshipped || []).length ? html`
+                  <div class="opt-card-body">Largest unshipped: ${sh.top_unshipped.slice(0, 3).map((r, i) => html`${i ? ', ' : ''}<a class="sz-link" href=${'#/sessions/' + r.session_id}>${r.session_id.slice(0, 8)}</a> (${fmtCost(r.cost_usd)})`)}</div>` : null}`}
+            <div class="opt-card-acts">
+              <a class="opt-card-link" href="#/sessions?shipped=unshipped">Unshipped sessions →</a>
+              <span class="opt-card-note">tj optimize shipped</span>
+            </div>
+            ${sh ? html`<div class="opt-card-body" style="font-size:11px;color:var(--text-dim)">${sh.caveat}</div>` : null}
+          </div>`;
+        })()}
         <div class="opt-card">
           <div class="opt-card-title">Relearn</div>
           <div class="opt-card-body">
@@ -8767,7 +8850,7 @@ const GUIDE_ENTRIES = {
   'claude-code': {
     order: [
       // Live for Claude Code: these produce cards on the Optimize screen.
-      'downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn',
+      'downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn', 'shipped',
       // Gated off for Claude Code: documented here, never shown as an empty
       // card on Optimize.
       'cache', 'cache-recommend', 'reuse', 'script', 'trim', 'verbosity',
@@ -8822,6 +8905,13 @@ const GUIDE_ENTRIES = {
         description: [
           'The same mistake, session after session: the agent runs into the same class of problem repeatedly across sessions and works it out again each time, because nothing carried the answer forward.',
           'The fix is to write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
+        ],
+      },
+      shipped: {
+        title: 'Shipped',
+        description: [
+          'Shipped is about what a session left behind: it joins each session to the commits it produced, at a labelled confidence (a git commit tool call in the session, a session trailer on the commit, or an AI co-author trailer on the session\'s branch), and reports how many sessions shipped a commit to the default branch and what the sessions that shipped nothing cost.',
+          'It is a measurement, not a saving: an unshipped session can be research, review or operations work that was worth every token. Nothing here goes into the recoverable total, and the figure is there so you can review the largest unshipped sessions, not to cut them.',
         ],
       },
       // ---- Gated off for Claude Code, documented rather than hidden ---- //
@@ -13052,6 +13142,10 @@ function DashboardView({ params, persona }) {
   const driftRead = useTriageRead(() => api('/drift', { since, persona }), [since, persona]);
   const tracesRead = useTriageRead(() => api('/traces', { since, limit: 6, persona }), [since, persona]);
   const relearnRead = useTriageRead(() => api('/relearn/proposals', { since, persona }), [since, persona]);
+  // "Shipped vs unshipped this week" (ledger W2): a fixed 7d window on purpose,
+  // named in the tile's label, so the picker above cannot silently relabel it.
+  // Cheap SQL over the session -> commit join; no analyzer runs on the request.
+  const shippedRead = useTriageRead(() => api('/shipped', { since: '7d', persona }), [persona]);
   // The hero band's own read, on its own state machine, same as every other
   // panel here. `past_overspend` (`cost_proposals.past_overspend_rollup`,
   // gathered across cost proposals AND relearn clusters by
@@ -13297,6 +13391,17 @@ function DashboardView({ params, persona }) {
   const relearnClusters = (relearnRead.data && relearnRead.data.persona_scoped !== false
     && relearnRead.data.finding && relearnRead.data.finding.clusters) || [];
   const errTraces = traceList.filter(t => t.status_code === 'error').length;
+  const shippedWeek = shippedRead.data || null;
+  const shippedTileValue = shippedWeek
+    ? (shippedWeek.sessions_total ? shippedWeek.sessions_shipped + ' / ' + shippedWeek.sessions_total : '-')
+    : null;
+  // Measured spend on sessions that left no commit: labelled "measured" and
+  // never a saving. Local inference has no dollar figure at all.
+  const shippedTileSub = !shippedWeek ? null
+    : !shippedWeek.sessions_total ? 'no sessions in a repo'
+    : (shippedWeek.framing && shippedWeek.framing.pricing_mode === 'local')
+      ? shippedWeek.sessions_unshipped + ' unshipped'
+      : fmtCost(shippedWeek.cost_unshipped_usd) + ' unshipped (measured)';
 
   // Run-rate projection folded into a one-line caption under the explorer's KPI
   // row — the dashboard's single spend headline lives there, not as a separate
@@ -13509,6 +13614,8 @@ function DashboardView({ params, persona }) {
                     sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
                   <${HealthTile} label="Recent activity" value=${traceList.length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
                     status=${readStatus(tracesRead)} sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
+                  <${HealthTile} label="Shipped this week" value=${shippedTileValue} attention=${false} href="#/sessions?shipped=unshipped"
+                    status=${readStatus(shippedRead)} sub=${shippedTileSub} />
                 </div>
               </div>
             </div>`}

@@ -609,7 +609,7 @@ def test_lens_shipped_helpers_execute_under_node():
         pytest.skip("node not available for JS evaluation")
     ui = Path(__file__).parent.parent.parent / "tokenjam" / "ui" / "index.html"
     html = ui.read_text(encoding="utf-8")
-    start = html.index("function confidenceGlyph")
+    start = html.index("const CONFIDENCE_GLYPH")
     end = html.index("\n}\n", html.index("function shippedFilterKeep", start)) + 3
     cases = [
         [{"shipped_state": "shipped"}, "shipped"],
@@ -617,7 +617,8 @@ def test_lens_shipped_helpers_execute_under_node():
         [{"shipped_state": "reverted"}, "unshipped"],
         [{"shipped_state": "committed"}, "shipped"],
         [{"shipped_state": "no_repo"}, "unshipped"],
-        [{}, ""],
+        [{"shipped_state": "no_repo"}, ""],
+        [{}, "unshipped"],
     ]
     script = (
         html[start:end]
@@ -629,4 +630,4 @@ def test_lens_shipped_helpers_execute_under_node():
                           capture_output=True, text=True, check=True)
     glyphs, keeps = json.loads(proc.stdout)
     assert len(set(glyphs[:3])) == 3 and glyphs[3] == ""
-    assert keeps == [True, True, True, False, False, True]
+    assert keeps == [True, True, True, False, False, True, False]
