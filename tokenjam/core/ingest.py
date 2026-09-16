@@ -5,10 +5,17 @@ import logging
 import queue
 import threading
 import time
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from tokenjam.core.agent_kind import classify_agent_kind
-from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
+from tokenjam.core.models import (
+    SESSION_CONTEXT_FIELDS,
+    NormalizedSpan,
+    SessionContext,
+    SessionRecord,
+    SpanStatus,
+)
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.ids import new_uuid
@@ -192,6 +199,25 @@ def extract_request_capture(span: NormalizedSpan) -> None:
             except (ValueError, TypeError):
                 tools = {"raw": tools}
         span.request_tools = tools
+
+
+def _merge_session_context(session: SessionRecord, ctx: SessionContext | None) -> None:
+    """Copy the §3 values a span carries onto a session that lacks them.
+
+    Start-side columns are fixed at first observation (stored wins); the
+    `*_end` columns describe the latest observed state (incoming wins when
+    present). A None never erases. Same rule as `upsert_session`'s
+    ON CONFLICT clause, applied in Python because the live path reads the
+    row, mutates it and writes it back whole.
+    """
+    if ctx is None:
+        return
+    for name in SESSION_CONTEXT_FIELDS:
+        incoming = getattr(ctx, name)
+        if incoming is None:
+            continue
+        if name.endswith("_end") or getattr(session, name) is None:
+            setattr(session, name, incoming)
 
 
 class IngestPipeline:
@@ -567,6 +593,13 @@ class IngestPipeline:
                 existing.run_id = span.run_id
             if existing.parent_session_id is None and span.parent_session_id:
                 existing.parent_session_id = span.parent_session_id
+            # Repo context + identity (contracts §3/§4): fill what the row
+            # does not yet know, mirroring the DB's fill-null-only write. A
+            # session created by a span that carried nothing (or one that
+            # landed before `tj init` stamped anything) picks the values up
+            # from the first span that does; the END-side values track the
+            # latest span that names them.
+            _merge_session_context(existing, span.session_context)
             return existing
 
         # New session
@@ -601,6 +634,7 @@ class IngestPipeline:
             run_id=span.run_id,
             parent_session_id=span.parent_session_id,
             source=agent_kind.group or "sdk",
+            **(asdict(span.session_context) if span.session_context else {}),
         )
 
     def _resolve_project(self, agent_id: str | None) -> str | None:

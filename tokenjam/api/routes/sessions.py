@@ -52,7 +52,13 @@ from tokenjam.core.framing import (
     plan_determination_mix,
 )
 from tokenjam.core.method_spine import build_method_spine
-from tokenjam.core.models import AlertFilters, SessionRecord
+from tokenjam.core.models import (
+    SESSION_CONTEXT_FIELDS,
+    AlertFilters,
+    SessionContext,
+    SessionRecord,
+)
+from tokenjam.core.repo_context import repo_name_from_url
 from tokenjam.core.optimize.accounting import four_type_token_total
 from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.sessionmap import build_session_map
@@ -141,7 +147,9 @@ async def list_sessions(
     query = (
         "SELECT session_id, agent_id, started_at, total_cost_usd, "
         "input_tokens, output_tokens, cache_tokens, cache_write_tokens, "
-        "tool_call_count, error_count "
+        "tool_call_count, error_count, "
+        "repo_remote, repo_root, branch_start, branch_end, "
+        "head_sha_start, head_sha_end, developer_id, user_email "
         f"FROM sessions{where} ORDER BY started_at DESC"
     )
     # LIMIT AFTER the persona filter, never before: pushing it into SQL would
@@ -174,10 +182,23 @@ async def list_sessions(
             "cache_write_tokens": r[7] or 0,
             "tool_call_count": r[8] or 0,
             "error_count": r[9] or 0,
+            **session_context_payload(SessionContext(*r[10:18])),
         }
         for r in rows
     ]
     return {"sessions": sessions, "count": len(sessions)}
+
+
+def session_context_payload(ctx: SessionContext) -> dict[str, Any]:
+    """The eight ledger columns plus the two display derivations every
+    session surface renders: `repo` (`org/repo`, from the normalised
+    remote) and `branch` (where the session was LAST seen, falling back to
+    where it started). Null everywhere for a session with no context, never
+    a placeholder string the UI would have to special-case."""
+    payload: dict[str, Any] = {f: getattr(ctx, f) for f in SESSION_CONTEXT_FIELDS}
+    payload["repo"] = repo_name_from_url(ctx.repo_remote)
+    payload["branch"] = ctx.branch_end or ctx.branch_start
+    return payload
 
 
 @router.post("/sessions/close")
@@ -712,6 +733,7 @@ async def get_session_detail(request: Request, session_id: str):
             "error_count": session.error_count,
             "conversation_count": conversation_count,
             "active_alerts": len(active_alerts),
+            **session_context_payload(session.context),
         },
         "turn_count": turn_count,
         "model_mix": model_mix,

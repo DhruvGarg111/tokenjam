@@ -26,6 +26,7 @@ from tokenjam.core.config import (
 # would shadow the imported helper inside those functions.
 from tokenjam.core.config import global_config_path as _global_config_path
 from tokenjam.core.ingest_adapters.codex import ingest_codex
+from tokenjam.core.repo_context import ensure_install_id
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
 
@@ -475,6 +476,11 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
             "--project has been removed. The project name is now taken "
             "from the repo/folder name automatically."
         )
+    # The per-install identifier (`~/.tj/install_id`, contracts §3): generated
+    # exactly once, here, so every later `tj init` stamp and every bridge
+    # upload names the same install. Idempotent and silent; a failure to
+    # write it must never block onboarding, and never mints a fresh id.
+    ensure_install_id()
     # --add-project is the lightweight "register another repo" path: a fresh
     # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
     # the entire Claude Code history just to set one config key

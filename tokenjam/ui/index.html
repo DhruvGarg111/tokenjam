@@ -610,6 +610,10 @@ table.archive-list .a-id { color: var(--text); }
 /* Agent id can be long (claude-code-agent-<hash>); cap it and ellipsize, full
    value on hover, so it identifies the project without widening the table. */
 table.archive-list td.a-agent { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); }
+/* `org/repo · branch` is user data of unbounded length (a branch name can be
+   a whole sentence); same cap-and-ellipsize treatment as the agent id, so one
+   long branch never dictates the table's width. */
+table.archive-list td.a-repo { max-width: 260px; overflow: hidden; text-overflow: ellipsis; font-family: 'Geist Mono', monospace; font-size: 11px; }
 
 /* SDK services panel (Prometheus-style rows) */
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
@@ -3080,6 +3084,20 @@ function agentName(row) {
   return (row && (row.agent_display_name || row.agent_id)) || '-';
 }
 
+// `org/repo · branch` for a session row, from the `repo` + `branch` display
+// fields every session payload carries (/status, /sessions, /sessions/{id}).
+// Either half may be unknown: a session outside a git repo, or one ingested
+// before its transcript was read. Whatever is known is shown and nothing is
+// invented for the rest; both unknown yields '' so a caller can omit the
+// element rather than print a dash where a value is expected.
+function repoBranchLabel(row) {
+  if (!row) return '';
+  const parts = [];
+  if (row.repo) parts.push(row.repo);
+  if (row.branch) parts.push(row.branch);
+  return parts.join(' · ');
+}
+
 // Stripping a shared prefix can make two DIFFERENT agents render identically:
 // `claude-code-api` and `codex-api` both shorten to `api`. That is a list-level
 // property, so it cannot be decided per row on the server. Any short name
@@ -3539,6 +3557,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
           </div>
           ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
           ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
+          ${repoBranchLabel(a) ? html`<div class="card-row"><span class="label">Repo</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px" title=${a.repo_remote || ''}>${repoBranchLabel(a)}</span></div>` : null}
           <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
@@ -3577,6 +3596,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
               badge. */ ''}
         <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}${s.status === 'stale' ? html` <span class="badge badge-stale" style="margin-left:4px">stale</span>` : null}</td>
         <td class="a-agent" title=${s.agent_id || ''}>${archNames.get(s.agent_id) || agentName(s)}</td>
+        <td class="dim a-repo" title=${repoBranchLabel(s)}>${repoBranchLabel(s) || '-'}</td>
         <td class="num" style="color:var(--text);font-weight:600">${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
         <td class="dim">${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
         <td class="dim">${dur}</td>
@@ -3642,7 +3662,7 @@ function StatusView({ params, persona, personaKnown, routeView }) {
         </div>
         <div class="panel">
           <div class="table-wrap"><table class="archive-list">
-            <thead><tr><th>Session</th><th>Agent</th><th class="num">Cost</th><th>Tokens in / out</th><th>Duration</th><th class="num">Tools</th><th>Ended</th><th></th></tr></thead>
+            <thead><tr><th>Session</th><th>Agent</th><th>Repo · branch</th><th class="num">Cost</th><th>Tokens in / out</th><th>Duration</th><th class="num">Tools</th><th>Ended</th><th></th></tr></thead>
             <tbody>
               ${codingArchived.map(archRow)}
             </tbody>
@@ -4427,6 +4447,7 @@ function SessionDetailView({ sessionId }) {
       <span class="status-dot ${s.status}"></span>
       <div class="page-title" style="margin-bottom:0">${title}</div>
       <span class="ses-id-chip">${s.session_id}</span>
+      ${repoBranchLabel(s) ? html`<span class="ses-id-chip" title=${s.repo_remote || ''}>${repoBranchLabel(s)}</span>` : null}
       <span class="badge badge-${s.status}">${s.status}</span>
     </div>
 

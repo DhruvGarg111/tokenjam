@@ -34,6 +34,7 @@ from tokenjam.core.models import (
     PolicyDecisionRecord,
     SavingsLedgerEntry,
     SchemaValidationResult,
+    SESSION_CONTEXT_FIELDS,
     SessionRecord,
     SpanKind,
     SpanStatus,
@@ -927,6 +928,25 @@ MIGRATIONS: list[tuple[int, str]] = [
     # survive between analysis runs and be invalidated by the spec hash rather
     # than re-taken on a schedule.
     (22, AGENT_CONFIG_FILES_TABLE_SQL + ";\n" + AGENT_CONFIG_INDEX_SQL),
+    # Migration 23: repo context + developer identity on every session
+    # (shipped-value ledger, contracts §4). Which repo / branch / HEAD a
+    # session ran against and who ran it, so the next wave can join sessions
+    # to the commits they produced. All nullable: a session outside a git
+    # repo, or one whose telemetry carried no context, holds NULL, never a
+    # placeholder. `developer_id` is sha256(lower(user_email))[:16] and is
+    # what aggregates key on; `user_email` is kept beside it so a local
+    # reader can still name the author. Written fill-null-only on conflict
+    # (see `upsert_session`), so a backfill re-run fills gaps and never
+    # erases a value an earlier write resolved.
+    (23,
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS repo_remote TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS repo_root TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch_start TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch_end TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS head_sha_start TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS head_sha_end TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS developer_id TEXT;"
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_email TEXT"),
 ]
 
 
@@ -963,6 +983,14 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "source",                  "TEXT"),               # migration 21
     ("sessions", "task_statement_hash",     "TEXT"),               # migration 21
     ("sessions", "dominant_model",          "TEXT"),               # migration 21
+    ("sessions", "repo_remote",             "TEXT"),               # migration 23
+    ("sessions", "repo_root",               "TEXT"),               # migration 23
+    ("sessions", "branch_start",            "TEXT"),               # migration 23
+    ("sessions", "branch_end",              "TEXT"),               # migration 23
+    ("sessions", "head_sha_start",          "TEXT"),               # migration 23
+    ("sessions", "head_sha_end",            "TEXT"),               # migration 23
+    ("sessions", "developer_id",            "TEXT"),               # migration 23
+    ("sessions", "user_email",              "TEXT"),               # migration 23
 ]
 
 
@@ -1681,6 +1709,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         source=d.get("source"),
         task_statement_hash=d.get("task_statement_hash"),
         dominant_model=d.get("dominant_model"),
+        **{f: d.get(f) for f in SESSION_CONTEXT_FIELDS},
     )
 
 
@@ -3007,8 +3036,11 @@ class DuckDBBackend:
                     status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                     tool_call_count, error_count, plan_tier, service_namespace,
                     service_instance_id, cache_write_tokens, run_id, parent_session_id,
-                    source, task_statement_hash, dominant_model
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+                    source, task_statement_hash, dominant_model,
+                    repo_remote, repo_root, branch_start, branch_end,
+                    head_sha_start, head_sha_end, developer_id, user_email
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
+                          $22,$23,$24,$25,$26,$27,$28,$29)
                 ON CONFLICT (session_id) DO UPDATE SET
                     -- `started_at` was absent from this list entirely, which
                     -- made it WRITE-ONCE: whatever the first span to reach a
@@ -3062,7 +3094,20 @@ class DuckDBBackend:
                     -- prior write already resolved.
                     source = COALESCE(sessions.source, EXCLUDED.source),
                     task_statement_hash = COALESCE(sessions.task_statement_hash, EXCLUDED.task_statement_hash),
-                    dominant_model = COALESCE(sessions.dominant_model, EXCLUDED.dominant_model)
+                    dominant_model = COALESCE(sessions.dominant_model, EXCLUDED.dominant_model),
+                    -- Repo context + identity (migration 23): the START-side
+                    -- columns are fixed at first observation, so stored wins;
+                    -- the END-side ones describe the latest observed state,
+                    -- so an incoming non-NULL wins and a NULL never erases.
+                    -- Either way a re-run fills gaps and never clears a value.
+                    repo_remote = COALESCE(sessions.repo_remote, EXCLUDED.repo_remote),
+                    repo_root = COALESCE(sessions.repo_root, EXCLUDED.repo_root),
+                    branch_start = COALESCE(sessions.branch_start, EXCLUDED.branch_start),
+                    branch_end = COALESCE(EXCLUDED.branch_end, sessions.branch_end),
+                    head_sha_start = COALESCE(sessions.head_sha_start, EXCLUDED.head_sha_start),
+                    head_sha_end = COALESCE(EXCLUDED.head_sha_end, sessions.head_sha_end),
+                    developer_id = COALESCE(sessions.developer_id, EXCLUDED.developer_id),
+                    user_email = COALESCE(sessions.user_email, EXCLUDED.user_email)
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -3073,6 +3118,10 @@ class DuckDBBackend:
                     session.service_instance_id, session.cache_write_tokens,
                     session.run_id, session.parent_session_id,
                     session.source, session.task_statement_hash, session.dominant_model,
+                    session.repo_remote, session.repo_root,
+                    session.branch_start, session.branch_end,
+                    session.head_sha_start, session.head_sha_end,
+                    session.developer_id, session.user_email,
                 ],
             )
 

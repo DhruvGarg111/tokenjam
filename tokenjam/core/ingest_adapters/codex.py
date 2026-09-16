@@ -43,7 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -51,8 +51,10 @@ from typing import Any, Iterator
 from tokenjam.core.backfill import _existing_span_ids
 from tokenjam.core.cost import calculate_cost
 from tokenjam.core.pricing import classify_pricing_source
+from tokenjam.core.repo_context import normalise_remote_url, resolve_repo_context
 from tokenjam.core.models import (
     NormalizedSpan,
+    SessionContext,
     SessionRecord,
     SpanKind,
     SpanStatus,
@@ -105,6 +107,13 @@ class ParsedCodexSession:
     tool_call_count: int
     # See ParsedSession.records_undated in core/backfill.py.
     records_undated: int = 0
+    # From `session_meta.git` when the rollout carries it (newer Codex builds
+    # record `{commit_hash, branch, repository_url}` at session start). These
+    # are the values AT SESSION START, so they are trusted over anything git
+    # would say about the checkout today. None on builds that omit the block.
+    git_branch: str | None = None
+    git_commit: str | None = None
+    git_repository_url: str | None = None
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -170,6 +179,9 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
 
     session_id: str | None = None
     cwd: str | None = None
+    git_branch: str | None = None
+    git_commit: str | None = None
+    git_repository_url: str | None = None
     current_model: str | None = None
     earliest: datetime | None = None
     latest: datetime | None = None
@@ -217,6 +229,13 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
                 session_id = payload.get("session_id") or payload.get("id")
             if cwd is None:
                 cwd = payload.get("cwd")
+            git_meta = payload.get("git")
+            if isinstance(git_meta, dict):
+                git_branch = git_branch or _clean_str(git_meta.get("branch"))
+                git_commit = git_commit or _clean_str(git_meta.get("commit_hash"))
+                git_repository_url = git_repository_url or _clean_str(
+                    git_meta.get("repository_url")
+                )
             continue
 
         if rtype == "turn_context":
@@ -367,6 +386,9 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
         records_undated=records_undated,
+        git_branch=git_branch,
+        git_commit=git_commit,
+        git_repository_url=git_repository_url,
     )
 
 
@@ -422,6 +444,34 @@ def session_record_from_parsed(
         # (mirrors backfill.session_record_from_parsed's Claude Code source
         # tag), not a heuristic.
         source="codex",
+        **asdict(_codex_session_context(parsed)),
+    )
+
+
+def _clean_str(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _codex_session_context(parsed: ParsedCodexSession) -> SessionContext:
+    """Repo context for a rollout (contracts §3/§4).
+
+    The rollout's own `session_meta.git` block is the authority for the
+    branch, HEAD and remote at session START when present. Repo root and the
+    author come from git in the session's cwd; when the rollout carried no
+    remote, git's `origin` fills it. Nothing here names a HEAD the session did
+    not record: `head_sha_start` is the rollout's `commit_hash` or None.
+    """
+    ctx = resolve_repo_context(parsed.cwd)
+    remote = normalise_remote_url(parsed.git_repository_url) or ctx.remote_url
+    return SessionContext(
+        repo_remote=remote,
+        repo_root=ctx.repo_root,
+        branch_start=parsed.git_branch,
+        head_sha_start=parsed.git_commit,
+        developer_id=ctx.developer_id,
+        user_email=ctx.user_email,
     )
 
 

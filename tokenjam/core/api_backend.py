@@ -312,6 +312,12 @@ class ApiBackend:
             cache_write_tokens=a.get("cache_write_tokens", 0) or 0,
             tool_call_count=a.get("tool_call_count", 0) or 0,
             error_count=a.get("error_count", 0) or 0,
+            # Repo context as /status publishes it: the remote verbatim, and
+            # the one display branch it resolved (`branch_end or
+            # branch_start`) parked on `branch_start` so `tj status`'s card
+            # reads the same value either way.
+            repo_remote=a.get("repo_remote"),
+            branch_start=a.get("branch"),
         )][:limit]
 
     def get_completed_session_count(self, agent_id: str) -> int:

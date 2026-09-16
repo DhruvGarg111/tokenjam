@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.alerts import agent_display_name, is_interactive_coding_agent
+from tokenjam.core.repo_context import repo_name_from_url
 from tokenjam.core.transcript import (
     resolve_projects_root,
     session_transcript_mtime,
@@ -204,6 +205,11 @@ def _build_archive(
             ),
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "last_span_time": s.ended_at.isoformat() if s.ended_at else None,
+            # Repo context (contracts §3) for the Sessions view's repo ·
+            # branch column: display derivations only; the full columns are
+            # on /sessions and /sessions/{id}.
+            "repo": repo_name_from_url(s.repo_remote),
+            "branch": s.branch_end or s.branch_start,
         })
         if len(archived) >= ARCHIVE_LIMIT:
             break
@@ -482,6 +488,12 @@ async def get_status(
                 ),
                 # Per-agent count of current sessions hidden by the tile cap.
                 "overflow": overflow,
+                # Repo context (contracts §3): where this session is running.
+                # `repo_remote` rides along so the CLI's serve-mode shim can
+                # rebuild the same SessionRecord fields the DB path reads.
+                "repo": repo_name_from_url(session.repo_remote),
+                "repo_remote": session.repo_remote,
+                "branch": session.branch_end or session.branch_start,
             })
 
     # SDK-services zone: non-interactive agents with per-minute sparkline series

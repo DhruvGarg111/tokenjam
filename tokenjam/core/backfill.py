@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -33,6 +33,7 @@ from tokenjam.core import system_prefix
 from tokenjam.core.config import CaptureConfig
 from tokenjam.core.method_capture import capture_session_method
 from tokenjam.core.optimize.repeat_task import hash_task_statement
+from tokenjam.core.repo_context import session_context_for_cwd
 from tokenjam.core.models import (
     SESSION_STALE_THRESHOLD,
     NormalizedSpan,
@@ -174,6 +175,14 @@ class ParsedSession:
     # model shouldn't drown out what the session itself mostly ran on). None
     # when the file carries no priced assistant turn.
     dominant_model: str | None = None
+    # The transcript's own `gitBranch` at its first and last dated record.
+    # Claude Code stamps it on every record, so this is the branch the session
+    # STARTED on and the one it was last seen on, read off the file rather
+    # than off git today (which would name whatever the checkout is on now).
+    # None when the transcript never carried one (older Claude Code builds, or
+    # a cwd outside a repo).
+    git_branch_start: str | None = None
+    git_branch_end: str | None = None
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -415,6 +424,10 @@ def parse_claude_code_session(
     # Captured unconditionally (never gated on `[capture] prompts` — see
     # `ParsedSession.first_user_prompt`'s docstring for why that's safe).
     first_user_prompt: str | None = None
+    # `gitBranch` at the first and last record that carries one (see
+    # `ParsedSession.git_branch_start` / `git_branch_end`).
+    git_branch_start: str | None = None
+    git_branch_end: str | None = None
     # Main-thread-only per-model token totals, for `ParsedSession.dominant_model`.
     _model_tokens: dict[str, int] = {}
 
@@ -478,6 +491,14 @@ def parse_claude_code_session(
             # first record that reveals cwd) rather than parsed and priced.
             if cwd is not None and is_tokenjam_invoke_cwd(cwd):
                 return None
+        git_branch = record.get("gitBranch")
+        # A detached checkout is recorded as the literal "HEAD", which is
+        # not a branch; storing it would let the next wave join on it.
+        if isinstance(git_branch, str) and git_branch.strip() and git_branch.strip() != "HEAD":
+            git_branch = git_branch.strip()
+            if git_branch_start is None:
+                git_branch_start = git_branch
+            git_branch_end = git_branch
 
         rtype = record.get("type")
         if rtype == "user" and not record.get("isMeta"):
@@ -740,6 +761,8 @@ def parse_claude_code_session(
         dominant_model=(
             max(_model_tokens, key=lambda m: _model_tokens[m]) if _model_tokens else None
         ),
+        git_branch_start=git_branch_start,
+        git_branch_end=git_branch_end,
     )
 
 
@@ -888,6 +911,15 @@ def session_record_from_parsed(
         source="claude-code",
         task_statement_hash=hash_task_statement(parsed.first_user_prompt),
         dominant_model=parsed.dominant_model,
+        # Repo context + identity (contracts §3/§4): branch from the
+        # transcript, repo + author from git in the session's cwd, HEAD sha
+        # deliberately absent (git today cannot name the commit the session
+        # started on). Fill-null-only on write, so a re-run fills gaps.
+        **asdict(session_context_for_cwd(
+            parsed.cwd,
+            branch_start=parsed.git_branch_start,
+            branch_end=parsed.git_branch_end,
+        )),
     )
 
 
