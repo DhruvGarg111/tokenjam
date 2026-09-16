@@ -96,6 +96,7 @@ def create_app(
     from tokenjam.api.routes.relearn import router as relearn_router
     from tokenjam.api.routes.recommendations import router as recommendations_router
     from tokenjam.api.routes.persona import router as persona_router
+    from tokenjam.api.routes.shipped import router as shipped_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -105,6 +106,7 @@ def create_app(
     app.include_router(drift_router, prefix="/api/v1")
     app.include_router(status_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
+    app.include_router(shipped_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(budget_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")

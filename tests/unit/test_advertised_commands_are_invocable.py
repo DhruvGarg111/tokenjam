@@ -234,3 +234,23 @@ def test_both_verbose_positions_and_every_drill_down_parse(command):
     user types works. Both are booleans meaning the same thing; the command
     ORs them, so there is no precedence question."""
     assert_invocable(command)
+
+
+def test_every_command_the_shipped_finding_advertises_runs(capsys):
+    """The Shipped card points at the largest unshipped sessions with a
+    command; a capped list is only defensible if that command runs."""
+    from tokenjam.cli.cmd_optimize import _render_shipped
+    from tokenjam.core.optimize.analyzers.shipped import ShippedFinding
+
+    finding = ShippedFinding(
+        window_days=30.0, sessions_total=3, sessions_shipped=1, sessions_unshipped=2,
+        cost_shipped_usd=1.0, cost_unshipped_usd=4.0, coverage=0.5,
+        top_unshipped=[{"session_id": "abcdef12-0000", "cost_usd": 3.0, "started_at": None,
+                        "repo": "Acme/widgets", "branch": "main", "state": "unshipped"}],
+    )
+    _render_shipped(finding, pricing_mode="api")
+    rendered = capsys.readouterr().out
+    commands = advertised_commands(rendered)
+    assert commands, rendered
+    for command in commands:
+        assert_invocable(command)

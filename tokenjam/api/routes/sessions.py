@@ -59,6 +59,12 @@ from tokenjam.core.models import (
     SessionRecord,
 )
 from tokenjam.core.repo_context import repo_name_from_url
+from tokenjam.core.shipped import (
+    STATE_NO_REPO,
+    session_commits_payload,
+    session_shipped_state,
+    shipped_states,
+)
 from tokenjam.core.optimize.accounting import four_type_token_total
 from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.sessionmap import build_session_map
@@ -167,6 +173,8 @@ async def list_sessions(
         rows = [r for r in rows if is_interactive_coding_agent(r[1]) == want_coding]
         if limit is not None:
             rows = rows[:limit]
+    # Shipped state per row in ONE query (ledger W2), never one per session.
+    states = shipped_states(conn, [r[0] for r in rows])
     sessions = [
         {
             "session_id": r[0],
@@ -174,6 +182,7 @@ async def list_sessions(
             # Display only; `agent_id` beside it stays the identity. See
             # `alerts.agent_display_name`.
             "agent_display_name": agent_display_name(r[1]),
+            **states.get(r[0], {"shipped_state": STATE_NO_REPO, "commit_count": 0}),
             "started_at": r[2].isoformat() if r[2] else None,
             "total_cost_usd": float(r[3]) if r[3] else 0.0,
             "input_tokens": r[4] or 0,
@@ -734,7 +743,11 @@ async def get_session_detail(request: Request, session_id: str):
             "conversation_count": conversation_count,
             "active_alerts": len(active_alerts),
             **session_context_payload(session.context),
+            # Derived at read time from the ledger tables (contracts §4, brief
+            # §3): SQL only, no git on a request.
+            "shipped_state": session_shipped_state(db.conn, session_id),
         },
+        "commits": session_commits_payload(db, session_id),
         "turn_count": turn_count,
         "model_mix": model_mix,
         "subagents": subagents,

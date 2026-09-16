@@ -27,6 +27,7 @@ CARD_FINDING_NAMES: tuple[str, ...] = (
     "placement",
     "summarize",
     "stream-usage",
+    "shipped",
 )
 
 # Findings that must never collapse into the "Minor findings" pointer by

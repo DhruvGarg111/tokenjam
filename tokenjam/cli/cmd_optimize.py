@@ -350,6 +350,16 @@ def cmd_optimize(
                     )
                 return
 
+            # The session -> commit join the `shipped` analyzer reads is kept
+            # by the daemon's pass; with a direct connection in hand (the
+            # daemon is not holding the lock) refresh it here first, so a
+            # CLI-only user is not one pass behind their own repo. Read-only
+            # git, bounded, never raises (see `core/shipped`).
+            if analyzer_findings is None or "shipped" in analyzer_findings:
+                from tokenjam.core.shipped import match_sessions_to_commits
+
+                match_sessions_to_commits(db, config)
+
             report = build_report(
                 db=db,
                 config=config,
@@ -610,6 +620,7 @@ _MINOR_FINDING_LABELS = {
     "placement":       "Batch placement",
     "summarize":       "Summarize",
     "stream-usage":    "Streaming usage gap",
+    "shipped":         "Shipped",
 }
 
 
@@ -1283,6 +1294,15 @@ def _summarize_stream_usage(f: Any) -> tuple[str, str] | None:
     )
 
 
+def _summarize_shipped(f: Any) -> tuple[str, str] | None:
+    if not f.sessions_total:
+        return None
+    return (
+        f"{f.sessions_shipped} of {f.sessions_total} sessions shipped a commit",
+        "which sessions did not",
+    )
+
+
 # Dispatch table — analyzer registration name → one-line summarizer. Mirrors
 # `_FINDING_RENDERERS`; a summarizer returns None when its analyzer ran and
 # found nothing, which is how a clean analyzer earns no row.
@@ -1301,6 +1321,7 @@ _FINDING_SUMMARIES = {
     "placement":     _summarize_placement,
     "summarize":     _summarize_summarize,
     "stream-usage":  _summarize_stream_usage,
+    "shipped":       _summarize_shipped,
 }
 
 # Findings whose headline figure is NOT a recoverable amount, so the
@@ -1308,7 +1329,9 @@ _FINDING_SUMMARIES = {
 # `stream-usage` carries `undercounted_usd`: spend that already happened and
 # was never recorded. A data-quality number sitting in a savings column is
 # read as a saving.
-_UNPRICED_IN_SCOREBOARD = {"stream-usage"}
+# `shipped` carries MEASURED cost of sessions that left no commit: output, not
+# waste (contracts §1), so it never reads as a saving either.
+_UNPRICED_IN_SCOREBOARD = {"stream-usage", "shipped"}
 
 
 def _scoreboard_recoverable(name: str, finding: Any, framing: Framing) -> str:
@@ -3511,6 +3534,86 @@ def _render_stream_usage(
     _render_prose(finding.accounting_note, style="dim")
 
 
+def _render_shipped(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """Render what the window shipped and what the rest cost (ledger W2).
+
+    Measure ROI, not a saving: every dollar here is MEASURED spend, labelled
+    so (contracts §1), and the caveat is printed verbatim every time because
+    an unshipped session is not a wasted one.
+    """
+    console.print(_finding_header(marker, "Shipped:"))
+    if not finding.sessions_total:
+        console.print(
+            "     [dim]No session in this window ran inside a git repo, so nothing "
+            "could be joined to a commit. Sessions get repo context from the Claude "
+            "Code / Codex backfill and from `tj init`.[/dim]"
+        )
+        return
+    unit = "session" if finding.sessions_total == 1 else "sessions"
+    console.print(
+        f"     • Shipped [bold]{finding.sessions_shipped} of {finding.sessions_total}[/bold] "
+        f"{unit} [dim](a joined commit reached the default branch)[/dim]"
+    )
+    dollars = pricing_mode != "local"
+
+    def _measured(label: str, usd: float | None, n: int | None = None) -> None:
+        count = f" · {_plural(n, 'session')}" if n is not None else ""
+        if usd is None:
+            return
+        fig = f"{format_cost(usd)} measured" if dollars else "no dollar figure on local inference"
+        console.print(f"     [dim]{label}[/dim] {fig}{count}")
+
+    _measured("unshipped", finding.cost_unshipped_usd, finding.sessions_unshipped)
+    if finding.sessions_committed:
+        _measured("committed, not on default branch", finding.cost_committed_usd,
+                  finding.sessions_committed)
+    _measured("shipped", finding.cost_shipped_usd, finding.sessions_shipped)
+    if finding.cost_rework_usd is not None:
+        _measured("rework", finding.cost_rework_usd)
+    if finding.cost_loop_usd is not None:
+        _measured("edit loops", finding.cost_loop_usd)
+    if finding.coverage is not None:
+        console.print(
+            f"     [dim]coverage[/dim] {finding.coverage * 100:.0f}% of your default-branch "
+            f"commits in this window are joined to a session"
+        )
+    if finding.sessions_no_repo:
+        console.print(
+            f"     [dim]{_plural(finding.sessions_no_repo, 'session')} had no repo context "
+            f"and {'was' if finding.sessions_no_repo == 1 else 'were'} not analysed.[/dim]"
+        )
+    if finding.top_unshipped:
+        console.print("     [dim]Largest unshipped:[/dim]")
+        for row in finding.top_unshipped[:TOP_UNSHIPPED_ROWS]:
+            where = " · ".join(p for p in (row.get("repo"), row.get("branch")) if p)
+            fig = format_cost(row.get("cost_usd") or 0.0) if dollars else ""
+            state = f" [dim]({row['state']})[/dim]" if row.get("state") == "reverted" else ""
+            console.print(
+                f"       {_rich_escape(str(row.get('session_id', ''))[:8])}  {fig}  "
+                f"[dim]{_rich_escape(where)}[/dim]{state}"
+            )
+        console.print(
+            "       [dim]Open one with [bold]tj session-story <session_id>[/bold] "
+            "or the Sessions view.[/dim]"
+        )
+    if finding.top_reworked:
+        console.print("     [dim]Most reworked paths:[/dim]")
+        for row in finding.top_reworked[:TOP_UNSHIPPED_ROWS]:
+            console.print(
+                f"       {_rich_escape(row['path'])}  [dim]{_plural(row['sessions'], 'session')}"
+                f"{' · ' + format_cost(row['cost_usd']) if dollars else ''}[/dim]"
+            )
+    for basis in (finding.rework_basis, finding.loop_basis):
+        if basis:
+            _render_prose(basis, style="dim")
+    _render_prose(finding.caveat, style="dim")
+
+
+TOP_UNSHIPPED_ROWS = 5
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -3526,4 +3629,5 @@ _FINDING_RENDERERS = {
     "placement":    _render_placement,
     "summarize":    _render_summarize,
     "stream-usage": _render_stream_usage,
+    "shipped":      _render_shipped,
 }

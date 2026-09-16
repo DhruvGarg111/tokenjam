@@ -301,6 +301,13 @@ def _trigger_analyzer_pass(
             record = cycle_provenance.begin_cycle(
                 config, conn=getattr(backend, "conn", None), anchor=anchor,
             )
+            # Session -> commit join FIRST, so the `shipped` analyzer in the
+            # report below reads a ledger that is current as of this pass. It
+            # is the one leg that shells out to git (read-only, 2s timeout per
+            # call) and it may only ever run here or from a direct-DB
+            # `tj optimize`, never on a request. Best-effort: a failure leaves
+            # the previous join in place and the report still builds.
+            _match_session_commits(backend, config)
             stored = report_store.recompute_now(backend, config, provenance=record)
             if stored is None:
                 # The overlap guard declined between the check above and here.
@@ -383,6 +390,24 @@ def _trigger_analyzer_pass(
         _CYCLE_COMPUTING.clear()
         raise
     return True
+
+
+def _match_session_commits(backend: Any, config: Any) -> None:
+    """Refresh the session -> commit join (`core/shipped`) for this pass.
+
+    Swallows everything except a DuckDB fatal, which is re-raised so the
+    cycle's own classifier (`handle_if_fatal`) sees it: a stale ledger is a
+    one-pass lag, a dead database instance is not.
+    """
+    try:
+        from tokenjam.core.shipped import match_sessions_to_commits
+
+        match_sessions_to_commits(backend, config)
+    except Exception as exc:  # noqa: BLE001 - classified, see docstring
+        from tokenjam.core.db import is_fatal_db_error
+
+        if is_fatal_db_error(exc):
+            raise
 
 
 def _refresh_attribution_cache(backend: Any, config: Any) -> None:

@@ -136,6 +136,12 @@ def cmd_status(
             # ran against. None when unknown; the card omits the line.
             "repo": repo_name_from_url(session.repo_remote) if session else None,
             "branch": (session.branch_end or session.branch_start) if session else None,
+            # Shipped-value ledger: of this agent's sessions in the last
+            # `SHIPPED_WINDOW_DAYS`, how many left a commit on the default
+            # branch, and the MEASURED cost of the ones that left none. None
+            # when nothing could be joined (no repo context), so the card
+            # omits the line rather than printing "0 of 0".
+            "shipped": _shipped_for_agent(db, aid),
         }
         agents_data.append(agent_data)
         entries.append((agent_data, active_alerts, session))
@@ -408,6 +414,43 @@ def _last_activity(session: object | None):
     return getattr(session, "ended_at", None) or getattr(session, "started_at", None)
 
 
+#: The window the `tj status` card's shipped line reads over.
+SHIPPED_WINDOW_DAYS = 30
+
+
+def _shipped_for_agent(db: object, agent_id: str) -> dict | None:
+    """`{sessions_total, sessions_shipped, cost_unshipped_usd, window_days}`
+    for one agent, or None when no session of theirs had repo context.
+    Direct DB: `core.shipped.shipped_summary`; serve mode: `/api/v1/shipped`
+    through the shim. Never raises: the card must render without it."""
+    try:
+        if hasattr(db, "conn"):
+            from datetime import timedelta
+
+            from tokenjam.core.shipped import shipped_summary
+
+            until = utcnow()
+            summary = shipped_summary(
+                db.conn, until - timedelta(days=SHIPPED_WINDOW_DAYS), until, agent_id=agent_id,
+            )
+            payload = summary.to_dict()
+        else:
+            fetch = getattr(db, "fetch_shipped", None)
+            if fetch is None:
+                return None
+            payload = fetch(since=f"{SHIPPED_WINDOW_DAYS}d", agent_id=agent_id)
+    except Exception:
+        return None
+    if not payload.get("sessions_total"):
+        return None
+    return {
+        "sessions_total": int(payload["sessions_total"]),
+        "sessions_shipped": int(payload["sessions_shipped"]),
+        "cost_unshipped_usd": round(float(payload["cost_unshipped_usd"] or 0.0), 6),
+        "window_days": SHIPPED_WINDOW_DAYS,
+    }
+
+
 def _repo_branch_label(repo: str | None, branch: str | None) -> str:
     """`org/repo · branch`, or whichever half is known. Never a placeholder
     for the missing half: an unknown branch is simply not printed."""
@@ -537,6 +580,15 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None)
     # branch are user data (a branch can carry `[...]`), so both are escaped.
     if data.get("repo") or data.get("branch"):
         console.print(f"  Repo:           {_repo_branch_label(data['repo'], data['branch'])}")
+
+    shipped = data.get("shipped")
+    if shipped:
+        n, m = shipped["sessions_shipped"], shipped["sessions_total"]
+        console.print(
+            f"  Shipped:        Shipped {n} of {m} session{'' if m == 1 else 's'} · "
+            f"{format_cost(shipped['cost_unshipped_usd'])} unshipped "
+            f"[dim](measured, last {shipped['window_days']}d)[/dim]"
+        )
 
     console.print()
     for alert, count in _dedupe_alerts(active_alerts):
