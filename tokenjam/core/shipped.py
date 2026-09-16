@@ -83,6 +83,12 @@ GIT_TIMEOUT_S = 2.0
 #: large history stays bounded; the watermark carries the rest to the next.
 MAX_SESSIONS_PER_PASS = 4000
 MAX_REWORK_COMMITS_PER_PASS = 400
+#: Late evidence (a note attached after the fact, a rebased trailer, a bridge
+#: id or tool spans a later backfill filled in) does not move a session's
+#: `ended_at`, so a session younger than `RESCAN_HORIZON` is re-scanned once
+#: its last scan is older than `RESCAN_AFTER`, until it ages out.
+RESCAN_AFTER = timedelta(hours=24)
+RESCAN_HORIZON = timedelta(days=30)
 #: Rows to carry on the finding.
 TOP_N = 5
 
@@ -290,7 +296,7 @@ def _log_range(root: str, spec: list[str]) -> list[GitCommit]:
 
 
 def _default_branch(root: str) -> str | None:
-    """`origin/HEAD`'s branch, else `main`, else `master`, else the current."""
+    """`origin/HEAD`'s branch name, else `main`, else `master`, else the current."""
     out = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], root)
     if out and out.strip():
         return out.strip().split("/", 1)[-1] or None
@@ -301,6 +307,19 @@ def _default_branch(root: str) -> str | None:
     if out and out.strip() and out.strip() != "HEAD":
         return out.strip()
     return None
+
+
+def _default_refs(root: str, branch: str) -> list[str]:
+    """The refs that together mean "the default branch": the remote-tracking
+    ref (what was merged upstream; tj never fetches, so it is as fresh as the
+    user's last fetch) AND the local branch (a merge not pushed yet). Either
+    alone is wrong in one direction: a checkout on a feature branch whose
+    local `main` is stale would miss upstream merges, and the remote alone
+    would miss local ones."""
+    return [
+        ref for ref in (f"refs/remotes/origin/{branch}", f"refs/heads/{branch}")
+        if _has_ref(root, ref)
+    ]
 
 
 def _rev(root: str, ref: str) -> str | None:
@@ -400,7 +419,9 @@ class _Session:
         return self.started_at - WINDOW_BEFORE, self.ended_at + WINDOW_AFTER
 
 
-def _candidate_sessions(conn, limit: int) -> list[_Session]:
+def _candidate_sessions(conn, limit: int, now: datetime) -> list[_Session]:
+    """Sessions never scanned, changed since their scan (`ended_at` moved), or
+    recent enough that late evidence may still arrive (see `RESCAN_AFTER`)."""
     rows = conn.execute(
         """
         SELECT s.session_id, s.repo_root, s.repo_remote, s.branch_start, s.branch_end,
@@ -412,11 +433,12 @@ def _candidate_sessions(conn, limit: int) -> list[_Session]:
           AND s.started_at IS NOT NULL
           AND (sc.session_id IS NULL
                OR sc.ended_at IS NULL
-               OR COALESCE(s.ended_at, s.started_at) > sc.ended_at)
+               OR COALESCE(s.ended_at, s.started_at) > sc.ended_at
+               OR (sc.scanned_at < $2 AND COALESCE(s.ended_at, s.started_at) > $3))
         ORDER BY COALESCE(s.ended_at, s.started_at) DESC
         LIMIT $1
         """,
-        [limit],
+        [limit, now - RESCAN_AFTER, now - RESCAN_HORIZON],
     ).fetchall()
     out: list[_Session] = []
     for r in rows:
@@ -427,7 +449,7 @@ def _candidate_sessions(conn, limit: int) -> list[_Session]:
     return out
 
 
-def _resolve_roots(conn, sessions: list[_Session]) -> tuple[dict[str, str], int]:
+def _resolve_roots(conn, sessions: list[_Session]) -> tuple[dict[str, str], int, dict[str, str]]:
     """`session_id -> usable repo root`. A session whose own root is gone
     (a deleted worktree) borrows any live root with the same remote: worktrees
     share one object store, so `git log --all` there sees its branches."""
@@ -447,7 +469,7 @@ def _resolve_roots(conn, sessions: list[_Session]) -> tuple[dict[str, str], int]
             resolved[s.session_id] = live_by_remote[s.repo_remote]
         else:
             missing += 1
-    return resolved, missing
+    return resolved, missing, live_by_remote
 
 
 def _commit_tool_spans(conn, session_ids: list[str]) -> dict[str, list[datetime]]:
@@ -512,19 +534,31 @@ def _index_repo(conn, root: str, remote: str | None, oldest: datetime, now: date
     branch = _default_branch(root)
     if branch is None:
         return False
-    tip = _rev(root, branch)
-    if tip is None:
+    refs = _default_refs(root, branch)
+    tips = [t for t in (_rev(root, r) for r in refs) if t]
+    if not tips:
         return False
+    tip = ",".join(sorted(set(tips)))
     state = conn.execute(
         "SELECT default_tip FROM ledger_repo_state WHERE repo_root = $1", [root],
     ).fetchone()
     old_tip = state[0] if state else None
     if old_tip == tip:
         return True
-    if old_tip and _is_ancestor(root, old_tip, branch):
-        commits = _log_range(root, [f"{old_tip}..{branch}"])
+    old_tips = [t for t in (old_tip or "").split(",") if t]
+    # Incremental only while every previously indexed tip is still reachable
+    # from the branch; a rewritten history (force push, reset) re-indexes from
+    # scratch, and the rows the old history put here go with it, or a commit
+    # force-pushed away would stay "shipped" and a stale revert would keep
+    # flipping a session's state.
+    intact = bool(old_tips) and all(
+        any(_is_ancestor(root, t, ref) for ref in refs) for t in old_tips
+    )
+    if intact:
+        commits = _log_range(root, [*refs, "--not", *old_tips])
     else:
-        commits = _log_range(root, [branch, f"--since={(oldest - timedelta(days=1)).isoformat()}"])
+        conn.execute("DELETE FROM repo_commits WHERE repo_root = $1", [root])
+        commits = _log_range(root, [*refs, f"--since={(oldest - timedelta(days=1)).isoformat()}"])
     for c in commits:
         conn.execute(
             "INSERT INTO repo_commits (repo_root, commit_sha, repo_remote, author_email, "
@@ -704,10 +738,8 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
         return result
     now = _utc(now) or utcnow()
     lock = getattr(db, "write_lock", None)
-    sessions = _candidate_sessions(conn, MAX_SESSIONS_PER_PASS)
-    if not sessions:
-        return result
-    roots, result.repos_missing = _resolve_roots(conn, sessions)
+    sessions = _candidate_sessions(conn, MAX_SESSIONS_PER_PASS, now)
+    roots, result.repos_missing, live_by_remote = _resolve_roots(conn, sessions)
     known_ids, by_bridge = _session_index(conn)
     tool_times = _commit_tool_spans(conn, [s.session_id for s in sessions if s.session_id in roots])
 
@@ -716,14 +748,23 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
         root = roots.get(s.session_id)
         if root:
             by_root[root].append(s)
+    # Every live repo is re-indexed each pass, not only the ones with a
+    # session due for a scan: a merge that lands weeks after the session
+    # ended flips its state through the index alone, and the tip comparison
+    # makes an unchanged repo a no-op.
+    for live_root in live_by_remote.values():
+        by_root.setdefault(live_root, [])
 
     rework_budget = MAX_REWORK_COMMITS_PER_PASS
     for root, group in by_root.items():
-        oldest = min(s.started_at for s in group)
-        remote = next((s.repo_remote for s in group if s.repo_remote), None)
+        oldest = min((s.started_at for s in group), default=None) or _oldest_session_start(conn, root, now)
+        remote: str | None = next((s.repo_remote for s in group if s.repo_remote), None) or next(
+            (r for r, rt in live_by_remote.items() if rt == root), None)
         try:
             if _index_repo(conn, root, remote, oldest, now):
                 result.repos_indexed += 1
+            if not group:
+                continue
             notes_refs = [r for r in ("ai", "exceeds-ink") if _has_ref(root, f"refs/notes/{r}")]
             for s in group:
                 since, until = s.window
@@ -759,6 +800,15 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
     return result
 
 
+def _oldest_session_start(conn, root: str, now: datetime) -> datetime:
+    row = conn.execute(
+        "SELECT MIN(started_at) FROM sessions WHERE repo_root = $1", [root],
+    ).fetchone()
+    if row is None or row[0] is None:
+        return now
+    return _utc(row[0]) or now
+
+
 class _NullLock:
     def __enter__(self) -> None:
         return None
@@ -769,20 +819,23 @@ class _NullLock:
 
 # --- Read side -------------------------------------------------------------------
 
+# One row per (session, commit), always: the default-branch index can hold the
+# same sha under several roots of one remote (a clone and a worktree both
+# indexed), so membership is an EXISTS, never a join that would multiply rows.
 _STATE_SQL = """
     WITH joined AS (
         SELECT sc.session_id, sc.commit_sha, sc.confidence, sc.source,
-               (rc.commit_sha IS NOT NULL) AS on_default,
-               (rv.commit_sha IS NOT NULL) AS reverted
+               EXISTS (SELECT 1 FROM repo_commits rc
+                       WHERE rc.commit_sha = sc.commit_sha
+                         AND (rc.repo_root = s.repo_root OR rc.repo_remote = s.repo_remote))
+                   AS on_default,
+               EXISTS (SELECT 1 FROM repo_commits rv
+                       WHERE rv.reverts_sha IS NOT NULL
+                         AND sc.commit_sha LIKE rv.reverts_sha || '%'
+                         AND (rv.repo_root = s.repo_root OR rv.repo_remote = s.repo_remote))
+                   AS reverted
         FROM session_commits sc
         JOIN sessions s ON s.session_id = sc.session_id
-        LEFT JOIN repo_commits rc
-               ON rc.commit_sha = sc.commit_sha
-              AND (rc.repo_root = s.repo_root OR rc.repo_remote = s.repo_remote)
-        LEFT JOIN repo_commits rv
-               ON rv.reverts_sha IS NOT NULL
-              AND sc.commit_sha LIKE rv.reverts_sha || '%'
-              AND (rv.repo_root = s.repo_root OR rv.repo_remote = s.repo_remote)
         WHERE sc.confidence IN ('deterministic', 'inferred')
     )
 """
@@ -791,7 +844,8 @@ _STATE_SQL = """
 def _state_from_counts(joined: int, on_default: int, reverted: int) -> str:
     if joined == 0:
         return STATE_UNSHIPPED
-    if on_default - reverted > 0:
+    # `on_default` is already "on the default branch AND not reverted".
+    if on_default > 0:
         return STATE_SHIPPED
     if reverted >= joined:
         return STATE_REVERTED
@@ -1009,11 +1063,13 @@ def _add_rework(conn, summary: ShippedSummary, where: str, params: list[Any]) ->
     rows = conn.execute(
         f"""
         WITH per_commit AS (
-            SELECT sc.session_id, sc.commit_sha, f.path, f.additions, f.later_deletions
+            SELECT sc.session_id, sc.commit_sha, f.path,
+                   MAX(f.additions) AS additions, MAX(f.later_deletions) AS later_deletions
             FROM session_commits sc
             JOIN sessions s ON s.session_id = sc.session_id
             JOIN commit_file_stats f ON f.commit_sha = sc.commit_sha AND f.path <> ''
             WHERE {where} AND sc.confidence IN ('deterministic', 'inferred')
+            GROUP BY sc.session_id, sc.commit_sha, f.path
         ),
         per_session AS (
             SELECT session_id, SUM(additions) AS adds, SUM(later_deletions) AS dels
@@ -1045,15 +1101,16 @@ def _add_rework(conn, summary: ShippedSummary, where: str, params: list[Any]) ->
     placeholders = ", ".join(f"${i + 1}" for i in range(len(reworked)))
     paths = conn.execute(
         f"""
-        SELECT f.path, COUNT(DISTINCT sc.session_id) AS sessions,
-               SUM(DISTINCT_COST.cost) AS cost_usd
-        FROM session_commits sc
-        JOIN commit_file_stats f ON f.commit_sha = sc.commit_sha AND f.path <> ''
-        JOIN (SELECT session_id, COALESCE(total_cost_usd, 0.0) AS cost FROM sessions) DISTINCT_COST
-             ON DISTINCT_COST.session_id = sc.session_id
-        WHERE sc.session_id IN ({placeholders}) AND f.additions > 0
-          AND f.later_deletions * 1.0 / f.additions >= {REWORK_SHARE}
-        GROUP BY f.path ORDER BY cost_usd DESC, sessions DESC LIMIT {TOP_N}
+        WITH hit AS (
+            SELECT DISTINCT f.path, sc.session_id
+            FROM session_commits sc
+            JOIN commit_file_stats f ON f.commit_sha = sc.commit_sha AND f.path <> ''
+            WHERE sc.session_id IN ({placeholders}) AND f.additions > 0
+              AND f.later_deletions * 1.0 / f.additions >= {REWORK_SHARE}
+        )
+        SELECT hit.path, COUNT(*) AS sessions, SUM(COALESCE(s.total_cost_usd, 0.0)) AS cost_usd
+        FROM hit JOIN sessions s ON s.session_id = hit.session_id
+        GROUP BY hit.path ORDER BY cost_usd DESC, sessions DESC LIMIT {TOP_N}
         """,
         list(reworked),
     ).fetchall()

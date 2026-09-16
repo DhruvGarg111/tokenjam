@@ -94,8 +94,8 @@ def repo(tmp_path, monkeypatch) -> Path:
     _git(path, "remote", "set-url", "origin", str(origin))
     _git(path, "push", "-q", "origin", "main")
     _git(path, "remote", "set-head", "origin", "main")
-    # Keep the normalised remote the sessions carry; git needs the push url only.
-    _git(path, "remote", "set-url", "origin", REMOTE + ".git")
+    # `origin` stays the bare repo so tests can push; the sessions carry the
+    # normalised GitHub remote explicitly (`_session`), as a real backfill would.
     yield path
     repo_context.clear_caches()
 
@@ -416,6 +416,108 @@ def test_shipped_state_derives_from_default_branch_membership_and_reverts(repo):
         db.upsert_session(replace(db.get_session("s2"), ended_at=T0 + timedelta(hours=1, minutes=11)))
         match_sessions_to_commits(db)
         assert session_shipped_state(db.conn, "s2") == STATE_SHIPPED
+    finally:
+        db.close()
+
+
+def test_a_surviving_commit_beside_a_reverted_one_still_ships(repo):
+    """Review finding: `on_default` already excludes reverted commits, so a
+    session with one surviving default-branch commit and one reverted commit
+    is shipped, not committed."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        _bash(db, "s1", T0 + timedelta(minutes=2), "git commit -m keep")
+        _commit(repo, "keep.py", "1\n", "keep", T0 + timedelta(minutes=2))
+        _bash(db, "s1", T0 + timedelta(minutes=5), "git commit -m drop")
+        drop = _commit(repo, "drop.py", "1\n", "drop", T0 + timedelta(minutes=5))
+        _git(repo, "revert", "--no-edit", drop, at=T0 + timedelta(hours=1))
+        match_sessions_to_commits(db)
+        assert session_shipped_state(db.conn, "s1") == STATE_SHIPPED
+        assert shipped.shipped_states(db.conn, ["s1"])["s1"]["commit_count"] == 2
+    finally:
+        db.close()
+
+
+def test_a_rewritten_default_branch_drops_the_commits_it_no_longer_holds(repo):
+    """Review finding: a force-pushed-away commit must not stay "shipped"."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        _bash(db, "s1", T0 + timedelta(minutes=5), "git commit -m feat")
+        sha = _commit(repo, "a.py", "1\n", "feat", T0 + timedelta(minutes=5))
+        _git(repo, "push", "-q", "origin", "main")
+        match_sessions_to_commits(db)
+        assert session_shipped_state(db.conn, "s1") == STATE_SHIPPED
+        # History rewritten: main and origin/main no longer contain the commit.
+        _git(repo, "reset", "-q", "--hard", "HEAD~1")
+        _git(repo, "push", "-q", "--force", "origin", "main")
+        db.upsert_session(replace(db.get_session("s1"), ended_at=T0 + timedelta(minutes=11)))
+        match_sessions_to_commits(db)
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM repo_commits WHERE commit_sha = $1", [sha]).fetchone()[0] == 0
+        assert session_shipped_state(db.conn, "s1") == STATE_COMMITTED
+    finally:
+        db.close()
+
+
+def test_a_commit_only_on_the_remote_default_branch_counts_as_shipped(repo):
+    """Review finding: tj never fetches, so a stale local `main` behind
+    `origin/main` must not hide an upstream merge. Both refs are indexed."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        _bash(db, "s1", T0 + timedelta(minutes=5), "git commit -m feat")
+        _commit(repo, "a.py", "1\n", "feat", T0 + timedelta(minutes=5))
+        _git(repo, "push", "-q", "origin", "main")
+        # Local main falls behind the remote (the checkout moves elsewhere).
+        _git(repo, "reset", "-q", "--hard", "HEAD~1")
+        match_sessions_to_commits(db)
+        assert session_shipped_state(db.conn, "s1") == STATE_SHIPPED
+    finally:
+        db.close()
+
+
+def test_late_evidence_is_picked_up_by_the_periodic_rescan(repo):
+    """Review finding: a note attached after the first scan does not move
+    `ended_at`; a recent session is re-scanned once its scan is a day old."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        sha = _commit(repo, "a.py", "1\n", "feat", T0 + timedelta(minutes=3))
+        match_sessions_to_commits(db, now=T0 + timedelta(hours=1))
+        assert _rows(db, "s1") == []
+        _git(repo, "notes", "--ref=ai", "add", "-m", json.dumps({"session": "s1"}), sha)
+        # Same day: the watermark holds.
+        assert match_sessions_to_commits(db, now=T0 + timedelta(hours=2)).sessions_scanned == 0
+        # A day later: re-scanned, and the note is found.
+        assert match_sessions_to_commits(db, now=T0 + timedelta(days=1, hours=2)).sessions_scanned == 1
+        assert [(r[2], r[3]) for r in _rows(db, "s1")] == [("deterministic", "git_note")]
+        # Past the horizon the session is left alone.
+        db.conn.execute("UPDATE session_commit_scans SET scanned_at = $1", [T0])
+        assert match_sessions_to_commits(db, now=T0 + timedelta(days=40)).sessions_scanned == 0
+    finally:
+        db.close()
+
+
+def test_the_same_remote_indexed_under_two_roots_does_not_double_count(repo, tmp_path):
+    """Review finding: a clone and a worktree of one remote both land in
+    `repo_commits`; a session's commit must still count once."""
+    db = InMemoryBackend()
+    try:
+        _session(db, "s1", repo, T0, T0 + timedelta(minutes=10))
+        _bash(db, "s1", T0 + timedelta(minutes=5), "git commit -m feat")
+        _commit(repo, "a.py", "1\n", "feat", T0 + timedelta(minutes=5))
+        _git(repo, "push", "-q", "origin", "main")
+        clone = tmp_path / "clone"
+        _git(repo, "clone", "-q", str(tmp_path / "origin.git"), str(clone))
+        _session(db, "s2", clone, T0 + timedelta(hours=1), T0 + timedelta(hours=1, minutes=10))
+        match_sessions_to_commits(db)
+        assert db.conn.execute("SELECT COUNT(DISTINCT repo_root) FROM repo_commits").fetchone()[0] == 2
+        states = shipped.shipped_states(db.conn, ["s1"])
+        assert states["s1"] == {"shipped_state": STATE_SHIPPED, "commit_count": 1}
+        summary = shipped_summary(db.conn, T0 - timedelta(hours=1), T0 + timedelta(days=1))
+        assert summary.commits_joined == 1 and summary.commits_on_default == 1
     finally:
         db.close()
 
