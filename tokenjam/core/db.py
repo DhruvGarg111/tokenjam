@@ -34,7 +34,9 @@ from tokenjam.core.models import (
     PolicyDecisionRecord,
     SavingsLedgerEntry,
     SchemaValidationResult,
+    COMMIT_CONFIDENCE_RANK,
     SESSION_CONTEXT_FIELDS,
+    SessionCommit,
     SessionRecord,
     SpanKind,
     SpanStatus,
@@ -98,6 +100,8 @@ class StorageBackend(Protocol):
     def upsert_baseline(self, baseline: DriftBaseline) -> None: ...
     def get_session(self, session_id: str) -> SessionRecord | None: ...
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None: ...
+    def get_session_commits(self, session_id: str) -> list[SessionCommit]: ...
+    def upsert_session_commits(self, rows: Sequence[SessionCommit]) -> int: ...
     def close_sessions_by_instance(self, instance_id: str) -> int: ...
     def close_session_by_id(self, session_id: str) -> int: ...
     def mark_sessions_completed(self, session_ids: list[str]) -> None: ...
@@ -565,6 +569,90 @@ RETENTION_EVENTS_TABLE_SQL = (
     ")"
 )
 
+# Shipped-value ledger (contracts §4), migration 24. `session_commits` is the
+# contract table verbatim: one row per (session, commit) at the best confidence
+# found, written only by `core/shipped.match_sessions_to_commits` on the daemon
+# pass. The three tables beside it are what let every READ of the ledger stay
+# off git: a request handler may never shell out (contracts §3), so the facts
+# the shipped state needs (is this commit on the default branch, was it
+# reverted, how much of it survived) are indexed by the same pass and joined
+# in SQL.
+SESSION_COMMITS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS session_commits (\n"
+    "    session_id    TEXT NOT NULL,\n"
+    "    commit_sha    TEXT NOT NULL,\n"
+    "    repo_remote   TEXT,\n"
+    "    confidence    TEXT NOT NULL,\n"
+    "    source        TEXT NOT NULL,\n"
+    "    author_email  TEXT,\n"
+    "    committed_at  TIMESTAMPTZ,\n"
+    "    matched_at    TIMESTAMPTZ NOT NULL,\n"
+    "    match_delta_s DOUBLE,\n"
+    "    PRIMARY KEY (session_id, commit_sha)\n"
+    ")"
+)
+# Every commit reachable from a repo's default branch, indexed incrementally
+# (`ledger_repo_state.default_tip` is the high-water mark: the next pass logs
+# only `old_tip..new_tip`). Membership here IS "on the default branch";
+# `reverts_sha` is parsed off a `Revert "..."` commit's body so a reverted
+# commit is a join, not a git call.
+REPO_COMMITS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS repo_commits (\n"
+    "    repo_root     TEXT NOT NULL,\n"
+    "    commit_sha    TEXT NOT NULL,\n"
+    "    repo_remote   TEXT,\n"
+    "    author_email  TEXT,\n"
+    "    committed_at  TIMESTAMPTZ,\n"
+    "    subject       TEXT,\n"
+    "    reverts_sha   TEXT,\n"
+    "    indexed_at    TIMESTAMPTZ NOT NULL,\n"
+    "    PRIMARY KEY (repo_root, commit_sha)\n"
+    ")"
+)
+LEDGER_REPO_STATE_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS ledger_repo_state (\n"
+    "    repo_root      TEXT PRIMARY KEY,\n"
+    "    default_branch TEXT,\n"
+    "    default_tip    TEXT,\n"
+    "    indexed_at     TIMESTAMPTZ NOT NULL\n"
+    ")"
+)
+# Per-session matcher watermark: the session's `ended_at` as of its last scan,
+# so a pass re-reads only sessions that changed since (a resumed transcript
+# moves `ended_at` forward) and a backfill of OLDER history, which no
+# timestamp watermark would ever reach, is scanned because it has no row.
+SESSION_COMMIT_SCANS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS session_commit_scans (\n"
+    "    session_id TEXT PRIMARY KEY,\n"
+    "    ended_at   TIMESTAMPTZ,\n"
+    "    scanned_at TIMESTAMPTZ NOT NULL\n"
+    ")"
+)
+# Rework evidence per (commit, path): the lines the commit added and how many
+# lines later commits (outside the same session) deleted from that path inside
+# `rework_window_days`. `horizon_closed` says the window has elapsed, so the
+# row is final; open rows are re-taken each pass.
+COMMIT_FILE_STATS_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS commit_file_stats (\n"
+    "    repo_root       TEXT NOT NULL,\n"
+    "    commit_sha      TEXT NOT NULL,\n"
+    "    path            TEXT NOT NULL,\n"
+    "    additions       INTEGER,\n"
+    "    later_deletions INTEGER,\n"
+    "    horizon_closed  BOOLEAN,\n"
+    "    checked_at      TIMESTAMPTZ NOT NULL,\n"
+    "    PRIMARY KEY (repo_root, commit_sha, path)\n"
+    ")"
+)
+LEDGER_TABLES_SQL = ";\n".join([
+    SESSION_COMMITS_TABLE_SQL,
+    REPO_COMMITS_TABLE_SQL,
+    LEDGER_REPO_STATE_TABLE_SQL,
+    SESSION_COMMIT_SCANS_TABLE_SQL,
+    COMMIT_FILE_STATS_TABLE_SQL,
+])
+
+
 # The ingested agent-config surface, single-sourced so migration 22 and the
 # `EXPECTED_TABLES` self-heal create the same table. See `core/agent_config.py`
 # for what each column answers and why the measurement columns are separate
@@ -947,6 +1035,15 @@ MIGRATIONS: list[tuple[int, str]] = [
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS head_sha_end TEXT;"
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS developer_id TEXT;"
      "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_email TEXT"),
+    # Migration 24: the session -> commit join (shipped-value ledger, contracts
+    # §4) plus the bridge session id. `bridge_session_id` is the id Claude
+    # Code's remote bridge assigns a session (`cse_...`); a `Claude-Session:`
+    # commit trailer names THAT id (as `session_...`), not the local uuid, so
+    # it is persisted on the session to make the trailer resolvable. See the
+    # `*_TABLE_SQL` constants above for what each table holds.
+    (24,
+     "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bridge_session_id TEXT;\n"
+     + LEDGER_TABLES_SQL),
 ]
 
 
@@ -991,6 +1088,7 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("sessions", "head_sha_end",            "TEXT"),               # migration 23
     ("sessions", "developer_id",            "TEXT"),               # migration 23
     ("sessions", "user_email",              "TEXT"),               # migration 23
+    ("sessions", "bridge_session_id",       "TEXT"),               # migration 24
 ]
 
 
@@ -1095,6 +1193,12 @@ EXPECTED_TABLES: dict[str, str] = {
     "retention_events": RETENTION_EVENTS_TABLE_SQL,
     # migration 22
     "agent_config_files": AGENT_CONFIG_FILES_TABLE_SQL,
+    # migration 24
+    "session_commits": SESSION_COMMITS_TABLE_SQL,
+    "repo_commits": REPO_COMMITS_TABLE_SQL,
+    "ledger_repo_state": LEDGER_REPO_STATE_TABLE_SQL,
+    "session_commit_scans": SESSION_COMMIT_SCANS_TABLE_SQL,
+    "commit_file_stats": COMMIT_FILE_STATS_TABLE_SQL,
 }
 
 
@@ -1709,6 +1813,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         source=d.get("source"),
         task_statement_hash=d.get("task_statement_hash"),
         dominant_model=d.get("dominant_model"),
+        bridge_session_id=d.get("bridge_session_id"),
         **{f: d.get(f) for f in SESSION_CONTEXT_FIELDS},
     )
 
@@ -3038,9 +3143,10 @@ class DuckDBBackend:
                     service_instance_id, cache_write_tokens, run_id, parent_session_id,
                     source, task_statement_hash, dominant_model,
                     repo_remote, repo_root, branch_start, branch_end,
-                    head_sha_start, head_sha_end, developer_id, user_email
+                    head_sha_start, head_sha_end, developer_id, user_email,
+                    bridge_session_id
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-                          $22,$23,$24,$25,$26,$27,$28,$29)
+                          $22,$23,$24,$25,$26,$27,$28,$29,$30)
                 ON CONFLICT (session_id) DO UPDATE SET
                     -- `started_at` was absent from this list entirely, which
                     -- made it WRITE-ONCE: whatever the first span to reach a
@@ -3107,7 +3213,8 @@ class DuckDBBackend:
                     head_sha_start = COALESCE(sessions.head_sha_start, EXCLUDED.head_sha_start),
                     head_sha_end = COALESCE(EXCLUDED.head_sha_end, sessions.head_sha_end),
                     developer_id = COALESCE(sessions.developer_id, EXCLUDED.developer_id),
-                    user_email = COALESCE(sessions.user_email, EXCLUDED.user_email)
+                    user_email = COALESCE(sessions.user_email, EXCLUDED.user_email),
+                    bridge_session_id = COALESCE(sessions.bridge_session_id, EXCLUDED.bridge_session_id)
                 """,
                 [
                     session.session_id, session.agent_id, session.conversation_id,
@@ -3122,6 +3229,7 @@ class DuckDBBackend:
                     session.branch_start, session.branch_end,
                     session.head_sha_start, session.head_sha_end,
                     session.developer_id, session.user_email,
+                    session.bridge_session_id,
                 ],
             )
 
@@ -3326,6 +3434,65 @@ class DuckDBBackend:
             return None
         cols = [d[0] for d in cur.description]
         return _row_to_session(rows[0], cols)
+
+    def get_session_commits(self, session_id: str) -> list[SessionCommit]:
+        """Every commit joined to `session_id` (contracts §4), best
+        confidence first, then newest commit first."""
+        rows = self.conn.execute(
+            "SELECT session_id, commit_sha, confidence, source, repo_remote, "
+            "author_email, committed_at, matched_at, match_delta_s "
+            "FROM session_commits WHERE session_id = $1",
+            [session_id],
+        ).fetchall()
+        commits = [SessionCommit(*r) for r in rows]
+        commits.sort(key=lambda c: (
+            -c.rank, -(c.committed_at.timestamp() if c.committed_at else 0.0),
+        ))
+        return commits
+
+    def upsert_session_commits(self, rows: Sequence[SessionCommit]) -> int:
+        """Write `(session, commit)` rows at the best confidence found.
+
+        Contracts §4: a pair is written once and a later pass may UPGRADE its
+        confidence, never downgrade it, so the conflict branch keeps the stored
+        row unless the incoming one ranks strictly higher. Returns how many
+        rows were inserted or upgraded.
+        """
+        if not rows:
+            return 0
+        written = 0
+        with self._write_lock:
+            for c in rows:
+                existing = self.conn.execute(
+                    "SELECT confidence FROM session_commits "
+                    "WHERE session_id = $1 AND commit_sha = $2",
+                    [c.session_id, c.commit_sha],
+                ).fetchone()
+                if existing is not None:
+                    if COMMIT_CONFIDENCE_RANK.get(existing[0], 0) >= c.rank:
+                        continue
+                    self.conn.execute(
+                        "UPDATE session_commits SET confidence = $3, source = $4, "
+                        "repo_remote = COALESCE($5, repo_remote), "
+                        "author_email = COALESCE($6, author_email), "
+                        "committed_at = COALESCE($7, committed_at), "
+                        "matched_at = $8, match_delta_s = $9 "
+                        "WHERE session_id = $1 AND commit_sha = $2",
+                        [c.session_id, c.commit_sha, c.confidence, c.source,
+                         c.repo_remote, c.author_email, c.committed_at,
+                         c.matched_at or utcnow(), c.match_delta_s],
+                    )
+                else:
+                    self.conn.execute(
+                        "INSERT INTO session_commits (session_id, commit_sha, repo_remote, "
+                        "confidence, source, author_email, committed_at, matched_at, "
+                        "match_delta_s) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                        [c.session_id, c.commit_sha, c.repo_remote, c.confidence,
+                         c.source, c.author_email, c.committed_at,
+                         c.matched_at or utcnow(), c.match_delta_s],
+                    )
+                written += 1
+        return written
 
     def close_sessions_by_instance(self, instance_id: str) -> int:
         """Mark all currently-active sessions for a terminal as 'closed'.

@@ -98,6 +98,39 @@ SESSION_CONTEXT_FIELDS: tuple[str, ...] = (
 )
 
 
+#: Contracts §2: the one confidence enum, ranked so "best wins, never
+#: downgrades" is a comparison rather than a special case.
+COMMIT_CONFIDENCE_RANK: dict[str, int] = {
+    "deterministic": 3, "inferred": 2, "estimated": 1,
+}
+
+
+@dataclass(frozen=True)
+class SessionCommit:
+    """One `session_commits` row (contracts §4): a commit joined to the
+    session that produced it, at a labelled confidence.
+
+    `confidence` is the §2 enum and `source` names how the row was produced
+    (`tool_span_git_log`, `trailer_session`, `git_note`, `trailer_window`).
+    `match_delta_s` is tool-span time minus commit time and is only set for
+    a tool-span match. Written once at the best confidence found; a later
+    pass may upgrade `inferred` to `deterministic`, never the reverse.
+    """
+    session_id:    str
+    commit_sha:    str
+    confidence:    str
+    source:        str
+    repo_remote:   str | None = None
+    author_email:  str | None = None
+    committed_at:  datetime | None = None
+    matched_at:    datetime | None = None
+    match_delta_s: float | None = None
+
+    @property
+    def rank(self) -> int:
+        return COMMIT_CONFIDENCE_RANK.get(self.confidence, 0)
+
+
 @dataclass
 class NormalizedSpan:
     span_id:        str
@@ -283,6 +316,13 @@ class SessionRecord:
     head_sha_end:     str | None    = None
     developer_id:     str | None    = None
     user_email:       str | None    = None
+    # The id Claude Code's remote bridge assigned this session (`cse_...`),
+    # read off the transcript's `bridge-session` record (migration 24). A
+    # `Claude-Session: https://claude.ai/code/session_<id>` commit trailer
+    # names THIS id, not the local session uuid, so it is the key the
+    # trailer resolves through (`core.shipped`). None when the session never
+    # ran under the bridge. Fill-null-only on write, like the context above.
+    bridge_session_id: str | None   = None
 
     @property
     def context(self) -> SessionContext:
