@@ -5,7 +5,7 @@ use these factory functions. This ensures consistent defaults and readable tests
 from __future__ import annotations
 from datetime import timedelta
 from tokenjam.core.models import (
-    NormalizedSpan, SessionRecord,
+    NormalizedSpan, SessionContext, SessionRecord,
     SpanStatus, SpanKind,
 )
 from tokenjam.otel.semconv import GenAIAttributes
@@ -82,9 +82,14 @@ def make_llm_span(
     commit_sha: str | None = None,
     prompt_template_id: str | None = None,
     prompt_template_version: str | None = None,
+    session_context: SessionContext | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
+
+    `session_context` is the repo-context + identity block a `tj init`-stamped
+    producer carries (contracts §3); None (the default) means the span carries
+    no such attributes, which is what every pre-existing test expects.
 
     `billing_account` defaults to "anthropic" so existing tests using the
     default `provider="anthropic"` get a sensible value. Tests exercising
@@ -138,6 +143,7 @@ def make_llm_span(
         commit_sha=commit_sha,
         prompt_template_id=prompt_template_id,
         prompt_template_version=prompt_template_version,
+        session_context=session_context,
     )
 
 

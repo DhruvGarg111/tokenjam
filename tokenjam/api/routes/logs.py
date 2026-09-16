@@ -33,6 +33,7 @@ from typing import Any
 
 from tokenjam.core.ingest import IngestPipeline, SpanRejectedError
 from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
+from tokenjam.core.repo_context import session_context_from_attrs
 from tokenjam.otel.semconv import (
     ClaudeCodeEvents,
     CodexEvents,
@@ -660,6 +661,10 @@ def parse_log_records(
                     span.parent_session_id = resource_attrs.get(
                         TjAttributes.PARENT_SESSION_ID
                     )
+                    # Repo context + developer identity (contracts §3):
+                    # resource-level when `tj init` stamped them, else None
+                    # and the transcript catch-up fills the session later.
+                    span.session_context = session_context_from_attrs(resource_attrs)
                     _attach_turn_prompt(span, attrs, prompt_by_turn)
                     pipeline.process(span)
                     ingested += 1

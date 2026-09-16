@@ -120,7 +120,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     # root callback; override with ``requires_db=True`` on that leaf's
     # ``@click.command(..., cls=TjCommand, requires_db=True)``.
     no_db_commands = {
-        "stop", "uninstall", "onboard", "mcp", "demo", "policy",
+        "stop", "uninstall", "onboard", "init", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
         # `rules` reads the proposal cache the optimize pass already wrote —
         # config only, no analyzer sweep — so it works while `tj serve` holds
@@ -219,6 +219,11 @@ from tokenjam.cli.cmd_ping import cmd_ping  # noqa: E402
 from tokenjam.cli.cmd_relearn import cmd_relearn  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
+# `tj init` is the same command under the name every other developer tool
+# uses for "set this up here" (contracts §3 names it as the stamping
+# command). One Command object, registered twice: the options, the prompts
+# and the config it writes are identical, so there is nothing to drift.
+cli.add_command(cmd_onboard, name="init")
 cli.add_command(cmd_status, name="status")
 cli.add_command(cmd_traces, name="traces")
 cli.add_command(cmd_trace, name="trace")

@@ -15,6 +15,7 @@ from typing import Any
 
 from tokenjam.core.ingest import SpanRejectedError
 from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
+from tokenjam.core.repo_context import session_context_from_attrs
 from tokenjam.otel.semconv import (
     GenAIAttributes,
     OpenInferenceAttributes,
@@ -227,6 +228,9 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
         service_instance_id=attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID),
         run_id=attrs.get(TjAttributes.RUN_ID),
         parent_session_id=attrs.get(TjAttributes.PARENT_SESSION_ID),
+        # Repo context + developer identity (contracts §3), resource-level
+        # from `tj init`; None when the producer stamped none of them.
+        session_context=session_context_from_attrs(attrs),
         # -- SDK cost-attribution dimensions --
         # environment/service_version/commit_sha are typically resource-level
         # (set once per process/deployment); tenant_id/feature/prompt template

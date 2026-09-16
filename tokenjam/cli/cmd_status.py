@@ -8,6 +8,7 @@ from rich.markup import escape
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.cli.tj_status import TjCommand
 from tokenjam.core.models import Alert, AlertFilters
+from tokenjam.core.repo_context import repo_name_from_url
 from tokenjam.utils.formatting import (
     console,
     format_cost,
@@ -131,6 +132,10 @@ def cmd_status(
             "active_alerts": len(active_alerts),
             "duration_seconds": session.duration_seconds if session else None,
             "active_seconds": active_seconds,
+            # Repo context (contracts §3): which repo and branch the session
+            # ran against. None when unknown; the card omits the line.
+            "repo": repo_name_from_url(session.repo_remote) if session else None,
+            "branch": (session.branch_end or session.branch_start) if session else None,
         }
         agents_data.append(agent_data)
         entries.append((agent_data, active_alerts, session))
@@ -403,6 +408,13 @@ def _last_activity(session: object | None):
     return getattr(session, "ended_at", None) or getattr(session, "started_at", None)
 
 
+def _repo_branch_label(repo: str | None, branch: str | None) -> str:
+    """`org/repo · branch`, or whichever half is known. Never a placeholder
+    for the missing half: an unknown branch is simply not printed."""
+    parts = [escape(p) for p in (repo, branch) if p]
+    return " · ".join(parts)
+
+
 def _fmt_age(when) -> str:
     """Coarse relative age. `-` when unknown, never a fabricated zero."""
     if when is None:
@@ -520,6 +532,11 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None)
 
     if data["session_id"]:
         console.print(f"  Active session: {data['session_id']}")
+
+    # Repo · branch: only when at least one is known. A repo name and a
+    # branch are user data (a branch can carry `[...]`), so both are escaped.
+    if data.get("repo") or data.get("branch"):
+        console.print(f"  Repo:           {_repo_branch_label(data['repo'], data['branch'])}")
 
     console.print()
     for alert, count in _dedupe_alerts(active_alerts):

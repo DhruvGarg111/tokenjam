@@ -56,6 +56,48 @@ class SpanKind(str, Enum):
     CONSUMER  = "consumer"
 
 
+@dataclass(frozen=True)
+class SessionContext:
+    """Which repo, branch and HEAD a session ran against, and who ran it.
+
+    The eight nullable `sessions` columns the shipped-value ledger joins on
+    (contracts §4). Every field is optional: a session that ran outside a git
+    repo, or whose telemetry carried no context, holds None everywhere, never
+    a placeholder. `developer_id` is `sha256(lower(user_email))[:16]`
+    (`core.repo_context.developer_id_for`); `user_email` is the git author
+    email. `*_end` values describe the session's last observed state and are
+    absent whenever nothing recorded it.
+
+    Populated three ways, all landing on the same row with fill-null-only
+    semantics: the Claude Code / Codex backfill (from the transcript's own
+    `cwd` + branch), the live OTLP path (from the §3 attributes a `tj init`
+    stamps), and the daemon's transcript catch-up for live sessions that
+    arrived without them.
+    """
+    repo_remote:    str | None = None
+    repo_root:      str | None = None
+    branch_start:   str | None = None
+    branch_end:     str | None = None
+    head_sha_start: str | None = None
+    head_sha_end:   str | None = None
+    developer_id:   str | None = None
+    user_email:     str | None = None
+
+    def is_empty(self) -> bool:
+        return all(
+            getattr(self, f) is None for f in SESSION_CONTEXT_FIELDS
+        )
+
+
+#: The `sessions` column names `SessionContext` maps onto, in the order the
+#: dataclass declares them. Single-sourced so the DB upsert, the row reader
+#: and every serializer iterate one list instead of eight hand-kept copies.
+SESSION_CONTEXT_FIELDS: tuple[str, ...] = (
+    "repo_remote", "repo_root", "branch_start", "branch_end",
+    "head_sha_start", "head_sha_end", "developer_id", "user_email",
+)
+
+
 @dataclass
 class NormalizedSpan:
     span_id:        str
@@ -135,6 +177,11 @@ class NormalizedSpan:
     # Optional spawning-session id (tokenjam.parent_session_id) for nested
     # spawns. Transient on the span; persisted on the session for the run tree.
     parent_session_id: str | None   = None
+    # Repo context + developer identity read off the §3 attributes a `tj init`
+    # stamps (see `core.repo_context.session_context_from_attrs`). Transient
+    # on the span, like `run_id`: it is never written to the spans table, only
+    # onto the session row this span creates or fills (`IngestPipeline`).
+    session_context: SessionContext | None = None
 
     # -- SDK cost-attribution dimensions (multi-tenant cost breakdown) --
     # Indexed directly on `spans` (not session-only, unlike service_namespace):
@@ -221,6 +268,26 @@ class SessionRecord:
     # prompt text itself.
     task_statement_hash: str | None = None
     dominant_model:   str | None    = None
+    # Repo context + developer identity (shipped-value ledger, contracts §4):
+    # which repo / branch / HEAD this session ran against and who ran it. All
+    # nullable; a session outside a git repo or one whose telemetry carried
+    # no context holds None, never a placeholder. Written fill-null-only on
+    # conflict, so a re-run of the backfill fills gaps and never erases a
+    # value an earlier write resolved. `developer_id` is the hashed form of
+    # `user_email` and is what aggregates key on.
+    repo_remote:      str | None    = None
+    repo_root:        str | None    = None
+    branch_start:     str | None    = None
+    branch_end:       str | None    = None
+    head_sha_start:   str | None    = None
+    head_sha_end:     str | None    = None
+    developer_id:     str | None    = None
+    user_email:       str | None    = None
+
+    @property
+    def context(self) -> SessionContext:
+        """The eight ledger columns as one value (see `SessionContext`)."""
+        return SessionContext(**{f: getattr(self, f) for f in SESSION_CONTEXT_FIELDS})
 
     @property
     def duration_seconds(self) -> float | None:

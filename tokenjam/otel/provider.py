@@ -13,6 +13,7 @@ from opentelemetry.trace import StatusCode as OtelStatusCode
 from opentelemetry.trace import SpanKind as OtelSpanKind
 
 from tokenjam.core.models import NormalizedSpan, SpanStatus, SpanKind
+from tokenjam.core.repo_context import session_context_from_attrs
 from tokenjam.core.config import TjConfig
 from tokenjam.otel.semconv import GenAIAttributes, ResourceAttributes, TjAttributes
 
@@ -205,6 +206,9 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         service_instance_id=service_instance_id,
         run_id=run_id,
         parent_session_id=parent_session_id,
+        # Repo context + developer identity (contracts §3): resource-level,
+        # same as the OTLP and Claude Code logs paths.
+        session_context=session_context_from_attrs(resource_attrs),
         tenant_id=tenant_id,
         feature=feature,
         environment=environment,

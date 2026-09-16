@@ -224,6 +224,26 @@ class ResourceAttributes:
     VCS_REF_HEAD_REVISION = "vcs.ref.head.revision"
     VCS_REPOSITORY_REF_REVISION = "vcs.repository.ref.revision"  # deprecated
 
+    # -- Repo context + developer identity (shipped-value ledger, contracts §3) --
+    # Standard OTel names where one exists. Stamped per process by `tj init`
+    # (resource) and per session (`vcs.ref.head.name` / `.revision`) so a
+    # session can later be joined to the commits it produced. Read by
+    # `core.repo_context.session_context_from_attrs` on the live ingest path;
+    # the backfill path derives the same values from the transcript's `cwd`
+    # + `gitBranch` instead. Never carries team / department / display name.
+    #
+    # Git author email (`git config user.email` in the session cwd). The one
+    # personal identifier on the wire; the hashed `tokenjam.developer_id` is
+    # what every aggregate keys on.
+    USER_EMAIL = "user.email"
+    HOST_NAME = "host.name"
+    # Normalised remote: `https://github.com/org/repo` (no `.git`, no creds).
+    VCS_REPOSITORY_URL_FULL = "vcs.repository.url.full"
+    # `org/repo`, derived from the URL above.
+    VCS_REPOSITORY_NAME = "vcs.repository.name"
+    # Branch at session start (transcript `gitBranch` for Claude Code).
+    VCS_REF_HEAD_NAME = "vcs.ref.head.name"
+
 
 class TjAttributes:
     """tj-specific span attributes (non-standard extensions)."""
@@ -305,6 +325,21 @@ class TjAttributes:
     # the dashboard can group a run's member sessions and render a parent tree.
     RUN_ID            = "tokenjam.run_id"
     PARENT_SESSION_ID = "tokenjam.parent_session_id"
+
+    # -- Repo context + developer identity (shipped-value ledger, contracts §3) --
+    # The tj-specific half; the standard-named half is on ResourceAttributes
+    # (USER_EMAIL, HOST_NAME, VCS_*). Resource-level: DEVELOPER_ID is
+    # `sha256(lower(user.email))[:16]`, GITHUB_LOGIN is optional (`gh` must be
+    # authenticated), INSTALL_ID is the once-generated uuid4 in
+    # `~/.tj/install_id`. Session-level: REPO_ROOT is the absolute repo root
+    # the session ran in; SESSION_BRANCH_END / SESSION_HEAD_END are the
+    # branch / HEAD at session END and may be absent.
+    DEVELOPER_ID       = "tokenjam.developer_id"
+    GITHUB_LOGIN       = "tokenjam.github_login"
+    INSTALL_ID         = "tokenjam.install_id"
+    REPO_ROOT          = "tokenjam.repo_root"
+    SESSION_BRANCH_END = "tokenjam.session.branch_end"
+    SESSION_HEAD_END   = "tokenjam.session.head_end"
     # Explicit workflow key for an outcome event (`record_outcome`). When set, it
     # overrides the session-root walk on the Cloud ROI side (roi.write_outcome
     # keys the outcome to this id when no session_id is given). Lets a caller
