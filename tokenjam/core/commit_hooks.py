@@ -47,10 +47,11 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from tokenjam.core.agent_kind import classify_agent_kind
 from tokenjam.core.repo_context import GIT_TIMEOUT_S, tj_home
@@ -150,32 +151,57 @@ def record_active_session(
     at = now or utcnow()
     epoch = int(at.timestamp())
     try:
-        entries = read_active_sessions(target)
-        entries = {
-            k: v for k, v in entries.items()
-            if isinstance(v.get("updated_epoch"), int)
-            and epoch - int(v["updated_epoch"]) <= ACTIVE_SESSION_TTL_S
-        }
-        entries[_worktree_root(cwd)] = {
-            "session_id": sid, "cwd": cwd,
-            "updated_at": at.isoformat(), "updated_epoch": epoch,
-        }
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".active_sessions.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(_render_active_sessions(entries))
-            os.replace(tmp, target)
-        except Exception:
+        # Two sessions in two worktrees render their statuslines at the same
+        # moment: without serialising the read-modify-write, the second
+        # replace drops the first one's entry until its next turn, and a hand
+        # commit in that gap gets no trailer. One advisory lock per record.
+        with _record_lock(target):
+            entries = read_active_sessions(target)
+            entries = {
+                k: v for k, v in entries.items()
+                if isinstance(v.get("updated_epoch"), int)
+                and epoch - int(v["updated_epoch"]) <= ACTIVE_SESSION_TTL_S
+            }
+            entries[_worktree_root(cwd)] = {
+                "session_id": sid, "cwd": cwd,
+                "updated_at": at.isoformat(), "updated_epoch": epoch,
+            }
+            fd, tmp = tempfile.mkstemp(
+                dir=str(target.parent), prefix=".active_sessions.", suffix=".tmp")
             try:
-                os.unlink(tmp)
-            except FileNotFoundError:
-                pass
-            raise
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(_render_active_sessions(entries))
+                os.replace(tmp, target)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
         return True
     except (OSError, ValueError, TypeError):
         logger.debug("could not record active session at %s", target, exc_info=True)
         return False
+
+
+@contextmanager
+def _record_lock(target: Path) -> Iterator[None]:
+    """An exclusive advisory lock on `<record>.lock` for the duration of a
+    read-modify-write. `fcntl` is POSIX only; where it is missing the write
+    proceeds unserialised, which is the pre-lock behaviour, not a failure."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        yield
+        return
+    lock_path = target.with_name(target.name + ".lock")
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def active_session_for(

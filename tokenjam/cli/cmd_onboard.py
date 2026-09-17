@@ -489,13 +489,14 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         and not (claude_code or codex or force or reconfigure or add_project or verify_only)
         and resolve_config_path((ctx.obj or {}).get("config_path_override")) is not None
     )
+    written_config: Path | None = None
     if ledger_only:
         # An already-onboarded machine: the ledger flags are the whole
         # request. Re-running the wizard here would re-prompt plan, budget
         # and backfill scope to set nothing (the --add-project precedent).
         ensure_install_id()
     else:
-        _run_onboard_wizard(
+        written_config = _run_onboard_wizard(
             ctx, claude_code, codex, budget, install_daemon, no_daemon, force,
             reconfigure, plan, analysis_span, removed_project_flag, backfill_days,
             backfill_all, verify, verify_only, add_project, verbose,
@@ -506,7 +507,11 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         print_hook_install(install_repo_hooks(os.getcwd(), notes=notes), notes=notes)
         print_active_session_state(os.getcwd())
     if enforce:
-        run_enforce(ctx)
+        # The persona flows write the GLOBAL config while a project
+        # `.tj/config.toml` in cwd would win a fresh search, so enforcement
+        # is pointed at the file the wizard just wrote (the one the daemon
+        # was installed against), not at whatever resolves first.
+        run_enforce(ctx, config_path=written_config)
 
 
 def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
@@ -515,9 +520,15 @@ def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budg
                         removed_project_flag: str | None,
                         backfill_days: int | None, backfill_all: bool,
                         verify: bool, verify_only: bool, add_project: bool,
-                        verbose: bool) -> None:
+                        verbose: bool) -> Path | None:
     """The onboarding wizard proper: every path in here ends with
-    `_print_setup_complete_home` (or an early return that says why)."""
+    `_print_setup_complete_home` (or an early return that says why).
+
+    Returns the config file the run WROTE (the persona flows write the global
+    config, the plain SDK path a project-local one), or None when nothing was
+    written, so a follow-on step targets the same file the daemon was
+    installed against.
+    """
     # --project was removed: the project name is now ALWAYS derived from the
     # repo/folder name (see _derive_project_name) — the flag and the prompt
     # it fed were ceremony that only ever created divergence from what nearly
@@ -543,14 +554,14 @@ def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budg
     # nothing but the namespace mapping.
     if add_project:
         _onboard_add_project(ctx)
-        return
+        return None
     # --verify-only is the documented post-restart re-check: config already
     # exists, the user just restarted the agent, and re-running the whole wizard
     # (config rewrite + full summary + restart banner) only to poll is wasteful
     # noise (#102). Skip straight to the poll, before the banner and any setup.
     if verify_only:
         _run_verify_only(ctx, claude_code=claude_code, codex=codex)
-        return
+        return None
     if backfill_days is not None and backfill_all:
         raise click.UsageError("Use either --backfill-days or --backfill-all, not both.")
     if backfill_days is not None and backfill_days <= 0:
@@ -571,11 +582,11 @@ def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budg
                              verify=verify,
                              backfill_days=backfill_days, backfill_all=backfill_all,
                              analysis_span=analysis_span, verbose=verbose)
-        return
+        return _global_config_path()
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
                        verify=verify, analysis_span=analysis_span)
-        return
+        return _global_config_path()
 
     # Path-branched first run (#448): the bare `tj onboard` no longer assumes an
     # SDK/API user. It opens with "How do you use AI agents?" and routes to the
@@ -594,18 +605,18 @@ def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budg
                                  backfill_days=backfill_days,
                                  backfill_all=backfill_all,
                                  analysis_span=analysis_span, verbose=verbose)
-            return
+            return _global_config_path()
         if choice == "codex":
             _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
                            verify=verify, analysis_span=analysis_span)
-            return
+            return _global_config_path()
         if choice == "combination":
             _onboard_combination(ctx, budget, no_daemon, force, plan,
                                   verify=verify,
                                   backfill_days=backfill_days,
                                   backfill_all=backfill_all,
                                   analysis_span=analysis_span)
-            return
+            return _global_config_path()
         # choice == "sdk" → fall through to the generic SDK/API path below.
 
     # Honor TJ_CONFIG for the EXISTING-config check only (not the write
@@ -639,10 +650,10 @@ def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budg
                 "[bold]tj onboard --codex --reconfigure[/bold] instead."
             )
             ctx.exit(1)
-            return
+            return None
         console.print(f"[bold]Config already exists:[/bold] {existing}")
         console.print("Use [bold]--force[/bold] to overwrite.")
-        return
+        return None
 
     console.print()
     console.print("[bold]Setting up TokenJam...[/bold]")
@@ -858,6 +869,7 @@ analysis_span = "{analysis_span}"
     # Shared closing banner (#448): the SDK path has no backfill, so this is the
     # branded home screen + next-best-actions with no session count.
     _print_setup_complete_home()
+    return config_path.resolve()
 
 
 def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> None:

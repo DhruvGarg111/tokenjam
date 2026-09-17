@@ -161,16 +161,23 @@ def hook_summary_line(cwd: str) -> str:
     return "Commit hook: not installed (tj init --hooks adds the session trailer)"
 
 
-def run_enforce(ctx: click.Context) -> None:
+def run_enforce(ctx: click.Context, *, config_path: Path | None = None) -> None:
     """`--enforce`: turn the proxy on through the existing `tj proxy enable`
-    wiring, against the config as it stands AFTER onboarding wrote it, then
-    print the enforcement summary and the contracts §9 sentence."""
+    wiring, then print the enforcement summary and the contracts §9 sentence.
+
+    `config_path` is the file the wizard just wrote, when it wrote one; the
+    persona flows write the GLOBAL config while a project `.tj/config.toml`
+    in cwd would win a fresh search, and enabling the proxy in a file the
+    daemon was not installed against reports enforcement that is not on.
+    Without it (the ledger-only path) the config resolves the way the next
+    `tj proxy enable` would.
+    """
     from tokenjam.cli.cmd_proxy import proxy_enable
     from tokenjam.core.config import load_config, resolve_config_path
     from tokenjam.proxy.wiring import BASE_URL_ENV_VARS, proxy_base_url
 
     ctx.ensure_object(dict)
-    path = resolve_config_path(ctx.obj.get("config_path_override"))
+    path = config_path or resolve_config_path(ctx.obj.get("config_path_override"))
     if path:
         ctx.obj["config"] = load_config(str(path))
     if ctx.obj.get("config") is None:

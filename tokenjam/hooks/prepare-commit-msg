@@ -21,7 +21,10 @@ tj_session_trailer() {
         [ -f "$_tj_state" ] || return 0
         _tj_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
         [ -n "$_tj_root" ] || return 0
-        _tj_line=$(grep -F "\"$_tj_root\": {" "$_tj_state" 2>/dev/null | head -n 1)
+        # The key is JSON-encoded by the writer (only backslash and the
+        # double quote are escaped); encode the same way before the lookup.
+        _tj_key=$(printf '%s' "$_tj_root" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        _tj_line=$(grep -F "\"$_tj_key\": {" "$_tj_state" 2>/dev/null | head -n 1)
         [ -n "$_tj_line" ] || return 0
         _tj_sid=$(printf '%s\n' "$_tj_line" | sed -n 's/.*"session_id": "\([^"]*\)".*/\1/p')
         _tj_at=$(printf '%s\n' "$_tj_line" | sed -n 's/.*"updated_epoch": \([0-9][0-9]*\).*/\1/p')

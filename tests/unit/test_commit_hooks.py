@@ -192,6 +192,22 @@ def test_hook_matches_the_worktree_root_for_a_session_in_a_subdirectory(repo):
     assert "TokenJam-Session: sess-sub" in _body(repo)
 
 
+def test_hook_finds_a_worktree_whose_path_needs_json_escaping(tmp_path, home):
+    """The writer JSON-encodes the key (backslash and double quote escaped);
+    the hook has to encode the same way or a repo at such a path silently
+    gets no trailer."""
+    path = tmp_path / 'it"s a \\ repo'
+    path.mkdir()
+    _git(path, "init", "-q", "-b", "main")
+    _git(path, "config", "user.email", "dev@example.com")
+    _git(path, "config", "user.name", "Dev")
+    install_repo_hooks(str(path), notes=False)
+    assert record_active_session(str(path), "sess-esc")
+    assert '\\"' in active_sessions_path().read_text()
+    _commit(path, "feat")
+    assert "TokenJam-Session: sess-esc" in _body(path)
+
+
 def test_hook_lays_an_editor_message_out_like_git_commit_s(repo, tmp_path):
     """No `-m`: the message file is comments only when the hook runs. The
     trailer goes two lines down so the subject the user types stays its own
@@ -338,6 +354,36 @@ def test_record_is_atomic_pruned_and_keyed_by_worktree_root(repo, home):
     lines = path.read_text().splitlines()
     assert lines[0] == "{" and lines[-1] == "}"
     assert lines[1].startswith(f'  "{os.path.realpath(repo)}": {{"session_id": "new", ')
+
+
+def test_concurrent_records_from_two_sessions_keep_both_entries(tmp_path, home):
+    """Two statuslines rendering at once (two worktrees, two sessions) must
+    not lose each other's entry: the read-modify-write is serialised on an
+    advisory lock, so a hand commit in either worktree finds its session."""
+    import multiprocessing
+
+    roots = []
+    for name in ("a", "b"):
+        r = tmp_path / name
+        r.mkdir()
+        (r / ".git").mkdir()
+        roots.append(str(r))
+    path = active_sessions_path()
+
+    def writer(root: str, sid: str) -> None:
+        for _ in range(40):
+            record_active_session(root, sid, path=path)
+
+    ctx = multiprocessing.get_context("fork")
+    procs = [ctx.Process(target=writer, args=(roots[0], "sess-a")),
+             ctx.Process(target=writer, args=(roots[1], "sess-b"))]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(30)
+    assert all(p.exitcode == 0 for p in procs)
+    data = read_active_sessions(path)
+    assert {data[os.path.realpath(roots[0])]["session_id"], data[os.path.realpath(roots[1])]["session_id"]} == {"sess-a", "sess-b"}
 
 
 def test_record_refuses_bad_input_and_never_raises(home, tmp_path):
@@ -524,6 +570,27 @@ def test_tj_init_enforce_enables_the_proxy_and_prints_the_privacy_sentence(repo,
     assert "prepare-commit-msg hook installed" in out
     for command in advertised_commands(result.output):
         assert_invocable(command)
+
+
+def test_enforce_targets_the_config_the_persona_wizard_wrote(repo, home, monkeypatch):
+    """`tj init --claude-code --enforce` with a project `.tj/config.toml` in
+    cwd: the wizard writes the GLOBAL config and installs the daemon against
+    it, so that is the file the proxy must be enabled in, not the project
+    file a fresh search would pick first."""
+    from tokenjam.core.config import load_config
+
+    global_path = _global_config(home, monkeypatch)
+    monkeypatch.chdir(repo)
+    project_path = repo / ".tj" / "config.toml"
+    project_path.parent.mkdir()
+    write_config(TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="api")}), project_path)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._onboard_claude_code", MagicMock())
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard._maybe_guard_ephemeral_runner", MagicMock())
+    result = CliRunner().invoke(cmd_onboard, ["--claude-code", "--enforce"], obj={})
+    assert result.exit_code == 0, result.output
+    assert load_config(str(global_path)).proxy.enabled is True
+    assert load_config(str(project_path)).proxy.enabled is False
+    assert str(global_path) in "".join(result.output.split())  # Rich wraps long paths
 
 
 def test_hook_summary_line_names_every_state_and_its_commands(repo, tmp_path):
