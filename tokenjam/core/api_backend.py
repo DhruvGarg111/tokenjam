@@ -557,6 +557,39 @@ class ApiBackend:
             "/api/v1/quota-audit", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
         )
 
+    def get_session(self, session_id: str) -> SessionRecord | None:
+        """One session off `/sessions/{id}`, the fields `tj commit-note`'s
+        §5 note needs (identity, plan tier, measured cost, the model that ran
+        most of it). None for an unknown id or an unreachable daemon."""
+        try:
+            data = self._get(f"/api/v1/sessions/{session_id}")
+        except (httpx.HTTPError, ValueError):
+            return None
+        s = data.get("session") if isinstance(data, dict) else None
+        if not isinstance(s, dict) or not s.get("session_id"):
+            return None
+        mix = data.get("model_mix") or []
+        top = mix[0].get("model") if mix and isinstance(mix[0], dict) else None
+        started = s.get("started_at")
+        ended = s.get("last_span_time")
+        return SessionRecord(
+            session_id=s["session_id"],
+            agent_id=s.get("agent_id") or "",
+            started_at=datetime.fromisoformat(started) if started else utcnow(),
+            ended_at=datetime.fromisoformat(ended) if ended else None,
+            conversation_id=None,
+            status=s.get("status", "completed"),
+            total_cost_usd=s.get("total_cost_usd"),
+            input_tokens=s.get("input_tokens", 0) or 0,
+            output_tokens=s.get("output_tokens", 0) or 0,
+            cache_tokens=s.get("cache_tokens", 0) or 0,
+            cache_write_tokens=s.get("cache_write_tokens", 0) or 0,
+            tool_call_count=s.get("tool_call_count", 0) or 0,
+            error_count=s.get("error_count", 0) or 0,
+            plan_tier=s.get("plan_tier") or "unknown",
+            dominant_model=top,
+        )
+
     def get_session_commits(self, session_id: str) -> list[SessionCommit]:
         """The commits joined to a session, read off `/sessions/{id}`'s
         `commits` block. Same order the DB backend returns (best confidence,

@@ -217,6 +217,7 @@ from tokenjam.cli.cmd_loop import cmd_loop  # noqa: E402
 from tokenjam.cli.cmd_resume_brief import cmd_resume_brief  # noqa: E402
 from tokenjam.cli.cmd_ping import cmd_ping  # noqa: E402
 from tokenjam.cli.cmd_relearn import cmd_relearn  # noqa: E402
+from tokenjam.cli.cmd_commit_note import cmd_commit_note  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 # `tj init` is the same command under the name every other developer tool
@@ -256,6 +257,7 @@ cli.add_command(cmd_loop, name="loop")
 cli.add_command(cmd_resume_brief, name="resume-brief")
 cli.add_command(cmd_ping, name="ping")
 cli.add_command(cmd_relearn, name="relearn")
+cli.add_command(cmd_commit_note, name="commit-note")
 
 # cmd_drift is provided by task 05 — register if available
 try:

@@ -106,6 +106,11 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 14. Claude Code statusline wiring (issue #59) — the zero-token surface
     checks.append(_check_statusline_wiring(config))
 
+    # 14b. Commit trailer hook (ledger W3) — is the managed block in this
+    #      repo's prepare-commit-msg intact, and would a hand commit made
+    #      right now find a fresh session to join.
+    checks.append(_check_commit_hook())
+
     # 15. Onboarded-but-silent — first-signal diagnosis (issue #80)
     checks.append(_check_onboarding_first_signal(config, ctx.obj["db"]))
 
@@ -1882,6 +1887,85 @@ def _check_statusline_wiring(config: object) -> dict:
             "you also use Claude Code."
         ),
     }
+
+
+def _check_commit_hook(cwd: str | None = None) -> dict:
+    """The `tj init --hooks` block in the repo doctor runs from, plus the
+    active-session record the hook reads (ledger W3, `core/commit_hooks.py`).
+
+    Opt-in feature, so "not installed" is `info`, never a warning. A block
+    from another build (`stale`) or one whose end sentinel is gone
+    (`damaged`) is a warning: the first may lack a fix, the second is a hook
+    that no longer does what the user asked for. With the block current, the
+    message also says whether a commit made by hand right now would carry a
+    trailer (a session written to the record within the last 30 minutes, or
+    the id Claude Code exports to its own shell).
+    """
+    import os
+
+    from tokenjam.core.commit_hooks import (
+        ACTIVE_SESSION_FRESH_S,
+        STATE_ABSENT,
+        STATE_CURRENT,
+        STATE_DAMAGED,
+        STATE_FOREIGN,
+        STATE_STALE,
+        active_session_for,
+        active_sessions_path,
+        hook_states,
+        resolve_hooks_location,
+    )
+
+    name = "Commit hook"
+    here = cwd or os.getcwd()
+    try:
+        loc = resolve_hooks_location(here)
+    except Exception:  # best-effort; never fail doctor on this
+        loc = None
+    if loc is None:
+        return {"name": name, "level": "info",
+                "message": "Not inside a git repository; run `tj doctor` from a repo "
+                           "to check its commit hook."}
+    try:
+        states = hook_states(loc.hooks_dir)
+    except Exception:
+        return {"name": name, "level": "info",
+                "message": f"Could not read hooks in {loc.hooks_dir}."}
+    trailer = states["prepare-commit-msg"]
+    if trailer == STATE_ABSENT:
+        return {"name": name, "level": "info",
+                "message": "Commit trailer hook not installed in this repo. "
+                           "`tj init --hooks` adds it so commits made from a plain shell "
+                           "join their Claude Code session at deterministic confidence."}
+    if trailer == STATE_FOREIGN:
+        return {"name": name, "level": "info",
+                "message": f"{loc.hooks_dir / 'prepare-commit-msg'} is not a shell script, "
+                           "so tj left it untouched; the trailer hook is not installed."}
+    if trailer == STATE_STALE:
+        return {"name": name, "level": "warning",
+                "message": "Commit trailer hook was installed by another tj build. "
+                           "Run `tj init --hooks` to refresh the managed block."}
+    if trailer == STATE_DAMAGED:
+        return {"name": name, "level": "warning",
+                "message": f"The tj block in {loc.hooks_dir / 'prepare-commit-msg'} has lost "
+                           "its end sentinel. Run `tj init --hooks` to rewrite it."}
+    assert trailer == STATE_CURRENT
+    notes = " Git notes hook installed." if states["post-commit"] == STATE_CURRENT else ""
+    entry = active_session_for(here)
+    if entry:
+        freshness = (f"active session for this repo: {entry['session_id']} "
+                     f"(record {active_sessions_path()} is fresh).")
+    elif os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        freshness = "running inside a Claude Code session; commits here carry its id."
+    elif not active_sessions_path().exists():
+        freshness = (f"no active-session record yet at {active_sessions_path()}; "
+                     "`tj statusline` writes it on the next Claude Code turn.")
+    else:
+        minutes = ACTIVE_SESSION_FRESH_S // 60
+        freshness = (f"no session seen for this repo in the last {minutes} minutes, so a "
+                     "commit made by hand right now would carry no trailer.")
+    return {"name": name, "level": "ok",
+            "message": f"Commit trailer hook installed.{notes} Right now: {freshness}"}
 
 
 def _tj_statusline_wired() -> bool:

@@ -455,6 +455,21 @@ def _print_instrument_agent_snippet() -> None:
                    "existing config — the lightweight post-restart re-check. "
                    "Does not rewrite config or replay the summary. Pair with "
                    "--claude-code / --codex to select that persona's config.")
+@click.option("--hooks", "hooks", is_flag=True, default=False,
+              help="Install the prepare-commit-msg hook in this repo so commits "
+                   "made from a plain shell while a Claude Code session is open "
+                   "carry a TokenJam-Session trailer (joins them to the session "
+                   "at deterministic confidence). Managed block; a hook you "
+                   "already have is kept. With an existing config this skips "
+                   "the wizard.")
+@click.option("--notes", "notes", is_flag=True, default=False,
+              help="Also install the post-commit hook that writes each "
+                   "trailered commit's session cost to refs/notes/tokenjam "
+                   "(implies --hooks). Off by default.")
+@click.option("--enforce", "enforce", is_flag=True, default=False,
+              help="After setup, enable the enforcement proxy in suggest mode "
+                   "(`tj proxy enable`) and print what it does and does not "
+                   "touch. Composes with --hooks.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
@@ -462,8 +477,47 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 removed_project_flag: str | None,
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool,
-                verbose: bool) -> None:
+                verbose: bool, hooks: bool, notes: bool, enforce: bool) -> None:
     """Set up tj (interactive)."""
+    from tokenjam.cli.ledger_hooks import (
+        install_repo_hooks, print_hook_install, print_active_session_state, run_enforce,
+    )
+
+    hooks = hooks or notes
+    ledger_only = (
+        (hooks or enforce)
+        and not (claude_code or codex or force or reconfigure or add_project or verify_only)
+        and resolve_config_path((ctx.obj or {}).get("config_path_override")) is not None
+    )
+    if ledger_only:
+        # An already-onboarded machine: the ledger flags are the whole
+        # request. Re-running the wizard here would re-prompt plan, budget
+        # and backfill scope to set nothing (the --add-project precedent).
+        ensure_install_id()
+    else:
+        _run_onboard_wizard(
+            ctx, claude_code, codex, budget, install_daemon, no_daemon, force,
+            reconfigure, plan, analysis_span, removed_project_flag, backfill_days,
+            backfill_all, verify, verify_only, add_project, verbose,
+        )
+    if hooks:
+        console.print()
+        console.print("[bold]Commit hooks[/bold]")
+        print_hook_install(install_repo_hooks(os.getcwd(), notes=notes), notes=notes)
+        print_active_session_state(os.getcwd())
+    if enforce:
+        run_enforce(ctx)
+
+
+def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
+                        install_daemon: bool, no_daemon: bool, force: bool,
+                        reconfigure: bool, plan: str | None, analysis_span: str | None,
+                        removed_project_flag: str | None,
+                        backfill_days: int | None, backfill_all: bool,
+                        verify: bool, verify_only: bool, add_project: bool,
+                        verbose: bool) -> None:
+    """The onboarding wizard proper: every path in here ends with
+    `_print_setup_complete_home` (or an early return that says why)."""
     # --project was removed: the project name is now ALWAYS derived from the
     # repo/folder name (see _derive_project_name) — the flag and the prompt
     # it fed were ceremony that only ever created divergence from what nearly
@@ -1193,6 +1247,11 @@ def _print_setup_complete_home(
         )
     else:
         console.print("[ok]✓ You're set up.[/ok]")
+    # The per-repo half of what `tj init` stamps (contracts §3): whether a
+    # hand commit in THIS repo joins its session. One informational line,
+    # plain (Critical Rule 35: a lone coloured row reads as a failure).
+    from tokenjam.cli.ledger_hooks import hook_summary_line
+    console.print(f"[muted]{hook_summary_line(os.getcwd())}[/muted]", soft_wrap=True)
     console.print("[muted]Full command list:[/muted]  [accent]tj --help[/accent]  "
                   "[muted]· home screen:[/muted]  [accent]tj[/accent]")
 
