@@ -28,6 +28,7 @@ import os
 import click
 
 from tokenjam.cli.tj_status import TjCommand
+from tokenjam.core.commit_hooks import record_active_session
 from tokenjam.core.usage import last_turn_context_tokens, session_usage
 from tokenjam.utils.humanize import format_tokens
 
@@ -379,6 +380,14 @@ def cmd_statusline() -> None:
     except Exception:
         # Absolute last-resort fail-safe: never emit a traceback to the terminal.
         line = f"◆ {_model_name(data)}" if isinstance(data, dict) else ""
+    # The active-session record the commit trailer hook reads (ledger W3,
+    # `core/commit_hooks.py`): this render is the one place Claude Code hands
+    # tj `{session_id, cwd}` every turn at zero token cost. One small atomic
+    # file write; silent on any failure, and never a reason to lose the line.
+    try:
+        record_active_session(data.get("cwd"), data.get("session_id") or data.get("sessionId"))
+    except Exception:
+        pass
     if line:
         click.echo(line)
     # Always exit 0 — a non-zero status from a statusline command surfaces as an

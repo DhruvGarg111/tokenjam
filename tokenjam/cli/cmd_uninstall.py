@@ -400,6 +400,18 @@ def _teardown_side_effects(ctx: click.Context) -> None:
         systemd_path.unlink()
         console.print(f"  Removed {systemd_path}")
 
+    # 4b. The commit trailer / notes hook blocks `tj init --hooks` wrote, in
+    #     every hooks directory it recorded plus the repo this runs from. Must
+    #     precede the `~/.tj` removal below, which deletes that record. The
+    #     notes ref (`refs/notes/tokenjam`) is user data and stays.
+    from tokenjam.cli.ledger_hooks import remove_all_repo_hooks
+    try:
+        for hooks_dir, outcomes in remove_all_repo_hooks(os.getcwd()).items():
+            names = ", ".join(n for n, o in outcomes.items() if o != "absent")
+            console.print(f"  Removed tj hook block ({names}) from {hooks_dir}")
+    except Exception as exc:
+        console.print(f"  [yellow]Could not clean commit hooks: {exc}[/yellow]")
+
     # 5. Delete ~/.tj/ (telemetry DB)
     tj_dir = Path.home() / ".tj"
     if tj_dir.exists():

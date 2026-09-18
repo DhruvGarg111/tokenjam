@@ -455,6 +455,21 @@ def _print_instrument_agent_snippet() -> None:
                    "existing config — the lightweight post-restart re-check. "
                    "Does not rewrite config or replay the summary. Pair with "
                    "--claude-code / --codex to select that persona's config.")
+@click.option("--hooks", "hooks", is_flag=True, default=False,
+              help="Install the prepare-commit-msg hook in this repo so commits "
+                   "made from a plain shell while a Claude Code session is open "
+                   "carry a TokenJam-Session trailer (joins them to the session "
+                   "at deterministic confidence). Managed block; a hook you "
+                   "already have is kept. With an existing config this skips "
+                   "the wizard.")
+@click.option("--notes", "notes", is_flag=True, default=False,
+              help="Also install the post-commit hook that writes each "
+                   "trailered commit's session cost to refs/notes/tokenjam "
+                   "(implies --hooks). Off by default.")
+@click.option("--enforce", "enforce", is_flag=True, default=False,
+              help="After setup, enable the enforcement proxy in suggest mode "
+                   "(`tj proxy enable`) and print what it does and does not "
+                   "touch. Composes with --hooks.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
@@ -462,8 +477,58 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 removed_project_flag: str | None,
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool,
-                verbose: bool) -> None:
+                verbose: bool, hooks: bool, notes: bool, enforce: bool) -> None:
     """Set up tj (interactive)."""
+    from tokenjam.cli.ledger_hooks import (
+        install_repo_hooks, print_hook_install, print_active_session_state, run_enforce,
+    )
+
+    hooks = hooks or notes
+    ledger_only = (
+        (hooks or enforce)
+        and not (claude_code or codex or force or reconfigure or add_project or verify_only)
+        and resolve_config_path((ctx.obj or {}).get("config_path_override")) is not None
+    )
+    written_config: Path | None = None
+    if ledger_only:
+        # An already-onboarded machine: the ledger flags are the whole
+        # request. Re-running the wizard here would re-prompt plan, budget
+        # and backfill scope to set nothing (the --add-project precedent).
+        ensure_install_id()
+    else:
+        written_config = _run_onboard_wizard(
+            ctx, claude_code, codex, budget, install_daemon, no_daemon, force,
+            reconfigure, plan, analysis_span, removed_project_flag, backfill_days,
+            backfill_all, verify, verify_only, add_project, verbose,
+        )
+    if hooks:
+        console.print()
+        console.print("[bold]Commit hooks[/bold]")
+        print_hook_install(install_repo_hooks(os.getcwd(), notes=notes), notes=notes)
+        print_active_session_state(os.getcwd())
+    if enforce:
+        # The persona flows write the GLOBAL config while a project
+        # `.tj/config.toml` in cwd would win a fresh search, so enforcement
+        # is pointed at the file the wizard just wrote (the one the daemon
+        # was installed against), not at whatever resolves first.
+        run_enforce(ctx, config_path=written_config)
+
+
+def _run_onboard_wizard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
+                        install_daemon: bool, no_daemon: bool, force: bool,
+                        reconfigure: bool, plan: str | None, analysis_span: str | None,
+                        removed_project_flag: str | None,
+                        backfill_days: int | None, backfill_all: bool,
+                        verify: bool, verify_only: bool, add_project: bool,
+                        verbose: bool) -> Path | None:
+    """The onboarding wizard proper: every path in here ends with
+    `_print_setup_complete_home` (or an early return that says why).
+
+    Returns the config file the run WROTE (the persona flows write the global
+    config, the plain SDK path a project-local one), or None when nothing was
+    written, so a follow-on step targets the same file the daemon was
+    installed against.
+    """
     # --project was removed: the project name is now ALWAYS derived from the
     # repo/folder name (see _derive_project_name) — the flag and the prompt
     # it fed were ceremony that only ever created divergence from what nearly
@@ -489,14 +554,14 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # nothing but the namespace mapping.
     if add_project:
         _onboard_add_project(ctx)
-        return
+        return None
     # --verify-only is the documented post-restart re-check: config already
     # exists, the user just restarted the agent, and re-running the whole wizard
     # (config rewrite + full summary + restart banner) only to poll is wasteful
     # noise (#102). Skip straight to the poll, before the banner and any setup.
     if verify_only:
         _run_verify_only(ctx, claude_code=claude_code, codex=codex)
-        return
+        return None
     if backfill_days is not None and backfill_all:
         raise click.UsageError("Use either --backfill-days or --backfill-all, not both.")
     if backfill_days is not None and backfill_days <= 0:
@@ -517,11 +582,11 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                              verify=verify,
                              backfill_days=backfill_days, backfill_all=backfill_all,
                              analysis_span=analysis_span, verbose=verbose)
-        return
+        return _global_config_path()
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
                        verify=verify, analysis_span=analysis_span)
-        return
+        return _global_config_path()
 
     # Path-branched first run (#448): the bare `tj onboard` no longer assumes an
     # SDK/API user. It opens with "How do you use AI agents?" and routes to the
@@ -540,18 +605,18 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                                  backfill_days=backfill_days,
                                  backfill_all=backfill_all,
                                  analysis_span=analysis_span, verbose=verbose)
-            return
+            return _global_config_path()
         if choice == "codex":
             _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
                            verify=verify, analysis_span=analysis_span)
-            return
+            return _global_config_path()
         if choice == "combination":
             _onboard_combination(ctx, budget, no_daemon, force, plan,
                                   verify=verify,
                                   backfill_days=backfill_days,
                                   backfill_all=backfill_all,
                                   analysis_span=analysis_span)
-            return
+            return _global_config_path()
         # choice == "sdk" → fall through to the generic SDK/API path below.
 
     # Honor TJ_CONFIG for the EXISTING-config check only (not the write
@@ -585,10 +650,10 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 "[bold]tj onboard --codex --reconfigure[/bold] instead."
             )
             ctx.exit(1)
-            return
+            return None
         console.print(f"[bold]Config already exists:[/bold] {existing}")
         console.print("Use [bold]--force[/bold] to overwrite.")
-        return
+        return None
 
     console.print()
     console.print("[bold]Setting up TokenJam...[/bold]")
@@ -804,6 +869,7 @@ analysis_span = "{analysis_span}"
     # Shared closing banner (#448): the SDK path has no backfill, so this is the
     # branded home screen + next-best-actions with no session count.
     _print_setup_complete_home()
+    return config_path.resolve()
 
 
 def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> None:
@@ -1193,6 +1259,11 @@ def _print_setup_complete_home(
         )
     else:
         console.print("[ok]✓ You're set up.[/ok]")
+    # The per-repo half of what `tj init` stamps (contracts §3): whether a
+    # hand commit in THIS repo joins its session. One informational line,
+    # plain (Critical Rule 35: a lone coloured row reads as a failure).
+    from tokenjam.cli.ledger_hooks import hook_summary_line
+    console.print(f"[muted]{hook_summary_line(os.getcwd())}[/muted]", soft_wrap=True)
     console.print("[muted]Full command list:[/muted]  [accent]tj --help[/accent]  "
                   "[muted]· home screen:[/muted]  [accent]tj[/accent]")
 

@@ -1,0 +1,50 @@
+# Installed by `tj init --hooks`, replaced by the next `tj init --hooks`,
+# removed by `tj uninstall`. Edits inside this block do not survive.
+#
+# Appends `TokenJam-Session: <id>` so a commit made from a plain shell while
+# a Claude Code session is open still joins that session in the shipped
+# ledger (deterministic confidence, source trailer_session). The id comes
+# from CLAUDE_CODE_SESSION_ID when the commit runs inside the agent's own
+# shell, else from ~/.tj/active_sessions.json, which `tj statusline` keeps
+# current and which only counts when written in the last 30 minutes.
+# Existing trailers are preserved and a trailer already present is left
+# alone (merge, squash and amend messages included). POSIX sh, no Python,
+# and every path returns 0: this hook never fails a commit.
+tj_session_trailer() {
+    _tj_msg=$1
+    [ -n "$_tj_msg" ] && [ -f "$_tj_msg" ] || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    grep -qi '^TokenJam-Session:' "$_tj_msg" 2>/dev/null && return 0
+    _tj_sid=${CLAUDE_CODE_SESSION_ID:-}
+    if [ -z "$_tj_sid" ]; then
+        _tj_state="${HOME:-}/.tj/active_sessions.json"
+        [ -f "$_tj_state" ] || return 0
+        _tj_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+        [ -n "$_tj_root" ] || return 0
+        # The key is JSON-encoded by the writer (only backslash and the
+        # double quote are escaped); encode the same way before the lookup.
+        _tj_key=$(printf '%s' "$_tj_root" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        _tj_line=$(grep -F "\"$_tj_key\": {" "$_tj_state" 2>/dev/null | head -n 1)
+        [ -n "$_tj_line" ] || return 0
+        _tj_sid=$(printf '%s\n' "$_tj_line" | sed -n 's/.*"session_id": "\([^"]*\)".*/\1/p')
+        _tj_at=$(printf '%s\n' "$_tj_line" | sed -n 's/.*"updated_epoch": \([0-9][0-9]*\).*/\1/p')
+        [ -n "$_tj_at" ] || return 0
+        _tj_now=$(date +%s 2>/dev/null) || return 0
+        [ "$((_tj_now - _tj_at))" -le 1800 ] || return 0
+    fi
+    [ -n "$_tj_sid" ] || return 0
+    case $_tj_sid in *[!A-Za-z0-9_-]*) return 0 ;; esac
+    if grep -v '^#' "$_tj_msg" 2>/dev/null | grep -q '[^[:space:]]'; then
+        git interpret-trailers --in-place --if-exists doNothing \
+            --trailer "TokenJam-Session: $_tj_sid" "$_tj_msg" >/dev/null 2>&1
+    else
+        # An editor session with no message yet: lay the trailer out the way
+        # `git commit -s` does, two lines down, so the subject the user types
+        # on line 1 stays its own paragraph.
+        { printf '\n\nTokenJam-Session: %s\n' "$_tj_sid"; cat "$_tj_msg"; } > "$_tj_msg.tj" \
+            && mv -f "$_tj_msg.tj" "$_tj_msg"
+    fi
+    return 0
+}
+tj_session_trailer "$@" 2>/dev/null || true
+unset -f tj_session_trailer

@@ -84,6 +84,7 @@ SHIM_PARITY_METHODS = {
     "get_daily_cost",
     "get_baseline",
     "get_session_commits",
+    "get_session",
 }
 
 # Methods the shim implements but that intentionally return a degraded / stub
@@ -118,7 +119,6 @@ SHIM_NOT_IMPLEMENTED = {
     "get_distinct_agent_ids",
     "get_policy_decisions",
     "get_savings_entries",
-    "get_session",
     "get_session_id_for_trace",
     "get_trace_cost_stats",
     "get_session_active_seconds",
@@ -236,6 +236,21 @@ def _proj_daily_cost(value) -> float:
     return round(value, 6)
 
 
+def _proj_session(session) -> tuple | None:
+    # The fields `tj commit-note`'s §5 note reads off a session (identity,
+    # plan tier and its derived pricing mode, measured cost, token counts).
+    # Repo context and the ingest `source` column are not carried by
+    # /sessions/{id}; the note derives the tool from `agent_id` instead.
+    if session is None:
+        return None
+    return (
+        session.session_id, session.agent_id, session.plan_tier, session.pricing_mode,
+        session.total_cost_usd, session.input_tokens, session.output_tokens,
+        session.cache_tokens, session.cache_write_tokens, session.tool_call_count,
+        session.error_count,
+    )
+
+
 def _proj_commits(commits) -> list:
     # (sha, confidence, source, author, committed_at) — the ledger row as
     # every session surface renders it; `matched_at` is a write-side stamp the
@@ -275,6 +290,7 @@ def _parity_specs(now, trace_id, span_id="span-id"):
         "get_daily_cost": (lambda b: b.get_daily_cost(AGENT, historical_day), _proj_daily_cost),
         "get_baseline": (lambda b: b.get_baseline(AGENT), _proj_baseline),
         "get_session_commits": (lambda b: b.get_session_commits(SESSION), _proj_commits),
+        "get_session": (lambda b: b.get_session(SESSION), _proj_session),
     }
 
 

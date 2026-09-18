@@ -1,0 +1,21 @@
+# Installed by `tj init --notes`, replaced by the next `tj init --notes`,
+# removed by `tj uninstall`. Edits inside this block do not survive.
+#
+# For a commit that carries the TokenJam-Session trailer, asks `tj` to write
+# the session's measured cost to refs/notes/tokenjam (`tj commit-note`). The
+# cost is read through the running daemon, so this skips in a few
+# milliseconds when `tj serve` is not up rather than starting Python for
+# nothing. Never fails a commit: every path returns 0.
+tj_commit_note() {
+    command -v tj >/dev/null 2>&1 || return 0
+    command -v git >/dev/null 2>&1 || return 0
+    git log -1 --format=%B 2>/dev/null | grep -qi '^TokenJam-Session:' || return 0
+    _tj_state="${HOME:-}/.local/share/tj/server.state"
+    [ -f "$_tj_state" ] || return 0
+    _tj_pid=$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$_tj_state" 2>/dev/null | head -n 1)
+    [ -n "$_tj_pid" ] && kill -0 "$_tj_pid" 2>/dev/null || return 0
+    tj commit-note >/dev/null 2>&1
+    return 0
+}
+tj_commit_note 2>/dev/null || true
+unset -f tj_commit_note

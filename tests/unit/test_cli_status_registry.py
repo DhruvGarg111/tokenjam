@@ -90,6 +90,7 @@ STRUCTURAL_OPT_OUT = {
     "cli serve",          # prints its own banner, then blocks forever
     "cli statusline",     # every-turn, must stay near-instant
     "cli session-end",    # best-effort, intentionally silent unless -v
+    "cli commit-note",    # runs from a git post-commit hook; stdout is the hook's
 }
 
 #: Fast / config-only / already-self-narrating commands: a deliberate "no" —

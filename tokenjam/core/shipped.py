@@ -18,8 +18,10 @@ window and joins each one at the best confidence the evidence supports:
   `TokenJam-Session: <id>` or `Claude-Session: <url>` resolving to an ingested
   session. The URL names the bridge session id, not the local uuid, which is
   why `sessions.bridge_session_id` exists.
-* `git_note` (deterministic): a `refs/notes/ai` (Git AI) or
-  `refs/notes/exceeds-ink` note names a session id we ingested. Read only.
+* `git_note` (deterministic): a `refs/notes/ai` (Git AI), `refs/notes/exceeds-ink`
+  or `refs/notes/tokenjam` (our own, written by the `tj init --notes`
+  post-commit hook, `core/commit_hooks.py`) note names a session id we
+  ingested. The matcher only ever reads notes.
 * `trailer_window` (inferred): an AI co-author trailer, on the session's
   start or end branch, inside the window, with no tool-span match.
 
@@ -120,6 +122,8 @@ _TJ_SESSION_TRAILER = re.compile(r"^TokenJam-Session:\s*(\S+)\s*$", re.IGNORECAS
 _CLAUDE_SESSION_TRAILER = re.compile(
     r"^Claude-Session:\s*\S*?/?(?:session_)?([A-Za-z0-9]+)\s*$", re.IGNORECASE | re.MULTILINE,
 )
+#: Notes refs the matcher reads (contracts §5): Git AI, Exceeds, and ours.
+NOTES_REFS_READ: tuple[str, ...] = ("ai", "exceeds-ink", "tokenjam")
 _REVERT_BODY = re.compile(r"This reverts commit ([0-9a-f]{7,40})", re.IGNORECASE)
 _SHA_IN_SUBJECT = re.compile(r"\b([0-9a-f]{7,40})\b")
 
@@ -765,7 +769,7 @@ def match_sessions_to_commits(db: Any, config: Any = None, *, now: datetime | No
                 result.repos_indexed += 1
             if not group:
                 continue
-            notes_refs = [r for r in ("ai", "exceeds-ink") if _has_ref(root, f"refs/notes/{r}")]
+            notes_refs = [r for r in NOTES_REFS_READ if _has_ref(root, f"refs/notes/{r}")]
             for s in group:
                 since, until = s.window
                 commits = _log_between(root, since, until)
