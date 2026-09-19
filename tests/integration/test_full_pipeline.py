@@ -1065,6 +1065,65 @@ def test_real_pipeline_reconciliation_scale_benchmark(full_stack):
     assert provisional.total_cost_usd == 0.0
 
 
+def test_real_pipeline_explicit_session_trace_stays_near_trace_only_path(
+    full_stack, monkeypatch,
+):
+    """Explicit-session traces must not reconcile the whole trace per span."""
+    import time
+
+    span_count = 2_000
+    explicit_trace = "explicit-session-hot-path"
+    trace_only_trace = "trace-only-hot-path"
+    pipeline = IngestPipeline(full_stack.db, full_stack.pipeline.config)
+    reconcile_calls: list[str] = []
+    reconcile = full_stack.db.reconcile_trace_session_attribution
+
+    def counted_reconcile(trace_id: str) -> None:
+        reconcile_calls.append(trace_id)
+        reconcile(trace_id)
+
+    monkeypatch.setattr(
+        full_stack.db,
+        "reconcile_trace_session_attribution",
+        counted_reconcile,
+    )
+
+    started = time.perf_counter()
+    for i in range(span_count):
+        span = make_llm_span(
+            agent_id="bench-agent",
+            trace_id=explicit_trace,
+            span_id=f"explicit-{i}",
+            session_id="explicit-session",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.01,
+        )
+        pipeline.process(span)
+    explicit_duration = time.perf_counter() - started
+
+    started = time.perf_counter()
+    for i in range(span_count):
+        span = make_llm_span(
+            agent_id="bench-agent",
+            trace_id=trace_only_trace,
+            span_id=f"trace-only-{i}",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.01,
+        )
+        span.session_id = None
+        span.conversation_id = None
+        pipeline.process(span)
+    trace_only_duration = time.perf_counter() - started
+
+    assert reconcile_calls == [explicit_trace]
+    assert explicit_duration < trace_only_duration * 8 + 1.0, (
+        f"explicit-session ingest took {explicit_duration / span_count * 1000:.2f} ms/span; "
+        f"trace-only ingest took {trace_only_duration / span_count * 1000:.2f} ms/span"
+    )
+
+
 def test_real_pipeline_multi_marker_all_unparented_spans_unattributed(full_stack):
     """When multiple markers exist and non-marker spans have no parentage,
     all eligible spans must batch-reconcile to session_id=NULL, step3_unattributed (Issue #749).
