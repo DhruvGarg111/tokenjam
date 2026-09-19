@@ -27,6 +27,8 @@ def test_status_view_explains_unattributed_spend(status_view: str):
     assert "grand total can exceed the sum of named sessions" in status_view
     assert "fmtFramedDollar(unattributedSpend.cost_usd, data.framing)" in status_view
     assert "tj cost --group-by session" in status_view
+    assert '<span class="range">tj cost --group-by session</span>' in status_view
+    assert '<a class="range" href="#/cost?group_by=session">' not in status_view
 
 
 def test_status_view_does_not_hide_the_disclosure_in_the_empty_state(status_view: str):

@@ -717,8 +717,7 @@ MIGRATIONS: list[tuple[int, str]] = [
         "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
         "DROP INDEX IF EXISTS idx_spans_start_time;\n"
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
-        "DROP INDEX IF EXISTS idx_spans_conv_id;\n"
-        "DROP INDEX IF EXISTS idx_spans_session_id"
+        "DROP INDEX IF EXISTS idx_spans_conv_id"
     )),
     (3, SPANS_INDEX_SQL),
     # Migration 4: billing_account on spans, plan_tier on sessions.
@@ -3825,6 +3824,35 @@ class DuckDBBackend:
             [trace_id],
         ).fetchall()
         return [str(row[0]) for row in rows]
+
+    def should_reconcile_trace_session_attribution(
+        self, trace_id: str, span_id: str, session_id: str,
+    ) -> bool:
+        """Return whether a new marker can change trace attribution."""
+        row = self.conn.execute(
+            """
+            SELECT
+                NOT EXISTS (
+                    SELECT 1 FROM spans
+                    WHERE trace_id = $1 AND span_id = $2
+                ),
+                NOT EXISTS (
+                    SELECT 1 FROM spans
+                    WHERE trace_id = $1 AND session_id = $3
+                ),
+                EXISTS (
+                    SELECT 1 FROM spans
+                    WHERE trace_id = $1
+                      AND (
+                          session_id IS NULL
+                          OR attribution_step IS NULL
+                          OR attribution_step NOT IN ('explicit', 'conversation')
+                      )
+                )
+            """,
+            [trace_id, span_id, session_id],
+        ).fetchone()
+        return bool(row and row[0] and (row[1] or row[2]))
 
     def reconcile_trace_session_attribution(self, trace_id: str) -> None:
         """Reconcile provisional trace-derived spans after a marker arrives.

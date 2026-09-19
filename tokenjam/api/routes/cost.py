@@ -970,7 +970,7 @@ async def get_cost(
         "attribution_coverage": _dimension_coverage(conn, agent_id, since_dt, until_dt),
         # Which models in this window were priced at the flat default rate
         # rather than a published one. Without this the UI cannot tell an
-        # estimated dollar figure from a quoted one, which is practical proof that a
+        # estimated dollar figure from a quoted one, which is exactly how a
         # missing table row stays invisible while the number is 5-30x wrong.
         "pricing_coverage": _pricing_coverage_block(
             conn, agent_id, since_dt, until_dt,

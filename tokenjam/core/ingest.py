@@ -332,15 +332,41 @@ class IngestPipeline:
             # late trace-only spans, while explicit session markers are always
             # identified by their span id so repeated session ids are handled.
             if not (span.attribution_step == "conversation" and span.parent_span_id):
-                get_span = getattr(self.db, "get_span", None)
-                if get_span is not None:
-                    is_new_marker_span = get_span(span.trace_id, span.span_id) is None
+                should_reconcile = getattr(
+                    self.db, "should_reconcile_trace_session_attribution", None,
+                )
+                if should_reconcile is not None:
+                    is_new_marker_span = should_reconcile(
+                        span.trace_id, span.span_id, span.session_id,
+                    )
                 else:
                     # Preserve compatibility with minimal backends that expose
-                    # marker discovery but not targeted span lookup.
-                    marker_lookup = getattr(self.db, "get_marker_session_ids_for_trace", None)
-                    marker_ids = marker_lookup(span.trace_id) if marker_lookup is not None else []
-                    is_new_marker_span = span.session_id not in marker_ids
+                    # the older targeted lookups but not the combined probe.
+                    get_span = getattr(self.db, "get_span", None)
+                    is_new_span = (
+                        get_span(span.trace_id, span.span_id) is None
+                        if get_span is not None else True
+                    )
+                    if not is_new_span:
+                        is_new_marker_span = False
+                    else:
+                        marker_lookup = getattr(
+                            self.db, "get_marker_session_ids_for_trace", None,
+                        )
+                        if marker_lookup is None:
+                            is_new_marker_span = True
+                        else:
+                            marker_ids = marker_lookup(span.trace_id)
+                            is_new_marker_span = span.session_id not in marker_ids
+                            if not is_new_marker_span:
+                                get_trace_spans = getattr(self.db, "get_trace_spans", None)
+                                if get_trace_spans is not None:
+                                    is_new_marker_span = any(
+                                        candidate.session_id is None
+                                        or candidate.attribution_step
+                                        not in {"explicit", "conversation"}
+                                        for candidate in get_trace_spans(span.trace_id)
+                                    )
 
         # 4. Write span
         self.db.insert_span(span)
