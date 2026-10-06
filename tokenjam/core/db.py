@@ -4075,8 +4075,21 @@ class DuckDBBackend:
 
                 self.recompute_session_totals_from_spans(sorted(affected))
                 for session_id in old_session_ids - set(marker_ids):
+                    # `updated_at = now()` is load-bearing, not cosmetic:
+                    # `sessions.updated_at` is the Cloud bridge's resume cursor
+                    # (cloud_sync pages with `WHERE updated_at > mark`), so a
+                    # row whose status changes without advancing it is never
+                    # re-sent. The preceding `recompute_session_totals_from_spans`
+                    # cannot stamp it either — a session with no spans left
+                    # produces no row in that aggregate, so its `FROM agg` join
+                    # never matches. This statement is the only writer, which is
+                    # why dropping the stamp strands the correction locally:
+                    # Cloud keeps the provisional row ACTIVE at its old totals
+                    # alongside the real session, double-counting the very spend
+                    # this reconciliation exists to give exactly one owner.
+                    # Pinned by `test_superseded_session_advances_updated_at`.
                     self.conn.execute(
-                        "UPDATE sessions SET status = 'superseded', "
+                        "UPDATE sessions SET status = 'superseded', updated_at = now(), "
                         "input_tokens = 0, output_tokens = 0, cache_tokens = 0, "
                         "cache_write_tokens = 0, total_cost_usd = 0.0, tool_call_count = 0 "
                         "WHERE session_id = $1 AND NOT EXISTS (SELECT 1 FROM spans WHERE session_id = $1)",

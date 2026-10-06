@@ -464,6 +464,70 @@ def test_real_pipeline_reparents_reverse_arrival_and_reconciles_totals(full_stac
     assert session.total_cost_usd == expected_cost
 
 
+def test_superseded_session_advances_updated_at(full_stack):
+    """Superseding a provisional session must advance its Cloud-bridge cursor.
+
+    `sessions.updated_at` is the resume cursor `cloud_sync` pages with
+    (`WHERE updated_at > mark`), so a row whose status flips to 'superseded'
+    without advancing it is corrected locally and never re-sent. Cloud then
+    keeps the provisional row ACTIVE at its old totals next to the real
+    session, double-counting the spend reconciliation just gave one owner.
+
+    This asserts the CONSEQUENCE, not just the column: re-reading the row the
+    UPDATE wrote would pass on a stamp that never moved, so the mark is taken
+    BEFORE the marker arrives and the row must come back from a query shaped
+    the way the bridge asks (Critical Rule 46).
+    """
+    trace_id = "superseded-cursor-trace"
+    cost_span = make_llm_span(trace_id=trace_id, input_tokens=40, output_tokens=8)
+    cost_span.session_id = None
+    cost_span.conversation_id = None
+    full_stack.pipeline.process(cost_span)
+
+    provisional_session_id = full_stack.db.get_trace_spans(trace_id)[0].session_id
+    assert provisional_session_id is not None
+
+    # The high-water mark a bridge pass would have recorded having already
+    # forwarded the provisional session, read from the row itself so the
+    # comparison cannot drift on clock source.
+    mark = full_stack.db.conn.execute(
+        "SELECT updated_at FROM sessions WHERE session_id = $1",
+        [provisional_session_id],
+    ).fetchone()[0]
+    assert mark is not None
+
+    full_stack.pipeline.process(make_invoke_agent_span(
+        session_id="cursor-marker", trace_id=trace_id,
+    ))
+
+    superseded = full_stack.db.get_session(provisional_session_id)
+    assert superseded is not None
+    assert superseded.status == "superseded"
+
+    # The stamp must have strictly advanced past the mark...
+    after = full_stack.db.conn.execute(
+        "SELECT updated_at FROM sessions WHERE session_id = $1",
+        [provisional_session_id],
+    ).fetchone()[0]
+    assert after > mark, (
+        f"superseded row's updated_at did not advance ({after} <= {mark}); "
+        "the Cloud bridge pages on `updated_at > mark` and will never re-send "
+        "this status change, leaving the provisional session active upstream"
+    )
+
+    # ...and the bridge's own cursor query must therefore return it.
+    resent = {
+        row[0]
+        for row in full_stack.db.conn.execute(
+            "SELECT session_id FROM sessions WHERE updated_at > $1", [mark],
+        ).fetchall()
+    }
+    assert provisional_session_id in resent, (
+        "superseded session is not picked up by a `updated_at > mark` sweep, "
+        "so its correction never reaches Cloud"
+    )
+
+
 def test_real_pipeline_generic_custom_marker_sole_marker(full_stack):
     """A sole generic OTLP marker with custom name attributes child spans via step2_marker."""
     trace_id = "real-generic-sole-trace"
